@@ -1,5 +1,7 @@
 """Sandbox management routes."""
 
+import os
+import re
 from math import ceil
 from uuid import UUID
 
@@ -18,6 +20,30 @@ logger = get_logger("web.routes.sandboxes")
 router = APIRouter()
 
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
+_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _parse_docker_bind_mounts(value: str) -> list[dict[str, str | bool]]:
+    mounts: list[dict[str, str | bool]] = []
+    for line in value.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.rsplit(":", 2)
+        if len(parts) < 2:
+            raise HTTPException(422, "Volume mounts must use source:target[:ro] format")
+        source, target = parts[0].strip(), parts[1].strip()
+        read_only = len(parts) == 3 and parts[2].strip().lower() == "ro"
+        if len(parts) == 3 and parts[2].strip().lower() not in ("ro", "rw"):
+            raise HTTPException(422, "Volume mount mode must be ro or rw")
+        if not source or (not source.startswith("/") and not _VOLUME_NAME_RE.fullmatch(source)):
+            raise HTTPException(422, "Volume mount source must be an absolute path or volume name")
+        if not target.startswith("/"):
+            raise HTTPException(422, "Volume mount target must be an absolute path")
+        if target == "/workspace" or target.startswith("/workspace/"):
+            raise HTTPException(422, "Volume mounts cannot replace the managed /workspace volume")
+        mounts.append({"source": source, "target": target, "read_only": read_only})
+    return mounts
 
 
 async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
@@ -198,6 +224,7 @@ async def sandboxes_page(
             "per_page": per_page,
             "total_pages": total_pages,
             "total_count": total_count,
+            "sandbox_backend": os.environ.get("LUCENT_SANDBOX_BACKEND", "docker").lower(),
         },
     )
 
@@ -212,10 +239,13 @@ async def create_template_web(
     branch: str = Form(default="main"),
     setup_commands: str = Form(default=""),
     env_vars: str = Form(default=""),
+    docker_bind_mounts: str = Form(default=""),
+    working_dir: str = Form(default="/workspace"),
     memory_limit: str = Form(default="2g"),
     cpu_limit: float = Form(default=2.0),
     disk_limit: str = Form(default="10g"),
     network_mode: str = Form(default="none"),
+    allowed_hosts: str = Form(default=""),
     timeout_seconds: int = Form(default=1800),
     owner_scope: str = Form(default="me"),
     csrf_token: str = Form(default=""),
@@ -240,13 +270,16 @@ async def create_template_web(
         description=description.strip(),
         image=image,
         repo_url=repo_url.strip() or None,
-        branch=branch.strip() or None,
+        branch=(branch.strip() or None) if repo_url.strip() else None,
         setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
         env_vars=_parse_env_vars(env_vars),
+        docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
+        working_dir=working_dir.strip() or "/workspace",
         memory_limit=memory_limit,
         cpu_limit=cpu_limit,
         disk_limit=disk_limit,
         network_mode=network_mode,
+        allowed_hosts=[host.strip() for host in allowed_hosts.splitlines() if host.strip()],
         timeout_seconds=timeout_seconds,
         created_by=str(user.id),
         owner_user_id=owner_user_id,
@@ -284,6 +317,7 @@ async def edit_template_page(request: Request, template_id: str):
             "user": user,
             "owner_groups": owner_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+            "sandbox_backend": os.environ.get("LUCENT_SANDBOX_BACKEND", "docker").lower(),
         },
     )
 
@@ -299,10 +333,13 @@ async def update_template_web(
     branch: str = Form(default="main"),
     setup_commands: str = Form(default=""),
     env_vars: str = Form(default=""),
+    docker_bind_mounts: str = Form(default=""),
+    working_dir: str = Form(default="/workspace"),
     memory_limit: str = Form(default="2g"),
     cpu_limit: float = Form(default=2.0),
     disk_limit: str = Form(default="10g"),
     network_mode: str = Form(default="none"),
+    allowed_hosts: str = Form(default=""),
     timeout_seconds: int = Form(default=1800),
     owner_scope: str = Form(default="me"),
     csrf_token: str = Form(default=""),
@@ -328,13 +365,16 @@ async def update_template_web(
         description=description.strip(),
         image=image,
         repo_url=repo_url.strip() or None,
-        branch=branch.strip() or None,
+        branch=(branch.strip() or None) if repo_url.strip() else None,
         setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
         env_vars=_parse_env_vars(env_vars),
+        docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
+        working_dir=working_dir.strip() or "/workspace",
         memory_limit=memory_limit,
         cpu_limit=cpu_limit,
         disk_limit=disk_limit,
         network_mode=network_mode,
+        allowed_hosts=[host.strip() for host in allowed_hosts.splitlines() if host.strip()],
         timeout_seconds=timeout_seconds,
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
@@ -393,8 +433,10 @@ async def launch_sandbox_web(
         setup_commands=tpl.get("setup_commands") or [],
         env_vars=resolved_env_vars,
         working_dir=tpl.get("working_dir", "/workspace"),
+        docker_bind_mounts=tpl.get("docker_bind_mounts") or [],
         memory_limit=tpl.get("memory_limit", "2g"),
         cpu_limit=float(tpl.get("cpu_limit", 2.0)),
+        disk_limit=tpl.get("disk_limit", "10g"),
         network_mode=tpl.get("network_mode", "none"),
         allowed_hosts=tpl.get("allowed_hosts") or [],
         timeout_seconds=tpl.get("timeout_seconds", 1800),

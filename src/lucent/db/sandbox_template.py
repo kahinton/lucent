@@ -12,7 +12,7 @@ import asyncpg
 class SandboxTemplateRepository:
     """CRUD for sandbox environment templates."""
 
-    _json_fields = {"setup_commands", "env_vars", "allowed_hosts"}
+    _json_fields = {"setup_commands", "env_vars", "allowed_hosts", "docker_bind_mounts"}
 
     def __init__(self, pool: asyncpg.Pool):
         self.pool = pool
@@ -39,6 +39,7 @@ class SandboxTemplateRepository:
         setup_commands: list[str] | None = None,
         env_vars: dict[str, str] | None = None,
         working_dir: str = "/workspace",
+        docker_bind_mounts: list[dict[str, str | bool]] | None = None,
         memory_limit: str = "2g",
         cpu_limit: float = 2.0,
         disk_limit: str = "10g",
@@ -66,13 +67,14 @@ class SandboxTemplateRepository:
             row = await conn.fetchrow(
                 """INSERT INTO sandbox_templates
                    (name, organization_id, description, image, repo_url, branch,
-                    setup_commands, env_vars, working_dir, memory_limit, cpu_limit,
-                    disk_limit, network_mode, allowed_hosts, timeout_seconds, created_by,
+                          setup_commands, env_vars, working_dir, docker_bind_mounts,
+                          memory_limit, cpu_limit, disk_limit, network_mode, allowed_hosts,
+                          timeout_seconds, created_by,
                     owner_user_id, owner_group_id, scope, status,
                     proposed_by, proposal_reason)
                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9,
-                           $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18,
-                           $19, $20, $21, $22)
+                              $10::jsonb, $11, $12, $13, $14, $15::jsonb, $16, $17,
+                              $18, $19, $20, $21, $22, $23)
                    RETURNING *""",
                 name,
                 UUID(organization_id),
@@ -83,6 +85,7 @@ class SandboxTemplateRepository:
                 json.dumps(setup_commands or []),
                 json.dumps(env_vars or {}),
                 working_dir,
+                json.dumps(docker_bind_mounts or []),
                 memory_limit,
                 cpu_limit,
                 disk_limit,
@@ -195,12 +198,13 @@ class SandboxTemplateRepository:
             "network_mode": "network_mode",
             "timeout_seconds": "timeout_seconds",
         }
-        json_fields = {"setup_commands", "env_vars", "allowed_hosts"}
+        json_fields = {"setup_commands", "env_vars", "allowed_hosts", "docker_bind_mounts"}
+        nullable_fields = {"repo_url", "branch"}
         # Ownership fields allow None values (to clear ownership)
         ownership_fields = {"owner_user_id", "owner_group_id"}
 
         for key, col in field_map.items():
-            if key in kwargs and kwargs[key] is not None:
+            if key in kwargs and (kwargs[key] is not None or key in nullable_fields):
                 sets.append(f"{col} = ${idx}")
                 params.append(kwargs[key])
                 idx += 1
@@ -248,6 +252,7 @@ class SandboxTemplateRepository:
             "setup_commands": template.get("setup_commands") or [],
             "env_vars": template.get("env_vars") or {},
             "working_dir": template.get("working_dir", "/workspace"),
+            "docker_bind_mounts": template.get("docker_bind_mounts") or [],
             "memory_limit": template.get("memory_limit", "2g"),
             "cpu_limit": float(template.get("cpu_limit", 2.0)),
             "disk_limit": template.get("disk_limit", "10g"),

@@ -882,7 +882,7 @@ async def knowledge_tree(request: Request):
         FROM memories
         WHERE deleted_at IS NULL
           AND type = 'technical'
-                    AND COALESCE(lifecycle_stage, 'active') = 'active'
+                    AND COALESCE(lifecycle_stage, 'active') IN ('active', 'consolidating')
                     AND NOT ('superseded' = ANY(tags))
           AND metadata->>'repo' IS NOT NULL
           AND {memory_access}

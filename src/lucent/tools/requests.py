@@ -20,6 +20,7 @@ _HANDOFF_REFERENCE_TYPES = {
     "request",
     "task",
     "task_output",
+    "user_file",
     "memory",
     "workflow",
     "schedule_run",
@@ -200,7 +201,11 @@ async def _handoff_lineage_references(
             }
         )
     if task and task.get("id"):
-        task_url = f"/activity/{task['request_id']}#task-{task['id']}" if task.get("request_id") else None
+        task_url = (
+            f"/activity/{task['request_id']}#task-{task['id']}"
+            if task.get("request_id")
+            else None
+        )
         refs.append(
             {
                 "reference_type": "task",
@@ -232,9 +237,15 @@ async def _enriched_handoff_references(
             continue
         _append_unique_reference(enriched, ref, seen)
     for ref in references or []:
-        ref_type = str(ref.get("reference_type") or ref.get("type") or "other").strip().lower()
+        ref_type = (
+            str(ref.get("reference_type") or ref.get("type") or "other").strip().lower()
+        )
         if ref_type not in _HANDOFF_REFERENCE_TYPES:
-            metadata = dict(ref.get("metadata") or {}) if isinstance(ref.get("metadata"), dict) else {}
+            metadata = (
+                dict(ref.get("metadata") or {})
+                if isinstance(ref.get("metadata"), dict)
+                else {}
+            )
             metadata.setdefault("original_reference_type", ref_type)
             ref = {
                 **ref,
@@ -1066,7 +1077,11 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
         info = await manager.get(resolved_sandbox_id)
         if not info:
             return json.dumps({"error": "Sandbox not found"})
-        info_org_id = info.get("organization_id") if isinstance(info, dict) else getattr(info, "organization_id", None)
+        info_org_id = (
+            info.get("organization_id")
+            if isinstance(info, dict)
+            else getattr(info, "organization_id", None)
+        )
         if info_org_id and str(info_org_id) != str(org_id):
             return json.dumps({"error": "Sandbox not found"})
 
@@ -1260,6 +1275,172 @@ Returns: JSON with the created output artifact."""
             return str(obj)
 
         return json.dumps(output, default=serialize)
+
+    @mcp.tool(
+        annotations=CREATE_ONLY,
+        description="""Store a durable text file for the current user.
+
+Use this when producing a report, Markdown document, plan, dataset, code sample,
+or other text artifact the user should be able to review in Lucent and recall
+later. In task context, task_id defaults to the current task and the file is
+automatically recorded as a request output. The returned id can be attached to
+a handoff reference with reference_type='user_file'.
+
+Args:
+    filename: File name including extension, such as report.md
+    content: UTF-8 text content to store
+    display_name: Optional user-facing title
+    mime_type: Optional MIME type; inferred from filename by default
+    task_id: Optional producing task; defaults to the current task
+    request_id: Optional owning request when there is no task
+    metadata: Optional structured provenance
+    is_primary: Mark the generated request output as primary
+
+Returns: JSON metadata with id, URL, content URL, and task output ID when linked."""
+    )
+    async def store_user_file(
+        filename: str,
+        content: str,
+        display_name: str = "",
+        mime_type: str = "",
+        task_id: str = "",
+        request_id: str = "",
+        metadata: dict | None = None,
+        is_primary: bool = False,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        llm_context = get_llm_context()
+        current_task_id = _valid_uuid(llm_context.get("task_id"))
+        resolved_task_id = _valid_uuid(task_id) or current_task_id
+        resolved_request_id = _valid_uuid(request_id) or _valid_uuid(
+            llm_context.get("request_id")
+        )
+        from lucent.storage import UserFileService
+
+        try:
+            item = await UserFileService(await _get_pool()).create(
+                org_id=str(org_id),
+                user_id=str(user_id),
+                created_by=str(user_id),
+                filename=filename,
+                content=content.encode("utf-8"),
+                display_name=display_name or None,
+                mime_type=mime_type or None,
+                task_id=resolved_task_id,
+                request_id=resolved_request_id,
+                session_id=_valid_uuid(llm_context.get("session_id")),
+                turn_id=_valid_uuid(llm_context.get("turn_id")),
+                message_id=_valid_uuid(llm_context.get("message_id")),
+                metadata=metadata,
+                is_primary=is_primary,
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(item, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Replace the content of a durable user file.
+
+Creates an immutable revision and records the trusted current chat, request,
+and task context so the user can trace why the file changed. Previous content
+remains in revision history.
+
+Args:
+    file_id: ID returned by store_user_file or list_user_files
+    content: Complete replacement UTF-8 content
+    change_summary: Short explanation of what changed
+
+Returns: Updated file metadata and the new revision."""
+    )
+    async def edit_user_file(
+        file_id: str,
+        content: str,
+        change_summary: str = "",
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id or not org_id:
+            return json.dumps({"error": "Authentication required"})
+        llm_context = get_llm_context()
+        from lucent.storage import UserFileService
+
+        try:
+            item = await UserFileService(await _get_pool()).update(
+                file_id=file_id,
+                org_id=str(org_id),
+                user_id=str(user_id),
+                edited_by=str(user_id),
+                content=content.encode("utf-8"),
+                change_summary=change_summary or None,
+                session_id=_valid_uuid(llm_context.get("session_id")),
+                turn_id=_valid_uuid(llm_context.get("turn_id")),
+                message_id=_valid_uuid(llm_context.get("message_id")),
+                request_id=_valid_uuid(llm_context.get("request_id")),
+                task_id=_valid_uuid(llm_context.get("task_id")),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(item, default=str)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List durable files owned by the current user.
+
+Use this to find a previously generated file by name, date, request, or task.
+Only files owned by the effective user are returned."""
+    )
+    async def list_user_files(limit: int = 50, offset: int = 0) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id or not org_id:
+            return json.dumps({"error": "Authentication required"})
+        from lucent.storage import UserFileService
+
+        result = await UserFileService(await _get_pool()).repository.list_owned(
+            str(org_id),
+            str(user_id),
+            limit=max(1, min(int(limit), 100)),
+            offset=max(0, int(offset)),
+        )
+        return json.dumps(result, default=str)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""Read a durable text file owned by the current user.
+
+Returns file metadata and UTF-8 content. Binary files remain available through
+their authenticated content URL but are not injected into agent context."""
+    )
+    async def read_user_file(file_id: str) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id or not org_id:
+            return json.dumps({"error": "Authentication required"})
+        from lucent.storage import UserFileService
+
+        result = await UserFileService(await _get_pool()).read_owned(
+            file_id, str(org_id), str(user_id)
+        )
+        if not result:
+            return json.dumps({"error": "File not found"})
+        item, content = result
+        item["revisions"] = await UserFileService(
+            await _get_pool()
+        ).repository.list_revisions_owned(file_id, str(org_id), str(user_id))
+        if not item["mime_type"].startswith("text/") and item["mime_type"] not in {
+            "application/json",
+            "application/xml",
+        }:
+            return json.dumps(
+                {"error": "File is not a text document", "file": item}, default=str
+            )
+        return json.dumps(
+            {"file": item, "content": content.decode("utf-8", errors="replace")},
+            default=str,
+        )
 
     @mcp.tool(
         annotations=CREATE_ONLY,

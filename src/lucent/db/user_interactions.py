@@ -46,6 +46,7 @@ VALID_REFERENCE_TYPES = {
     "request",
     "task",
     "task_output",
+    "user_file",
     "memory",
     "workflow",
     "schedule_run",

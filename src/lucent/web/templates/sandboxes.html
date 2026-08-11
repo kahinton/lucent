@@ -5,13 +5,13 @@
     <div class="flex items-center justify-between">
         <div>
             <h1 class="text-2xl font-bold text-gray-900">Sandboxes</h1>
-            <p class="text-gray-500 mt-1">Reusable execution environments for tasks</p>
+            <p class="text-gray-500 mt-1">Reusable {{ 'Kubernetes pod' if sandbox_backend == 'kubernetes' else 'Docker container' }} environments for tasks</p>
         </div>
         <div class="flex gap-2">
             {% if tab == 'templates' %}
-            <button onclick="document.getElementById('template-modal').classList.remove('hidden')" class="px-4 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium text-sm">+ New Template</button>
+            <button type="button" id="open-template-modal" class="px-4 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium text-sm">+ New Template</button>
             {% else %}
-            <button onclick="document.getElementById('launch-modal').classList.remove('hidden')" class="px-4 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium text-sm">+ Launch Instance</button>
+            <button type="button" id="open-launch-modal" class="px-4 py-2.5 bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium text-sm">+ Launch Instance</button>
             {% endif %}
         </div>
     </div>
@@ -163,7 +163,7 @@
                     <td class="px-4 py-3">
                         <div class="flex gap-2 justify-end">
                             {% if sb.status in ('ready', 'running') %}
-                            <button onclick="openTerminal('{{ sb.id }}')" class="px-2.5 py-1 text-xs bg-gray-800 text-white rounded hover:bg-gray-700 font-medium">Terminal</button>
+                            <button type="button" data-open-terminal="{{ sb.id }}" class="px-2.5 py-1 text-xs bg-gray-800 text-white rounded hover:bg-gray-700 font-medium">Terminal</button>
                             <form method="POST" action="/sandboxes/{{ sb.id }}/stop" class="inline">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                                 <button type="submit" class="px-2.5 py-1 text-xs bg-amber-50 text-amber-700 rounded hover:bg-amber-100 font-medium">Stop</button>
@@ -203,15 +203,15 @@
         <div class="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
             <span class="text-sm text-gray-300 font-mono" id="terminal-title">Terminal</span>
             <div class="flex gap-2">
-                <button onclick="runCommand()" class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-500">Run</button>
-                <button onclick="closeTerminal()" class="text-gray-400 hover:text-gray-200">&times;</button>
+                <button type="button" id="terminal-run" class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-500">Run</button>
+                <button type="button" id="terminal-close" aria-label="Close terminal" class="text-gray-400 hover:text-gray-200">&times;</button>
             </div>
         </div>
         <div class="p-4">
             <div id="terminal-output" class="font-mono text-sm text-green-400 whitespace-pre-wrap max-h-96 overflow-y-auto mb-3"></div>
             <div class="flex gap-2">
                 <span class="text-green-400 font-mono text-sm">$</span>
-                <input type="text" id="terminal-input" class="flex-1 bg-transparent text-green-400 font-mono text-sm outline-none border-none" placeholder="type a command..." onkeydown="if(event.key==='Enter')runCommand()">
+                <input type="text" id="terminal-input" class="flex-1 bg-transparent text-green-400 font-mono text-sm outline-none border-none" placeholder="type a command...">
             </div>
         </div>
     </div>
@@ -219,13 +219,13 @@
 </div>
 
 <!-- Template Create/Edit Modal -->
-<div id="template-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target===this)this.classList.add('hidden')">
+<div id="template-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
         <div class="flex items-center justify-between px-6 py-4 border-b sticky top-0 bg-white">
             <h2 class="text-lg font-semibold">New Sandbox Template</h2>
-            <button onclick="this.closest('#template-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+            <button type="button" data-close-template-modal class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
         </div>
-        <form method="POST" action="/sandboxes/templates/create" class="px-6 py-4 space-y-4">
+        <form id="template-form" method="POST" action="/sandboxes/templates/create" class="px-6 py-4 space-y-4">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Name <span class="text-red-400">*</span></label>
@@ -238,22 +238,18 @@
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Image</label>
-                <select name="image" class="w-full px-3 py-2 border rounded-lg text-sm">
-                    <option value="python:3.12-slim">Python 3.12</option>
-                    <option value="node:20-slim">Node.js 20</option>
-                    <option value="golang:1.22-bookworm">Go 1.22</option>
-                    <option value="rust:1.77-slim">Rust 1.77</option>
-                    <option value="ubuntu:24.04">Ubuntu 24.04</option>
-                    <option value="alpine:3.19">Alpine 3.19</option>
-                </select>
+                <input name="image" list="sandbox-images" value="python:3.12-slim" required class="w-full px-3 py-2 border rounded-lg text-sm font-mono">
+                <datalist id="sandbox-images">
+                    {% for image in ['lucent-sandbox:base', 'python:3.12-slim', 'node:20-slim', 'golang:1.22-bookworm', 'rust:1.77-slim', 'ubuntu:24.04', 'alpine:3.19'] %}<option value="{{ image }}"></option>{% endfor %}
+                </datalist>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Repository URL (optional)</label>
-                <input name="repo_url" type="text" placeholder="https://github.com/owner/repo" class="w-full px-3 py-2 border rounded-lg text-sm">
+                <input id="template-repo-url" name="repo_url" type="text" placeholder="https://github.com/owner/repo" class="w-full px-3 py-2 border rounded-lg text-sm">
             </div>
-            <div>
+            <div id="template-branch-field" class="hidden">
                 <label class="block text-sm font-medium text-gray-700 mb-1">Branch</label>
-                <input name="branch" type="text" value="main" class="w-full px-3 py-2 border rounded-lg text-sm">
+                <input name="branch" type="text" placeholder="Repository default" class="w-full px-3 py-2 border rounded-lg text-sm">
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Setup Commands (one per line)</label>
@@ -265,6 +261,17 @@
                 <textarea name="env_vars" rows="2" placeholder="PYTHONDONTWRITEBYTECODE=1&#10;NODE_ENV=production" class="w-full px-3 py-2 border rounded-lg text-sm font-mono"></textarea>
             </div>
             <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Working Directory</label>
+                <input name="working_dir" type="text" value="/workspace" required class="w-full px-3 py-2 border rounded-lg text-sm font-mono">
+            </div>
+            {% if sandbox_backend == 'docker' %}
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Volume Mounts (source:target[:ro])</label>
+                <textarea name="docker_bind_mounts" rows="3" placeholder="/host/cache:/cache&#10;shared-config:/etc/shared:ro" class="w-full px-3 py-2 border rounded-lg text-sm font-mono"></textarea>
+                <p class="text-xs text-gray-400 mt-1">Local Docker only. The managed /workspace volume cannot be replaced.</p>
+            </div>
+            {% endif %}
+            <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
                 <select name="owner_scope" class="w-full px-3 py-2 border rounded-lg text-sm">
                     <option value="me" selected>Me</option>
@@ -273,7 +280,7 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="grid grid-cols-3 gap-3">
+            <div class="grid grid-cols-2 gap-3">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Memory</label>
                     <select name="memory_limit" class="w-full px-3 py-2 border rounded-lg text-sm">
@@ -285,10 +292,19 @@
                     </select>
                 </div>
                 <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">CPU</label>
+                    <input name="cpu_limit" type="number" min="0.1" max="16" step="0.1" value="2" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Disk</label>
+                    <input name="disk_limit" type="text" value="10g" pattern="[1-9][0-9]{0,4}[mgt]" class="w-full px-3 py-2 border rounded-lg text-sm">
+                </div>
+                <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Network</label>
-                    <select name="network_mode" class="w-full px-3 py-2 border rounded-lg text-sm">
-                        <option value="none">Isolated</option>
-                        <option value="bridge">Bridge</option>
+                    <select id="template-network-mode" name="network_mode" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        <option value="none">No egress</option>
+                        <option value="allowlist">Allowlist</option>
+                        <option value="bridge">Full egress</option>
                     </select>
                 </div>
                 <div>
@@ -302,22 +318,26 @@
                     </select>
                 </div>
             </div>
+            <div id="template-allowed-hosts-field" class="hidden">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Allowed Hosts (one per line)</label>
+                <textarea name="allowed_hosts" rows="3" placeholder="github.com&#10;pypi.org" class="w-full px-3 py-2 border rounded-lg text-sm font-mono"></textarea>
+            </div>
         </form>
         <div class="px-6 py-4 border-t flex justify-end gap-3 sticky bottom-0 bg-white">
-            <button onclick="this.closest('#template-modal').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-            <button onclick="this.closest('#template-modal').querySelector('form').submit()" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Save Template</button>
+            <button type="button" data-close-template-modal class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+            <button type="submit" form="template-form" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Save Template</button>
         </div>
     </div>
 </div>
 
 <!-- Launch Instance Modal -->
-<div id="launch-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50" onclick="if(event.target===this)this.classList.add('hidden')">
+<div id="launch-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50">
     <div class="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
         <div class="flex items-center justify-between px-6 py-4 border-b">
             <h2 class="text-lg font-semibold">Launch Sandbox Instance</h2>
-            <button onclick="this.closest('#launch-modal').classList.add('hidden')" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+            <button type="button" data-close-launch-modal class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
         </div>
-        <form method="POST" action="/sandboxes/launch" class="px-6 py-4 space-y-4">
+        <form id="launch-form" method="POST" action="/sandboxes/launch" class="px-6 py-4 space-y-4">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Template</label>
@@ -334,8 +354,8 @@
             </div>
         </form>
         <div class="px-6 py-4 border-t flex justify-end gap-3">
-            <button onclick="this.closest('#launch-modal').classList.add('hidden')" class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-            <button onclick="this.closest('#launch-modal').querySelector('form').submit()" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Launch</button>
+            <button type="button" data-close-launch-modal class="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+            <button type="submit" form="launch-form" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">Launch</button>
         </div>
     </div>
 </div>
@@ -343,6 +363,54 @@
 {% block extra_scripts %}
 <script nonce="{{ request.state.csp_nonce }}">
 let currentSandboxId = null;
+
+const templateModal = document.getElementById('template-modal');
+const openTemplateModalButton = document.getElementById('open-template-modal');
+if (templateModal && openTemplateModalButton) {
+    openTemplateModalButton.addEventListener('click', () => {
+        templateModal.classList.remove('hidden');
+    });
+    templateModal.querySelectorAll('[data-close-template-modal]').forEach((button) => {
+        button.addEventListener('click', () => templateModal.classList.add('hidden'));
+    });
+    templateModal.addEventListener('click', (event) => {
+        if (event.target === templateModal) templateModal.classList.add('hidden');
+    });
+}
+
+const launchModal = document.getElementById('launch-modal');
+const openLaunchModalButton = document.getElementById('open-launch-modal');
+if (launchModal && openLaunchModalButton) {
+    openLaunchModalButton.addEventListener('click', () => {
+        launchModal.classList.remove('hidden');
+    });
+    launchModal.querySelectorAll('[data-close-launch-modal]').forEach((button) => {
+        button.addEventListener('click', () => launchModal.classList.add('hidden'));
+    });
+    launchModal.addEventListener('click', (event) => {
+        if (event.target === launchModal) launchModal.classList.add('hidden');
+    });
+}
+
+const templateRepoUrl = document.getElementById('template-repo-url');
+const templateBranchField = document.getElementById('template-branch-field');
+if (templateRepoUrl && templateBranchField) {
+    const syncBranchField = () => {
+        templateBranchField.classList.toggle('hidden', !templateRepoUrl.value.trim());
+    };
+    templateRepoUrl.addEventListener('input', syncBranchField);
+    syncBranchField();
+}
+
+const templateNetworkMode = document.getElementById('template-network-mode');
+const templateAllowedHostsField = document.getElementById('template-allowed-hosts-field');
+if (templateNetworkMode && templateAllowedHostsField) {
+    const syncAllowedHostsField = () => {
+        templateAllowedHostsField.classList.toggle('hidden', templateNetworkMode.value !== 'allowlist');
+    };
+    templateNetworkMode.addEventListener('change', syncAllowedHostsField);
+    syncAllowedHostsField();
+}
 
 function openTerminal(sandboxId) {
     currentSandboxId = sandboxId;
@@ -390,5 +458,14 @@ async function runCommand() {
     }
     output.scrollTop = output.scrollHeight;
 }
+
+document.querySelectorAll('[data-open-terminal]').forEach((button) => {
+    button.addEventListener('click', () => openTerminal(button.dataset.openTerminal));
+});
+document.getElementById('terminal-run')?.addEventListener('click', runCommand);
+document.getElementById('terminal-close')?.addEventListener('click', closeTerminal);
+document.getElementById('terminal-input')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') runCommand();
+});
 </script>
 {% endblock %}

@@ -4244,7 +4244,8 @@ class LucentDaemon(
                 reason = (
                     "Task instructions required tool call(s) "
                     f"{', '.join(missing_required_tools)}, but the session did not call them. "
-                    "Do not satisfy explicit handoff instructions with narrative text only."
+                    "Do not satisfy explicit durable-deliverable instructions with "
+                    "narrative text or temporary filesystem writes."
                 )
                 log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
                 await RequestAPI.add_event(

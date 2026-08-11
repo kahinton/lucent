@@ -15,6 +15,7 @@ from . import (
     daemon,
     dashboard,
     definitions,
+    files,
     groups,
     memories,
     requests_routes,
@@ -37,6 +38,7 @@ router.include_router(chat.router)
 router.include_router(dashboard.router)
 router.include_router(definitions.router)
 router.include_router(daemon.router)
+router.include_router(files.router)
 router.include_router(memories.router)
 router.include_router(sandboxes.router)
 router.include_router(settings.router)

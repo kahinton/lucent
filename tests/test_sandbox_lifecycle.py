@@ -1249,6 +1249,37 @@ class TestSandboxSecurity:
         assert volumes[volume_name]["bind"] == "/workspace"
         assert volumes[volume_name]["mode"] == "rw"
 
+    def test_create_container_adds_configured_bind_mounts(self):
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        client = _make_docker_client()
+        backend._client = client
+
+        config = SandboxConfig(
+            docker_bind_mounts=[
+                {"source": "/host/cache", "target": "/cache", "read_only": False},
+                {"source": "shared-config", "target": "/etc/shared", "read_only": True},
+            ]
+        )
+        backend._create_container("sb-bind-test", "test-sb", config)
+
+        volumes = client.containers.run.call_args.kwargs["volumes"]
+        assert volumes["/host/cache"] == {"bind": "/cache", "mode": "rw"}
+        assert volumes["shared-config"] == {"bind": "/etc/shared", "mode": "ro"}
+
+    def test_create_container_rejects_workspace_bind_mount(self):
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        backend._client = _make_docker_client()
+        config = SandboxConfig(
+            docker_bind_mounts=[
+                {"source": "/host/repo", "target": "/workspace/repo", "read_only": False}
+            ]
+        )
+
+        with pytest.raises(ValueError, match="managed /workspace"):
+            backend._create_container("sb-bind-test", "test-sb", config)
+
     @pytest.mark.asyncio
     async def test_rebuild_with_image_preserves_workspace_volume(self):
         """_rebuild_with_image() uses the same named volume so /workspace survives."""

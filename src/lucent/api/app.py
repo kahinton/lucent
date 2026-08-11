@@ -341,7 +341,8 @@ def create_app() -> FastAPI:
             "base-uri 'self'; "
             "form-action 'self'"
         )
-        response.headers["Content-Security-Policy"] = csp
+        if "Content-Security-Policy" not in response.headers:
+            response.headers["Content-Security-Policy"] = csp
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -542,10 +543,12 @@ def create_app() -> FastAPI:
     app.include_router(definitions.router, prefix="/api", tags=["Definitions"])
 
     # Include request tracking router
+    from lucent.api.routers import files as files_router
     from lucent.api.routers import requests as requests_router
     from lucent.api.routers import user_interactions as user_interactions_router
 
     app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
+    app.include_router(files_router.router, prefix="/api", tags=["Files"])
     app.include_router(
         user_interactions_router.router,
         prefix="/api",

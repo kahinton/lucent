@@ -13,6 +13,7 @@ Reusable knowledge for creating, operating, and cleaning up Lucent sandbox envir
 |------|---------|
 | `src/lucent/sandbox/manager.py` | `SandboxManager` class + `get_sandbox_manager()` singleton |
 | `src/lucent/sandbox/docker_backend.py` | `DockerBackend` — container lifecycle, networking, MCP bridge injection |
+| `src/lucent/sandbox/k8s_backend.py` | `KubernetesBackend` — pod lifecycle, exec, NetworkPolicy, MCP bridge injection |
 | `src/lucent/sandbox/models.py` | `SandboxConfig`, `SandboxInfo`, `ExecResult`, `OutputResult` |
 | `src/lucent/sandbox/mcp_bridge.py` | MCP bridge server that runs inside the container |
 | `daemon/daemon.py` (~line 2309) | `_create_task_sandbox()` / `_destroy_task_sandbox()` daemon integration |
@@ -144,6 +145,7 @@ Destroys all live containers. Use with caution.
 | `setup_commands` | `list[str]` | `[]` | Shell commands to run after container start. Best-effort — failures do **not** abort creation |
 | `env_vars` | `dict[str, str]` | `{}` | Environment variables injected into the container |
 | `working_dir` | `str` | `"/workspace"` | Default working directory for exec calls |
+| `docker_bind_mounts` | `list[dict]` | `[]` | Docker-only `source`, `target`, `read_only` mounts; cannot replace `/workspace` |
 | `memory_limit` | `str` | `"2g"` | Docker memory limit |
 | `cpu_limit` | `float` | `2.0` | CPU cores (converted to `nano_cpus = cpu_limit * 1e9`) |
 | `disk_limit` | `str` | `"10g"` | Storage quota via `storage_opt`. Falls back gracefully on unsupported drivers |
@@ -366,6 +368,26 @@ if live is None or live.status != "ready":
 
 sandbox_id = info.sandbox_id
 ```
+
+## Kubernetes Backend
+
+Set `LUCENT_SANDBOX_BACKEND=kubernetes`. The backend loads in-cluster credentials
+first and falls back to kubeconfig. Configure `LUCENT_SANDBOX_K8S_NAMESPACE` and,
+for out-of-cluster use, `LUCENT_SANDBOX_KUBECONFIG`.
+
+Portable template fields map to pods as follows:
+
+- Memory/CPU become container requests and limits.
+- Disk becomes the `/workspace` `emptyDir.sizeLimit`.
+- `none` and `allowlist` create egress NetworkPolicies; the task bridge retains
+    access to `LUCENT_SANDBOX_BRIDGE_API_URL`.
+- Docker bind mounts are ignored and hidden by the UI.
+- Repository cloning, setup commands, exec/file operations, cleanup, and the MCP
+    bridge work through the Kubernetes exec API.
+
+The service account requires namespaced pod create/delete/get/list/watch,
+`pods/exec`, and NetworkPolicy create/delete/get/list permissions. The Helm chart
+configures these permissions and defaults sandbox pods to the release namespace.
 
 ### Cloning a Repository
 

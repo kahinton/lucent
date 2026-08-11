@@ -116,6 +116,17 @@ def required_task_tool_names(
         pattern.search(text) for pattern in _HANDOFF_TOOL_REQUIRED_PATTERNS
     ):
         required.add("send_handoff")
+    durable_file_signals = (
+        "files integration",
+        "store_user_file",
+        "durable user file",
+        "user-owned file",
+        "user file storage",
+        "lucent files",
+        "files area",
+    )
+    if any(signal in text for signal in durable_file_signals):
+        required.add("store_user_file")
     return required
 
 

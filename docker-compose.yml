@@ -142,6 +142,8 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
       LUCENT_CHAT_MODEL: ${LUCENT_CHAT_MODEL:-}
+      LUCENT_FILE_STORAGE_PATH: /var/lib/lucent/files
+      LUCENT_MAX_USER_FILE_BYTES: ${LUCENT_MAX_USER_FILE_BYTES:-10485760}
       LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
       # MCP DNS-rebinding allowlist. The MCP SDK rejects non-loopback Host
       # headers with HTTP 421; the daemon reaches the server as http://lucent:8766/mcp,
@@ -179,6 +181,7 @@ services:
       - ./.github/agents/definitions:/app/.github/agents/definitions:ro
       - ./.github/sandbox-templates:/app/.github/sandbox-templates:ro
       - ./.openbao/shared:/shared:ro
+      - lucent_files:/var/lib/lucent/files
     ports:
       - "${LUCENT_PORT:-8766}:8766"
     healthcheck:
@@ -303,6 +306,8 @@ services:
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN_FILE: /shared/vault-token
+      # Task sandbox lifecycle uses the same restricted Docker API as the server.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
     extra_hosts:
       # Required so host.docker.internal resolves on Linux hosts (Docker Desktop
       # provides it automatically, plain Docker Engine does not).
@@ -351,6 +356,8 @@ services:
       LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
       VAULT_ADDR: http://openbao:8200
       VAULT_TOKEN_FILE: /shared/vault-token
+      # Task sandbox lifecycle uses the same restricted Docker API as the server.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
     extra_hosts:
       # Required so host.docker.internal resolves on Linux hosts.
       - "host.docker.internal:host-gateway"
@@ -364,6 +371,8 @@ services:
 
 volumes:
   lucent_data:
+    driver: local
+  lucent_files:
     driver: local
   openbao_data:
     driver: local

@@ -140,6 +140,32 @@ class TestRequiredToolUsage:
             description,
         ) == {"send_handoff"}
 
+    def test_files_integration_task_requires_durable_user_file_tool(self):
+        description = (
+            "Create a fake shopping list text file. This file is intended to "
+            "test the files integration."
+        )
+        assert (
+            _task_requires_mcp_tool_usage(
+                "code",
+                "Create Shopping List File",
+                description,
+            )
+            is True
+        )
+        assert _required_task_tool_names(
+            "code",
+            "Create Shopping List File",
+            description,
+        ) == {"store_user_file"}
+
+    def test_generic_repository_file_does_not_require_user_file_tool(self):
+        assert _required_task_tool_names(
+            "code",
+            "Create configuration file",
+            "Add pyproject.toml to the target repository.",
+        ) == set()
+
     def test_generic_handoff_word_does_not_require_tool_usage(self):
         assert (
             _task_requires_mcp_tool_usage(

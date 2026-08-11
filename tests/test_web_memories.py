@@ -361,6 +361,45 @@ class TestKnowledgeTree:
             organization_id=org["id"],
             shared=True,
         )
+        consolidating_memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Consolidating file memory",
+            tags=["knowledge-tree", "file"],
+            importance=5,
+            metadata={
+                "repo": "org/root-visible",
+                "directory": "src/",
+                "filename": "src/consolidating.py",
+            },
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+        archived_memory = await repo.create(
+            username=f"{web_prefix}User",
+            type="technical",
+            content=f"{web_prefix}Archived file memory",
+            tags=["knowledge-tree", "file"],
+            importance=5,
+            metadata={
+                "repo": "org/root-visible",
+                "directory": "src/",
+                "filename": "src/archived.py",
+            },
+            user_id=user["id"],
+            organization_id=org["id"],
+            shared=True,
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE memories SET lifecycle_stage = 'consolidating' WHERE id = $1",
+                consolidating_memory["id"],
+            )
+            await conn.execute(
+                "UPDATE memories SET lifecycle_stage = 'archived' WHERE id = $1",
+                archived_memory["id"],
+            )
 
         async def _repo_exists(self, repo_full_name):  # pragma: no cover - signature shim
             return True
@@ -377,6 +416,8 @@ class TestKnowledgeTree:
         assert str(root_memory["id"]) in resp.text
         assert str(audit_memory["id"]) not in resp.text
         assert str(superseded_memory["id"]) not in resp.text
+        assert str(consolidating_memory["id"]) in resp.text
+        assert str(archived_memory["id"]) not in resp.text
         match = re.search(r"const treeData = (.*?);\n", resp.text, re.S)
         assert match is not None
         tree = json.loads(match.group(1))

@@ -42,6 +42,14 @@ The UI shows the active source for each value:
 | `LUCENT_LOG_FILE_MAX_BYTES` | `10485760` | Max bytes per log file before rotation (10 MB) |
 | `LUCENT_LOG_FILE_BACKUP_COUNT` | `5` | Number of rotated log files to keep |
 | `LUCENT_LOG_MODULES` | *(none)* | Per-module log level overrides (comma-separated, e.g. `lucent.api=DEBUG,lucent.db=WARNING`) |
+| `LUCENT_FILE_STORAGE_PATH` | `./data/files` | Root directory for the built-in local user-file provider. Compose and Helm mount durable storage at `/var/lib/lucent/files`. |
+| `LUCENT_MAX_USER_FILE_BYTES` | `10485760` | Maximum size of one stored user file in bytes (10 MiB by default). |
+
+User-file identity, ownership, provenance, and provider keys are stored in
+PostgreSQL. File content uses the local provider by default. The provider
+boundary is independent of request outputs and handoff references so external
+backends such as Azure Blob Storage or Google Drive can be added without
+changing user-facing file IDs or authorization rules.
 
 ## Authentication
 
@@ -199,9 +207,18 @@ For the full two-tier model, recommended setup profiles (simple / team / enterpr
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_SANDBOX_BACKEND` | `docker` | Sandbox backend (currently only `docker`) |
+| `LUCENT_SANDBOX_BACKEND` | `docker` | Sandbox backend: `docker` or `kubernetes` |
 | `LUCENT_SANDBOX_BRIDGE_API_URL` | `http://host.docker.internal:8766/api` | API URL accessible from inside sandboxes |
 | `DOCKER_HOST` | *(system default)* | Docker daemon socket URL for sandbox creation |
+| `LUCENT_SANDBOX_K8S_NAMESPACE` | `lucent-sandboxes` | Namespace for Kubernetes sandbox pods and NetworkPolicies |
+| `LUCENT_SANDBOX_KUBECONFIG` | *(in-cluster or default config)* | Optional kubeconfig path used outside a cluster |
+
+Templates share image, repository, setup, environment, working directory,
+resource, network, and lifecycle settings across both backends. Docker bind
+mounts are local-runtime settings and only appear in the UI when the Docker
+backend is active. Kubernetes uses an `emptyDir` workspace bounded by the
+template disk limit and requires a CNI plugin that enforces NetworkPolicy for
+isolated or allowlisted egress.
 
 ## Docker Compose
 

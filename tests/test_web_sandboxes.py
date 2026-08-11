@@ -146,6 +146,30 @@ async def test_sandboxes_page_returns_200(client):
 
 
 @pytest.mark.asyncio
+async def test_new_template_modal_uses_nonce_backed_script(client):
+    resp = await client.get("/sandboxes", follow_redirects=True)
+
+    assert resp.status_code == 200
+    assert 'id="open-template-modal"' in resp.text
+    assert 'data-close-template-modal' in resp.text
+    assert 'form="template-form"' in resp.text
+    assert "onclick=\"document.getElementById('template-modal')" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_template_form_only_shows_docker_fields_for_docker_backend(client, monkeypatch):
+    monkeypatch.setenv("LUCENT_SANDBOX_BACKEND", "docker")
+    docker_response = await client.get("/sandboxes")
+    assert 'name="docker_bind_mounts"' in docker_response.text
+    assert "Docker container environments" in docker_response.text
+
+    monkeypatch.setenv("LUCENT_SANDBOX_BACKEND", "kubernetes")
+    kubernetes_response = await client.get("/sandboxes")
+    assert 'name="docker_bind_mounts"' not in kubernetes_response.text
+    assert "Kubernetes pod environments" in kubernetes_response.text
+
+
+@pytest.mark.asyncio
 async def test_sandboxes_instances_tab_returns_200(client):
     mock_manager = AsyncMock()
     mock_manager.list_all.return_value = []
@@ -153,6 +177,48 @@ async def test_sandboxes_instances_tab_returns_200(client):
         resp = await client.get("/sandboxes?tab=instances", follow_redirects=True)
     assert resp.status_code == 200
     mock_manager.list_all.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_launch_instance_modal_uses_nonce_backed_script(client):
+    mock_manager = AsyncMock()
+    mock_manager.list_all.return_value = {"items": [], "total_count": 0}
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        response = await client.get("/sandboxes?tab=instances", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert 'id="open-launch-modal"' in response.text
+    assert 'data-close-launch-modal' in response.text
+    assert 'form="launch-form"' in response.text
+    assert "onclick=\"document.getElementById('launch-modal')" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_terminal_controls_use_nonce_backed_script(client):
+    sandbox_id = str(uuid4())
+    mock_manager = AsyncMock()
+    mock_manager.list_all.return_value = {
+        "items": [{
+            "id": sandbox_id,
+            "name": "active-sandbox",
+            "status": "ready",
+            "image": "python:3.12-slim",
+            "created_at": None,
+        }],
+        "total_count": 1,
+    }
+    with patch("lucent.sandbox.manager.get_sandbox_manager", return_value=mock_manager):
+        response = await client.get("/sandboxes?tab=instances", follow_redirects=True)
+
+    assert response.status_code == 200
+    assert f'data-open-terminal="{sandbox_id}"' in response.text
+    assert 'id="terminal-run"' in response.text
+    assert 'id="terminal-close"' in response.text
+    assert 'id="terminal-input"' in response.text
+    assert 'onclick="openTerminal(' not in response.text
+    assert 'onclick="runCommand()"' not in response.text
+    assert 'onclick="closeTerminal()"' not in response.text
+    assert "onkeydown=\"if(event.key==='Enter')runCommand()\"" not in response.text
 
 
 @pytest.mark.asyncio
@@ -192,7 +258,7 @@ async def test_create_template(client):
 
 
 @pytest.mark.asyncio
-async def test_create_template_with_all_fields(client):
+async def test_create_template_with_all_fields(client, db_pool, web_user):
     resp = await client.post(
         "/sandboxes/templates/create",
         data=_csrf_data(
@@ -205,6 +271,7 @@ async def test_create_template_with_all_fields(client):
                 "branch": "develop",
                 "setup_commands": "npm install\nnpm run build",
                 "env_vars": "NODE_ENV=test\nCI=true",
+                "docker_bind_mounts": "/host/cache:/cache\nshared:/etc/shared:ro",
                 "memory_limit": "4g",
                 "cpu_limit": "4.0",
                 "disk_limit": "20g",
@@ -215,6 +282,15 @@ async def test_create_template_with_all_fields(client):
         follow_redirects=False,
     )
     assert resp.status_code == 303
+
+    _user, org, _token = web_user
+    result = await SandboxTemplateRepository(db_pool).get_by_name(
+        "full-field-template", str(org["id"])
+    )
+    assert result["docker_bind_mounts"] == [
+        {"source": "/host/cache", "target": "/cache", "read_only": False},
+        {"source": "shared", "target": "/etc/shared", "read_only": True},
+    ]
 
 
 @pytest.mark.asyncio
@@ -281,6 +357,32 @@ async def test_update_template(client, db_pool, web_user, web_prefix):
     # Verify the update persisted
     updated = await repo.get(str(tpl["id"]))
     assert updated["description"] == "updated"
+
+
+@pytest.mark.asyncio
+async def test_update_template_clears_branch_without_repository(
+    client, db_pool, web_user, web_prefix
+):
+    user, org, _token = web_user
+    repo = SandboxTemplateRepository(db_pool)
+    tpl = await repo.create(
+        name=f"{web_prefix}branch_template",
+        organization_id=str(org["id"]),
+        repo_url="https://github.com/test/repo",
+        branch="main",
+        created_by=str(user["id"]),
+    )
+
+    response = await client.post(
+        f"/sandboxes/templates/{tpl['id']}/edit",
+        data=_csrf_data(client, {"name": tpl["name"], "repo_url": "", "branch": "main"}),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    updated = await repo.get(str(tpl["id"]))
+    assert updated["repo_url"] is None
+    assert updated["branch"] is None
 
 
 @pytest.mark.asyncio

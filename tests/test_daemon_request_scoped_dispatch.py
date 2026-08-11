@@ -46,6 +46,8 @@ async def test_subagent_prompt_includes_request_owner_context():
     assert owner_context in prompt
     assert "request-owner" in prompt
     assert "Owner-only preference" in prompt
+    assert "call `store_user_file` instead of a generic filesystem tool" in prompt
+    assert "a path in the agent/container working directory is not a user deliverable" in prompt
 
 
 @pytest.mark.asyncio
