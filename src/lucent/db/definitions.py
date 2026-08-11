@@ -10,6 +10,8 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import validator_for
 
 from lucent.db.audit import (
     DEFINITION_APPROVE,
@@ -36,6 +38,40 @@ VALID_HOOK_TRIGGER_EVENTS = frozenset({
     "before_tool_call",
     "after_tool_call",
 })
+
+_JSON_SCHEMA_TYPES = frozenset({
+    "array", "boolean", "integer", "null", "number", "object", "string",
+})
+
+
+def _normalize_json_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        normalized = {key: _normalize_json_schema(item) for key, item in value.items()}
+        schema_type = normalized.get("type")
+        if isinstance(schema_type, str) and schema_type.lower() in _JSON_SCHEMA_TYPES:
+            normalized["type"] = schema_type.lower()
+        elif isinstance(schema_type, list):
+            normalized["type"] = [
+                item.lower()
+                if isinstance(item, str) and item.lower() in _JSON_SCHEMA_TYPES
+                else item
+                for item in schema_type
+            ]
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_json_schema(item) for item in value]
+    return value
+
+
+def _prepare_json_schema(schema: dict | None, field_name: str) -> dict | None:
+    if schema is None:
+        return None
+    normalized = _normalize_json_schema(schema)
+    try:
+        validator_for(normalized).check_schema(normalized)
+    except SchemaError as exc:
+        raise ValueError(f"{field_name} is not valid JSON Schema: {exc.message}") from exc
+    return normalized
 VALID_HOOK_ACTION_TYPES = frozenset({"memory_lookup", "static_context", "command"})
 DEFAULT_AGENT_HOOK_NAMES = ("file-memory-lookup",)
 
@@ -1124,7 +1160,11 @@ class DefinitionRepository:
         proposal_reason: str | None = None,
         proposal_evidence: dict | None = None,
     ) -> dict:
-        input_schema = input_schema or {"type": "object", "properties": {}}
+        input_schema = _prepare_json_schema(
+            input_schema or {"type": "object", "properties": {}},
+            "input_schema",
+        )
+        output_schema = _prepare_json_schema(output_schema, "output_schema")
         auth_policy = auth_policy or {"mode": "agent_grant", "require_user_access": True}
         network_policy = network_policy or {"network_mode": "none", "allowed_hosts": []}
         resource_limits = resource_limits or {
@@ -1206,6 +1246,14 @@ class DefinitionRepository:
         current = await self.get_managed_tool(tool_id, org_id)
         if not current:
             return None
+        if "input_schema" in kwargs:
+            kwargs["input_schema"] = _prepare_json_schema(
+                kwargs["input_schema"], "input_schema",
+            )
+        if "output_schema" in kwargs:
+            kwargs["output_schema"] = _prepare_json_schema(
+                kwargs["output_schema"], "output_schema",
+            )
         self._validate_tool_shape(
             input_schema=kwargs.get("input_schema", current.get("input_schema")),
             output_schema=kwargs.get("output_schema", current.get("output_schema")),

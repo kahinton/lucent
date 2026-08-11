@@ -125,15 +125,23 @@ async def test_mcp_create_list_get_tool_definition(mcp, auth_user):
             "description": "Echo through managed tool",
             "source_code": TOOL_CODE,
             "input_schema": {
-                "type": "object",
-                "properties": {"value": {"type": "string"}},
+                "type": "OBJECT",
+                "properties": {"value": {"type": "STRING"}},
             },
             "network_policy": {"network_mode": "none", "allowed_hosts": []},
+            "proposal_evidence": "Requested in chat to test custom tool creation.",
         },
     )
     assert result["name"] == "mcp-echo"
     assert result["status"] == "proposed"
     assert result["auth_policy"]["mode"] == "agent_grant"
+    assert result["input_schema"] == {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+    }
+    assert result["proposal_evidence"] == {
+        "summary": "Requested in chat to test custom tool creation."
+    }
 
     listed = await _call(mcp, "list_tool_definitions", {"status": "proposed"})
     assert any(item["name"] == "mcp-echo" for item in listed["items"])

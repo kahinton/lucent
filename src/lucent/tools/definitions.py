@@ -72,6 +72,21 @@ def _parse_json_object(value: dict | str | None) -> dict:
     raise ValueError("value must be a JSON object")
 
 
+def _parse_proposal_evidence(value: dict | str | None) -> dict:
+    if value is None or value == "":
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {"summary": value}
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("proposal_evidence must be a JSON object or plain text")
+
+
 def _parse_json_array(value: list | str | None) -> list:
     if value is None:
         return []
@@ -330,7 +345,7 @@ Returns: JSON with the created agent including its ID and status."""
 
         repo = await _get_definition_repository()
         try:
-            evidence = _parse_json_object(proposal_evidence)
+            evidence = _parse_proposal_evidence(proposal_evidence)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
         agent = await repo.create_agent(
@@ -377,7 +392,7 @@ Returns: JSON with the created skill including its ID and status."""
 
         repo = await _get_definition_repository()
         try:
-            evidence = _parse_json_object(proposal_evidence)
+            evidence = _parse_proposal_evidence(proposal_evidence)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
         skill = await repo.create_skill(
@@ -435,7 +450,7 @@ Returns: JSON with the created hook including its ID and status."""
 
         try:
             parsed_config = _parse_config(config)
-            evidence = _parse_json_object(proposal_evidence)
+            evidence = _parse_proposal_evidence(proposal_evidence)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
@@ -526,7 +541,7 @@ Returns: JSON with the created proposed tool including its ID and status."""
                 "memory_limit": "512m", "cpu_limit": 1.0,
                 "disk_limit": "1g", "timeout_seconds": timeout_seconds,
             }
-            evidence = _parse_json_object(proposal_evidence)
+            evidence = _parse_proposal_evidence(proposal_evidence)
         except (ValueError, json.JSONDecodeError) as exc:
             return json.dumps({"error": str(exc)})
 
@@ -1426,7 +1441,7 @@ Returns: JSON with the created server including its ID and status."""
             except (json.JSONDecodeError, ValueError):
                 return json.dumps({"error": "env_vars must be a valid JSON object string"})
         try:
-            evidence = _parse_json_object(proposal_evidence)
+            evidence = _parse_proposal_evidence(proposal_evidence)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
