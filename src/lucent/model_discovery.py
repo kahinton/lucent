@@ -809,21 +809,12 @@ class ModelDiscoveryService:
 
     async def _discover_copilot(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
         try:
-            from copilot import CopilotClient, SubprocessConfig
-
-            from lucent.llm.copilot_engine import resolve_copilot_cli_path
+            from lucent.llm.copilot_engine import create_copilot_client
         except ImportError as exc:
             raise ValueError("github-copilot-sdk is not installed") from exc
 
-        config_kwargs: dict[str, Any] = {"log_level": "warning"}
         github_token = await self._provider_credential("copilot", org_id=org_id)
-        if github_token:
-            config_kwargs["github_token"] = github_token
-        cli_path = resolve_copilot_cli_path()
-        if cli_path:
-            config_kwargs["cli_path"] = cli_path
-
-        client = CopilotClient(config=SubprocessConfig(**config_kwargs))
+        client = create_copilot_client(github_token=github_token)
         try:
             await client.start()
             rows = await client.list_models()

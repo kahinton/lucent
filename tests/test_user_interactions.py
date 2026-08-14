@@ -7,7 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
@@ -143,7 +143,7 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 
 
 async def _call_mcp_tool(mcp: FastMCP, tool_name: str, args: dict | None = None):
-    result = await mcp._tool_manager.call_tool(tool_name, args or {})
+    result = await mcp._tool_manager.call_tool(tool_name, args or {}, None)
     return json.loads(result)
 
 

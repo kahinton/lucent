@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.auth import set_current_user
 from lucent.db import UserRepository
@@ -100,7 +100,7 @@ async def cleanup_requests(db_pool, test_organization):
 
 async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
     """Call an MCP tool and parse the JSON response."""
-    result = await mcp._tool_manager.call_tool(tool_name, args or {})
+    result = await mcp._tool_manager.call_tool(tool_name, args or {}, None)
     return json.loads(result)
 
 

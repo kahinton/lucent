@@ -4,7 +4,7 @@ import json
 import logging
 from uuid import UUID
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.db import get_pool
 from lucent.db.definitions import BuiltInProtectionError, DefinitionRepository

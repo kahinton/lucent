@@ -797,7 +797,7 @@ class TestMCPScopedRequestCreation:
     ):
         """When set_current_user has memory_scope='user', the MCP create_request
         tool should create a request with force_pending_approval=True."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer as FastMCP
 
         from lucent.tools.requests import register_request_tools
 
@@ -828,6 +828,7 @@ class TestMCPScopedRequestCreation:
                     "source": "cognitive",
                     "goal_id": str(goal["id"]),
                 },
+                None,
             )
             result = json.loads(result_text)
             request_id = result["id"]
@@ -851,7 +852,7 @@ class TestMCPScopedRequestCreation:
     ):
         """When set_current_user has no memory_scope, the MCP create_request
         tool should not force pending_approval (uses normal logic)."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer as FastMCP
 
         from lucent.tools.requests import register_request_tools
 
@@ -877,6 +878,7 @@ class TestMCPScopedRequestCreation:
                     "description": "Created without scoping",
                     "source": "user",
                 },
+                None,
             )
             result = json.loads(result_text)
             request_id = result["id"]

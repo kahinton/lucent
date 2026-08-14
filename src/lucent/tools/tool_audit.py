@@ -6,7 +6,7 @@ import json
 from typing import Any
 from uuid import UUID
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.db import DefinitionRepository, ToolAuditRepository, get_pool
 from lucent.tools.memories import _get_current_user_context

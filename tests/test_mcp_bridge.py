@@ -63,7 +63,19 @@ class _FakeClientSession:
 
 @asynccontextmanager
 async def _fake_streamable_client(*_args, **_kwargs):
-    yield object(), object(), lambda: "session-id"
+    yield object(), object()
+
+
+class _FakeHttpClient:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+
+def _fake_http_client(*_args, **_kwargs):
+    return _FakeHttpClient()
 
 
 @pytest.mark.asyncio
@@ -74,8 +86,13 @@ async def test_bridge_uses_streamable_http_session(monkeypatch):
     monkeypatch.setattr(mcp, "ClientSession", _FakeClientSession)
     monkeypatch.setattr(
         mcp.client.streamable_http,
-        "streamablehttp_client",
+        "streamable_http_client",
         _fake_streamable_client,
+    )
+    monkeypatch.setattr(
+        mcp.client.streamable_http,
+        "create_mcp_http_client",
+        _fake_http_client,
     )
 
     bridge = MCPToolBridge(
@@ -127,8 +144,13 @@ async def test_bridge_reconnects_once_after_session_termination(monkeypatch):
     monkeypatch.setattr(mcp, "ClientSession", _TerminatingFirstSession)
     monkeypatch.setattr(
         mcp.client.streamable_http,
-        "streamablehttp_client",
+        "streamable_http_client",
         _fake_streamable_client,
+    )
+    monkeypatch.setattr(
+        mcp.client.streamable_http,
+        "create_mcp_http_client",
+        _fake_http_client,
     )
 
     bridge = MCPToolBridge(

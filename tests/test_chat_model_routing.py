@@ -262,6 +262,7 @@ def test_copilot_restricted_session_excludes_built_in_tools():
     )
 
     assert "bash" in kwargs["excluded_tools"]
+    assert "skill" in kwargs["excluded_tools"]
     assert "view" in kwargs["excluded_tools"]
     assert "available_tools" not in kwargs
     assert kwargs["mcp_servers"]["memory-server"]["tools"] == ["create_workflow"]

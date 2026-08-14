@@ -248,7 +248,7 @@ class TestMemoryUsernameSpoofing:
     ):
         """MCP create_memory with a different username should use the
         authenticated user's name, not the parameter value."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer as FastMCP
 
         from lucent.tools.memories import register_tools
 
@@ -274,6 +274,7 @@ class TestMemoryUsernameSpoofing:
                     "username": user_b["display_name"],  # Trying to impersonate
                     "tags": ["test"],
                 },
+                None,
             )
             data = json.loads(result)
             assert "error" not in data
@@ -383,7 +384,7 @@ class TestCrossOrgTaskClaim:
             organization_id=user_a["organization_id"],
         )
 
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer as FastMCP
 
         from lucent.tools.memories import register_tools
 
@@ -404,6 +405,7 @@ class TestCrossOrgTaskClaim:
             result = await mcp._tool_manager.call_tool(
                 "claim_task",
                 {"memory_id": str(task["id"]), "instance_id": "attacker-instance"},
+                None,
             )
             data = json.loads(result)
             # Should fail — task is in org A, user C is in org B
@@ -431,7 +433,7 @@ class TestCrossOrgTaskClaim:
         claimed = await repo.claim_task(task["id"], "legitimate-instance")
         assert claimed is not None
 
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer as FastMCP
 
         from lucent.tools.memories import register_tools
 
@@ -452,6 +454,7 @@ class TestCrossOrgTaskClaim:
             result = await mcp._tool_manager.call_tool(
                 "release_claim",
                 {"memory_id": str(task["id"]), "instance_id": "legitimate-instance"},
+                None,
             )
             data = json.loads(result)
             assert "error" in data
@@ -574,7 +577,7 @@ class TestMCPToolsRequireAuth:
 
     async def test_log_task_event_requires_auth(self, db_pool):
         """log_task_event should fail without authentication."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer as FastMCP
 
         from lucent.tools.requests import register_request_tools
 
@@ -586,6 +589,7 @@ class TestMCPToolsRequireAuth:
         result = await mcp._tool_manager.call_tool(
             "log_task_event",
             {"task_id": str(uuid4()), "event_type": "progress", "detail": "test"},
+            None,
         )
         data = json.loads(result)
         assert "error" in data
@@ -593,7 +597,7 @@ class TestMCPToolsRequireAuth:
 
     async def test_link_task_memory_requires_auth(self, db_pool):
         """link_task_memory should fail without authentication."""
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server import MCPServer as FastMCP
 
         from lucent.tools.requests import register_request_tools
 
@@ -604,6 +608,7 @@ class TestMCPToolsRequireAuth:
         result = await mcp._tool_manager.call_tool(
             "link_task_memory",
             {"task_id": str(uuid4()), "memory_id": str(uuid4())},
+            None,
         )
         data = json.loads(result)
         assert "error" in data

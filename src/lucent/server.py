@@ -11,7 +11,7 @@ import sys
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -98,7 +98,7 @@ def _build_mcp_transport_security() -> TransportSecuritySettings:
 
 
 # Create the MCP server
-mcp = FastMCP("Lucent", transport_security=_build_mcp_transport_security())
+mcp = FastMCP("Lucent")
 
 # Register all memory tools
 register_tools(mcp)
@@ -416,7 +416,7 @@ def get_mcp_app():
 
     Returns the MCP app (auth is handled by wrapping the entire FastAPI app).
     """
-    return mcp.streamable_http_app()
+    return mcp.streamable_http_app(transport_security=_build_mcp_transport_security())
 
 
 def main() -> None:
