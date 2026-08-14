@@ -26,7 +26,7 @@ from lucent.api.deps import CurrentUser, get_current_user
 
 
 @pytest_asyncio.fixture
-async def org_prefix(db_pool):
+async def org_prefix(db_pool, delete_test_organizations):
     """Create and clean up test data."""
     test_id = str(uuid4())[:8]
     prefix = f"test_org_{test_id}_"
@@ -49,7 +49,7 @@ async def org_prefix(db_pool):
             f"{prefix}%",
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
-        await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
+        await delete_test_organizations(conn, [f"{prefix}%"])
 
 
 @pytest_asyncio.fixture

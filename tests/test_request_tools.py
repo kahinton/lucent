@@ -47,6 +47,52 @@ async def auth_user(test_user):
 
 
 @pytest_asyncio.fixture
+async def available_model(db_pool):
+    from lucent.db.models import ModelRepository
+    from lucent.model_registry import list_models
+
+    model = list_models()[0]
+    repo = ModelRepository(db_pool)
+    existing = await repo.get_model(model.id)
+    if existing:
+        await repo.update_model(
+            model.id,
+            is_enabled=True,
+            organization_id=None,
+            owner_user_id=None,
+            owner_group_id=None,
+        )
+    else:
+        await repo.create_model(
+            model.id,
+            model.provider,
+            model.name,
+            category=model.category,
+            supports_tools=model.supports_tools,
+        )
+    yield model
+    if existing:
+        await repo.update_model(
+            model.id,
+            is_enabled=existing["is_enabled"],
+            organization_id=(
+                str(existing["organization_id"])
+                if existing["organization_id"]
+                else None
+            ),
+            owner_user_id=(
+                str(existing["owner_user_id"]) if existing["owner_user_id"] else None
+            ),
+            owner_group_id=(
+                str(existing["owner_group_id"]) if existing["owner_group_id"] else None
+            ),
+        )
+    else:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM models WHERE id = $1", model.id)
+
+
+@pytest_asyncio.fixture
 async def other_auth_user(db_pool, other_org, clean_test_data):
     """Set auth context to a user in a different organization."""
     from lucent.db import UserRepository
@@ -556,6 +602,7 @@ class TestListPendingRequests:
 # ============================================================================
 
 
+@pytest.mark.usefixtures("available_model")
 class TestListAvailableModels:
     @pytest.mark.asyncio
     async def test_returns_models(self, mcp, auth_user):

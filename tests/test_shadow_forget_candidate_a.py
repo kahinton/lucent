@@ -41,7 +41,10 @@ async def test_shadow_gcp_flag_off_is_noop_and_does_not_change_vitality_or_ranki
             organization_id=test_user["organization_id"],
         )
 
-    await repo.compute_vitality_scores(batch_size=100)
+    await repo.compute_vitality_scores(
+        batch_size=100,
+        organization_id=str(test_user["organization_id"]),
+    )
 
     search_before = await repo.search(
         query=f"{prefix} candidate-a ranking corpus",

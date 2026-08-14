@@ -756,8 +756,16 @@ async def test_handoff_inline_chat_uses_session_and_mirrors_user_turn(
 ):
     seen: dict = {}
     fake_engine = _FakeHandoffChatEngine(seen)
+
+    async def allow_model_access(*_args):
+        return True
+
     monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: fake_engine)
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+    monkeypatch.setattr(
+        "lucent.api.routers.chat._can_user_access_model",
+        allow_model_access,
+    )
     monkeypatch.setattr(
         "lucent.model_registry.validate_reasoning_effort",
         lambda _model, _effort: None,

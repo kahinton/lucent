@@ -52,7 +52,7 @@ class TestEngineFactory:
             assert engine.name == "langchain"
 
     def test_invalid_engine_raises(self):
-        with patch.dict(os.environ, {"LUCENT_LLM_ENGINE": "invalid"}):
+        with patch("lucent.llm.factory.get_engine_name", return_value="invalid"):
             reset_engine()
             with pytest.raises(ValueError, match="Unknown LLM engine"):
                 get_engine()

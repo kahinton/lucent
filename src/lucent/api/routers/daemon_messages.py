@@ -74,7 +74,16 @@ async def list_messages(
         requesting_org_id=user.organization_id,
     )
 
-    messages = [_memory_to_message(mem) for mem in result["memories"]]
+    memories = result["memories"]
+    if pending_only:
+        required_tags = {"daemon-message", "from-human", "pending"}
+        memories = [
+            memory
+            for memory in memories
+            if required_tags.issubset(set(memory.get("tags") or []))
+        ]
+
+    messages = [_memory_to_message(mem) for mem in memories]
     return DaemonMessageListResponse(messages=messages, total_count=len(messages))
 
 

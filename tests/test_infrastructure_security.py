@@ -202,7 +202,7 @@ class TestSecretProviderRegistry:
             os.environ.pop("LUCENT_SECRET_PROVIDER", None)
             assert get_selected_provider_name() == "auto"
 
-    def test_aws_stub_methods_raise_not_implemented(self):
+    async def test_aws_stub_methods_raise_not_implemented(self):
         """AWS provider stub methods should raise NotImplementedError."""
         from lucent.secrets.aws import AWSSecretProvider
         from lucent.secrets.base import SecretScope
@@ -211,10 +211,9 @@ class TestSecretProviderRegistry:
         scope = SecretScope(organization_id="test-org")
 
         with pytest.raises(NotImplementedError, match="not yet implemented"):
-            import asyncio
-            asyncio.get_event_loop().run_until_complete(provider.get("key", scope))
+            await provider.get("key", scope)
 
-    def test_azure_stub_methods_raise_not_implemented(self):
+    async def test_azure_stub_methods_raise_not_implemented(self):
         """Azure provider stub methods should raise NotImplementedError."""
         from lucent.secrets.azure import AzureSecretProvider
         from lucent.secrets.base import SecretScope
@@ -223,5 +222,4 @@ class TestSecretProviderRegistry:
         scope = SecretScope(organization_id="test-org")
 
         with pytest.raises(NotImplementedError, match="not yet implemented"):
-            import asyncio
-            asyncio.get_event_loop().run_until_complete(provider.get("key", scope))
+            await provider.get("key", scope)

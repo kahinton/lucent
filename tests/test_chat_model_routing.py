@@ -45,6 +45,8 @@ class _FakeStreamingEngine:
 
 
 class _FakeSummaryEngine:
+    name = "fake-summary"
+
     def __init__(self, seen: dict):
         self.seen = seen
 

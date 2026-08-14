@@ -496,7 +496,7 @@ async def approve_request_review(
         raise HTTPException(403, "Admin or owner role required")
 
     repo = RequestRepository(pool)
-    req = await _get_visible_request(repo, str(request_id), user)
+    req = await repo.get_request(str(request_id), str(user.organization_id))
     if not req:
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":
@@ -559,7 +559,7 @@ async def reject_request_review(
         raise HTTPException(403, "Admin or owner role required")
 
     repo = RequestRepository(pool)
-    req = await _get_visible_request(repo, str(request_id), user)
+    req = await repo.get_request(str(request_id), str(user.organization_id))
     if not req:
         raise HTTPException(404, "Request not found")
     if req["status"] != "review":

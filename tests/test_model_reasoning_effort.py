@@ -43,10 +43,23 @@ def test_validate_reasoning_effort_rejects_unlisted_model_specific_value(monkeyp
     assert "does not allow" in error
 
 
-def test_validate_reasoning_effort_rejects_model_without_controls():
-    from lucent.model_registry import validate_reasoning_effort
+def test_validate_reasoning_effort_rejects_model_without_controls(monkeypatch):
+    from lucent import model_registry
+    from lucent.model_registry import ModelInfo, validate_reasoning_effort
 
-    error = validate_reasoning_effort("gpt-4.1", "low")
+    monkeypatch.setitem(
+        model_registry._MODEL_BY_ID,
+        "no-reasoning-controls",
+        ModelInfo(
+            id="no-reasoning-controls",
+            provider="test",
+            name="No Reasoning Controls",
+            category="general",
+            reasoning_efforts=[],
+        ),
+    )
+
+    error = validate_reasoning_effort("no-reasoning-controls", "low")
     assert error is not None
     assert "does not expose" in error
 

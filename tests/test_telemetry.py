@@ -8,7 +8,7 @@ and verifies no-op behaviour when disabled.
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -97,10 +97,23 @@ class TestTelemetryEnabled:
     @pytest.fixture(autouse=True)
     def _enable_otel(self):
         """Enable OTEL for every test in this class."""
-        with patch.dict(os.environ, {
-            "OTEL_ENABLED": "true",
-            "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
-        }):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "OTEL_ENABLED": "true",
+                    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317",
+                },
+            ),
+            patch(
+                "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "opentelemetry.exporter.otlp.proto.grpc.metric_exporter.OTLPMetricExporter",
+                return_value=MagicMock(),
+            ),
+        ):
             yield
 
     def test_init_sets_enabled(self):

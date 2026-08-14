@@ -2100,6 +2100,7 @@ class MemoryRepository:
         *,
         strategy: str = "gcp-v1",
         batch_size: int = 500,
+        organization_id: str | None = None,
     ) -> dict[str, Any]:
         """Compute Candidate-A shadow scores and write sidecar rows only."""
         from lucent.memory.decay import (
@@ -2136,11 +2137,13 @@ class MemoryRepository:
                     FROM memories
                     WHERE deleted_at IS NULL
                       AND lifecycle_stage != 'forgotten'
+                                            AND ($3::uuid IS NULL OR organization_id = $3::uuid)
                     ORDER BY created_at ASC
                     LIMIT $1 OFFSET $2
                     """,
                     batch_size,
                     offset,
+                                        organization_id,
                 )
             if not rows:
                 break
@@ -2201,6 +2204,7 @@ class MemoryRepository:
             strategy=strategy,
             window_hours=168,
             limit=100,
+            organization_id=organization_id,
         )
         duration_seconds = monotonic() - started
         self._emit_shadow_forget_metrics(
@@ -2225,6 +2229,7 @@ class MemoryRepository:
         strategy: str = "gcp-v1",
         window_hours: int = 168,
         limit: int = 100,
+        organization_id: str | None = None,
     ) -> dict[str, Any]:
         """Return aggregate shadow-vs-vitality comparison statistics."""
         if strategy != "gcp-v1":
@@ -2251,19 +2256,24 @@ class MemoryRepository:
                 WHERE ms.strategy = $1
                   AND ms.computed_at >= $2
                   AND m.deleted_at IS NULL
+                                    AND ($3::uuid IS NULL OR m.organization_id = $3::uuid)
                 ORDER BY ms.memory_id, ms.computed_at DESC
                 """,
                 strategy,
                 cutoff,
+                                organization_id,
             )
             ldr_rows = await conn.fetch(
                 """
-                SELECT signals
-                FROM memory_shadow_scores
-                WHERE strategy = 'ldr-obs-v1'
-                  AND computed_at >= $1
+                                SELECT ms.signals
+                                FROM memory_shadow_scores ms
+                                JOIN memories m ON m.id = ms.memory_id
+                                WHERE ms.strategy = 'ldr-obs-v1'
+                                    AND ms.computed_at >= $1
+                                    AND ($2::uuid IS NULL OR m.organization_id = $2::uuid)
                 """,
                 cutoff,
+                                organization_id,
             )
 
         latest = [dict(row) for row in latest_rows]
