@@ -14,7 +14,7 @@ class SchedulingMixin:
     async def _update_heartbeat(self):
         from daemon.runtime.module_proxy import runtime
 
-        await runtime.RequestAPI.heartbeat_instance(
+        return await runtime.RequestAPI.heartbeat_instance(
             self.instance_id,
             metadata={
                 "cycle_count": self.cycle_count,
@@ -24,6 +24,20 @@ class SchedulingMixin:
                 "max_sessions": runtime.MAX_CONCURRENT_SESSIONS,
             },
         )
+
+    async def _heartbeat_once(self) -> bool:
+        """Send one heartbeat, recovering and retrying once on failure."""
+        from daemon.runtime.module_proxy import runtime
+
+        if not await runtime._verify_and_provision_key(self.instance_id):
+            return False
+        if await self._update_heartbeat() is not None:
+            return True
+
+        runtime.log("Heartbeat failed; refreshing API key and retrying", "WARN")
+        if not await runtime._verify_and_provision_key(self.instance_id):
+            return False
+        return await self._update_heartbeat() is not None
 
     async def _check_due_schedules(self):
         from daemon.runtime.module_proxy import runtime

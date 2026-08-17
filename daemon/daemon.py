@@ -4369,6 +4369,8 @@ class LucentDaemon(
         try:
             loops: list[asyncio.Task] = []
 
+            loops.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
+
             if "dispatcher" in self.roles:
                 loops.append(asyncio.create_task(self._dispatch_loop(), name="dispatch"))
             if "scheduler" in self.roles:
