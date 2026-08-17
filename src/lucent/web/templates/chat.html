@@ -127,6 +127,7 @@
         flex-direction: column;
         justify-content: center;
         align-items: center;
+        padding-top: 4rem;
         padding-bottom: 0;
     }
     .chat-input-area.drag-active .input-glow {
@@ -169,6 +170,7 @@
         flex: 1;
         overflow-y: auto;
         scroll-behavior: smooth;
+        padding-top: 3.5rem;
     }
     
     /* Typing indicator animation */
@@ -298,7 +300,7 @@
     @media (max-width: 767px) {
         main { height: 100dvh; }
         .chat-shell { padding-top: 3.75rem; }
-        .chat-container.empty-mode .messages-area { justify-content: flex-start; overflow-y: auto; }
+        .chat-container.empty-mode .messages-area { justify-content: flex-start; overflow-y: auto; padding-top: 0; }
         .chat-container.empty-mode .messages-area #empty-state { transform: none; padding-top: 2rem; }
         .chat-container.empty-mode .chat-input-area { transform: none; }
         #empty-state { padding-left: 1rem; padding-right: 1rem; }
