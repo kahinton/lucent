@@ -1,11 +1,12 @@
 """Dashboard routes."""
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import MemoryRepository, get_pool
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
@@ -49,12 +50,20 @@ def _goal_title(goal: dict, metadata: dict) -> str:
     """Short, human-readable title for a goal memory."""
     explicit = metadata.get("title") or metadata.get("name")
     if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
+        return _plain_markdown_label(explicit)
     for line in (goal.get("content") or "").splitlines():
-        cleaned = line.strip().lstrip("# ").strip()
+        cleaned = _plain_markdown_label(line)
         if cleaned:
             return cleaned[:120]
     return "Untitled goal"
+
+
+def _plain_markdown_label(value: str) -> str:
+    """Collapse common Markdown syntax for compact, single-line labels."""
+    cleaned = re.sub(r"\[([^]]+)]\([^)]+\)", r"\1", value.strip())
+    cleaned = re.sub(r"^\s{0,3}(?:#{1,6}|[-*+]|\d+\.)\s+", "", cleaned)
+    cleaned = re.sub(r"[*_`~]", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def _milestone_label(milestone: dict | None) -> str | None:
@@ -109,6 +118,7 @@ def _goal_summary(goal: dict, linked_requests: list[dict]) -> dict:
     return {
         "id": str(goal["id"]),
         "title": _goal_title(goal, metadata),
+        "content": goal.get("content") or "",
         "status": status,
         "updated_at": goal.get("updated_at"),
         "milestone_total": total,
@@ -159,6 +169,101 @@ async def _load_goal_requests(conn, org_id: UUID, goal_ids: list[UUID]) -> dict[
     return requests_by_goal
 
 
+async def load_chat_overview(user) -> dict:
+    """Load the small operational overview shown on the chat start screen."""
+    pool = await get_pool()
+    is_admin_or_owner = _is_admin_or_owner(user.role)
+    memory_repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        memory_repo,
+        GitHubRepoAccessService(pool),
+        is_admin=is_admin_or_owner,
+    )
+    goal_result = await memory_access.search(
+        user_id=user.id,
+        type="goal",
+        limit=100,
+        requesting_user_id=user.id,
+        requesting_org_id=user.organization_id,
+        include_archived=False,
+    )
+    goals = goal_result["memories"]
+    goal_ids = [UUID(str(goal["id"])) for goal in goals]
+
+    from lucent.db.requests import RequestRepository
+
+    request_repo = RequestRepository(pool)
+    pending_approval_count = await request_repo.count_pending_approvals(
+        org_id=str(user.organization_id),
+        requester_user_id=str(user.id),
+        include_system=is_admin_or_owner,
+    )
+    request_result = await request_repo.list_requests(
+        org_id=str(user.organization_id),
+        limit=5,
+        requester_user_id=str(user.id),
+        include_system=is_admin_or_owner,
+    )
+    pending_approvals = [
+        request
+        for request in request_result["items"]
+        if request.get("approval_status") == "pending_approval"
+        and request.get("status") not in {"cancelled", "rejection_processing"}
+    ][:3]
+
+    heartbeat_row = None
+    async with pool.acquire() as conn:
+        goal_requests = await _load_goal_requests(conn, user.organization_id, goal_ids)
+        heartbeat_row = await conn.fetchrow(
+            """SELECT last_seen_at
+               FROM daemon_instances
+               WHERE organization_id = $1::uuid
+               ORDER BY last_seen_at DESC
+               LIMIT 1""",
+            user.organization_id,
+        )
+
+    active_goals = [
+        summary
+        for goal in goals
+        if (summary := _goal_summary(goal, goal_requests.get(str(goal["id"]), [])))[
+            "status"
+        ]
+        == "active"
+    ]
+    min_datetime = datetime.min.replace(tzinfo=timezone.utc)
+    active_goals.sort(
+        key=lambda goal: (
+            1 if goal["current_request"] else 0,
+            goal["updated_at"] or min_datetime,
+        ),
+        reverse=True,
+    )
+
+    status_level = "offline"
+    status_label = "Offline"
+    if heartbeat_row and heartbeat_row["last_seen_at"]:
+        heartbeat_at = heartbeat_row["last_seen_at"]
+        if heartbeat_at.tzinfo is None:
+            heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+        heartbeat_age = datetime.now(timezone.utc) - heartbeat_at
+        if heartbeat_age <= timedelta(minutes=20):
+            status_level = "online"
+            status_label = "Online"
+        elif heartbeat_age <= timedelta(minutes=60):
+            status_level = "stale"
+            status_label = "Stale"
+
+    return {
+        "chat_goal_cards": active_goals[:3],
+        "chat_active_goal_count": len(active_goals),
+        "pending_approval_count": pending_approval_count,
+        "pending_approvals": pending_approvals,
+        "daemon_status_level": status_level,
+        "daemon_status_label": status_label,
+    }
+
+
 # =============================================================================
 # Dashboard
 # =============================================================================
@@ -167,6 +272,10 @@ async def _load_goal_requests(conn, org_id: UUID, goal_ids: list[UUID]) -> dict[
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """Main dashboard page."""
+    await get_user_context(request)
+    return RedirectResponse(url="/chat", status_code=303)
+
+    # Legacy dashboard implementation retained temporarily for data migration reference.
     user = await get_user_context(request)
     pool = await get_pool()
     org_id = str(user.organization_id)

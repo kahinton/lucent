@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from ._shared import get_user_context, templates
+from .dashboard import load_chat_overview
 
 router = APIRouter()
 
@@ -13,8 +14,9 @@ router = APIRouter()
 async def chat_page(request: Request, session_id: str | None = None):
     """Dedicated chat page with model/agent selection and tool visibility."""
     user = await get_user_context(request)
+    overview = await load_chat_overview(user)
     return templates.TemplateResponse(
         request,
         "chat.html",
-        {"user": user, "session_id": session_id},
+        {"user": user, "session_id": session_id, **overview},
     )
