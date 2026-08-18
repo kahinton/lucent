@@ -20,6 +20,11 @@ from lucent.logging import get_logger
 
 logger = get_logger("llm.langchain")
 
+
+class _StreamIdleTimeout(Exception):
+    pass
+
+
 # Provider mapping: our model IDs → LangChain provider + provider model ID
 # The Copilot SDK uses short names; direct API providers need different IDs.
 PROVIDER_MODEL_MAP: dict[str, tuple[str, str]] = {
@@ -326,6 +331,7 @@ class LangChainEngine(LLMEngine):
                 prompt=prompt,
                 mcp_config=mcp_config,
                 timeout=timeout,
+                idle_timeout=idle_timeout,
                 reasoning_effort=reasoning_effort,
                 on_event=on_event,
                 message_history=message_history,
@@ -335,9 +341,10 @@ class LangChainEngine(LLMEngine):
                 approve_permissions=approve_permissions,
             )
         except Exception as e:
-            logger.error("LangChain streaming session failed: %s", e)
+            error_message = str(e) or type(e).__name__
+            logger.error("LangChain streaming session failed: %s", error_message)
             if on_event:
-                on_event(SessionEvent(type=SessionEventType.ERROR, content=str(e)))
+                on_event(SessionEvent(type=SessionEventType.ERROR, content=error_message))
             return None
 
     async def _run_with_tools(
@@ -347,6 +354,7 @@ class LangChainEngine(LLMEngine):
         prompt: str,
         mcp_config: dict | None = None,
         timeout: int = 300,
+        idle_timeout: int | None = None,
         reasoning_effort: str | None = None,
         on_event: Callable[[SessionEvent], None] | None = None,
         message_history: list[dict[str, Any]] | None = None,
@@ -478,11 +486,51 @@ class LangChainEngine(LLMEngine):
                         )
                     )
 
-                # Run model with timeout
-                ai_msg: AIMessage = await asyncio.wait_for(
-                    model_with_tools.ainvoke(messages),
-                    timeout=timeout,
-                )
+                # Streaming callers consume provider chunks so slow local models
+                # can show progress and use activity-based timeout handling.
+                if on_event:
+                    async def consume_stream() -> AIMessage:
+                        aggregate = None
+                        stream = model_with_tools.astream(messages).__aiter__()
+                        while True:
+                            try:
+                                chunk = await asyncio.wait_for(
+                                    anext(stream),
+                                    timeout=idle_timeout or timeout,
+                                )
+                            except StopAsyncIteration:
+                                break
+                            except asyncio.TimeoutError as exc:
+                                raise _StreamIdleTimeout(
+                                    "LangChain stream idle timeout after "
+                                    f"{idle_timeout or timeout}s of inactivity"
+                                ) from exc
+
+                            aggregate = chunk if aggregate is None else aggregate + chunk
+                            chunk_text = chunk.content if isinstance(chunk.content, str) else ""
+                            if chunk_text:
+                                on_event(
+                                    SessionEvent(
+                                        type=SessionEventType.MESSAGE_DELTA,
+                                        content=chunk_text,
+                                    )
+                                )
+
+                        return aggregate or AIMessage(content="")
+
+                    try:
+                        ai_msg = await asyncio.wait_for(consume_stream(), timeout=timeout)
+                    except _StreamIdleTimeout:
+                        raise
+                    except asyncio.TimeoutError as exc:
+                        raise TimeoutError(
+                            f"LangChain stream hard timeout after {timeout}s"
+                        ) from exc
+                else:
+                    ai_msg = await asyncio.wait_for(
+                        model_with_tools.ainvoke(messages),
+                        timeout=timeout,
+                    )
 
                 # Extract text content
                 text = ai_msg.content if isinstance(ai_msg.content, str) else ""

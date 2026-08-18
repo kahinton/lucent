@@ -344,6 +344,84 @@ class TestLangChainEngine:
         await engine.cleanup()  # Should not raise
 
     @pytest.mark.asyncio
+    async def test_streaming_emits_deltas(self, monkeypatch):
+        from langchain_core.messages import AIMessageChunk
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.engine import SessionEventType
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        class FakeChatModel:
+            def bind_tools(self, schemas):
+                return self
+
+            async def astream(self, messages):
+                yield AIMessageChunk(content="hello ")
+                yield AIMessageChunk(content="locally")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        events = []
+        result = await LangChainEngine().run_session_streaming(
+            model="muse-glimmer:latest",
+            system_message="sys",
+            prompt="hi",
+            mcp_config=None,
+            on_event=events.append,
+            timeout=10,
+            idle_timeout=1,
+            approve_permissions=False,
+        )
+
+        assert result == "hello locally"
+        assert [
+            event.content
+            for event in events
+            if event.type == SessionEventType.MESSAGE_DELTA
+        ] == ["hello ", "locally"]
+
+    @pytest.mark.asyncio
+    async def test_streaming_reports_idle_timeout(self, monkeypatch):
+        import asyncio
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.engine import SessionEventType
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        class FakeChatModel:
+            def bind_tools(self, schemas):
+                return self
+
+            async def astream(self, messages):
+                await asyncio.sleep(0.05)
+                if False:
+                    yield
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        events = []
+        result = await LangChainEngine().run_session_streaming(
+            model="muse-glimmer:latest",
+            system_message="sys",
+            prompt="hi",
+            mcp_config=None,
+            on_event=events.append,
+            timeout=1,
+            idle_timeout=0.01,
+            approve_permissions=False,
+        )
+
+        assert result is None
+        errors = [event.content for event in events if event.type == SessionEventType.ERROR]
+        assert errors == ["LangChain stream idle timeout after 0.01s of inactivity"]
+
+    @pytest.mark.asyncio
     async def test_builtin_tools_are_bound_and_executed(self, tmp_path, monkeypatch):
         """LangChain engine binds built-in tools and runs them with no MCP config."""
         from langchain_core.messages import AIMessage
