@@ -99,21 +99,12 @@
     </div>
 </div>
 {% endif %}
-{% if not sched.is_server_workflow and sched.agent_type not in active_agents | map(attribute='name') | list %}
-<div class="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-3">
-    <svg class="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
-    <div>
-        <p class="text-sm font-medium text-red-800">Invalid agent type: "{{ sched.agent_type }}"</p>
-        <p class="text-xs text-red-600 mt-0.5">This agent is not active in your system. The workflow will fail when triggered. Select a valid agent below, or <a href="/definitions" class="underline">create and approve</a> one matching this name.</p>
-    </div>
-</div>
-{% endif %}
-
 <!-- Workflow Flow -->
 {% set trigger_type = sched.trigger_type or 'schedule' %}
 {% set task_actions = sched.actions | selectattr('action_type', 'equalto', 'task') | list if sched.actions else [] %}
 {% set inbox_actions = sched.interaction_actions if sched.interaction_actions is defined else [] %}
 {% set inbox_only_workflow = inbox_actions and not task_actions and not sched.is_server_workflow %}
+{% set visual_task_workflow = task_actions and task_actions|length == sched.actions|length %}
 <div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
     <div class="border-b border-gray-100 px-5 py-4">
         <h2 class="text-lg font-semibold text-gray-900">Workflow flow</h2>
@@ -122,7 +113,7 @@
         {% elif inbox_only_workflow %}
         <p class="mt-1 text-sm text-gray-500">Every run follows: trigger → handoff to the user → read or reply. It only creates Activity work if a later reply asks Lucent to continue.</p>
         {% else %}
-        <p class="mt-1 text-sm text-gray-500">Every run follows the same path: trigger → request → task actions → recorded outputs → reviewer decision.</p>
+        <p class="mt-1 text-sm text-gray-500">Every run follows the same path: trigger → request → task steps → recorded outputs → reviewer decision.</p>
         {% endif %}
     </div>
     <div class="grid gap-3 p-5 lg:grid-cols-5">
@@ -155,7 +146,7 @@
             {% endif %}
         </div>
         <div class="rounded-lg border border-violet-100 bg-violet-50 p-4">
-            <p class="text-xs font-semibold uppercase tracking-wide text-violet-700">Actions</p>
+            <p class="text-xs font-semibold uppercase tracking-wide text-violet-700">Steps</p>
             {% if sched.is_server_workflow %}
             <p class="mt-2 text-sm font-semibold text-violet-950">Server function</p>
             <p class="mt-1 text-xs text-violet-700">Executed in the API process; no agent dispatch.</p>
@@ -163,8 +154,8 @@
             <p class="mt-2 text-sm font-semibold text-violet-950">{{ inbox_actions|length }} handoff action{{ 's' if inbox_actions|length != 1 }}</p>
             <p class="mt-1 text-xs text-violet-700">Creates a message the user can read or answer.</p>
             {% else %}
-            <p class="mt-2 text-sm font-semibold text-violet-950">{{ sched.actions|length if sched.actions else 1 }} task action{{ 's' if ((sched.actions|length) if sched.actions else 1) != 1 }}</p>
-            <p class="mt-1 text-xs text-violet-700">Created in order inside the request framework.</p>
+            <p class="mt-2 text-sm font-semibold text-violet-950">{{ task_actions|length if task_actions else 1 }} task step{{ 's' if ((task_actions|length) if task_actions else 1) != 1 }}</p>
+            <p class="mt-1 text-xs text-violet-700">Created in order inside the request.</p>
             {% endif %}
         </div>
         <div class="rounded-lg border border-emerald-100 bg-emerald-50 p-4">
@@ -196,23 +187,34 @@
     </div>
 </div>
 
-<!-- Actions -->
+<!-- Steps -->
 <div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
     <div class="border-b border-gray-100 px-5 py-4">
-        <h2 class="text-lg font-semibold text-gray-900">Actions</h2>
+        <h2 class="text-lg font-semibold text-gray-900">Steps</h2>
         {% if sched.is_server_workflow %}
         <p class="mt-1 text-sm text-gray-500">This source-defined action runs inside Lucent itself rather than through the request/task dispatcher.</p>
         {% elif inbox_only_workflow %}
         <p class="mt-1 text-sm text-gray-500">Each action sends a handoff instead of dispatching task work.</p>
         {% else %}
-        <p class="mt-1 text-sm text-gray-500">Each action becomes a task when the workflow fires.</p>
+        <p class="mt-1 text-sm text-gray-500">Each step becomes a task when the workflow fires.</p>
         {% endif %}
     </div>
     <div class="divide-y divide-gray-100">
+        {% set stage_state = namespace(previous=0) %}
         {% for action in sched.actions %}
+        {% set action_stage = (action.sequence_order + 1) if action.sequence_order is defined else loop.index %}
+        {% if action.action_type == 'task' and action_stage > stage_state.previous + 1 %}
+        {% for missing_stage in range(stage_state.previous + 1, action_stage) %}
+        <div class="flex items-center gap-3 border-y border-dashed border-amber-200 bg-amber-50/60 px-5 py-3 text-sm text-amber-700">
+            <span class="rounded border border-amber-200 bg-white px-2 py-0.5 text-xs font-medium">Stage {{ missing_stage }}</span>
+            <span>No tasks configured</span>
+        </div>
+        {% endfor %}
+        {% endif %}
         <div class="px-5 py-4">
             <div class="flex items-center gap-2 flex-wrap">
                 <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">#{{ loop.index }}</span>
+                {% if action.action_type == 'task' %}<span class="rounded bg-primary-50 px-2 py-0.5 text-xs text-primary-700">Stage {{ action_stage }}</span>{% endif %}
                 <h3 class="text-sm font-semibold text-gray-900">{{ action.title or sched.title }}</h3>
                 {% if action.action_type == 'server_function' %}
                 <span class="rounded bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700">server function</span>
@@ -228,6 +230,7 @@
             </div>
             {% if action.description %}<p class="mt-2 whitespace-pre-wrap text-sm text-gray-600">{{ action.description }}</p>{% endif %}
         </div>
+        {% if action.action_type == 'task' %}{% set stage_state.previous = action_stage %}{% endif %}
         {% endfor %}
     </div>
 </div>
@@ -239,17 +242,25 @@
         <p class="text-2xl font-bold text-gray-900">{{ sched.run_count or 0 }}{% if sched.max_runs %}<span class="text-sm font-normal text-gray-400"> / {{ sched.max_runs }}</span>{% endif %}</p>
     </div>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
+        {% if sched.is_server_workflow or inbox_only_workflow %}
         <p class="text-xs text-gray-500 uppercase tracking-wider">{{ sched.executor_label }}</p>
         <p class="text-lg font-semibold text-gray-900">{{ sched.executor_detail }}</p>
+        {% else %}
+        <p class="text-xs text-gray-500 uppercase tracking-wider">Task steps</p>
+        <p class="text-lg font-semibold text-gray-900">{{ task_actions|length }}</p>
+        {% endif %}
     </div>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Model</p>
+        <p class="text-xs text-gray-500 uppercase tracking-wider">Step models</p>
         {% if sched.is_server_workflow %}
         <p class="text-sm font-semibold text-gray-500">not applicable</p>
         {% else %}
-        <p class="text-sm font-semibold text-gray-900">{{ sched.model or 'default' }}</p>
-        {% if sched.reasoning_effort %}
-        <p class="text-xs text-purple-600 mt-1">reasoning: {{ sched.reasoning_effort }}</p>
+        {% set model_overrides = sched.actions | selectattr('model') | list if sched.actions else [] %}
+        <p class="text-sm font-semibold text-gray-900">Per step</p>
+        {% if sched.model and model_overrides|length == 0 %}
+        <p class="mt-1 text-xs text-gray-400">Legacy override inherited</p>
+        {% else %}
+        <p class="mt-1 text-xs text-gray-400">{{ model_overrides|length }} explicit override{{ 's' if model_overrides|length != 1 }}</p>
         {% endif %}
         {% endif %}
     </div>
@@ -272,14 +283,17 @@
 </div>
 
 <!-- Editable Configuration Form -->
-<form method="POST" action="{{ base_path }}/{{ sched.id }}/edit" class="space-y-6 mb-6">
+<form method="POST" action="{{ base_path }}/{{ sched.id }}/edit" class="space-y-6 mb-6" id="workflow-edit-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="bg-white rounded-lg border border-gray-200">
-        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-            <h2 class="text-lg font-semibold text-gray-900">Configuration</h2>
-            <button type="submit" class="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-lg bg-primary-600 text-white hover:bg-primary-700 transition-colors">
+        <div class="sticky top-2 z-30 flex items-center justify-between rounded-lg border border-gray-200 bg-white/95 px-5 py-3 shadow-md backdrop-blur">
+            <div>
+                <h2 class="text-lg font-semibold text-gray-900">Configuration</h2>
+                <p id="workflow-save-status" class="mt-0.5 text-xs text-gray-400" aria-live="polite">No unsaved changes</p>
+            </div>
+            <button type="submit" id="workflow-save-button" class="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-primary-200 transition-colors hover:bg-primary-700">
                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
-                Save Changes
+                Save workflow
             </button>
         </div>
         <div class="p-5 space-y-5">
@@ -297,76 +311,13 @@
                 </div>
             </div>
 
-            <!-- Agent, Model, Trigger Type -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div>
-                    {% if sched.is_server_workflow %}
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Executor</label>
-                    <div class="px-3 py-2 text-sm bg-indigo-50 border border-indigo-100 rounded-lg text-indigo-700">
-                        Server function: {{ sched.executor_detail }}
-                    </div>
-                    <p class="text-xs text-indigo-600 mt-1">Source-defined server action. This workflow is not dispatched to an agent.</p>
-                    {% else %}
-                    <label for="agent_type" class="block text-sm font-medium text-gray-700 mb-1">Agent Type</label>
-                    <select name="agent_type" id="agent_type"
-                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none bg-white">
-                        {% for agent in active_agents %}
-                        <option value="{{ agent.name }}" {% if agent.name == sched.agent_type %}selected{% endif %}>{{ agent.name }}</option>
-                        {% endfor %}
-                        {% if sched.agent_type not in active_agents | map(attribute='name') | list %}
-                        <option value="{{ sched.agent_type }}" selected>{{ sched.agent_type }} (not found)</option>
-                        {% endif %}
-                    </select>
-                    {% if active_agents | length == 0 %}
-                    <p class="text-xs text-red-500 mt-1">No active agents. Create and approve agents at <a href="/definitions" class="underline">Agent Composer</a>.</p>
-                    {% elif sched.agent_type not in active_agents | map(attribute='name') | list %}
-                    <p class="text-xs text-amber-600 mt-1">
-                        <svg class="w-3 h-3 inline -mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
-                        "{{ sched.agent_type }}" is not an active agent. This workflow will fail when triggered.
-                    </p>
-                    {% endif %}
-                    {% endif %}
-                </div>
-                <div>
-                    <label for="model" class="block text-sm font-medium text-gray-700 mb-1">Model</label>
-                    {% if sched.is_server_workflow %}
-                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-500">not applicable</div>
-                    <p class="text-xs text-gray-400 mt-1">Server functions do not call an LLM.</p>
-                    {% else %}
-                    <select name="model" id="model"
-                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none bg-white">
-                        <option value="" data-reasoning-efforts="" {% if not sched.model %}selected{% endif %}>daemon default</option>
-                        {% for model in available_models %}
-                        <option value="{{ model.id }}" data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}" {% if model.id == sched.model %}selected{% endif %}>{{ model.name }} ({{ model.id }})</option>
-                        {% endfor %}
-                        {% if sched.model and sched.model not in available_models | map(attribute='id') | list %}
-                        <option value="{{ sched.model }}" selected>{{ sched.model }} (not found)</option>
-                        {% endif %}
-                    </select>
-                    <p class="text-xs text-gray-400 mt-1">Leave blank for daemon default</p>
-                    {% endif %}
-                </div>
-                <div>
-                    <label for="reasoning_effort" class="block text-sm font-medium text-gray-700 mb-1">Reasoning</label>
-                    {% if sched.is_server_workflow %}
-                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-500">not applicable</div>
-                    {% else %}
-                    <select name="reasoning_effort" id="reasoning_effort" data-current="{{ sched.reasoning_effort or '' }}"
-                        class="w-full px-3 py-2 text-sm border border-purple-200 bg-purple-50 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none">
-                        <option value="">provider default</option>
-                    </select>
-                    <p class="text-xs text-gray-400 mt-1">Shown when the model supports selectable effort.</p>
-                    {% endif %}
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Trigger</label>
-                    <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-600">
-                        {{ sched.trigger_type or 'schedule' }}{% if (sched.trigger_type or 'schedule') == 'schedule' %} / {{ sched.schedule_type }}{% endif %}
-                        <span class="text-xs text-gray-400 ml-1">(edit advanced JSON below)</span>
-                    </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Trigger</label>
+                <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg text-gray-600">
+                    {{ sched.trigger_type or 'schedule' }}{% if (sched.trigger_type or 'schedule') == 'schedule' %} / {{ sched.schedule_type }}{% endif %}
                 </div>
                 {% if sandbox_template %}
-                <div>
+                <div class="mt-4">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sandbox Template</label>
                     <div class="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg">
                         <a href="/sandboxes/templates/{{ sched.sandbox_template_id }}/edit" class="text-blue-600 hover:text-blue-800 font-medium transition-colors">
@@ -375,7 +326,7 @@
                     </div>
                 </div>
                 {% elif sched.sandbox_template_id %}
-                <div>
+                <div class="mt-4">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sandbox Template</label>
                     <div class="px-3 py-2 text-sm bg-amber-50 border border-amber-200 rounded-lg text-amber-600">
                         <span class="font-mono text-xs">{{ sched.sandbox_template_id }}</span>
@@ -420,6 +371,164 @@
             </div>
             {% endif %}
 
+            {% if visual_task_workflow %}
+            <section class="border-t border-gray-100 pt-5">
+                <h3 class="text-base font-semibold text-gray-900">Request created each run</h3>
+                <p class="mt-1 text-sm text-gray-500">The workflow repeatedly creates this request, then adds the ordered steps below as tasks.</p>
+                <div class="mt-4 grid gap-4 lg:grid-cols-2">
+                    <div>
+                        <label for="request_title" class="block text-sm font-medium text-gray-700 mb-1">Request title</label>
+                        <input id="request_title" name="request_title" value="{{ sched.request_template.title if sched.request_template else sched.title }}" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                    </div>
+                    <div>
+                        <label for="dependency_policy" class="block text-sm font-medium text-gray-700 mb-1">Dependency policy</label>
+                        <select id="dependency_policy" name="dependency_policy" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                            <option value="strict" {% if not sched.request_template or sched.request_template.dependency_policy != 'permissive' %}selected{% endif %}>Strict — stop after a failed step</option>
+                            <option value="permissive" {% if sched.request_template and sched.request_template.dependency_policy == 'permissive' %}selected{% endif %}>Permissive — continue independent steps</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <label for="request_description" class="block text-sm font-medium text-gray-700 mb-1">Request description</label>
+                    <textarea id="request_description" name="request_description" rows="3" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">{{ sched.request_template.description if sched.request_template else sched.description or '' }}</textarea>
+                </div>
+            </section>
+
+            <section class="border-t border-gray-100 pt-5">
+                <div class="flex items-center justify-between gap-3">
+                    <div>
+                        <h3 class="text-base font-semibold text-gray-900">Steps</h3>
+                        <p class="mt-1 text-sm text-gray-500">Each card becomes a task. Give tasks the same stage number to run them in parallel.</p>
+                    </div>
+                    <button type="button" id="add-workflow-step" class="inline-flex items-center gap-1.5 rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 hover:bg-primary-100">
+                        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+                        Add step
+                    </button>
+                </div>
+                <div id="workflow-steps" class="mt-4 space-y-3">
+                    {% for action in task_actions %}
+                    {% set action_model = action.model if action.model is defined else sched.model %}
+                    {% set action_reasoning = action.reasoning_effort if action.reasoning_effort is defined else sched.reasoning_effort %}
+                    <div class="workflow-step rounded-lg border border-gray-200 bg-gray-50/60 p-4" data-reasoning-current="{{ action_reasoning or '' }}">
+                        <input type="hidden" name="action_existing_json" value="{{ action | tojson | forceescape }}">
+                        <div class="mb-4 flex items-center justify-between gap-3">
+                            <div class="flex items-center gap-2">
+                                <span class="step-number flex h-7 w-7 items-center justify-center rounded-full bg-primary-100 text-xs font-semibold text-primary-700">{{ loop.index }}</span>
+                                <span class="step-label text-sm font-semibold text-gray-800">Task {{ loop.index }}</span>
+                            </div>
+                            <div class="flex items-center gap-1">
+                                <button type="button" class="move-step-up rounded-md p-1.5 text-gray-500 hover:bg-white hover:text-gray-800" title="Move step up" aria-label="Move step up"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" /></svg></button>
+                                <button type="button" class="move-step-down rounded-md p-1.5 text-gray-500 hover:bg-white hover:text-gray-800" title="Move step down" aria-label="Move step down"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg></button>
+                                <button type="button" class="remove-workflow-step rounded-md p-1.5 text-red-500 hover:bg-red-50 hover:text-red-700" title="Remove step" aria-label="Remove step"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg></button>
+                            </div>
+                        </div>
+                        <div class="grid gap-4 lg:grid-cols-3">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Task title</label>
+                                <input name="action_title" value="{{ action.title or '' }}" required class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
+                                <select name="action_agent_type" class="step-agent w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                                    {% for agent in active_agents %}<option value="{{ agent.name }}" data-definition-id="{{ agent.id }}" {% if agent.name == action.agent_type %}selected{% endif %}>{{ agent.name }}</option>{% endfor %}
+                                    {% if action.agent_type not in active_agents | map(attribute='name') | list %}<option value="{{ action.agent_type }}" selected>{{ action.agent_type }} (not found)</option>{% endif %}
+                                </select>
+                                <input type="hidden" name="action_agent_definition_id" value="{{ action.agent_definition_id or '' }}">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Stage</label>
+                                <input name="action_stage" type="number" min="1" value="{{ (action.sequence_order + 1) if action.sequence_order is defined else loop.index }}" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                                <p class="mt-1 text-xs text-gray-400">Tasks with the same stage run in parallel.</p>
+                            </div>
+                        </div>
+                        <div class="mt-4">
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Instructions</label>
+                            <textarea name="action_prompt" rows="4" required class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">{{ action.description or '' }}</textarea>
+                        </div>
+                        <div class="mt-4 grid gap-4 md:grid-cols-3">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                                <select name="action_priority" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">{% for priority in ['low', 'medium', 'high', 'urgent'] %}<option value="{{ priority }}" {% if priority == (action.priority or sched.priority) %}selected{% endif %}>{{ priority|capitalize }}</option>{% endfor %}</select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Model override</label>
+                                <select name="action_model" class="step-model w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
+                                    <option value="" data-reasoning-efforts="">Daemon default</option>
+                                    {% for model in available_models %}<option value="{{ model.id }}" data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}" {% if model.id == action_model %}selected{% endif %}>{{ model.name }}</option>{% endfor %}
+                                    {% if action_model and action_model not in available_models | map(attribute='id') | list %}<option value="{{ action_model }}" selected>{{ action_model }} (not found)</option>{% endif %}
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Reasoning effort</label>
+                                <select name="action_reasoning_effort" class="step-reasoning w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="">Provider default</option></select>
+                            </div>
+                        </div>
+                        {% set sandbox_config = action.sandbox_config or {} %}
+                        <details class="mt-4 rounded-lg border border-gray-200 bg-white">
+                            <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Sandbox and runtime{% if action.sandbox_template_id or sandbox_config %}<span class="ml-2 text-xs font-normal text-primary-600">Configured</span>{% endif %}</summary>
+                            <div class="space-y-4 border-t border-gray-200 p-4">
+                                <div class="grid gap-4 md:grid-cols-2">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 mb-1">Sandbox template</label>
+                                        <select name="action_sandbox_template_id" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="">No template</option>{% for template in available_sandbox_templates %}<option value="{{ template.id }}" {% if template.id == (action.sandbox_template_id|string) %}selected{% endif %}>{{ template.name }}</option>{% endfor %}{% if action.sandbox_template_id and action.sandbox_template_id|string not in available_sandbox_templates | map(attribute='id') | list %}<option value="{{ action.sandbox_template_id }}" selected>{{ action.sandbox_template_id }} (not found)</option>{% endif %}</select>
+                                    </div>
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Timeout</label><input name="action_timeout_seconds" type="number" min="60" value="{{ sandbox_config.timeout_seconds or '' }}" placeholder="Template default" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"></div>
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Repository URL override</label><input name="action_repo_url" value="{{ sandbox_config.repo_url or '' }}" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"></div>
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Branch override</label><input name="action_branch" value="{{ sandbox_config.branch or '' }}" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"></div>
+                                </div>
+                                <div class="grid gap-4 md:grid-cols-3">
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Output mode</label><select name="action_output_mode" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">{% for value, label in [('', 'None'), ('diff', 'Diff'), ('pr', 'Pull request'), ('review', 'Review'), ('commit', 'Commit')] %}<option value="{{ value }}" {% if sandbox_config.output_mode == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Reuse sandbox</label><select name="action_reuse_sandbox" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="false">No</option><option value="true" {% if sandbox_config.reuse_within_request %}selected{% endif %}>Within this request</option></select></div>
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Approve commit</label><select name="action_commit_approved" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="false">No</option><option value="true" {% if sandbox_config.commit_approved %}selected{% endif %}>Yes</option></select></div>
+                                </div>
+                                                                <div>
+                                                                        <label class="block text-sm font-medium text-gray-700 mb-1">Additional sandbox config JSON</label>
+                                                                        <textarea name="action_sandbox_config_json" rows="5" placeholder='{"image":"lucent-sandbox:base","setup_commands":["npm ci"],"env_vars":{"NODE_ENV":"test"}}' class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs">{{ sandbox_config | tojson(indent=2) if sandbox_config else '' }}</textarea>
+                                                                        <p class="mt-1 text-xs text-gray-500">Advanced fields are merged with the controls above. Example:</p>
+                                                                        <pre class="mt-2 overflow-x-auto border-l-2 border-gray-200 pl-3 text-[11px] leading-5 text-gray-500">{
+    "image": "lucent-sandbox:base",
+    "setup_commands": ["npm ci", "npm test"],
+    "env_vars": {"NODE_ENV": "test"},
+    "memory_limit": "4g",
+    "cpu_limit": 2,
+    "network_mode": "allowlist",
+    "allowed_hosts": ["github.com", "registry.npmjs.org"]
+}</pre>
+                                                                </div>
+                            </div>
+                        </details>
+                        {% set output_contract = action.output_contract or {} %}
+                        <details class="mt-3 rounded-lg border border-gray-200 bg-white">
+                            <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Structured output{% if output_contract %}<span class="ml-2 text-xs font-normal text-primary-600">Configured</span>{% endif %}</summary>
+                            <div class="space-y-4 border-t border-gray-200 p-4">
+                                                                <div>
+                                                                        <label class="block text-sm font-medium text-gray-700 mb-1">JSON Schema</label>
+                                                                        <textarea name="action_output_schema_json" rows="6" placeholder='{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}' class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs">{{ output_contract.json_schema | tojson(indent=2) if output_contract.json_schema else '' }}</textarea>
+                                                                        <p class="mt-1 text-xs text-gray-500">Describe the structured result the task must return. Example:</p>
+                                                                        <pre class="mt-2 overflow-x-auto border-l-2 border-gray-200 pl-3 text-[11px] leading-5 text-gray-500">{
+    "type": "object",
+    "required": ["summary", "artifacts"],
+    "properties": {
+        "summary": {"type": "string"},
+        "artifacts": {
+            "type": "array",
+            "items": {"type": "string"}
+        }
+    }
+}</pre>
+                                                                </div>
+                                <div class="grid gap-4 md:grid-cols-2">
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Validation failure</label><select name="action_output_failure" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">{% for value, label in [('fallback', 'Keep text fallback'), ('fail', 'Fail task'), ('retry_then_fallback', 'Retry, then fallback')] %}<option value="{{ value }}" {% if output_contract.on_failure == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></div>
+                                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Maximum retries</label><input name="action_output_retries" type="number" min="0" value="{{ output_contract.max_retries if output_contract.max_retries is defined else 1 }}" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"></div>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+                    {% endfor %}
+                </div>
+            </section>
+            {% endif %}
+
             {% if not sched.actions %}
             <!-- Compatibility prompt only for legacy workflows without actions -->
             <div>
@@ -440,8 +549,12 @@
             </div>
 
             <details class="rounded-lg border border-gray-200 bg-gray-50">
-                <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Advanced workflow JSON</summary>
+                <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-600">Advanced: edit raw JSON</summary>
                 <div class="space-y-4 border-t border-gray-200 p-4">
+                    <label class="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                        <input type="checkbox" name="use_raw_json" class="mt-0.5 rounded border-amber-300 text-amber-600 focus:ring-amber-500">
+                        <span><span class="font-medium">Use raw JSON when saving</span><span class="mt-0.5 block text-xs text-amber-700">This replaces the visual request and step values. Use it for advanced action types or fields not shown above.</span></span>
+                    </label>
                     <div>
                         <label for="request_template_json" class="block text-sm font-medium text-gray-700 mb-1">Request template</label>
                         <textarea name="request_template_json" id="request_template_json" rows="6" class="w-full font-mono text-xs px-3 py-2 border border-gray-300 rounded-lg">{{ sched.request_template | tojson(indent=2) }}</textarea>
@@ -451,7 +564,7 @@
                         <textarea name="trigger_config_json" id="trigger_config_json" rows="6" class="w-full font-mono text-xs px-3 py-2 border border-gray-300 rounded-lg">{{ sched.trigger_config | tojson(indent=2) }}</textarea>
                     </div>
                     <div>
-                        <label for="actions_json" class="block text-sm font-medium text-gray-700 mb-1">Actions</label>
+                        <label for="actions_json" class="block text-sm font-medium text-gray-700 mb-1">Steps / actions</label>
                         <textarea name="actions_json" id="actions_json" rows="10" class="w-full font-mono text-xs px-3 py-2 border border-gray-300 rounded-lg">{{ sched.actions | tojson(indent=2) }}</textarea>
                     </div>
                 </div>
@@ -478,14 +591,30 @@
 </form>
 
 <script nonce="{{ request.state.csp_nonce }}">
-function refreshScheduleReasoning() {
-    const modelSelect = document.getElementById('model');
-    const reasoningSelect = document.getElementById('reasoning_effort');
+const workflowEditForm = document.getElementById('workflow-edit-form');
+const workflowSaveStatus = document.getElementById('workflow-save-status');
+const workflowSaveButton = document.getElementById('workflow-save-button');
+
+function markWorkflowDirty() {
+    if (!workflowSaveStatus || !workflowSaveButton) return;
+    workflowSaveStatus.textContent = 'Unsaved changes';
+    workflowSaveStatus.className = 'mt-0.5 text-xs font-medium text-amber-700';
+    workflowSaveButton.classList.add('ring-2', 'ring-primary-200', 'ring-offset-2');
+}
+
+workflowEditForm?.addEventListener('input', markWorkflowDirty);
+workflowEditForm?.addEventListener('change', markWorkflowDirty);
+
+const workflowSteps = document.getElementById('workflow-steps');
+
+function refreshStepReasoning(step) {
+    const modelSelect = step.querySelector('.step-model');
+    const reasoningSelect = step.querySelector('.step-reasoning');
     if (!modelSelect || !reasoningSelect) return;
     const selected = modelSelect.options[modelSelect.selectedIndex];
-    const efforts = ((selected && selected.dataset.reasoningEfforts) || '').split(',').filter(Boolean);
-    const current = reasoningSelect.dataset.current || '';
-    reasoningSelect.innerHTML = '<option value="">provider default</option>';
+    const efforts = ((selected?.dataset.reasoningEfforts) || '').split(',').filter(Boolean);
+    const current = step.dataset.reasoningCurrent || reasoningSelect.value || '';
+    reasoningSelect.innerHTML = '<option value="">Provider default</option>';
     for (const effort of efforts) {
         const opt = document.createElement('option');
         opt.value = effort;
@@ -493,13 +622,95 @@ function refreshScheduleReasoning() {
         if (effort === current) opt.selected = true;
         reasoningSelect.appendChild(opt);
     }
+    step.dataset.reasoningCurrent = '';
 }
-document.getElementById('model')?.addEventListener('change', function() {
-    const reasoningSelect = document.getElementById('reasoning_effort');
-    reasoningSelect.dataset.current = '';
-    refreshScheduleReasoning();
+
+function refreshWorkflowSteps() {
+    if (!workflowSteps) return;
+    const steps = Array.from(workflowSteps.querySelectorAll('.workflow-step'));
+    steps.forEach((step, index) => {
+        step.querySelector('.step-number').textContent = index + 1;
+        step.querySelector('.step-label').textContent = 'Task ' + (index + 1);
+        step.querySelector('.move-step-up').disabled = index === 0;
+        step.querySelector('.move-step-down').disabled = index === steps.length - 1;
+        step.querySelector('.remove-workflow-step').disabled = steps.length === 1;
+        step.querySelectorAll('button:disabled').forEach(button => {
+            button.classList.add('cursor-not-allowed', 'opacity-30');
+        });
+        step.querySelectorAll('button:not(:disabled)').forEach(button => {
+            button.classList.remove('cursor-not-allowed', 'opacity-30');
+        });
+    });
+}
+
+function wireWorkflowStep(step) {
+    const agent = step.querySelector('.step-agent');
+    const agentDefinition = step.querySelector('input[name="action_agent_definition_id"]');
+    const syncAgentDefinition = () => {
+        const selectedId = agent?.selectedOptions[0]?.dataset.definitionId;
+        if (agentDefinition && selectedId) agentDefinition.value = selectedId;
+    };
+    step.querySelector('.move-step-up')?.addEventListener('click', () => {
+        const previous = step.previousElementSibling;
+        if (previous) workflowSteps.insertBefore(step, previous);
+        refreshWorkflowSteps();
+        markWorkflowDirty();
+    });
+    step.querySelector('.move-step-down')?.addEventListener('click', () => {
+        const next = step.nextElementSibling;
+        if (next) workflowSteps.insertBefore(next, step);
+        refreshWorkflowSteps();
+        markWorkflowDirty();
+    });
+    step.querySelector('.remove-workflow-step')?.addEventListener('click', () => {
+        if (workflowSteps.querySelectorAll('.workflow-step').length === 1) return;
+        step.remove();
+        refreshWorkflowSteps();
+        markWorkflowDirty();
+    });
+    step.querySelector('.step-model')?.addEventListener('change', () => {
+        step.dataset.reasoningCurrent = '';
+        refreshStepReasoning(step);
+    });
+    agent?.addEventListener('change', syncAgentDefinition);
+    syncAgentDefinition();
+    refreshStepReasoning(step);
+}
+
+workflowSteps?.querySelectorAll('.workflow-step').forEach(wireWorkflowStep);
+document.getElementById('add-workflow-step')?.addEventListener('click', () => {
+    const source = workflowSteps.querySelector('.workflow-step');
+    if (!source) return;
+    const stages = Array.from(workflowSteps.querySelectorAll('input[name="action_stage"]'))
+        .map(input => Number.parseInt(input.value, 10) || 1);
+    const step = source.cloneNode(true);
+    step.dataset.reasoningCurrent = '';
+    step.querySelector('input[name="action_existing_json"]').value = '{}';
+    step.querySelector('input[name="action_agent_definition_id"]').value = '';
+    step.querySelector('input[name="action_title"]').value = '';
+    step.querySelector('textarea[name="action_prompt"]').value = '';
+    step.querySelector('input[name="action_stage"]').value = Math.max(...stages) + 1;
+    step.querySelector('select[name="action_model"]').value = '';
+    step.querySelector('select[name="action_reasoning_effort"]').innerHTML = '<option value="">Provider default</option>';
+    step.querySelector('select[name="action_priority"]').value = 'medium';
+    step.querySelector('select[name="action_sandbox_template_id"]').value = '';
+    step.querySelector('input[name="action_timeout_seconds"]').value = '';
+    step.querySelector('input[name="action_repo_url"]').value = '';
+    step.querySelector('input[name="action_branch"]').value = '';
+    step.querySelector('select[name="action_output_mode"]').value = '';
+    step.querySelector('select[name="action_reuse_sandbox"]').value = 'false';
+    step.querySelector('select[name="action_commit_approved"]').value = 'false';
+    step.querySelector('textarea[name="action_sandbox_config_json"]').value = '';
+    step.querySelector('textarea[name="action_output_schema_json"]').value = '';
+    step.querySelector('select[name="action_output_failure"]').value = 'fallback';
+    step.querySelector('input[name="action_output_retries"]').value = '1';
+    workflowSteps.appendChild(step);
+    wireWorkflowStep(step);
+    refreshWorkflowSteps();
+    markWorkflowDirty();
+    step.querySelector('input[name="action_title"]').focus();
 });
-refreshScheduleReasoning();
+refreshWorkflowSteps();
 </script>
 
 <!-- Run History -->
@@ -510,7 +721,7 @@ refreshScheduleReasoning();
     {% from "partials/pagination.html" import pagination_controls %}
     {% if run_total_count is defined and run_total_count > 0 %}
     <div class="px-4 pt-3">
-        {{ pagination_controls(base_url=base_path ~ "/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, entity_name="runs") }}
+        {{ pagination_controls(base_url=base_path ~ "/" ~ sched.id, page=run_page, per_page=run_per_page, total_pages=run_total_pages, total_count=run_total_count, filter_params={}, show_per_page=false, entity_name="runs") }}
     </div>
     {% endif %}
     {% if sched.runs %}

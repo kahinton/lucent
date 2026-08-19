@@ -10,6 +10,8 @@ Tests the HTML-serving endpoints:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
+import json
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import httpx
@@ -269,6 +271,9 @@ class TestWorkflowWizard:
         assert "Workflow Wizard" in resp.text
         assert "Build workflows by conversation" in resp.text
         assert "Incoming webhook" in resp.text
+        assert "Additional sandbox config JSON" in resp.text
+        assert '"setup_commands": ["npm ci", "npm test"]' in resp.text
+        assert "Describe the structured result the task must return" in resp.text
         assert '/static/chat-message-ui.css' in resp.text
         assert '/static/chat-message-ui.js' in resp.text
 
@@ -312,6 +317,20 @@ class TestWorkflowWizard:
                     "action_title": "Handle webhook",
                     "action_prompt": "Process the webhook payload and record outputs.",
                     "action_agent_type": "code",
+                    "action_priority": "high",
+                    "action_stage": "3",
+                    "action_sandbox_config_json": json.dumps(
+                        {"network_mode": "none", "memory_limit": "4g"}
+                    ),
+                    "action_repo_url": "https://github.com/example/hooks",
+                    "action_timeout_seconds": "1200",
+                    "action_reuse_sandbox": "true",
+                    "action_commit_approved": "false",
+                    "action_output_schema_json": json.dumps(
+                        {"type": "object", "required": ["summary"]}
+                    ),
+                    "action_output_failure": "retry_then_fallback",
+                    "action_output_retries": "2",
                     "review_instructions": "Confirm outputs are recorded.",
                 },
             ),
@@ -333,6 +352,21 @@ class TestWorkflowWizard:
         assert row["schedule_type"] == "webhook"
         assert row["webhook_secret_hash"]
         assert "Confirm outputs" in row["review_instructions"]
+        action = row["actions"][0]
+        assert action["priority"] == "high"
+        assert action["sequence_order"] == 2
+        assert action["sandbox_config"] == {
+            "network_mode": "none",
+            "memory_limit": "4g",
+            "repo_url": "https://github.com/example/hooks",
+            "timeout_seconds": 1200,
+            "reuse_within_request": True,
+        }
+        assert action["output_contract"] == {
+            "json_schema": {"type": "object", "required": ["summary"]},
+            "on_failure": "retry_then_fallback",
+            "max_retries": 2,
+        }
 
 
 # ============================================================================
@@ -341,6 +375,65 @@ class TestWorkflowWizard:
 
 
 class TestScheduleDetail:
+    async def test_run_history_uses_ten_items_per_page(self, client, schedule, monkeypatch):
+        observed = {}
+
+        async def list_runs(_self, schedule_id, *, limit, offset):
+            observed.update(schedule_id=schedule_id, limit=limit, offset=offset)
+            return {"items": [], "total_count": 0}
+
+        monkeypatch.setattr(ScheduleRepository, "list_runs", list_runs)
+
+        resp = await client.get(f"/workflows/{schedule['id']}")
+
+        assert resp.status_code == 200
+        assert observed == {
+            "schedule_id": str(schedule["id"]),
+            "limit": 10,
+            "offset": 0,
+        }
+
+    async def test_detail_represents_missing_task_stages(
+        self, client, schedule, db_pool, web_user
+    ):
+        _user, org, _token = web_user
+        await db_pool.execute(
+            "UPDATE schedules SET actions = $1 WHERE id = $2",
+            [
+                {
+                    "action_type": "task",
+                    "title": "First",
+                    "description": "Run first.",
+                    "agent_type": "code",
+                    "priority": "medium",
+                    "sequence_order": 0,
+                },
+                {
+                    "action_type": "task",
+                    "title": "Second",
+                    "description": "Run second.",
+                    "agent_type": "code",
+                    "priority": "medium",
+                    "sequence_order": 1,
+                },
+                {
+                    "action_type": "task",
+                    "title": "Fourth",
+                    "description": "Run fourth.",
+                    "agent_type": "code",
+                    "priority": "medium",
+                    "sequence_order": 3,
+                },
+            ],
+            schedule["id"],
+        )
+
+        resp = await client.get(f"/workflows/{schedule['id']}")
+
+        assert resp.status_code == 200
+        assert "Stage 3" in resp.text
+        assert "No tasks configured" in resp.text
+
     async def test_detail_returns_html(self, client, schedule):
         resp = await client.get(f"/schedules/{schedule['id']}")
         assert resp.status_code == 200
@@ -359,7 +452,9 @@ class TestScheduleDetail:
         resp = await client.get(f"/workflows/{schedule['id']}")
         assert resp.status_code == 200
         assert "Workflow flow" in resp.text
-        assert "Actions" in resp.text
+        assert "Steps" in resp.text
+        assert "Save workflow" in resp.text
+        assert "No unsaved changes" in resp.text
 
 
 # ============================================================================
@@ -465,6 +560,141 @@ class TestScheduleDelete:
 
 
 class TestScheduleEdit:
+    async def test_edit_visual_request_template(self, client, schedule, db_pool, web_user):
+        _user, org, _token = web_user
+        resp = await client.post(
+            f"/workflows/{schedule['id']}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "request_title": "Repeated request title",
+                    "request_description": "Context included on every run.",
+                    "dependency_policy": "permissive",
+                },
+            ),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        updated = await ScheduleRepository(db_pool).get_schedule(
+            str(schedule["id"]), str(org["id"])
+        )
+        assert updated is not None
+        assert updated["request_template"]["title"] == "Repeated request title"
+        assert updated["request_template"]["description"] == "Context included on every run."
+        assert updated["request_template"]["dependency_policy"] == "permissive"
+
+    async def test_edit_raw_json_can_override_visual_steps(
+        self, client, schedule, db_pool, web_user
+    ):
+        _user, org, _token = web_user
+        raw_actions = [
+            {
+                "action_type": "user_interaction",
+                "title": "Ask for approval",
+                "interaction_type": "question",
+                "sequence_order": 0,
+            }
+        ]
+        resp = await client.post(
+            f"/workflows/{schedule['id']}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "use_raw_json": "on",
+                    "actions_json": json.dumps(raw_actions),
+                    "action_title": "Ignored visual step",
+                    "action_prompt": "This should not replace the raw action.",
+                },
+            ),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        updated = await ScheduleRepository(db_pool).get_schedule(
+            str(schedule["id"]), str(org["id"])
+        )
+        assert updated is not None
+        assert updated["actions"] == raw_actions
+
+    async def test_edit_visual_steps_updates_ordered_actions(
+        self, client, schedule, db_pool, web_user
+    ):
+        _user, org, _token = web_user
+        csrf_token = client._csrf_token  # type: ignore[attr-defined]
+        resp = await client.post(
+            f"/workflows/{schedule['id']}/edit",
+            content=urlencode([
+                (CSRF_FIELD_NAME, csrf_token),
+                ("action_title", "Research changes"),
+                ("action_title", "Implement changes"),
+                ("action_prompt", "Find the relevant behavior."),
+                ("action_prompt", "Apply and verify the change."),
+                ("action_agent_type", "research"),
+                ("action_agent_type", "code"),
+                ("action_model", ""),
+                ("action_model", ""),
+                ("action_reasoning_effort", ""),
+                ("action_reasoning_effort", ""),
+                ("action_priority", "low"),
+                ("action_priority", "high"),
+                ("action_stage", "1"),
+                ("action_stage", "1"),
+                ("action_sandbox_template_id", ""),
+                ("action_sandbox_template_id", ""),
+                ("action_sandbox_config_json", "{}"),
+                ("action_sandbox_config_json", ""),
+                ("action_repo_url", "https://github.com/example/repo"),
+                ("action_repo_url", ""),
+                ("action_branch", "main"),
+                ("action_branch", ""),
+                ("action_timeout_seconds", "900"),
+                ("action_timeout_seconds", ""),
+                ("action_output_mode", "diff"),
+                ("action_output_mode", ""),
+                ("action_commit_approved", "false"),
+                ("action_commit_approved", "false"),
+                ("action_reuse_sandbox", "true"),
+                ("action_reuse_sandbox", "false"),
+                ("action_output_schema_json", json.dumps({"type": "object"})),
+                ("action_output_schema_json", ""),
+                ("action_output_failure", "fail"),
+                ("action_output_failure", "fallback"),
+                ("action_output_retries", "0"),
+                ("action_output_retries", "1"),
+                ("action_existing_json", json.dumps({"output_contract": {"on_failure": "fail"}})),
+                ("action_existing_json", "{}"),
+            ]),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        updated = await ScheduleRepository(db_pool).get_schedule(
+            str(schedule["id"]), str(org["id"])
+        )
+        assert updated is not None
+        actions = updated["actions"]
+        assert [action["title"] for action in actions] == [
+            "Research changes",
+            "Implement changes",
+        ]
+        assert [action["sequence_order"] for action in actions] == [0, 0]
+        assert [action["priority"] for action in actions] == ["low", "high"]
+        assert actions[0]["sandbox_config"] == {
+            "repo_url": "https://github.com/example/repo",
+            "branch": "main",
+            "timeout_seconds": 900,
+            "output_mode": "diff",
+            "reuse_within_request": True,
+        }
+        assert actions[0]["output_contract"] == {
+            "json_schema": {"type": "object"},
+            "on_failure": "fail",
+            "max_retries": 0,
+        }
+        assert updated["agent_type"] == "research"
+
     async def test_edit_title(self, client, schedule, db_pool, web_user):
         _user, org, _token = web_user
         resp = await client.post(

@@ -12,12 +12,12 @@
     <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
             <h1 class="text-2xl font-bold text-gray-900">Workflow Wizard</h1>
-            <p class="mt-1 text-sm text-gray-500">Choose a trigger, define the actions, and tell the reviewer how success should be checked.</p>
+            <p class="mt-1 text-sm text-gray-500">Define the request and ordered task steps Lucent should create each time the workflow runs.</p>
         </div>
         <div class="flex flex-wrap gap-2 text-xs text-primary-800">
             <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">1. Trigger</span>
             <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">2. Request</span>
-            <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">3. Actions</span>
+            <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">3. Steps</span>
             <span class="rounded-full bg-primary-50 px-2.5 py-1 ring-1 ring-primary-100">4. Review</span>
         </div>
     </div>
@@ -215,8 +215,8 @@
 
     <section class="rounded-xl border border-gray-200 bg-white shadow-sm">
         <div class="border-b border-gray-100 px-5 py-4">
-            <h2 class="text-lg font-semibold text-gray-900">Request template</h2>
-            <p class="mt-1 text-sm text-gray-500">Each run creates a request. These fields are what users and reviewers see first.</p>
+            <h2 class="text-lg font-semibold text-gray-900">Request created each run</h2>
+            <p class="mt-1 text-sm text-gray-500">This static request is repeated whenever the workflow fires.</p>
         </div>
         <div class="p-5 space-y-4">
             <div class="grid gap-4 lg:grid-cols-2">
@@ -243,37 +243,51 @@
     <section class="rounded-xl border border-gray-200 bg-white shadow-sm">
         <div class="flex items-center justify-between border-b border-gray-100 px-5 py-4">
             <div>
-                <h2 class="text-lg font-semibold text-gray-900">Actions</h2>
-                <p class="mt-1 text-sm text-gray-500">Actions become ordered tasks inside the request framework and can record outputs.</p>
+                <h2 class="text-lg font-semibold text-gray-900">Steps</h2>
+                <p class="mt-1 text-sm text-gray-500">Each step becomes an ordered task inside the request.</p>
             </div>
-            <button type="button" id="add-action" class="rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 hover:bg-primary-100">+ Add action</button>
+            <button type="button" id="add-action" class="inline-flex items-center gap-1.5 rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 hover:bg-primary-100"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>Add step</button>
         </div>
         <div id="actions" class="divide-y divide-gray-100">
             <div class="action-row p-5 space-y-4">
                 <div class="flex items-center justify-between">
-                    <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">Action 1</span>
-                    <button type="button" class="remove-action hidden text-xs font-medium text-red-600 hover:text-red-700">Remove</button>
+                    <span class="action-label rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">Step 1</span>
+                    <div class="flex items-center gap-1">
+                        <button type="button" class="move-action-up rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-800" title="Move step up" aria-label="Move step up"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" /></svg></button>
+                        <button type="button" class="move-action-down rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-800" title="Move step down" aria-label="Move step down"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg></button>
+                        <button type="button" class="remove-action rounded-md p-1.5 text-red-500 hover:bg-red-50 hover:text-red-700" title="Remove step" aria-label="Remove step"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg></button>
+                    </div>
                 </div>
-                <div class="grid gap-4 lg:grid-cols-2">
+                <div class="grid gap-4 lg:grid-cols-3">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Action title</label>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Task title</label>
                         <input name="action_title" placeholder="e.g. Check dependencies" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
                     </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
-                        <select name="action_agent_type" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                        <select name="action_agent_type" class="action-agent w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
                             {% for agent in active_agents %}
-                            <option value="{{ agent.name }}" {% if agent.name == 'code' %}selected{% endif %}>{{ agent.name }}</option>
+                            <option value="{{ agent.name }}" data-definition-id="{{ agent.id }}" {% if agent.name == 'code' %}selected{% endif %}>{{ agent.name }}</option>
                             {% endfor %}
                             {% if active_agents|length == 0 %}<option value="code">code</option>{% endif %}
                         </select>
+                        <input type="hidden" name="action_agent_definition_id" value="">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Stage</label>
+                        <input name="action_stage" type="number" min="1" value="1" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                        <p class="mt-1 text-xs text-gray-400">Tasks with the same stage run in parallel.</p>
                     </div>
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Instructions for this action</label>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Instructions</label>
                     <textarea name="action_prompt" rows="5" placeholder="Tell the task agent exactly what to do and what output to record." class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none"></textarea>
                 </div>
-                <div class="grid gap-4 md:grid-cols-2">
+                <div class="grid gap-4 md:grid-cols-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Priority</label>
+                        <select name="action_priority" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select>
+                    </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Model override</label>
                         <select name="action_model" class="action-model w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
@@ -290,6 +304,73 @@
                         </select>
                     </div>
                 </div>
+                <details class="rounded-lg border border-gray-200 bg-gray-50">
+                    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Sandbox and runtime</summary>
+                    <div class="space-y-4 border-t border-gray-200 p-4">
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Sandbox template</label>
+                                <select name="action_sandbox_template_id" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="">No template</option>{% for template in available_sandbox_templates %}<option value="{{ template.id }}">{{ template.name }}</option>{% endfor %}</select>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Timeout</label>
+                                <input name="action_timeout_seconds" type="number" min="60" placeholder="Template default" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Repository URL override</label>
+                                <input name="action_repo_url" placeholder="https://github.com/org/repo" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Branch override</label>
+                                <input name="action_branch" placeholder="main" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
+                            </div>
+                        </div>
+                        <div class="grid gap-4 md:grid-cols-3">
+                            <div><label class="block text-sm font-medium text-gray-700 mb-1">Output mode</label><select name="action_output_mode" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="">None</option><option value="diff">Diff</option><option value="pr">Pull request</option><option value="review">Review</option><option value="commit">Commit</option></select></div>
+                            <div><label class="block text-sm font-medium text-gray-700 mb-1">Reuse sandbox</label><select name="action_reuse_sandbox" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="false">No</option><option value="true">Within this request</option></select></div>
+                            <div><label class="block text-sm font-medium text-gray-700 mb-1">Approve commit</label><select name="action_commit_approved" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="false">No</option><option value="true">Yes</option></select></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Additional sandbox config JSON</label>
+                                                        <textarea name="action_sandbox_config_json" rows="5" placeholder='{"image":"lucent-sandbox:base","setup_commands":["npm ci"],"env_vars":{"NODE_ENV":"test"}}' class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs"></textarea>
+                                                        <p class="mt-1 text-xs text-gray-500">Optional advanced fields are merged with the controls above. Example:</p>
+                                                        <pre class="mt-2 overflow-x-auto border-l-2 border-gray-200 pl-3 text-[11px] leading-5 text-gray-500">{
+    "image": "lucent-sandbox:base",
+    "setup_commands": ["npm ci", "npm test"],
+    "env_vars": {"NODE_ENV": "test"},
+    "memory_limit": "4g",
+    "cpu_limit": 2,
+    "network_mode": "allowlist",
+    "allowed_hosts": ["github.com", "registry.npmjs.org"]
+}</pre>
+                        </div>
+                    </div>
+                </details>
+                <details class="rounded-lg border border-gray-200 bg-gray-50">
+                    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Structured output</summary>
+                    <div class="space-y-4 border-t border-gray-200 p-4">
+                                                <div>
+                                                        <label class="block text-sm font-medium text-gray-700 mb-1">JSON Schema</label>
+                                                        <textarea name="action_output_schema_json" rows="6" placeholder='{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}' class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs"></textarea>
+                                                        <p class="mt-1 text-xs text-gray-500">Describe the structured result the task must return. Example:</p>
+                                                        <pre class="mt-2 overflow-x-auto border-l-2 border-gray-200 pl-3 text-[11px] leading-5 text-gray-500">{
+    "type": "object",
+    "required": ["summary", "artifacts"],
+    "properties": {
+        "summary": {"type": "string"},
+        "artifacts": {
+            "type": "array",
+            "items": {"type": "string"}
+        }
+    }
+}</pre>
+                                                </div>
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div><label class="block text-sm font-medium text-gray-700 mb-1">Validation failure</label><select name="action_output_failure" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="fallback">Keep text fallback</option><option value="fail">Fail task</option><option value="retry_then_fallback">Retry, then fallback</option></select></div>
+                            <div><label class="block text-sm font-medium text-gray-700 mb-1">Maximum retries</label><input name="action_output_retries" type="number" min="0" value="1" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"></div>
+                        </div>
+                    </div>
+                </details>
             </div>
         </div>
     </section>
@@ -308,10 +389,10 @@
         </div>
     </section>
 
-    <div class="sticky bottom-0 -mx-2 border-t border-gray-200 bg-white/95 px-2 py-4 backdrop-blur">
+    <div class="sticky bottom-0 z-30 -mx-2 border-t border-gray-200 bg-white/95 px-3 py-3 shadow-[0_-6px_18px_-12px_rgba(15,23,42,0.45)] backdrop-blur">
         <div class="flex items-center justify-between gap-3">
             <a href="/workflows" class="text-sm font-medium text-gray-500 hover:text-gray-700">Cancel</a>
-            <button type="submit" class="rounded-lg bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-primary-700">Create workflow</button>
+            <button type="submit" class="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-primary-200 hover:bg-primary-700"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>Create workflow</button>
         </div>
     </div>
 </form>
@@ -621,10 +702,16 @@
     function refreshActionLabels() {
         const rows = actions.querySelectorAll('.action-row');
         rows.forEach((row, idx) => {
-            const badge = row.querySelector('span');
+            const badge = row.querySelector('.action-label');
             const remove = row.querySelector('.remove-action');
-            if (badge) badge.textContent = 'Action ' + (idx + 1);
-            if (remove) remove.classList.toggle('hidden', rows.length === 1);
+            const moveUp = row.querySelector('.move-action-up');
+            const moveDown = row.querySelector('.move-action-down');
+            if (badge) badge.textContent = 'Task ' + (idx + 1);
+            if (remove) remove.disabled = rows.length === 1;
+            if (moveUp) moveUp.disabled = idx === 0;
+            if (moveDown) moveDown.disabled = idx === rows.length - 1;
+            row.querySelectorAll('button:disabled').forEach(button => button.classList.add('cursor-not-allowed', 'opacity-30'));
+            row.querySelectorAll('button:not(:disabled)').forEach(button => button.classList.remove('cursor-not-allowed', 'opacity-30'));
         });
     }
 
@@ -647,12 +734,32 @@
 
     function wireAction(row) {
         const remove = row.querySelector('.remove-action');
+        const moveUp = row.querySelector('.move-action-up');
+        const moveDown = row.querySelector('.move-action-down');
         const model = row.querySelector('.action-model');
+        const agent = row.querySelector('.action-agent');
+        const agentDefinition = row.querySelector('input[name="action_agent_definition_id"]');
+        const syncAgentDefinition = () => {
+            if (agentDefinition) agentDefinition.value = agent?.selectedOptions[0]?.dataset.definitionId || '';
+        };
         if (remove) remove.addEventListener('click', () => {
+            if (actions.querySelectorAll('.action-row').length === 1) return;
             row.remove();
             refreshActionLabels();
         });
+        if (moveUp) moveUp.addEventListener('click', () => {
+            const previous = row.previousElementSibling;
+            if (previous) actions.insertBefore(row, previous);
+            refreshActionLabels();
+        });
+        if (moveDown) moveDown.addEventListener('click', () => {
+            const next = row.nextElementSibling;
+            if (next) actions.insertBefore(next, row);
+            refreshActionLabels();
+        });
         if (model) model.addEventListener('change', () => refreshReasoning(row));
+        if (agent) agent.addEventListener('change', syncAgentDefinition);
+        syncAgentDefinition();
         refreshReasoning(row);
     }
 
@@ -667,11 +774,15 @@
     actions.querySelectorAll('.action-row').forEach(wireAction);
     if (addAction) addAction.addEventListener('click', () => {
         const first = actions.querySelector('.action-row');
+        const stages = Array.from(actions.querySelectorAll('input[name="action_stage"]'))
+            .map(input => Number.parseInt(input.value, 10) || 1);
         const clone = first.cloneNode(true);
         clone.querySelectorAll('input, textarea, select').forEach(el => {
             if (el.tagName === 'SELECT') el.selectedIndex = 0;
             else el.value = '';
         });
+        clone.querySelector('input[name="action_stage"]').value = Math.max(...stages) + 1;
+        clone.querySelector('input[name="action_output_retries"]').value = '1';
         actions.appendChild(clone);
         wireAction(clone);
         refreshActionLabels();
