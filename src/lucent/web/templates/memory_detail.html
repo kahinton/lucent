@@ -69,10 +69,9 @@
                 </form>
                 {% endif %}
                 {% if memory.type != 'individual' %}
-                <form method="post" action="/memories/{{ memory.id }}/delete" class="inline-flex">
+                <form method="post" action="/memories/{{ memory.id }}/delete" class="inline-flex" data-confirm="Delete this memory? This soft-deletes it and removes it from normal search results.">
                     <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                     <button type="submit"
-                        onclick="return confirm('Delete this memory? This soft-deletes it and removes it from normal search results.')"
                         class="inline-flex items-center gap-1.5 px-3 py-2 bg-red-50 text-red-700 text-sm font-medium rounded-lg border border-red-100 hover:bg-red-100 transition-colors">
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
@@ -661,10 +660,9 @@
                         {% endif %}
                     </div>
                     {% if is_owner and entry.version != memory.version and entry.snapshot is not none %}
-                    <form method="post" action="/memories/{{ memory.id }}/restore/{{ entry.version }}" class="shrink-0">
+                    <form method="post" action="/memories/{{ memory.id }}/restore/{{ entry.version }}" class="shrink-0" data-confirm="Restore this memory to version {{ entry.version }}? This will create a new version with the old content.">
                         <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                         <button type="submit"
-                            onclick="return confirm('Restore this memory to version {{ entry.version }}? This will create a new version with the old content.')"
                             class="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-md hover:bg-gray-50 hover:text-primary-600 hover:border-primary-200 transition-colors"
                             title="Restore to this version">
                             <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

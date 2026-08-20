@@ -39,28 +39,28 @@
                 <label class="block text-sm font-medium text-gray-700 mb-3">Memory Type</label>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
                     <label class="relative cursor-pointer">
-                        <input type="radio" name="type" value="experience" class="peer sr-only" onchange="showTypeFields('experience')">
+                        <input type="radio" name="type" value="experience" class="peer sr-only" data-memory-type="experience">
                         <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-blue-300 peer-checked:border-blue-500 peer-checked:bg-blue-50 transition-all">
                             <p class="text-sm font-medium text-gray-900">Experience</p>
                             <p class="text-xs text-gray-500 mt-1">Events, decisions, lessons</p>
                         </div>
                     </label>
                     <label class="relative cursor-pointer">
-                        <input type="radio" name="type" value="technical" class="peer sr-only" onchange="showTypeFields('technical')">
+                        <input type="radio" name="type" value="technical" class="peer sr-only" data-memory-type="technical">
                         <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-emerald-300 peer-checked:border-emerald-500 peer-checked:bg-emerald-50 transition-all">
                             <p class="text-sm font-medium text-gray-900">Technical</p>
                             <p class="text-xs text-gray-500 mt-1">Code, solutions, patterns</p>
                         </div>
                     </label>
                     <label class="relative cursor-pointer">
-                        <input type="radio" name="type" value="procedural" class="peer sr-only" onchange="showTypeFields('procedural')">
+                        <input type="radio" name="type" value="procedural" class="peer sr-only" data-memory-type="procedural">
                         <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-amber-300 peer-checked:border-amber-500 peer-checked:bg-amber-50 transition-all">
                             <p class="text-sm font-medium text-gray-900">Procedural</p>
                             <p class="text-xs text-gray-500 mt-1">Step-by-step processes</p>
                         </div>
                     </label>
                     <label class="relative cursor-pointer">
-                        <input type="radio" name="type" value="goal" class="peer sr-only" onchange="showTypeFields('goal')">
+                        <input type="radio" name="type" value="goal" class="peer sr-only" data-memory-type="goal">
                         <div class="p-4 rounded-lg border-2 border-gray-200 hover:border-purple-300 peer-checked:border-purple-500 peer-checked:bg-purple-50 transition-all">
                             <p class="text-sm font-medium text-gray-900">Goal</p>
                             <p class="text-xs text-gray-500 mt-1">Objectives, milestones</p>
@@ -234,7 +234,7 @@
                         {% for tag in existing_tags[:15] %}
                         <button 
                             type="button"
-                            onclick="addTag('{{ tag.tag }}')"
+                            data-add-tag="{{ tag.tag }}"
                             class="inline-flex items-center px-2.5 py-1 bg-gray-100 text-gray-700 rounded-full text-xs hover:bg-primary-100 hover:text-primary-700 transition-colors"
                         >
                             {{ tag.tag }}
@@ -258,7 +258,7 @@
                     max="10" 
                     value="5"
                     class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-primary-600"
-                    oninput="document.getElementById('importance-value').textContent = this.value"
+                    data-value-output="importance-value"
                 >
                 <div class="flex justify-between text-xs text-gray-400 mt-2">
                     <span>Routine (1-3)</span>
@@ -303,6 +303,13 @@ function showTypeFields(type) {
         fields.classList.remove('hidden');
     }
 }
+
+document.querySelectorAll('[data-memory-type]').forEach((input) => {
+    input.addEventListener('change', () => showTypeFields(input.dataset.memoryType));
+});
+document.querySelectorAll('[data-add-tag]').forEach((button) => {
+    button.addEventListener('click', () => addTag(button.dataset.addTag));
+});
 
 // Form validation
 document.getElementById('memory-form').addEventListener('submit', function(e) {

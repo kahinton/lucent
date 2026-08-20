@@ -54,8 +54,7 @@
                 </p>
                 <div class="relative">
                     <code id="api-key" class="block w-full p-3 bg-gray-900 text-green-400 rounded-lg text-xs font-mono break-all select-all">{{ api_key }}</code>
-                    <button
-                        onclick="navigator.clipboard.writeText(document.getElementById('api-key').textContent); this.textContent='Copied!'; setTimeout(() => this.textContent='Copy', 2000)"
+                    <button type="button" data-copy-target="api-key" data-copied-label="Copied!"
                         class="absolute top-2 right-2 px-2 py-1 bg-gray-700 text-gray-300 text-xs rounded hover:bg-gray-600 transition-colors"
                     >Copy</button>
                 </div>

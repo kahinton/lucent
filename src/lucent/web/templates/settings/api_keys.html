@@ -63,7 +63,7 @@
                         <td class="py-3 text-sm text-gray-600">{{ key.use_count }}</td>
                         <td class="py-3 text-right">
                             {% if key.is_active %}
-                            <form action="/settings/api-keys/{{ key.id }}/revoke" method="post" class="inline" onsubmit="return confirm('Revoke this API key? Clients using it will stop working immediately.');">
+                            <form action="/settings/api-keys/{{ key.id }}/revoke" method="post" class="inline" data-confirm="Revoke this API key? Clients using it will stop working immediately.">
                                 <button type="submit" class="text-sm text-red-600 hover:text-red-700 font-medium">Revoke</button>
                             </form>
                             {% else %}

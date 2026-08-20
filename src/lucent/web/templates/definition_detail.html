@@ -178,12 +178,12 @@
                     </div>
                     <form method="POST" action="/definitions/agents/{{ definition.id }}/mcp-tools/{{ mcp.id }}"
                           id="tools-form-{{ mcp.id }}"
-                          onsubmit="return prepareToolsSubmit('{{ mcp.id }}')">
+                          data-tools-form-id="{{ mcp.id }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <input type="hidden" name="allowed_tools" id="tools-hidden-{{ mcp.id }}">
                         <label class="flex items-center gap-2 mb-2 cursor-pointer">
                             <input type="checkbox" id="allow-all-{{ mcp.id }}"
-                                   onchange="toggleAllowAll('{{ mcp.id }}')"
+                                data-tool-action="toggle-allow-all" data-server-id="{{ mcp.id }}"
                                    {% if mcp.allowed_tools is none %}checked{% endif %}
                                    class="rounded border-gray-300 text-purple-600 focus:ring-purple-500">
                             <span class="text-xs font-medium text-gray-600">Allow all tools (unrestricted)</span>
@@ -192,15 +192,15 @@
                         {% set discovered_names = mcp.discovered_tools | map(attribute='name') | list %}
                         <div id="tools-checklist-{{ mcp.id }}" class="{% if mcp.allowed_tools is none %}opacity-40 pointer-events-none{% endif %}">
                             <div class="flex gap-1 mb-1">
-                                <button type="button" onclick="selectAllServerTools('{{ mcp.id }}')" class="text-xs text-purple-600 hover:text-purple-800 px-1.5 py-0.5 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
-                                <button type="button" onclick="clearAllServerTools('{{ mcp.id }}')" class="text-xs text-gray-500 hover:text-gray-700 px-1.5 py-0.5 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
+                                <button type="button" data-tool-action="select-all" data-server-id="{{ mcp.id }}" class="text-xs text-purple-600 hover:text-purple-800 px-1.5 py-0.5 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
+                                <button type="button" data-tool-action="clear-all" data-server-id="{{ mcp.id }}" class="text-xs text-gray-500 hover:text-gray-700 px-1.5 py-0.5 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
                             </div>
                             <div class="space-y-0.5 max-h-48 overflow-y-auto border border-gray-100 rounded p-1.5 mb-2">
                                 {% for tool in mcp.discovered_tools %}
                                 <label class="flex items-start gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
                                     <input type="checkbox" class="tool-cb tool-cb-{{ mcp.id }} mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                            value="{{ tool.name }}"
-                                           onchange="updateToolSummary('{{ mcp.id }}')"
+                                           data-tool-action="update-summary" data-server-id="{{ mcp.id }}"
                                            {% if mcp.allowed_tools is none or (mcp.allowed_tools and tool.name in mcp.allowed_tools) %}checked{% endif %}>
                                     <div class="min-w-0 flex-1">
                                         <span class="text-xs font-medium text-gray-800">{{ tool.name }}</span>
@@ -215,11 +215,11 @@
                             {% for tool_name in mcp.allowed_tools %}
                             {% if tool_name not in discovered_names %}
                             <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                       value="{{ tool_name }}" onchange="updateToolSummary('{{ mcp.id }}')">
+                                    <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                        value="{{ tool_name }}" data-tool-action="update-summary" data-server-id="{{ mcp.id }}">
                                 <span class="text-xs font-medium text-gray-800">{{ tool_name }}</span>
                                 <span class="text-xs text-gray-400 italic">(custom)</span>
-                                <button type="button" onclick="this.closest('label').remove(); updateToolSummary('{{ mcp.id }}')" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
+                                <button type="button" data-tool-action="remove-custom" data-server-id="{{ mcp.id }}" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
                             </label>
                             {% endif %}
                             {% endfor %}
@@ -235,11 +235,11 @@
                         <div id="custom-tools-{{ mcp.id }}" class="space-y-0.5 mb-2">
                             {% for tool_name in mcp.allowed_tools %}
                             <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                       value="{{ tool_name }}" onchange="updateToolSummary('{{ mcp.id }}')">
+                                    <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                        value="{{ tool_name }}" data-tool-action="update-summary" data-server-id="{{ mcp.id }}">
                                 <span class="text-xs font-medium text-gray-800">{{ tool_name }}</span>
                                 <span class="text-xs text-gray-400 italic">(custom)</span>
-                                <button type="button" onclick="this.closest('label').remove(); updateToolSummary('{{ mcp.id }}')" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
+                                <button type="button" data-tool-action="remove-custom" data-server-id="{{ mcp.id }}" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
                             </label>
                             {% endfor %}
                         </div>
@@ -249,7 +249,7 @@
                         {% endif %}
                         <div class="flex gap-1 mt-2 {% if mcp.allowed_tools is none %}hidden{% endif %}" id="custom-tool-section-{{ mcp.id }}">
                             <input id="custom-input-{{ mcp.id }}" class="flex-1 px-2 py-1 border border-gray-200 rounded text-xs font-mono" placeholder="Custom tool name...">
-                            <button type="button" onclick="addCustomTool('{{ mcp.id }}')" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Add</button>
+                            <button type="button" data-tool-action="add-custom" data-server-id="{{ mcp.id }}" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Add</button>
                         </div>
                         <div class="mt-2">
                             <button type="submit" class="text-xs text-purple-600 hover:text-purple-800 px-3 py-1 border border-purple-200 rounded hover:bg-purple-50 font-medium">Save</button>
@@ -582,10 +582,26 @@
         var container = document.getElementById('custom-tools-' + serverId);
         var label = document.createElement('label');
         label.className = 'flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer';
-        label.innerHTML = '<input type="checkbox" checked class="tool-cb tool-cb-' + serverId + ' rounded border-gray-300 text-purple-600 focus:ring-purple-500" value="' + escapeHtml(name).replace(/"/g, '&quot;') + '" onchange="updateToolSummary(\'' + serverId + '\')">'
-            + '<span class="text-xs font-medium text-gray-800">' + escapeHtml(name) + '</span>'
-            + '<span class="text-xs text-gray-400 italic">(custom)</span>'
-            + '<button type="button" onclick="this.closest(\'label\').remove(); updateToolSummary(\'' + serverId + '\')" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>';
+        var checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = true;
+        checkbox.className = 'tool-cb tool-cb-' + serverId + ' rounded border-gray-300 text-purple-600 focus:ring-purple-500';
+        checkbox.value = name;
+        checkbox.dataset.toolAction = 'update-summary';
+        checkbox.dataset.serverId = serverId;
+        var nameLabel = document.createElement('span');
+        nameLabel.className = 'text-xs font-medium text-gray-800';
+        nameLabel.textContent = name;
+        var customLabel = document.createElement('span');
+        customLabel.className = 'text-xs text-gray-400 italic';
+        customLabel.textContent = '(custom)';
+        var removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'text-xs text-red-400 hover:text-red-600 ml-auto';
+        removeButton.dataset.toolAction = 'remove-custom';
+        removeButton.dataset.serverId = serverId;
+        removeButton.textContent = '\u00d7';
+        label.append(checkbox, nameLabel, customLabel, removeButton);
         container.appendChild(label);
         input.value = '';
         updateToolSummary(serverId);
@@ -630,6 +646,29 @@
         document.querySelectorAll('[id^="tool-summary-"]').forEach(function(badge) {
             var serverId = badge.dataset.serverId;
             if (serverId) updateToolSummary(serverId);
+        });
+        document.addEventListener('submit', function(event) {
+            var form = event.target.closest('[data-tools-form-id]');
+            if (form && !prepareToolsSubmit(form.dataset.toolsFormId)) event.preventDefault();
+        });
+        document.addEventListener('change', function(event) {
+            var control = event.target.closest('[data-tool-action]');
+            if (!control) return;
+            var serverId = control.dataset.serverId;
+            if (control.dataset.toolAction === 'toggle-allow-all') toggleAllowAll(serverId);
+            if (control.dataset.toolAction === 'update-summary') updateToolSummary(serverId);
+        });
+        document.addEventListener('click', function(event) {
+            var control = event.target.closest('[data-tool-action]');
+            if (!control) return;
+            var serverId = control.dataset.serverId;
+            if (control.dataset.toolAction === 'select-all') selectAllServerTools(serverId);
+            if (control.dataset.toolAction === 'clear-all') clearAllServerTools(serverId);
+            if (control.dataset.toolAction === 'add-custom') addCustomTool(serverId);
+            if (control.dataset.toolAction === 'remove-custom') {
+                control.closest('label')?.remove();
+                updateToolSummary(serverId);
+            }
         });
     });
     {% endif %}

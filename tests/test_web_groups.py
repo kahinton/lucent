@@ -148,6 +148,8 @@ async def test_groups_list_renders(client):
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "Groups" in resp.text
+    assert "data-open-group-modal=\"createGroupModal\"" in resp.text
+    assert "onclick=" not in resp.text
 
 
 # ============================================================================
@@ -195,6 +197,10 @@ async def test_group_detail_renders(client, db_pool, owner_user, web_prefix):
     resp = await client.get(f"/settings/groups/{group['id']}")
     assert resp.status_code == 200
     assert group["name"] in resp.text
+    assert "data-open-group-modal=\"editGroupModal\"" in resp.text
+    assert "data-close-group-modal=\"editGroupModal\"" in resp.text
+    assert "onclick=" not in resp.text
+    assert "onsubmit=" not in resp.text
 
 
 @pytest.mark.asyncio

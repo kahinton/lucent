@@ -68,8 +68,8 @@
                     <td class="px-4 py-3">
                         {% if may_modify and caller_role == 'owner' %}
                         <form action="/settings/users/{{ u.id }}/role" method="post" class="inline-flex items-center gap-1">
-                            <select name="role" class="text-xs border border-gray-200 rounded px-1.5 py-1 bg-white"
-                                    onchange="this.form.submit()">
+                                <select name="role" class="text-xs border border-gray-200 rounded px-1.5 py-1 bg-white"
+                                    data-auto-submit>
                                 <option value="member" {% if u_role == 'member' %}selected{% endif %}>Member</option>
                                 <option value="admin"  {% if u_role == 'admin'  %}selected{% endif %}>Admin</option>
                             </select>
@@ -96,13 +96,13 @@
                     <td class="px-4 py-3 text-right text-sm">
                         {% if may_modify %}
                         <div class="flex items-center justify-end gap-2 flex-wrap">
-                            <form action="/settings/users/{{ u.id }}/reset-password" method="post" class="inline"
-                                  onsubmit="return confirm('Reset password for {{ u.display_name or u.email }}?');">
+                                <form action="/settings/users/{{ u.id }}/reset-password" method="post" class="inline"
+                                    data-confirm="Reset password for {{ u.display_name or u.email }}?">
                                 <button type="submit" class="text-xs text-amber-600 hover:text-amber-700 font-medium">Reset</button>
                             </form>
                             {% if u.is_active %}
-                            <form action="/settings/users/{{ u.id }}/deactivate" method="post" class="inline"
-                                  onsubmit="return confirm('Deactivate {{ u.display_name or u.email }}? They will no longer be able to log in.');">
+                                <form action="/settings/users/{{ u.id }}/deactivate" method="post" class="inline"
+                                    data-confirm="Deactivate {{ u.display_name or u.email }}? They will no longer be able to log in.">
                                 <button type="submit" class="text-xs text-rose-600 hover:text-rose-700 font-medium">Deactivate</button>
                             </form>
                             {% else %}

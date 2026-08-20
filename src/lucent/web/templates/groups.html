@@ -8,7 +8,7 @@
 
 {% block settings_actions %}
     {% if can_manage %}
-    <button onclick="document.getElementById('createGroupModal').classList.remove('hidden')"
+    <button type="button" data-open-group-modal="createGroupModal"
             class="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors">
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -46,7 +46,7 @@
             </thead>
             <tbody class="divide-y divide-gray-100">
                 {% for g in groups %}
-                <tr class="hover:bg-gray-50 transition-colors cursor-pointer" onclick="window.location.href='/groups/{{ g.id }}'">
+                <tr class="hover:bg-gray-50 transition-colors">
                     <td class="px-6 py-4">
                         <div class="flex items-center gap-3">
                             <div class="flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-br from-indigo-400 to-indigo-600 text-white text-sm font-semibold">
@@ -75,7 +75,7 @@
         <h3 class="mt-4 text-sm font-medium text-gray-900">No groups</h3>
         <p class="mt-1 text-sm text-gray-500">Get started by creating a group for your team.</p>
         {% if can_manage %}
-        <button onclick="document.getElementById('createGroupModal').classList.remove('hidden')"
+        <button type="button" data-open-group-modal="createGroupModal"
                 class="mt-4 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors">
             Create Group
         </button>
@@ -89,13 +89,13 @@
 <div id="createGroupModal" class="hidden fixed inset-0 z-50 overflow-y-auto">
     <div class="flex items-center justify-center min-h-screen px-4">
         <!-- Backdrop -->
-        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" onclick="document.getElementById('createGroupModal').classList.add('hidden')"></div>
+        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" data-close-group-modal="createGroupModal"></div>
 
         <!-- Modal -->
         <div class="relative bg-white rounded-xl shadow-xl max-w-md w-full p-6 z-10">
             <div class="flex items-center justify-between mb-6">
                 <h3 class="text-lg font-semibold text-gray-900">Create Group</h3>
-                <button onclick="document.getElementById('createGroupModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-500">
+                <button type="button" data-close-group-modal="createGroupModal" class="text-gray-400 hover:text-gray-500">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -118,7 +118,7 @@
                 </div>
 
                 <div class="pt-4 flex justify-end gap-3">
-                    <button type="button" onclick="document.getElementById('createGroupModal').classList.add('hidden')"
+                    <button type="button" data-close-group-modal="createGroupModal"
                             class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
                         Cancel
                     </button>
@@ -132,4 +132,20 @@
     </div>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{{ super() }}
+<script nonce="{{ request.state.csp_nonce }}">
+document.querySelectorAll('[data-open-group-modal]').forEach((button) => {
+    button.addEventListener('click', () => {
+        document.getElementById(button.dataset.openGroupModal)?.classList.remove('hidden');
+    });
+});
+document.querySelectorAll('[data-close-group-modal]').forEach((button) => {
+    button.addEventListener('click', () => {
+        document.getElementById(button.dataset.closeGroupModal)?.classList.add('hidden');
+    });
+});
+</script>
 {% endblock %}

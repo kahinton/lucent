@@ -496,6 +496,67 @@
     </div>
     
     {% block extra_scripts %}{% endblock %}
+
+    <script nonce="{{ request.state.csp_nonce }}">
+    document.addEventListener('submit', function(event) {
+        const form = event.target.closest('form[data-confirm]');
+        if (form && !window.confirm(form.dataset.confirm)) event.preventDefault();
+    });
+    document.addEventListener('click', function(event) {
+        const toggle = event.target.closest('[data-toggle-target]');
+        if (toggle) {
+            const target = document.getElementById(toggle.dataset.toggleTarget);
+            if (target) {
+                const mode = toggle.dataset.toggleMode || 'toggle';
+                target.classList[mode]('hidden');
+                const focus = toggle.dataset.focusSelector;
+                if (focus) target.querySelector(focus)?.focus();
+            }
+            return;
+        }
+        const copy = event.target.closest('[data-copy-target]');
+        if (copy) {
+            const source = document.getElementById(copy.dataset.copyTarget);
+            if (!source) return;
+            navigator.clipboard.writeText(source.textContent || '').then(function() {
+                const label = copy.textContent;
+                copy.textContent = copy.dataset.copiedLabel || 'Copied!';
+                window.setTimeout(function() { copy.textContent = label; }, 2000);
+            });
+            return;
+        }
+        const feedbackAction = event.target.closest('[data-feedback-action]');
+        if (feedbackAction) {
+            const container = feedbackAction.closest('.feedback-actions');
+            if (!container) return;
+            if (feedbackAction.dataset.feedbackAction === 'reject') {
+                const form = container.querySelector('.reject-form');
+                form?.classList.remove('hidden');
+                form?.querySelector('input[name="comment"]')?.focus();
+            } else if (feedbackAction.dataset.feedbackAction === 'comment') {
+                container.querySelector('.comment-form')?.classList.toggle('hidden');
+            } else if (feedbackAction.dataset.feedbackAction === 'cancel-reject') {
+                feedbackAction.closest('.reject-form')?.classList.add('hidden');
+            }
+        }
+    });
+    document.addEventListener('change', function(event) {
+        const redirect = event.target.closest('[data-redirect-prefix]');
+        if (redirect) {
+            window.location.href = redirect.dataset.redirectPrefix + encodeURIComponent(redirect.value) + (redirect.dataset.redirectSuffix || '');
+            return;
+        }
+        const autoSubmit = event.target.closest('[data-auto-submit]');
+        if (autoSubmit?.form) autoSubmit.form.requestSubmit();
+    });
+    document.addEventListener('input', function(event) {
+        const input = event.target.closest('[data-value-output]');
+        if (input) {
+            const output = document.getElementById(input.dataset.valueOutput);
+            if (output) output.textContent = input.value;
+        }
+    });
+    </script>
     
     <!-- Auto-inject CSRF tokens into all forms and HTMX requests -->
     <script nonce="{{ request.state.csp_nonce }}">
