@@ -173,6 +173,11 @@ _REASONING_EFFORT_METADATA_KEYS = {
     "supportedeffortlevels",
 }
 
+# Ollama reports only a boolean ``thinking`` capability from /api/tags and
+# /api/show. Its chat API accepts these standardized values for models with that
+# capability, but does not return a per-model enum in discovery responses.
+_OLLAMA_REASONING_EFFORTS = ("low", "medium", "high")
+
 
 def _metadata_key_name(key: str) -> str:
     return re.sub(r"[^a-z0-9]", "", key.lower())
@@ -768,9 +773,20 @@ class ModelDiscoveryService:
                 or model_info.get("gemma.context_length")
                 or 0
             )
-            capabilities = show.get("capabilities") or []
+            capabilities = {
+                str(capability).lower()
+                for capability in [
+                    *(row.get("capabilities") or []),
+                    *(show.get("capabilities") or []),
+                ]
+            }
             supports_vision = "vision" in capabilities or "llava" in model_id.lower()
             supports_tools = "tools" in capabilities
+            reasoning_efforts = (
+                list(_OLLAMA_REASONING_EFFORTS)
+                if "thinking" in capabilities
+                else []
+            )
             tool_probe: dict[str, Any] | None = None
             if supports_tools and _env_flag("LUCENT_OLLAMA_TOOL_PROBE", default=True):
                 tool_probe = await self._probe_ollama_tool_support(api_base, model_id)
@@ -780,7 +796,11 @@ class ModelDiscoveryService:
                 tags.append(str(details["parameter_size"]).lower())
             if supports_tools:
                 tags.append("tools")
+            if reasoning_efforts:
+                tags.append("reasoning-effort")
             notes = "Discovered from local Ollama server."
+            if reasoning_efforts:
+                notes += " Supports low, medium, and high thinking effort."
             if "tools" in capabilities and not supports_tools:
                 notes += " Tool capability was advertised but structured tool-call probe failed."
             elif not supports_tools:
@@ -797,11 +817,17 @@ class ModelDiscoveryService:
                     supports_vision=supports_vision,
                     notes=notes,
                     tags=sorted(set(tags)),
+                    reasoning_efforts=reasoning_efforts,
                     engine="langchain",
                     discovery_metadata={
                         "tags_row": dict(row),
                         "show": show,
                         "tool_probe": tool_probe,
+                        "reasoning_efforts_source": (
+                            "ollama-thinking-capability"
+                            if reasoning_efforts
+                            else None
+                        ),
                     },
                 )
             )

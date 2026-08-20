@@ -337,6 +337,38 @@ class TestLangChainEngine:
         assert engine.name == "langchain"
 
     @pytest.mark.asyncio
+    async def test_ollama_reasoning_effort_uses_chat_ollama_reasoning_option(
+        self, monkeypatch
+    ):
+        from langchain import chat_models
+
+        from lucent.llm import langchain_engine
+
+        captured = {}
+
+        def fake_init_chat_model(model, **kwargs):
+            captured["model"] = model
+            captured["kwargs"] = kwargs
+            return object()
+
+        monkeypatch.setattr(chat_models, "init_chat_model", fake_init_chat_model)
+        monkeypatch.setenv("OLLAMA_HOST", "http://ollama.example:11434")
+        langchain_engine.register_model(
+            "ollama-thinking-test", "ollama", "qwen-thinking:4b", "langchain"
+        )
+        try:
+            await langchain_engine._get_chat_model(
+                "ollama-thinking-test", reasoning_effort="high"
+            )
+        finally:
+            langchain_engine.clear_runtime_model_registry()
+
+        assert captured["model"] == "qwen-thinking:4b"
+        assert captured["kwargs"]["model_provider"] == "ollama"
+        assert captured["kwargs"]["reasoning"] == "high"
+        assert captured["kwargs"]["base_url"] == "http://ollama.example:11434"
+
+    @pytest.mark.asyncio
     async def test_cleanup_is_noop(self):
         from lucent.llm.langchain_engine import LangChainEngine
 
