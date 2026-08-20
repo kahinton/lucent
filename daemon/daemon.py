@@ -2001,6 +2001,162 @@ class LucentDaemon(
         finally:
             await conn.close()
 
+    async def _list_memory_maintenance_users(
+        self,
+        org_id: str,
+        schedule_title: str,
+    ) -> list[dict[str, Any]]:
+        """Return memory owners with work for a per-user maintenance pass."""
+        import asyncpg
+
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+        except Exception as e:
+            log(f"{schedule_title} fan-out DB connect failed: {e}", "WARN")
+            return []
+
+        try:
+            if schedule_title == "Experience Compression":
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT user_id::text AS user_id
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND user_id IS NOT NULL
+                      AND type = 'experience'
+                      AND deleted_at IS NULL
+                      AND COALESCE(lifecycle_stage, 'active') = 'active'
+                      AND created_at < date_trunc('day', now())
+                      AND NOT (
+                          COALESCE(tags, '{}'::text[])
+                          && ARRAY[
+                              'daily-digest', 'pinned', 'do_not_consolidate',
+                              'heartbeat', 'state', 'telemetry'
+                          ]::text[]
+                      )
+                    ORDER BY user_id
+                    """,
+                    org_id,
+                )
+            elif schedule_title == "Learning Extraction":
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT user_id::text AS user_id
+                    FROM memories
+                    WHERE organization_id = $1::uuid
+                      AND user_id IS NOT NULL
+                      AND deleted_at IS NULL
+                      AND COALESCE(lifecycle_stage, 'active') = 'active'
+                      AND (
+                          COALESCE(tags, '{}'::text[])
+                          && ARRAY[
+                              'daemon-result', 'rejection-lesson',
+                              'feedback-rejected', 'feedback-approved', 'validated'
+                          ]::text[]
+                      )
+                      AND NOT ('lesson-extracted' = ANY(COALESCE(tags, '{}'::text[])))
+                      AND NOT (
+                          COALESCE(tags, '{}'::text[])
+                          && ARRAY['heartbeat', 'state', 'telemetry']::text[]
+                      )
+                    ORDER BY user_id
+                    """,
+                    org_id,
+                )
+            else:
+                return []
+            return [dict(row) for row in rows]
+        except Exception as e:
+            log(f"{schedule_title} fan-out query failed: {e}", "WARN")
+            return []
+        finally:
+            await conn.close()
+
+    async def _run_memory_maintenance_fanout(
+        self,
+        *,
+        task_id: str,
+        request_id: str,
+        org_id: str,
+        schedule_title: str,
+        agent_type: str,
+        system_message: str,
+        description: str,
+        model: str,
+        reasoning_effort: str | None,
+        mcp_config_base: dict[str, Any],
+        enable_config_discovery: bool,
+        hooks: list[dict] | None,
+        agent_definition_id: str,
+        skill_names: list[str],
+    ) -> str:
+        """Run a maintenance schedule separately under every eligible owner's scope."""
+        users = await self._list_memory_maintenance_users(org_id, schedule_title)
+        if not users:
+            return f"{schedule_title} fan-out: no eligible memory owners."
+
+        summaries: list[str] = []
+        for user_row in users:
+            user_id = str(user_row.get("user_id") or "").strip()
+            if not user_id:
+                continue
+            try:
+                scoped_key = await _mint_scoped_api_key(
+                    memory_scope=MEMORY_SCOPE_USER,
+                    memory_scope_user_id=user_id,
+                    org_id=org_id,
+                    ttl_minutes=60,
+                )
+                if not scoped_key:
+                    raise RuntimeError("scoped key minting failed")
+
+                scoped_mcp = dict(mcp_config_base)
+                scoped_mcp["memory-server"] = _build_scoped_memory_server_config(
+                    scoped_key=scoped_key,
+                    memory_scope=MEMORY_SCOPE_USER,
+                    org_id=org_id,
+                    memory_scope_user_id=user_id,
+                    tools=["*"],
+                    extra_headers={
+                        "X-Lucent-Agent-Definition-Id": agent_definition_id,
+                        "X-Lucent-Task-Id": task_id,
+                        "X-Lucent-Request-Id": request_id,
+                    },
+                )
+                result = await self.run_session(
+                    f"{schedule_title.lower().replace(' ', '-')}-{user_id[:8]}",
+                    system_message,
+                    (
+                        f"Execute this {schedule_title} pass for the scoped user only. "
+                        "You can access only that user's memories; do not attempt to "
+                        "discover or modify memories owned by anyone else.\n\n"
+                        f"{description}"
+                    ),
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    mcp_config_override=scoped_mcp,
+                    enable_config_discovery=enable_config_discovery,
+                    hooks=hooks,
+                    audit_context={
+                        "source": "daemon.memory_maintenance_fanout",
+                        "organization_id": org_id,
+                        "user_id": user_id,
+                        "request_id": request_id,
+                        "task_id": task_id,
+                        "agent_definition_id": agent_definition_id,
+                        "agent_type": agent_type,
+                        "skill_names": skill_names,
+                        "model": model,
+                        "reasoning_effort": reasoning_effort,
+                    },
+                )
+                summaries.append(f"user={user_id[:8]} status={'completed' if result is not None else 'empty'}")
+            except Exception as e:
+                log(f"{schedule_title} fan-out failed for user {user_id[:8]}: {e}", "WARN")
+                summaries.append(f"user={user_id[:8]} status=error")
+
+        return f"{schedule_title} fan-out complete: " + "; ".join(summaries)
+
     def _build_user_scoped_cognitive_prompt(
         self, targets: list[dict] | None = None
     ) -> str:
@@ -3958,6 +4114,36 @@ class LucentDaemon(
                         task_id,
                         "fanout_failed",
                         f"Cognitive planning fan-out failed: {e}",
+                    )
+                dispatched += 1
+                continue
+
+            schedule_title = _request_title.replace("[Scheduled] ", "")
+            if schedule_title in {"Learning Extraction", "Experience Compression"}:
+                try:
+                    fanout_result = await self._run_memory_maintenance_fanout(
+                        task_id=task_id,
+                        request_id=request_id,
+                        org_id=org_id,
+                        schedule_title=schedule_title,
+                        agent_type=agent_type,
+                        system_message=system_message,
+                        description=description,
+                        model=selected_model,
+                        reasoning_effort=task_reasoning_effort,
+                        mcp_config_base=task_mcp_config,
+                        enable_config_discovery=task_enable_config_discovery,
+                        hooks=hooks,
+                        agent_definition_id=str(agent_data["id"]),
+                        skill_names=[s.get("name") for s in skills if s.get("name")],
+                    )
+                    await _complete_owned(task_id, fanout_result[:4000])
+                except Exception as e:
+                    await _fail_owned(task_id, f"{schedule_title} fan-out failed: {e}")
+                    await RequestAPI.add_event(
+                        task_id,
+                        "fanout_failed",
+                        f"{schedule_title} fan-out failed: {e}",
                     )
                 dispatched += 1
                 continue
