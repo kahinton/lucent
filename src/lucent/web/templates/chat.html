@@ -903,18 +903,54 @@ async function loadSession(sessionId) {
         state.sessionId = session.id;
         history.replaceState(null, '', `/chat/${session.id}`);
         applySessionConfig(session);
-        renderSessionMessages(session.messages || []);
+        renderSessionMessages(session.messages || [], session.events || []);
         await loadSessions();
     } catch(e) {
         console.error('Failed to load session:', e);
     }
 }
 
-function renderSessionMessages(messages) {
+function eventTypeMatches(event, ...types) {
+    return types.includes(event.event_type || event.type);
+}
+
+function replaySessionEvents(assistantEl, events) {
+    if (!events.length) return;
+    const toolsEl = assistantEl.querySelector('.tools-container');
+    let reasoningEl = null;
+    let reasoningText = '';
+
+    for (const event of events) {
+        if (eventTypeMatches(event, 'tool_call', 'tool.call')) {
+            appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input);
+        } else if (eventTypeMatches(event, 'tool_result', 'tool.result')) {
+            updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output);
+        } else if (eventTypeMatches(event, 'reasoning')) {
+            if (!reasoningEl) reasoningEl = createReasoningBlock(toolsEl);
+            reasoningText += event.detail || '';
+            updateReasoningBlock(reasoningEl, reasoningText);
+        }
+    }
+
+    if (reasoningEl) collapseReasoningBlock(reasoningEl);
+    finalizeToolCalls(toolsEl);
+}
+
+function renderSessionMessages(messages, events = []) {
     const msgs = document.getElementById('messages');
     msgs.innerHTML = '';
     state.messages = [];
     const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant');
+    const eventsByTurn = new Map();
+    for (const event of events) {
+        if (event.visible === false || !event.turn_id) continue;
+        const turnEvents = eventsByTurn.get(event.turn_id) || [];
+        turnEvents.push(event);
+        eventsByTurn.set(event.turn_id, turnEvents);
+    }
+    for (const turnEvents of eventsByTurn.values()) {
+        turnEvents.sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+    }
     if (!visible.length) {
         clearConversation({ keepSession: true });
         return;
@@ -926,7 +962,8 @@ function renderSessionMessages(messages) {
             const att = msg.metadata && msg.metadata.attachments;
             appendUserMessage(msg.content || '', att);
         } else {
-            appendAssistantMessage(msg.content || '');
+            const assistantEl = appendAssistantMessage(msg.content || '');
+            replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || []);
         }
     }
     hideStatus();

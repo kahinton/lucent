@@ -1,5 +1,7 @@
 """Tests for chat model validation and per-model engine routing."""
 
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 
@@ -283,6 +285,16 @@ def test_chat_mcp_config_threads_llm_session_headers():
     assert headers["X-Lucent-LLM-Session-Id"] == "session-id"
     assert headers["X-Lucent-LLM-Turn-Id"] == "turn-id"
     assert headers["X-Lucent-LLM-Message-Id"] == "message-id"
+
+
+def test_chat_history_rehydrates_persisted_tool_events():
+    template = Path("src/lucent/web/templates/chat.html").read_text()
+
+    assert "renderSessionMessages(session.messages || [], session.events || [])" in template
+    assert "function replaySessionEvents(assistantEl, events)" in template
+    assert "appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input)" in template
+    assert "updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output)" in template
+    assert "replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || [])" in template
 
 
 def test_session_experience_summary_defaults_and_context_not_capped():
