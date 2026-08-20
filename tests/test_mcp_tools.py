@@ -294,6 +294,47 @@ class TestCreateMemory:
         finally:
             set_current_user(None)
 
+    async def test_user_scoped_daemon_memory_uses_scoped_user_attribution(
+        self, mcp_tools, db_pool, test_user, clean_test_data
+    ):
+        """A daemon key scoped to a user must not label that user's memory as daemon-owned."""
+        scoped_user = await UserRepository(db_pool).create(
+            external_id=f"{clean_test_data}scoped-user",
+            provider="local",
+            organization_id=test_user["organization_id"],
+            email=f"{clean_test_data}scoped-user@test.com",
+            display_name="Scoped User",
+        )
+        set_current_user(
+            {
+                "id": test_user["id"],
+                "organization_id": test_user["organization_id"],
+                "role": "daemon",
+                "display_name": "Lucent Daemon",
+                "email": "daemon@test.com",
+                "external_id": "daemon-service",
+                "memory_scope": "user",
+                "memory_scope_user_id": scoped_user["id"],
+            }
+        )
+        try:
+            result = await _call(
+                mcp_tools,
+                "create_memory",
+                {
+                    "type": "experience",
+                    "content": f"{clean_test_data} scoped daemon output",
+                    "tags": ["test"],
+                },
+            )
+
+            assert result["username"] == "Scoped User"
+            assert result["tags"] == ["test"]
+            assert result["user_id"] == str(scoped_user["id"])
+            assert result["shared"] is False
+        finally:
+            set_current_user(None)
+
 
 # ============================================================================
 # get_memory
