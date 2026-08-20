@@ -8,6 +8,10 @@
 # `http://openbao:8200` directly.
 
 services:
+  lucent:
+    environment:
+      LUCENT_MODEL_DISCOVERY_ON_STARTUP: ${LUCENT_MODEL_DISCOVERY_ON_STARTUP:-true}
+
   openbao:
     ports:
       - "127.0.0.1:8200:8200"

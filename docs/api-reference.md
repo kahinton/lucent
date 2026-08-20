@@ -107,7 +107,7 @@ POST /api/memories
 GET /api/memories/{memory_id}
 ```
 
-Returns the full memory object. Access is scoped to memories you own or that are shared within your organization.
+Returns the full memory object. Access is scoped to memories you own, memories granted to you directly or through a group, and memories granted to your organization.
 
 ### Update Memory
 
@@ -151,6 +151,37 @@ POST /api/memories/{memory_id}/unshare
 ```
 
 Removes a memory from organization sharing.
+
+### Manage Memory Access
+
+Memory owners and unscoped organization admins or owners can grant read access.
+The owner always retains access; grants never transfer ownership or update permission.
+
+```
+GET /api/memories/{memory_id}/access
+POST /api/memories/{memory_id}/access
+POST /api/memories/{memory_id}/access/revoke
+```
+
+`GET` returns the configured grants. To grant access, use one of these request bodies:
+
+```json
+{"grantee_type": "organization"}
+```
+
+```json
+{"grantee_type": "user", "grantee_id": "user-uuid"}
+```
+
+```json
+{"grantee_type": "group", "grantee_id": "group-uuid"}
+```
+
+Use the same body with `/access/revoke` to remove one grant. User and group
+recipients must belong to the memory's organization. The legacy `/share` and
+`/unshare` routes remain compatible aliases for adding or removing the
+organization grant; the `shared` response field indicates only that
+organization-wide grant, not targeted user or group grants.
 
 ---
 

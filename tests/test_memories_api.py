@@ -722,6 +722,31 @@ class TestShareMemory:
         assert resp.status_code == 404
 
 
+class TestMemoryAccessGrants:
+    """Targeted memory access management endpoints."""
+
+    async def test_grant_and_revoke_user_access(
+        self, mem_client, mem_client_b, mem_user_b, mem_prefix
+    ):
+        memory_id = (await _create_memory(mem_client, mem_prefix)).json()["id"]
+
+        grant = await mem_client.post(
+            f"/api/memories/{memory_id}/access",
+            json={"grantee_type": "user", "grantee_id": str(mem_user_b["id"])},
+        )
+        assert grant.status_code == 201
+        assert grant.json()["grantee_type"] == "user"
+
+        assert (await mem_client_b.get(f"/api/memories/{memory_id}")).status_code == 200
+
+        revoke = await mem_client.post(
+            f"/api/memories/{memory_id}/access/revoke",
+            json={"grantee_type": "user", "grantee_id": str(mem_user_b["id"])},
+        )
+        assert revoke.status_code == 200
+        assert (await mem_client_b.get(f"/api/memories/{memory_id}")).status_code == 404
+
+
 # ============================================================================
 # Tags
 # ============================================================================
