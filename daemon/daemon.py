@@ -140,16 +140,10 @@ except ImportError:
             self.original_error = original_error
             super().__init__(f"Model '{model}' is not available in the runtime")
 
-# Legacy import for backward compat (daemon may be run outside the package)
+# Legacy SDK availability check (daemon may be run outside the package)
 try:
-    from copilot import CopilotClient, SubprocessConfig
-
-    # PermissionHandler and SystemMessageReplaceConfig moved to copilot.session in SDK >=0.2.1
-    try:
-        from copilot.session import PermissionHandler, SystemMessageReplaceConfig
-    except ImportError:
-        from copilot import PermissionHandler
-        from copilot.types import SystemMessageReplaceConfig
+    import copilot
+    from copilot.session import PermissionHandler, SystemMessageReplaceConfig
 
     _COPILOT_SDK_AVAILABLE = True
 except ImportError:
@@ -3393,15 +3387,10 @@ class LucentDaemon(
             # Honor COPILOT_CLI_PATH / auto-detect the user's installed CLI
             # so this fallback path sees the same models the engine does.
             try:
-                from lucent.llm.copilot_engine import resolve_copilot_cli_path
-
-                _cli_path = resolve_copilot_cli_path()
+                from lucent.llm.copilot_engine import create_copilot_client
             except Exception:
-                _cli_path = None
-            _subprocess_kwargs: dict[str, Any] = {"log_level": "warning"}
-            if _cli_path:
-                _subprocess_kwargs["cli_path"] = _cli_path
-            client = CopilotClient(config=SubprocessConfig(**_subprocess_kwargs))
+                raise RuntimeError("Copilot engine module is unavailable")
+            client = create_copilot_client(log_level="warning")
             await client.start()
 
             session = await client.create_session(
@@ -4379,6 +4368,8 @@ class LucentDaemon(
 
         try:
             loops: list[asyncio.Task] = []
+
+            loops.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
 
             if "dispatcher" in self.roles:
                 loops.append(asyncio.create_task(self._dispatch_loop(), name="dispatch"))

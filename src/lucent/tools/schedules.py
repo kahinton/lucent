@@ -3,7 +3,7 @@
 import json
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.db.schedules import ScheduleRepository, webhook_secret_hash
 from lucent.tools.memories import _get_current_user_context

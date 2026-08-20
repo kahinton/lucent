@@ -136,6 +136,7 @@ async def schedules_list(
 async def _workflow_form_options(pool, user) -> dict[str, Any]:
     from lucent.db.definitions import DefinitionRepository
     from lucent.db.models import ModelRepository
+    from lucent.db.sandbox_template import SandboxTemplateRepository
 
     role_value = user.role if isinstance(user.role, str) else user.role.value
     def_repo = DefinitionRepository(pool)
@@ -168,9 +169,17 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
         for model in model_rows
     ]
     available_models.sort(key=lambda m: m["id"])
+    sandbox_rows = await SandboxTemplateRepository(pool).list_dispatchable(
+        str(user.organization_id)
+    )
+    available_sandbox_templates = [
+        {"id": str(template["id"]), "name": template["name"]}
+        for template in sandbox_rows
+    ]
     return {
         "active_agents": active_agents,
         "available_models": available_models,
+        "available_sandbox_templates": available_sandbox_templates,
         "workflow_composer_agent": workflow_composer_agent,
     }
 
@@ -243,8 +252,22 @@ async def workflow_create_from_wizard(request: Request):
     action_titles = _form_list(form, "action_title")
     action_prompts = _form_list(form, "action_prompt")
     action_agents = _form_list(form, "action_agent_type")
+    action_agent_definition_ids = _form_list(form, "action_agent_definition_id")
     action_models = _form_list(form, "action_model")
     action_efforts = _form_list(form, "action_reasoning_effort")
+    action_priorities = _form_list(form, "action_priority")
+    action_stages = _form_list(form, "action_stage")
+    action_sandbox_templates = _form_list(form, "action_sandbox_template_id")
+    action_sandbox_configs = _form_list(form, "action_sandbox_config_json")
+    action_repo_urls = _form_list(form, "action_repo_url")
+    action_branches = _form_list(form, "action_branch")
+    action_timeouts = _form_list(form, "action_timeout_seconds")
+    action_output_modes = _form_list(form, "action_output_mode")
+    action_commit_approved = _form_list(form, "action_commit_approved")
+    action_reuse_sandbox = _form_list(form, "action_reuse_sandbox")
+    action_output_schemas = _form_list(form, "action_output_schema_json")
+    action_output_failures = _form_list(form, "action_output_failure")
+    action_output_retries = _form_list(form, "action_output_retries")
     from lucent.access_control import AccessControlService
 
     access_control = AccessControlService(pool)
@@ -260,16 +283,77 @@ async def workflow_create_from_wizard(request: Request):
             str(user.id), "model", action_model, str(user.organization_id)
         ):
             raise HTTPException(403, "Model is not available to this user")
+        try:
+            stage = max(0, int(_form_value(action_stages, idx, str(idx + 1))) - 1)
+        except ValueError as exc:
+            raise HTTPException(422, f"Step {idx + 1} stage must be a number") from exc
+        sandbox_config: dict[str, Any] = {}
+        sandbox_json = _form_value(action_sandbox_configs, idx)
+        if sandbox_json:
+            try:
+                sandbox_config = json.loads(sandbox_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(422, f"Invalid sandbox JSON for step {idx + 1}") from exc
+            if not isinstance(sandbox_config, dict):
+                raise HTTPException(422, f"Sandbox config for step {idx + 1} must be an object")
+        for key, value in (
+            ("repo_url", _form_value(action_repo_urls, idx)),
+            ("branch", _form_value(action_branches, idx)),
+            ("output_mode", _form_value(action_output_modes, idx)),
+        ):
+            if value:
+                sandbox_config[key] = value
+        timeout = _form_value(action_timeouts, idx)
+        if timeout:
+            try:
+                sandbox_config["timeout_seconds"] = max(60, int(timeout))
+            except ValueError as exc:
+                raise HTTPException(422, f"Step {idx + 1} timeout must be a number") from exc
+        if _form_value(action_commit_approved, idx) == "true":
+            sandbox_config["commit_approved"] = True
+        if _form_value(action_reuse_sandbox, idx) == "true":
+            sandbox_config["reuse_within_request"] = True
+        output_contract = None
+        output_schema_json = _form_value(action_output_schemas, idx)
+        if output_schema_json:
+            try:
+                output_schema = json.loads(output_schema_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(422, f"Invalid output schema for step {idx + 1}") from exc
+            if not isinstance(output_schema, dict):
+                raise HTTPException(422, f"Output schema for step {idx + 1} must be an object")
+            try:
+                max_retries = max(0, int(_form_value(action_output_retries, idx, "1")))
+            except ValueError as exc:
+                raise HTTPException(422, f"Step {idx + 1} output retries must be a number") from exc
+            output_contract = {
+                "json_schema": output_schema,
+                "on_failure": _form_value(action_output_failures, idx, "fallback"),
+                "max_retries": max_retries,
+            }
+            if output_contract["on_failure"] not in {
+                "fail", "fallback", "retry_then_fallback"
+            }:
+                raise HTTPException(422, f"Invalid output failure policy for step {idx + 1}")
         actions.append(
             {
                 "action_type": "task",
                 "title": action_title or f"{title} action {idx + 1}",
                 "description": action_prompt or description,
                 "agent_type": _form_value(action_agents, idx, "code") or "code",
+                "agent_definition_id": _form_value(action_agent_definition_ids, idx) or None,
                 "model": action_model,
                 "reasoning_effort": _form_value(action_efforts, idx) or None,
-                "priority": str(form.get("priority", "medium")).strip() or "medium",
-                "sequence_order": idx,
+                "sandbox_template_id": _form_value(action_sandbox_templates, idx) or None,
+                "sandbox_config": sandbox_config or None,
+                "output_contract": output_contract,
+                "priority": _form_value(
+                    action_priorities,
+                    idx,
+                    str(form.get("priority", "medium")).strip() or "medium",
+                )
+                or "medium",
+                "sequence_order": stage,
             }
         )
     if not actions:
@@ -329,7 +413,6 @@ async def schedule_detail(
     request: Request,
     schedule_id: str,
     page: int = 1,
-    per_page: int = 25,
 ):
     """Schedule detail page with run history."""
     user = await get_user_context(request)
@@ -375,7 +458,7 @@ async def schedule_detail(
 
     # Paginate run history
     page = max(1, page)
-    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    per_page = 10
     run_offset = (page - 1) * per_page
     runs_result = await repo.list_runs(schedule_id, limit=per_page, offset=run_offset)
     sched["runs"] = runs_result["items"]
@@ -411,6 +494,13 @@ async def schedule_detail(
     ]
     available_models.sort(key=lambda m: m["id"])
 
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+
+    available_sandbox_templates = [
+        {"id": str(template["id"]), "name": template["name"]}
+        for template in await SandboxTemplateRepository(pool).list_dispatchable(org_id)
+    ]
+
     # Resolve sandbox template name if linked
     sandbox_template = None
     if sched.get("sandbox_template_id"):
@@ -435,6 +525,7 @@ async def schedule_detail(
             ),
             "active_agents": active_agents,
             "available_models": available_models,
+            "available_sandbox_templates": available_sandbox_templates,
             "sandbox_template": sandbox_template,
             "run_page": page,
             "run_per_page": per_page,
@@ -599,11 +690,175 @@ async def schedule_edit(request: Request, schedule_id: str):
     if review_instructions != (sched.get("review_instructions") or ""):
         updates["review_instructions"] = review_instructions
 
+    use_raw_json = str(form.get("use_raw_json", "")).lower() == "on"
+    if not use_raw_json and (
+        "request_title" in form or "request_description" in form
+    ):
+        current_template = sched.get("request_template") or {}
+        if isinstance(current_template, str):
+            try:
+                current_template = json.loads(current_template)
+            except (TypeError, ValueError):
+                current_template = {}
+        request_template = {
+            **current_template,
+            "title": str(form.get("request_title", "")).strip() or sched["title"],
+            "description": str(form.get("request_description", "")).strip(),
+            "dependency_policy": str(form.get("dependency_policy", "strict")).strip()
+            or "strict",
+        }
+        updates["request_template"] = request_template
+
+    if not use_raw_json and ("action_title" in form or "action_prompt" in form):
+        action_titles = _form_list(form, "action_title")
+        action_prompts = _form_list(form, "action_prompt")
+        action_agents = _form_list(form, "action_agent_type")
+        action_agent_definition_ids = _form_list(form, "action_agent_definition_id")
+        action_models = _form_list(form, "action_model")
+        action_efforts = _form_list(form, "action_reasoning_effort")
+        action_priorities = _form_list(form, "action_priority")
+        action_stages = _form_list(form, "action_stage")
+        action_sandbox_templates = _form_list(form, "action_sandbox_template_id")
+        action_sandbox_configs = _form_list(form, "action_sandbox_config_json")
+        action_repo_urls = _form_list(form, "action_repo_url")
+        action_branches = _form_list(form, "action_branch")
+        action_timeouts = _form_list(form, "action_timeout_seconds")
+        action_output_modes = _form_list(form, "action_output_mode")
+        action_commit_approved = _form_list(form, "action_commit_approved")
+        action_reuse_sandbox = _form_list(form, "action_reuse_sandbox")
+        action_output_schemas = _form_list(form, "action_output_schema_json")
+        action_output_failures = _form_list(form, "action_output_failure")
+        action_output_retries = _form_list(form, "action_output_retries")
+        existing_actions = _form_list(form, "action_existing_json")
+        from lucent.access_control import AccessControlService
+        from lucent.model_registry import validate_model, validate_reasoning_effort
+
+        access_control = AccessControlService(pool)
+        actions = []
+        for idx in range(max(len(action_titles), len(action_prompts))):
+            action_title = _form_value(action_titles, idx)
+            action_prompt = _form_value(action_prompts, idx)
+            if not action_title and not action_prompt:
+                continue
+            action_model = _form_value(action_models, idx) or None
+            action_effort = _form_value(action_efforts, idx) or None
+            if action_model:
+                model_error = validate_model(action_model, require_tools=True)
+                if model_error:
+                    raise HTTPException(422, model_error)
+                if not await access_control.can_access(
+                    str(user.id), "model", action_model, org_id
+                ):
+                    raise HTTPException(403, "Model is not available to this user")
+                effort_error = validate_reasoning_effort(action_model, action_effort)
+                if effort_error:
+                    raise HTTPException(422, effort_error)
+            elif action_effort:
+                raise HTTPException(422, "reasoning_effort requires model")
+            try:
+                stage = max(0, int(_form_value(action_stages, idx, str(idx + 1))) - 1)
+            except ValueError as exc:
+                raise HTTPException(422, f"Step {idx + 1} stage must be a number") from exc
+            existing_action: dict[str, Any] = {}
+            existing_raw = _form_value(existing_actions, idx)
+            if existing_raw:
+                try:
+                    parsed_existing = json.loads(existing_raw)
+                    if isinstance(parsed_existing, dict):
+                        existing_action = parsed_existing
+                except json.JSONDecodeError:
+                    pass
+            sandbox_config = existing_action.get("sandbox_config") or {}
+            sandbox_json = _form_value(action_sandbox_configs, idx)
+            if sandbox_json:
+                try:
+                    sandbox_config = json.loads(sandbox_json)
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(422, f"Invalid sandbox JSON for step {idx + 1}") from exc
+                if not isinstance(sandbox_config, dict):
+                    raise HTTPException(422, f"Sandbox config for step {idx + 1} must be an object")
+            for key, value in (
+                ("repo_url", _form_value(action_repo_urls, idx)),
+                ("branch", _form_value(action_branches, idx)),
+                ("output_mode", _form_value(action_output_modes, idx)),
+            ):
+                if value:
+                    sandbox_config[key] = value
+                else:
+                    sandbox_config.pop(key, None)
+            timeout = _form_value(action_timeouts, idx)
+            if timeout:
+                try:
+                    sandbox_config["timeout_seconds"] = max(60, int(timeout))
+                except ValueError as exc:
+                    raise HTTPException(422, f"Step {idx + 1} timeout must be a number") from exc
+            else:
+                sandbox_config.pop("timeout_seconds", None)
+            for key, values in (
+                ("commit_approved", action_commit_approved),
+                ("reuse_within_request", action_reuse_sandbox),
+            ):
+                if _form_value(values, idx) == "true":
+                    sandbox_config[key] = True
+                else:
+                    sandbox_config.pop(key, None)
+            output_contract = existing_action.get("output_contract")
+            output_schema_submitted = idx < len(action_output_schemas)
+            output_schema_json = _form_value(action_output_schemas, idx)
+            if output_schema_submitted and output_schema_json:
+                try:
+                    output_schema = json.loads(output_schema_json)
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(422, f"Invalid output schema for step {idx + 1}") from exc
+                if not isinstance(output_schema, dict):
+                    raise HTTPException(422, f"Output schema for step {idx + 1} must be an object")
+                try:
+                    max_retries = max(0, int(_form_value(action_output_retries, idx, "1")))
+                except ValueError as exc:
+                    raise HTTPException(422, f"Step {idx + 1} output retries must be a number") from exc
+                output_contract = {
+                    "json_schema": output_schema,
+                    "on_failure": _form_value(action_output_failures, idx, "fallback"),
+                    "max_retries": max_retries,
+                }
+                if output_contract["on_failure"] not in {
+                    "fail", "fallback", "retry_then_fallback"
+                }:
+                    raise HTTPException(422, f"Invalid output failure policy for step {idx + 1}")
+            elif output_schema_submitted:
+                output_contract = None
+            actions.append(
+                {
+                    **existing_action,
+                    "action_type": "task",
+                    "title": action_title or f"{sched['title']} step {idx + 1}",
+                    "description": action_prompt,
+                    "agent_type": _form_value(action_agents, idx, "code") or "code",
+                    "agent_definition_id": _form_value(action_agent_definition_ids, idx) or None,
+                    "model": action_model,
+                    "reasoning_effort": action_effort,
+                    "sandbox_template_id": _form_value(action_sandbox_templates, idx) or None,
+                    "sandbox_config": sandbox_config or None,
+                    "output_contract": output_contract,
+                    "priority": _form_value(
+                        action_priorities, idx, sched.get("priority") or "medium"
+                    )
+                    or "medium",
+                    "sequence_order": stage,
+                }
+            )
+        if not actions:
+            raise HTTPException(422, "A workflow must have at least one step")
+        updates["actions"] = actions
+        updates["agent_type"] = actions[0]["agent_type"]
+
     for field_name, default in (
         ("request_template", {}),
         ("trigger_config", {}),
         ("actions", []),
     ):
+        if field_name == "actions" and "actions" in updates:
+            continue
         raw = form.get(f"{field_name}_json", "")
         if raw is None or str(raw).strip() == "":
             continue

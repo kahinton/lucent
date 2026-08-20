@@ -24,6 +24,7 @@ logger = get_logger("llm.copilot")
 RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS = [
     "bash",
     "grep",
+    "skill",
     "view",
     "str_replace_editor",
     "create_file",
@@ -49,7 +50,7 @@ def _strip_internal_markers(mcp_config: dict) -> dict:
 # Lazy import — only loaded when this engine is actually used
 _CopilotClient: Any = None
 _PermissionHandler: Any = None
-_SubprocessConfig: Any = None
+_StdioRuntimeConnection: Any = None
 _SystemMessageReplaceConfig: Any = None
 _sdk_available: bool | None = None
 
@@ -429,39 +430,45 @@ def resolve_copilot_cli_path() -> str | None:
 
 def _ensure_sdk() -> bool:
     """Lazily import the Copilot SDK. Returns True if available."""
-    global _CopilotClient, _PermissionHandler, _SubprocessConfig
+    global _CopilotClient, _PermissionHandler, _StdioRuntimeConnection
     global _SystemMessageReplaceConfig, _sdk_available
     if _sdk_available is not None:
         return _sdk_available
     try:
-        from copilot import CopilotClient, SubprocessConfig
+        from copilot import CopilotClient, StdioRuntimeConnection
 
         _CopilotClient = CopilotClient
-        _SubprocessConfig = SubprocessConfig
-        # PermissionHandler and SystemMessageReplaceConfig moved to
-        # copilot.session in SDK >=0.2.1 (removed from top-level copilot)
-        try:
-            from copilot.session import PermissionHandler, SystemMessageReplaceConfig
-            _PermissionHandler = PermissionHandler
-            _SystemMessageReplaceConfig = SystemMessageReplaceConfig
-        except ImportError:
-            # Older SDK had these at top level or in copilot.types
-            try:
-                from copilot import PermissionHandler
-                _PermissionHandler = PermissionHandler
-            except ImportError:
-                _PermissionHandler = None
-            try:
-                from copilot.types import SystemMessageReplaceConfig
-                _SystemMessageReplaceConfig = SystemMessageReplaceConfig
-            except ImportError:
-                _SystemMessageReplaceConfig = None
+        _StdioRuntimeConnection = StdioRuntimeConnection
+        from copilot.session import PermissionHandler, SystemMessageReplaceConfig
+
+        _PermissionHandler = PermissionHandler
+        _SystemMessageReplaceConfig = SystemMessageReplaceConfig
         _install_copilot_permission_compat()
         _install_copilot_session_event_compat()
         _sdk_available = True
     except ImportError:
         _sdk_available = False
     return _sdk_available
+
+
+def create_copilot_client(
+    *,
+    github_token: str | None = None,
+    log_level: str = "warning",
+) -> Any:
+    """Create a Copilot SDK 1.x client using its runtime-connection API."""
+    if not _ensure_sdk():
+        raise RuntimeError(
+            "Copilot engine requires the github-copilot-sdk package. "
+            "Install with: pip install github-copilot-sdk"
+        )
+    cli_path = resolve_copilot_cli_path()
+    connection = _StdioRuntimeConnection(path=cli_path) if cli_path else None
+    return _CopilotClient(
+        connection=connection,
+        log_level=log_level,
+        github_token=github_token,
+    )
 
 
 class CopilotEngine(LLMEngine):
@@ -500,15 +507,11 @@ class CopilotEngine(LLMEngine):
             return None
 
     def _make_client(self, github_token: str | None = None) -> Any:
-        """Create a CopilotClient with SubprocessConfig."""
-        config_kwargs: dict[str, Any] = {"log_level": self._log_level}
-        token = github_token or self._github_token
-        if token:
-            config_kwargs["github_token"] = token
-        cli_path = resolve_copilot_cli_path()
-        if cli_path:
-            config_kwargs["cli_path"] = cli_path
-        return _CopilotClient(config=_SubprocessConfig(**config_kwargs))
+        """Create a CopilotClient using the configured runtime and credential."""
+        return create_copilot_client(
+            github_token=github_token or self._github_token,
+            log_level=self._log_level,
+        )
 
     def _make_session_kwargs(
         self,
@@ -725,17 +728,21 @@ class CopilotEngine(LLMEngine):
 
                 if etype == "assistant.message":
                     content = getattr(event.data, "content", None)
-                    if content:
-                        response_parts.append(content)
+                    if not content:
+                        return
+                    response_parts.append(content)
                     normalized = SessionEvent(
                         type=SessionEventType.MESSAGE,
                         content=content,
                         raw=event,
                     )
                 elif etype == "assistant.message_delta":
+                    content = getattr(event.data, "content", None)
+                    if not content:
+                        return
                     normalized = SessionEvent(
                         type=SessionEventType.MESSAGE_DELTA,
-                        content=getattr(event.data, "content", None),
+                        content=content,
                         raw=event,
                     )
                 elif etype == "tool.execution_start":
@@ -804,9 +811,12 @@ class CopilotEngine(LLMEngine):
                         raw=event,
                     )
                 elif etype in ("assistant.reasoning", "assistant.reasoning_delta"):
+                    content = getattr(event.data, "content", None)
+                    if not content:
+                        return
                     normalized = SessionEvent(
                         type=SessionEventType.OTHER,
-                        content=getattr(event.data, "content", None),
+                        content=content,
                         tool_name="_reasoning",
                         raw=event,
                     )

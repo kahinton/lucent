@@ -2163,9 +2163,9 @@ class RequestRepository:
     async def list_pending_tasks(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
         """Get all tasks ready to be claimed.
 
-        Respects sequence_order as a dependency gate: a task is only
-        dispatchable when every earlier sequence level in the same request
-        has at least one task in an acceptable terminal state.
+        Respects sequence_order as a stage gate: tasks at the same level are
+        dispatchable together, and a later level waits until every task in
+        each earlier level is terminal with an acceptable outcome.
 
         This correctly handles retries — if a task at sequence 0 fails but
         a retry task at the same sequence 0 completes, subsequent tasks
@@ -2184,6 +2184,12 @@ class RequestRepository:
                      AND t.status IN ('pending', 'planned')
                      AND r.approval_status IN ('auto_approved', 'approved')
                      AND r.status NOT IN ('cancelled', 'completed', 'failed')
+                                         AND NOT EXISTS (
+                                             SELECT 1 FROM tasks unfinished
+                                             WHERE unfinished.request_id = t.request_id
+                                                 AND unfinished.sequence_order < t.sequence_order
+                                                 AND unfinished.status NOT IN ('completed', 'failed', 'cancelled')
+                                         )
                      AND NOT EXISTS (
                        SELECT 1 FROM (
                            SELECT DISTINCT sequence_order AS seq

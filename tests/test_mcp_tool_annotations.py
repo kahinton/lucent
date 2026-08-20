@@ -1,6 +1,6 @@
 """Tests for MCP ToolAnnotations on Lucent tools."""
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.tools.definitions import register_definition_tools
 from lucent.tools.memories import register_tools as register_memory_tools
@@ -31,7 +31,7 @@ def test_core_read_only_tools_are_annotated():
     ]:
         annotations = _tool_annotations(mcp, name)
         assert annotations is not None, name
-        assert annotations.readOnlyHint is True, name
+        assert annotations.read_only_hint is True, name
 
 
 def test_core_mutating_tools_are_annotated():
@@ -50,7 +50,7 @@ def test_core_mutating_tools_are_annotated():
     ]:
         annotations = _tool_annotations(mcp, name)
         assert annotations is not None, name
-        assert annotations.readOnlyHint is False, name
+        assert annotations.read_only_hint is False, name
 
 
 def test_legacy_interaction_tools_are_not_registered():

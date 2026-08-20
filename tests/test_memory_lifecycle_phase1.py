@@ -22,7 +22,9 @@ async def _create_pre_phase1_memories_table(conn, schema_name: str) -> None:
         CREATE TABLE memories (
             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
             username TEXT NOT NULL,
-            type TEXT NOT NULL CHECK (type IN ('experience', 'technical', 'procedural', 'goal', 'individual')),
+            type TEXT NOT NULL CHECK (
+                type IN ('experience', 'technical', 'procedural', 'goal', 'individual')
+            ),
             content TEXT NOT NULL,
             tags TEXT[] DEFAULT '{}',
             importance INTEGER DEFAULT 5 CHECK (importance >= 1 AND importance <= 10),
@@ -133,7 +135,10 @@ class TestPhase1VitalityComputation:
                 stale["id"],
             )
 
-        result = await repo.compute_vitality_scores(batch_size=100)
+        result = await repo.compute_vitality_scores(
+            batch_size=100,
+            organization_id=str(test_user["organization_id"]),
+        )
         assert result["processed"] >= 2
         assert result["updated"] >= 2
 
@@ -168,7 +173,10 @@ class TestPhase1VitalityComputation:
                 memory["id"],
             )
 
-        await repo.compute_vitality_scores(batch_size=100)
+        await repo.compute_vitality_scores(
+            batch_size=100,
+            organization_id=str(test_user["organization_id"]),
+        )
         persisted = await repo.get(memory["id"])
         assert persisted is not None
         assert persisted["vitality_score"] is not None
@@ -211,7 +219,10 @@ class TestPhase1VitalityComputation:
                 [individual["id"], active_goal["id"]],
             )
 
-        await repo.compute_vitality_scores(batch_size=100)
+        await repo.compute_vitality_scores(
+            batch_size=100,
+            organization_id=str(test_user["organization_id"]),
+        )
         individual_after = await repo.get(individual["id"])
         goal_after = await repo.get(active_goal["id"])
         assert individual_after is not None
@@ -244,7 +255,10 @@ class TestPhase1VitalityComputation:
         )
         before_ids = [item["id"] for item in before["memories"]]
 
-        await repo.compute_vitality_scores(batch_size=100)
+        await repo.compute_vitality_scores(
+            batch_size=100,
+            organization_id=str(test_user["organization_id"]),
+        )
 
         after = await repo.search(
             query=f"{prefix} shadow invariant search corpus",

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.auth import set_current_user
 from lucent.db import UserRepository
@@ -44,6 +44,52 @@ async def auth_user(test_user):
     )
     yield test_user
     set_current_user(None)
+
+
+@pytest_asyncio.fixture
+async def available_model(db_pool):
+    from lucent.db.models import ModelRepository
+    from lucent.model_registry import list_models
+
+    model = list_models()[0]
+    repo = ModelRepository(db_pool)
+    existing = await repo.get_model(model.id)
+    if existing:
+        await repo.update_model(
+            model.id,
+            is_enabled=True,
+            organization_id=None,
+            owner_user_id=None,
+            owner_group_id=None,
+        )
+    else:
+        await repo.create_model(
+            model.id,
+            model.provider,
+            model.name,
+            category=model.category,
+            supports_tools=model.supports_tools,
+        )
+    yield model
+    if existing:
+        await repo.update_model(
+            model.id,
+            is_enabled=existing["is_enabled"],
+            organization_id=(
+                str(existing["organization_id"])
+                if existing["organization_id"]
+                else None
+            ),
+            owner_user_id=(
+                str(existing["owner_user_id"]) if existing["owner_user_id"] else None
+            ),
+            owner_group_id=(
+                str(existing["owner_group_id"]) if existing["owner_group_id"] else None
+            ),
+        )
+    else:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM models WHERE id = $1", model.id)
 
 
 @pytest_asyncio.fixture
@@ -100,7 +146,7 @@ async def cleanup_requests(db_pool, test_organization):
 
 async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
     """Call an MCP tool and parse the JSON response."""
-    result = await mcp._tool_manager.call_tool(tool_name, args or {})
+    result = await mcp._tool_manager.call_tool(tool_name, args or {}, None)
     return json.loads(result)
 
 
@@ -556,6 +602,7 @@ class TestListPendingRequests:
 # ============================================================================
 
 
+@pytest.mark.usefixtures("available_model")
 class TestListAvailableModels:
     @pytest.mark.asyncio
     async def test_returns_models(self, mcp, auth_user):

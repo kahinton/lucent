@@ -107,7 +107,7 @@ async def test_webhook_workflow_triggers_multi_action_request(
                 "title": "Record follow-up",
                 "description": "Create or record the follow-up artifact as a task output.",
                 "agent_type": "code",
-                "sequence_order": 1,
+                "sequence_order": 0,
             },
         ],
         review_instructions="Confirm both task outputs are recorded before approval.",
@@ -163,7 +163,7 @@ async def test_webhook_workflow_triggers_multi_action_request(
     assert "issue.opened" in request["description"]
     assert [(t["title"], t["sequence_order"]) for t in tasks] == [
         ("Classify event", 0),
-        ("Record follow-up", 1),
+        ("Record follow-up", 0),
     ]
     assert schedule["status"] == "active"
     assert schedule["run_count"] == 1

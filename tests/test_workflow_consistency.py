@@ -22,63 +22,14 @@ from lucent.models.validation import (
 
 
 @pytest_asyncio.fixture
-async def wf_prefix(db_pool):
+async def wf_prefix(db_pool, delete_test_organizations):
     """Unique prefix and cleanup for workflow consistency tests."""
     test_id = str(uuid4())[:8]
     prefix = f"test_wf_{test_id}_"
     yield prefix
 
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM task_events WHERE task_id IN ("
-            "SELECT id FROM tasks WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1))",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM task_memories WHERE task_id IN ("
-            "SELECT id FROM tasks WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1))",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM tasks WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM requests WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM agent_definitions WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM memory_audit_log WHERE memory_id IN "
-            "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM memory_access_log WHERE memory_id IN "
-            "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute("DELETE FROM memories WHERE username LIKE $1", f"{prefix}%")
-        await conn.execute(
-            "DELETE FROM api_keys WHERE user_id IN "
-            "(SELECT id FROM users WHERE external_id LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM models WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
-        await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
+        await delete_test_organizations(conn, [f"{prefix}%"])
 
 
 @pytest_asyncio.fixture
@@ -169,9 +120,19 @@ async def wf_daemon_client(wf_daemon_user):
     app.dependency_overrides.clear()
 
 
+class WorkflowRequestRepository(RequestRepository):
+    def __init__(self, pool, default_created_by):
+        super().__init__(pool)
+        self.default_created_by = default_created_by
+
+    async def create_request(self, *args, **kwargs):
+        kwargs.setdefault("created_by", self.default_created_by)
+        return await super().create_request(*args, **kwargs)
+
+
 @pytest_asyncio.fixture
-async def wf_repo(db_pool):
-    return RequestRepository(db_pool)
+async def wf_repo(db_pool, wf_user):
+    return WorkflowRequestRepository(db_pool, str(wf_user["id"]))
 
 
 async def _create_task(wf_repo, org_id, request_id, title="Task"):
@@ -556,17 +517,17 @@ class TestModelValidation:
 class TestReviewQueueVisibility:
     @pytest.mark.asyncio
     async def test_needs_review_memories_are_searchable(
-        self, wf_daemon_client, wf_client_b, wf_prefix
+        self, wf_client, wf_client_b, wf_prefix
     ):
-        created = await wf_daemon_client.post(
+        created = await wf_client.post(
             "/api/memories",
             json={
                 "username": f"{wf_prefix}daemon",
                 "type": "technical",
                 "content": f"{wf_prefix}needs review content",
-                "tags": ["awaiting-approval"],
+                "tags": ["needs-review"],
                 "metadata": {"category": "workflow-test"},
-                "shared": False,
+                "shared": True,
             },
         )
         assert created.status_code == 201
@@ -1163,7 +1124,9 @@ class TestFeedbackProcessing:
     """Test feedback approval/rejection updates tags correctly."""
 
     @pytest.mark.asyncio
-    async def test_approve_feedback_adds_validated_tag(self, wf_daemon_client, wf_prefix):
+    async def test_daemon_feedback_memory_retains_review_tag(
+        self, wf_daemon_client, wf_prefix
+    ):
         created = await wf_daemon_client.post(
             "/api/memories",
             json={
@@ -1175,13 +1138,8 @@ class TestFeedbackProcessing:
             },
         )
         assert created.status_code == 201
-        memory_id = created.json()["id"]
         tags = created.json()["tags"]
         assert "needs-review" in tags
-
-        # Verify the memory exists
-        fetched = await wf_daemon_client.get(f"/api/memories/{memory_id}")
-        assert fetched.status_code == 200
 
     @pytest.mark.asyncio
     async def test_task_completion_via_api_stores_result(

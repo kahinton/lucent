@@ -8,7 +8,7 @@ import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 # ============================================================================
 # Server Configuration

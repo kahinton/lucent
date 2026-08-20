@@ -134,6 +134,9 @@ services:
       # Local Compose serves plain HTTP, including when reached by LAN IP.
       # Secure cookies are not returned by browsers over http://<lan-ip>.
       LUCENT_SECURE_COOKIES: ${LUCENT_SECURE_COOKIES:-false}
+      LUCENT_PUBLIC_URL: ${LUCENT_PUBLIC_URL:-}
+      LUCENT_CORS_ORIGINS: ${LUCENT_CORS_ORIGINS:-}
+      LUCENT_TRUSTED_PROXIES: ${LUCENT_TRUSTED_PROXIES:-}
       # Cookie signing is persisted via the configured secret provider at startup.
       # Set LUCENT_SIGNING_SECRET only for explicit production override/debugging.
       LUCENT_SIGNING_SECRET: ${LUCENT_SIGNING_SECRET:-}

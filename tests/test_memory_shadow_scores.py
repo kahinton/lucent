@@ -376,7 +376,11 @@ class TestCandidateAGcpShadowScoring:
                 organization_id=test_user["organization_id"],
             )
 
-        result = await repo.compute_shadow_forget_scores(strategy="gcp-v1", batch_size=100)
+        result = await repo.compute_shadow_forget_scores(
+            strategy="gcp-v1",
+            batch_size=100,
+            organization_id=str(test_user["organization_id"]),
+        )
         assert result["enabled"] is True
         assert result["processed"] >= 3
         assert result["inserted"] >= 3

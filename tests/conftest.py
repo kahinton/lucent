@@ -19,6 +19,68 @@ os.environ.setdefault("LUCENT_RATE_LIMIT_PER_MINUTE", "999999")
 os.environ.setdefault("LUCENT_SECRET_KEY", "test-secret-key-for-testing-only")
 os.environ.setdefault("LUCENT_SECRET_PROVIDER", "builtin")
 
+_ORG_RESTRICTIVE_TABLES = (
+    "task_outputs",
+    "reviews",
+    "tasks",
+    "requests",
+    "schedules",
+    "sandboxes",
+    "sandbox_templates",
+    "agent_definitions",
+    "mcp_server_configs",
+    "models",
+    "skill_definitions",
+)
+
+
+def pytest_collection_modifyitems(items):
+    """Classify tests from their resolved fixture graph."""
+    for item in items:
+        marker = "integration" if "db_pool" in item.fixturenames else "unit"
+        item.add_marker(getattr(pytest.mark, marker))
+
+
+async def _delete_test_organizations(conn, name_patterns: list[str]) -> None:
+    """Delete test organizations after clearing non-cascading dependencies."""
+    restrictive_tables = {
+        row["table_name"]
+        for row in await conn.fetch(
+            "SELECT conrelid::regclass::text AS table_name "
+            "FROM pg_constraint "
+            "WHERE contype = 'f' AND confrelid = 'organizations'::regclass "
+            "AND confdeltype IN ('a', 'r')"
+        )
+    }
+    unknown_tables = restrictive_tables.difference(_ORG_RESTRICTIVE_TABLES)
+    if unknown_tables:
+        names = ", ".join(sorted(unknown_tables))
+        raise RuntimeError(f"Test organization cleanup is missing tables: {names}")
+
+    organization_ids = await conn.fetchval(
+        "SELECT array_agg(id) FROM organizations WHERE name LIKE ANY($1::text[])",
+        name_patterns,
+    )
+    if not organization_ids:
+        return
+
+    async with conn.transaction():
+        for table in _ORG_RESTRICTIVE_TABLES:
+            await conn.execute(
+                f"DELETE FROM {table} WHERE organization_id = ANY($1::uuid[])",
+                organization_ids,
+            )
+        await conn.execute(
+            "DELETE FROM organizations WHERE id = ANY($1::uuid[])",
+            organization_ids,
+        )
+
+
+@pytest.fixture
+def delete_test_organizations():
+    """Provide FK-aware organization cleanup to file-local test fixtures."""
+    return _delete_test_organizations
+
 
 @pytest.fixture(autouse=True)
 def _bypass_ssrf_validation_in_tests(request):
@@ -42,17 +104,13 @@ def _bypass_ssrf_validation_in_tests(request):
         yield
 
 
-@pytest_asyncio.fixture(scope="function")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def db_pool():
-    """Create a database pool for each test function.
+    """Create one database pool for the test session.
 
-    Uses the lucent database for tests since we clean up after ourselves.
+    Test data fixtures remain function-scoped and clean up after themselves.
     """
-    import lucent.db.pool as pool_module
     from lucent.db.pool import close_db, init_db
-
-    # Reset the global pool to None to ensure fresh connection
-    pool_module._pool = None
 
     database_url = os.environ.get(
         "DATABASE_URL",
@@ -64,15 +122,12 @@ async def db_pool():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def cleanup_orphaned_test_data():
-    """Session-scoped safety net: remove orphaned test data after the full test suite.
+def cleanup_orphaned_test_data(request):
+    """Remove orphaned test data before and after the full test suite.
 
     Individual test fixtures should clean up after themselves, but if cleanup
     fails (e.g. test crash, missing cleanup code), this catches the leftovers.
-    Runs once after ALL tests complete.
     """
-    yield
-
     import asyncio
 
     async def _cleanup():
@@ -84,92 +139,25 @@ def cleanup_orphaned_test_data():
         )
         conn = await asyncpg.connect(database_url)
         try:
-            # Delete test data in FK-safe order.
-            # Test users have external_id starting with 'test_' or 'mcp_other_'.
-            test_user_filter = (
-                "external_id LIKE 'test_%' OR external_id LIKE 'mcp_other_%'"
-            )
-            test_org_filter = (
-                "name LIKE 'test_%' OR name LIKE 'mcp_other_%'"
-            )
-
-            # Reviews, tasks, requests for test orgs
-            await conn.execute(
-                f"DELETE FROM reviews WHERE organization_id IN "
-                f"(SELECT id FROM organizations WHERE {test_org_filter})"
-            )
-            await conn.execute(
-                f"DELETE FROM tasks WHERE request_id IN "
-                f"(SELECT id FROM requests WHERE organization_id IN "
-                f"(SELECT id FROM organizations WHERE {test_org_filter}))"
-            )
-            await conn.execute(
-                f"DELETE FROM requests WHERE organization_id IN "
-                f"(SELECT id FROM organizations WHERE {test_org_filter})"
-            )
-            # Memories owned by test users (CASCADE should handle this, but be explicit)
-            await conn.execute(
-                f"DELETE FROM memory_audit_log WHERE memory_id IN "
-                f"(SELECT id FROM memories WHERE user_id IN "
-                f"(SELECT id FROM users WHERE {test_user_filter}))"
-            )
-            await conn.execute(
-                f"DELETE FROM memory_access_log WHERE memory_id IN "
-                f"(SELECT id FROM memories WHERE user_id IN "
-                f"(SELECT id FROM users WHERE {test_user_filter}))"
-            )
-            await conn.execute(
-                f"DELETE FROM memories WHERE user_id IN "
-                f"(SELECT id FROM users WHERE {test_user_filter})"
-            )
-            # Definitions, API keys, groups for test users
-            await conn.execute(
-                f"DELETE FROM agent_hooks WHERE hook_id IN "
-                f"(SELECT id FROM hook_definitions WHERE created_by IN "
-                f"(SELECT id FROM users WHERE {test_user_filter}))"
-            )
-            await conn.execute(
-                f"DELETE FROM agent_managed_tools WHERE tool_id IN "
-                f"(SELECT id FROM managed_tool_definitions WHERE created_by IN "
-                f"(SELECT id FROM users WHERE {test_user_filter}))"
-            )
-            await conn.execute(
-                f"DELETE FROM managed_tool_runs WHERE tool_id IN "
-                f"(SELECT id FROM managed_tool_definitions WHERE created_by IN "
-                f"(SELECT id FROM users WHERE {test_user_filter}))"
-            )
-            for tbl in ("agent_definitions", "skill_definitions"):
+            async with conn.transaction():
+                await _delete_test_organizations(conn, ["test_%", "mcp_other_%"])
                 await conn.execute(
-                    f"DELETE FROM {tbl} WHERE created_by IN "
-                    f"(SELECT id FROM users WHERE {test_user_filter})"
+                    "DELETE FROM users WHERE external_id LIKE ANY($1::text[])",
+                    ["test_%", "mcp_other_%"],
                 )
-            await conn.execute(
-                f"DELETE FROM hook_definitions WHERE created_by IN "
-                f"(SELECT id FROM users WHERE {test_user_filter})"
-            )
-            await conn.execute(
-                f"DELETE FROM managed_tool_definitions WHERE created_by IN "
-                f"(SELECT id FROM users WHERE {test_user_filter})"
-            )
-            await conn.execute(
-                f"DELETE FROM user_groups WHERE user_id IN "
-                f"(SELECT id FROM users WHERE {test_user_filter})"
-            )
-            await conn.execute(
-                f"DELETE FROM api_keys WHERE user_id IN "
-                f"(SELECT id FROM users WHERE {test_user_filter})"
-            )
-            # Users and orgs
-            await conn.execute(f"DELETE FROM users WHERE {test_user_filter}")
-            await conn.execute(f"DELETE FROM organizations WHERE {test_org_filter}")
         finally:
             await conn.close()
 
-    try:
-        asyncio.get_event_loop().run_until_complete(_cleanup())
-    except Exception:
-        # Best-effort cleanup — don't fail the test suite
-        pass
+    has_integration_tests = any(
+        item.get_closest_marker("integration") for item in request.session.items
+    )
+    if not has_integration_tests:
+        yield
+        return
+
+    asyncio.run(_cleanup())
+    yield
+    asyncio.run(_cleanup())
 
 
 @pytest_asyncio.fixture
@@ -250,8 +238,7 @@ async def clean_test_data(db_pool):
         await conn.execute("DELETE FROM memories WHERE username LIKE $1", f"{prefix}%")
         # Delete test users
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
-        # Delete test organizations
-        await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
+        await _delete_test_organizations(conn, [f"{prefix}%"])
 
 
 @pytest_asyncio.fixture

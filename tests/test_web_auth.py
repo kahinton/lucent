@@ -40,30 +40,13 @@ NEW_PASSWORD = "NewPass99"
 
 
 @pytest_asyncio.fixture
-async def web_prefix(db_pool):
+async def web_prefix(db_pool, delete_test_organizations):
     """Unique prefix and cleanup for web auth tests."""
     test_id = str(uuid4())[:8]
     prefix = f"test_webauth_{test_id}_"
     yield prefix
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM memory_audit_log WHERE memory_id IN "
-            "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM memory_access_log WHERE memory_id IN "
-            "(SELECT id FROM memories WHERE username LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute("DELETE FROM memories WHERE username LIKE $1", f"{prefix}%")
-        await conn.execute(
-            "DELETE FROM api_keys WHERE user_id IN "
-            "(SELECT id FROM users WHERE external_id LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
-        await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
+        await delete_test_organizations(conn, [f"{prefix}%"])
 
 
 @pytest_asyncio.fixture

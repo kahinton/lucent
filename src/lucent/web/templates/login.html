@@ -1,14 +1,14 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
+    <meta name="color-scheme" content="dark">
     <title>Login - Lucent</title>
     <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
     <script nonce="{{ request.state.csp_nonce }}">
         tailwind.config = {
-            darkMode: 'media',
+            darkMode: 'class',
             theme: {
                 extend: {
                     colors: {
@@ -24,6 +24,7 @@
     </script>
     <style>
         :root {
+            color-scheme: dark;
             --login-black: #080808;
             --login-panel: rgba(18, 18, 18, 0.78);
             --login-line: rgba(255, 255, 255, 0.15);
@@ -85,7 +86,7 @@
             body { align-items: flex-start !important; padding-top: max(2rem, env(safe-area-inset-top)); overflow-y: auto; }
             .login-card { padding: 1.5rem !important; }
         }
-        @media (prefers-color-scheme: dark) {
+        @media all {
             body { background-color: var(--login-black) !important; }
         }
     </style>

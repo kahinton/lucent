@@ -106,16 +106,16 @@ class TestMigrationColumns:
             assert len(cols) == 1
 
     @pytest.mark.asyncio
-    async def test_check_constraints_exist(self, db_pool):
+    async def test_single_owner_constraints_exist(self, db_pool):
         async with db_pool.acquire() as conn:
             constraints = await conn.fetch(
-                "SELECT conname FROM pg_constraint WHERE conname LIKE 'ck_%_owner_%'",
+                "SELECT conname FROM pg_constraint WHERE conname LIKE 'ck_%_owner%'",
             )
             names = {c["conname"] for c in constraints}
-            assert "ck_agent_def_owner_or_builtin" in names
-            assert "ck_skill_def_owner_or_builtin" in names
-            assert "ck_mcp_cfg_owner_or_builtin" in names
-            assert "ck_sandbox_tpl_owner_or_builtin" in names
+            assert "ck_agent_def_single_owner" in names
+            assert "ck_skill_def_single_owner" in names
+            assert "ck_mcp_cfg_single_owner" in names
+            assert "ck_sandbox_tpl_single_owner" in names
 
 
 # ── CHECK Constraint Tests ────────────────────────────────────────────────
@@ -141,19 +141,19 @@ class TestCheckConstraints:
             await conn.execute("DELETE FROM agent_definitions WHERE id = $1", row["id"])
 
     @pytest.mark.asyncio
-    async def test_instance_requires_owner(self, db_pool, test_organization):
-        """Instance-scoped definitions must have at least one owner set."""
-        import asyncpg
-
+    async def test_instance_allows_org_shared_owner(self, db_pool, test_organization):
+        """Instance-scoped definitions may use NULL owners for organization sharing."""
         org_id = test_organization["id"]
         async with db_pool.acquire() as conn:
-            with pytest.raises(asyncpg.CheckViolationError):
-                await conn.execute(
-                    "INSERT INTO agent_definitions "
-                    "(name, content, status, scope, organization_id) "
-                    "VALUES ('_test_no_owner', 'content', 'proposed', 'instance', $1)",
-                    org_id,
-                )
+            row = await conn.fetchrow(
+                "INSERT INTO agent_definitions "
+                "(name, content, status, scope, organization_id) "
+                "VALUES ('_test_org_shared', 'content', 'proposed', 'instance', $1) "
+                "RETURNING id",
+                org_id,
+            )
+            assert row is not None
+            await conn.execute("DELETE FROM agent_definitions WHERE id = $1", row["id"])
 
 
 # ── DefinitionRepository Ownership Tests ──────────────────────────────────

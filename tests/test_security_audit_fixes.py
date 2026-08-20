@@ -589,8 +589,8 @@ class TestSigningSecretPersistence:
             importlib.reload(mod)
             assert mod.SIGNING_SECRET == test_secret
 
-    def test_signing_secret_generates_random_when_not_set(self):
-        """SIGNING_SECRET should be auto-generated when env var is absent."""
+    def test_signing_secret_uses_ephemeral_fallback_when_needed_before_startup(self):
+        """Signing before startup should generate an ephemeral fallback."""
         import importlib
         import os
         from unittest.mock import patch
@@ -600,11 +600,13 @@ class TestSigningSecretPersistence:
         with patch.dict(os.environ, env, clear=True):
             import lucent.auth_providers as mod
             importlib.reload(mod)
-            assert mod.SIGNING_SECRET  # non-empty
-            assert len(mod.SIGNING_SECRET) > 20  # token_urlsafe(32) is ~43 chars
+            assert mod.SIGNING_SECRET == ""
+            secret = mod._get_signing_secret()
+            assert secret == mod.SIGNING_SECRET
+            assert len(secret) > 20
 
-    def test_signing_secret_warning_in_team_mode(self):
-        """Missing SIGNING_SECRET in team mode should log CRITICAL."""
+    def test_ephemeral_signing_secret_logs_warning(self):
+        """Using the pre-startup fallback should emit a warning."""
         import importlib
         import logging
         import os
@@ -612,14 +614,14 @@ class TestSigningSecretPersistence:
 
         env = os.environ.copy()
         env.pop("LUCENT_SIGNING_SECRET", None)
-        env["LUCENT_MODE"] = "team"
         with patch.dict(os.environ, env, clear=True):
             import lucent.auth_providers as mod
             auth_logger = logging.getLogger("lucent.auth.providers")
-            with patch.object(auth_logger, "critical") as mock_critical:
-                importlib.reload(mod)
-                mock_critical.assert_called_once()
-                assert "LUCENT_SIGNING_SECRET" in mock_critical.call_args[0][0]
+            importlib.reload(mod)
+            with patch.object(auth_logger, "warning") as mock_warning:
+                mod._get_signing_secret()
+                mock_warning.assert_called_once()
+                assert "ephemeral fallback" in mock_warning.call_args[0][0]
 
     def test_startup_check_warns_on_missing_signing_secret(self):
         """_check_security_defaults should warn when SIGNING_SECRET is unset."""
@@ -628,15 +630,14 @@ class TestSigningSecretPersistence:
 
         # Ensure LUCENT_SIGNING_SECRET is NOT set
         with patch.dict(os.environ, {
-            "LUCENT_SECRET_KEY": "a-real-production-secret-key-32chars!",
             "POSTGRES_PASSWORD": "strong-random-password",
-            "VAULT_TOKEN": "s.some-real-vault-token",
             "LUCENT_MODE": "team",
-        }, clear=False):
-            os.environ.pop("LUCENT_SIGNING_SECRET", None)
-            from lucent.api.app import _check_security_defaults, logger as app_logger
-            mock_logger = MagicMock()
+        }, clear=True):
             import lucent.api.app as app_module
+
+            from lucent.api.app import _check_security_defaults
+
+            mock_logger = MagicMock()
             with patch.object(app_module, "logger", mock_logger):
                 _check_security_defaults()
                 # Should have at least one critical call about missing secrets

@@ -687,7 +687,9 @@ async def _trigger_schedule_execution(
                     agent_type=agent_type,
                     agent_definition_id=action.get("agent_definition_id"),
                     priority=action.get("priority") or sched.get("priority", "medium"),
-                    sequence_order=int(action.get("sequence_order", idx) or idx),
+                    sequence_order=int(
+                        idx if action.get("sequence_order") is None else action["sequence_order"]
+                    ),
                     model=task_model,
                     reasoning_effort=task_reasoning_effort,
                     sandbox_template_id=sandbox_template_id,

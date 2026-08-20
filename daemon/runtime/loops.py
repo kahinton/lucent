@@ -104,7 +104,6 @@ class RuntimeLoopsMixin:
                     runtime.log("Dispatch: no valid API key, retrying in 30s", "WARN")
                     await asyncio.sleep(30)
                     continue
-                await self._update_heartbeat()
                 stale = await runtime.RequestAPI.release_stale(
                     runtime.STALE_HEARTBEAT_MINUTES
                 )
@@ -126,6 +125,22 @@ class RuntimeLoopsMixin:
                 await asyncio.sleep(5)
                 if self._listen_conn is None or self._listen_conn.is_closed():
                     await self._setup_listen()
+
+    async def _heartbeat_loop(self):
+        """Update instance liveness independently of dispatch execution."""
+        from daemon.runtime.module_proxy import runtime
+
+        heartbeat_seconds = min(60, runtime.DISPATCH_POLL_SECONDS)
+        runtime.log(f"Heartbeat loop started (interval: {heartbeat_seconds}s)")
+        while self.running:
+            try:
+                if not await self._heartbeat_once():
+                    runtime.log("Heartbeat update failed after recovery retry", "WARN")
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                runtime.log(f"Heartbeat loop error: {error}", "WARN")
+            await asyncio.sleep(heartbeat_seconds)
 
     async def _cognitive_loop(self):
         """Run long-horizon planning periodically or when requests arrive."""

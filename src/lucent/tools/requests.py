@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import get_llm_context

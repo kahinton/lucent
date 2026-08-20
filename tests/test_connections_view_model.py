@@ -310,6 +310,13 @@ async def test_admin_passes_permission_gate(
     exception type) is fine and proves the gate did not fire.
     """
     _patch_pool(monkeypatch)
+    repo = MagicMock()
+    repo.get_active_by_type = AsyncMock(return_value=None)
+    repo.create = AsyncMock(side_effect=RuntimeError("permission gate passed"))
+    monkeypatch.setattr(
+        "lucent.integrations.router.IntegrationRepo",
+        lambda _pool: repo,
+    )
     admin = _user("admin")
     body = IntegrationCreate(type=IntegrationType.GITHUB_APP, config={"k": "v"})
 

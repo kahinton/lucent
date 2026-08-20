@@ -1,6 +1,8 @@
 """Tests for the LLM engine abstraction layer."""
 
 import os
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -50,7 +52,7 @@ class TestEngineFactory:
             assert engine.name == "langchain"
 
     def test_invalid_engine_raises(self):
-        with patch.dict(os.environ, {"LUCENT_LLM_ENGINE": "invalid"}):
+        with patch("lucent.llm.factory.get_engine_name", return_value="invalid"):
             reset_engine()
             with pytest.raises(ValueError, match="Unknown LLM engine"):
                 get_engine()
@@ -75,6 +77,35 @@ class TestCopilotEngine:
 
         engine = CopilotEngine()
         assert engine.name == "copilot"
+
+    def test_sdk_1_client_uses_stdio_runtime_connection(self, monkeypatch):
+        from lucent.llm import copilot_engine
+
+        captured = {}
+
+        class FakeConnection:
+            def __init__(self, **kwargs):
+                captured["connection"] = kwargs
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured["client"] = kwargs
+
+        monkeypatch.setattr(copilot_engine, "_sdk_available", True)
+        monkeypatch.setattr(copilot_engine, "_StdioRuntimeConnection", FakeConnection)
+        monkeypatch.setattr(copilot_engine, "_CopilotClient", FakeClient)
+        monkeypatch.setattr(copilot_engine, "resolve_copilot_cli_path", lambda: "/cli")
+
+        client = copilot_engine.create_copilot_client(
+            github_token="token",
+            log_level="debug",
+        )
+
+        assert isinstance(client, FakeClient)
+        assert captured["connection"] == {"path": "/cli"}
+        assert isinstance(captured["client"]["connection"], FakeConnection)
+        assert captured["client"]["log_level"] == "debug"
+        assert captured["client"]["github_token"] == "token"
 
     @pytest.mark.asyncio
     async def test_cleanup_is_noop(self):
@@ -117,6 +148,67 @@ class TestCopilotEngine:
         )
 
         assert kwargs["enable_config_discovery"] is True
+
+    @pytest.mark.asyncio
+    async def test_streaming_ignores_empty_sdk_text_events(self, monkeypatch):
+        from lucent.llm import copilot_engine
+
+        callback = None
+
+        class FakeSession:
+            def on(self, handler):
+                nonlocal callback
+                callback = handler
+
+            async def send(self, _prompt, **_kwargs):
+                def emit(event_type, content=None):
+                    callback(
+                        SimpleNamespace(
+                            type=SimpleNamespace(value=event_type),
+                            data=SimpleNamespace(content=content),
+                        )
+                    )
+
+                emit("assistant.message", None)
+                emit("assistant.message_delta", None)
+                emit("assistant.reasoning", "")
+                emit("assistant.message", "I have access to Lucent tools.")
+                emit("session.idle")
+
+            async def disconnect(self):
+                return None
+
+        class FakeClient:
+            async def start(self):
+                return None
+
+            async def create_session(self, **_kwargs):
+                return FakeSession()
+
+            async def stop(self):
+                return None
+
+        async def fake_provider_github_token(_context=None):
+            return None
+
+        engine = copilot_engine.CopilotEngine()
+        monkeypatch.setattr(copilot_engine, "_sdk_available", True)
+        monkeypatch.setattr(engine, "_make_client", lambda _token=None: FakeClient())
+        monkeypatch.setattr(engine, "_provider_github_token", fake_provider_github_token)
+
+        events = []
+        result = await engine.run_session_streaming(
+            model="test-model",
+            system_message="system",
+            prompt="list tools",
+            on_event=events.append,
+        )
+
+        assert result == "I have access to Lucent tools."
+        assert [(event.type, event.content) for event in events] == [
+            (SessionEventType.MESSAGE, "I have access to Lucent tools."),
+            (SessionEventType.SESSION_IDLE, None),
+        ]
 
     def test_mutable_mcp_permission_uses_legacy_compat(self):
         from lucent.llm.copilot_engine import _should_use_legacy_permission_response
@@ -213,7 +305,7 @@ class TestCopilotEngine:
         assert getattr(parsed, "input", getattr(parsed, "input_tokens", None)) == 42.0
         assert getattr(parsed, "output", getattr(parsed, "output_tokens", None)) == 7.0
 
-    def test_copilot_ping_response_iso_timestamp_compat(self):
+    def test_copilot_ping_response_uses_native_datetime(self):
         pytest.importorskip("copilot.client")
         from copilot.client import PingResponse
 
@@ -231,8 +323,10 @@ class TestCopilotEngine:
         )
 
         assert parsed.message == "pong: lucent"
-        assert parsed.timestamp == 1780059855613
-        assert parsed.protocolVersion == 1
+        assert parsed.timestamp == datetime(
+            2026, 5, 29, 13, 4, 15, 613000, tzinfo=timezone.utc
+        )
+        assert parsed.protocol_version == 1
 
 
 class TestLangChainEngine:
@@ -248,6 +342,84 @@ class TestLangChainEngine:
 
         engine = LangChainEngine()
         await engine.cleanup()  # Should not raise
+
+    @pytest.mark.asyncio
+    async def test_streaming_emits_deltas(self, monkeypatch):
+        from langchain_core.messages import AIMessageChunk
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.engine import SessionEventType
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        class FakeChatModel:
+            def bind_tools(self, schemas):
+                return self
+
+            async def astream(self, messages):
+                yield AIMessageChunk(content="hello ")
+                yield AIMessageChunk(content="locally")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        events = []
+        result = await LangChainEngine().run_session_streaming(
+            model="muse-glimmer:latest",
+            system_message="sys",
+            prompt="hi",
+            mcp_config=None,
+            on_event=events.append,
+            timeout=10,
+            idle_timeout=1,
+            approve_permissions=False,
+        )
+
+        assert result == "hello locally"
+        assert [
+            event.content
+            for event in events
+            if event.type == SessionEventType.MESSAGE_DELTA
+        ] == ["hello ", "locally"]
+
+    @pytest.mark.asyncio
+    async def test_streaming_reports_idle_timeout(self, monkeypatch):
+        import asyncio
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.engine import SessionEventType
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        class FakeChatModel:
+            def bind_tools(self, schemas):
+                return self
+
+            async def astream(self, messages):
+                await asyncio.sleep(0.05)
+                if False:
+                    yield
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+
+        events = []
+        result = await LangChainEngine().run_session_streaming(
+            model="muse-glimmer:latest",
+            system_message="sys",
+            prompt="hi",
+            mcp_config=None,
+            on_event=events.append,
+            timeout=1,
+            idle_timeout=0.01,
+            approve_permissions=False,
+        )
+
+        assert result is None
+        errors = [event.content for event in events if event.type == SessionEventType.ERROR]
+        assert errors == ["LangChain stream idle timeout after 0.01s of inactivity"]
 
     @pytest.mark.asyncio
     async def test_builtin_tools_are_bound_and_executed(self, tmp_path, monkeypatch):

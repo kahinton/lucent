@@ -223,7 +223,7 @@ class TestReviewQueue:
         )
 
         result = await repo.search(
-            tags=["daemon", "needs-review"],
+            tags=["needs-review"],
             requesting_user_id=fb_user["id"],
             requesting_org_id=fb_user["organization_id"],
         )
@@ -443,7 +443,7 @@ class TestDaemonMessages:
         )
 
         result = await repo.search(
-            tags=["daemon-message", "from-human", "pending"],
+            tags=["pending"],
             requesting_user_id=fb_user["id"],
             requesting_org_id=fb_user["organization_id"],
         )

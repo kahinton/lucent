@@ -31,6 +31,55 @@ async def test_proactive_rotation_triggers_under_60_minutes(monkeypatch):
     assert called["force_rotate"] is True
 
 
+@pytest.mark.asyncio
+async def test_heartbeat_retries_after_key_recovery(monkeypatch):
+    daemon = LucentDaemon()
+    daemon.instance_id = "instance-heartbeat-recovery"
+
+    verify_results = iter((True, True))
+    verify_calls = 0
+    heartbeat_results = iter((None, {"status": "active"}))
+    heartbeat_calls = 0
+
+    async def _verify_and_provision(_instance_id: str) -> bool:
+        nonlocal verify_calls
+        verify_calls += 1
+        return next(verify_results)
+
+    async def _update_heartbeat():
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        return next(heartbeat_results)
+
+    monkeypatch.setattr(daemon_module, "_verify_and_provision_key", _verify_and_provision)
+    monkeypatch.setattr(daemon, "_update_heartbeat", _update_heartbeat)
+
+    assert await daemon._heartbeat_once() is True
+    assert verify_calls == 2
+    assert heartbeat_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_does_not_send_without_valid_key(monkeypatch):
+    daemon = LucentDaemon()
+    daemon.instance_id = "instance-heartbeat-no-key"
+    heartbeat_calls = 0
+
+    async def _verify_and_provision(_instance_id: str) -> bool:
+        return False
+
+    async def _update_heartbeat():
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        return {"status": "active"}
+
+    monkeypatch.setattr(daemon_module, "_verify_and_provision_key", _verify_and_provision)
+    monkeypatch.setattr(daemon, "_update_heartbeat", _update_heartbeat)
+
+    assert await daemon._heartbeat_once() is False
+    assert heartbeat_calls == 0
+
+
 def test_detects_mcp_auth_failure_from_tool_error_response():
     daemon = LucentDaemon()
     payload = (

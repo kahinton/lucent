@@ -76,19 +76,20 @@ class MCPToolBridge:
 
         try:
             from mcp import ClientSession
-            from mcp.client.streamable_http import streamablehttp_client
+            from mcp.client.streamable_http import (
+                create_mcp_http_client,
+                streamable_http_client,
+            )
         except ImportError as exc:
             raise RuntimeError("MCP client package is required for MCP tool bridge") from exc
 
         stack = AsyncExitStack()
         try:
-            read_stream, write_stream, _get_session_id = await stack.enter_async_context(
-                streamablehttp_client(
-                    self._mcp_url,
-                    headers=self._headers,
-                    timeout=30,
-                    sse_read_timeout=300,
-                )
+            http_client = await stack.enter_async_context(
+                create_mcp_http_client(headers=self._headers)
+            )
+            read_stream, write_stream = await stack.enter_async_context(
+                streamable_http_client(self._mcp_url, http_client=http_client)
             )
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()

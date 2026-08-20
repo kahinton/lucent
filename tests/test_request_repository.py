@@ -972,6 +972,21 @@ class TestListPendingTasks:
         assert "Par A" in titles
         assert "Par B" in titles
 
+    async def test_later_stage_waits_for_all_parallel_tasks(self, repo, org_id):
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        first = await _make_task(repo, rid, org_id, title="Par A", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Par B", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Next stage", sequence_order=1)
+
+        await repo.claim_task(str(first["id"]), "inst-test")
+        await repo.complete_task(str(first["id"]), "Done")
+
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [task["title"] for task in pending["items"]]
+        assert "Par B" in titles
+        assert "Next stage" not in titles
+
     async def test_includes_request_title(self, repo, org_id):
         req = await _make_request(repo, org_id, title="My Request")
         await _make_task(repo, str(req["id"]), org_id, title="My Task")

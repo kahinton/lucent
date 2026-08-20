@@ -6,7 +6,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
@@ -38,7 +38,7 @@ async def cleanup_user_file_requests(db_pool, test_organization):
 async def _call(mcp: FastMCP, tool_name: str, args: dict | None = None):
     import json
 
-    result = await mcp._tool_manager.call_tool(tool_name, args or {})
+    result = await mcp._tool_manager.call_tool(tool_name, args or {}, None)
     return json.loads(result)
 
 

@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" class="h-full">
+<html lang="en" class="h-full dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
+    <meta name="color-scheme" content="dark">
     <title>{% block title %}Lucent{% endblock %}</title>
     
     <!-- Favicon -->
@@ -19,7 +19,7 @@
     <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
     <script nonce="{{ request.state.csp_nonce }}">
         tailwind.config = {
-            darkMode: 'media',
+            darkMode: 'class',
             theme: {
                 extend: {
                     colors: {
@@ -39,6 +39,11 @@
                 }
             }
         }
+        try {
+            if (localStorage.getItem('lucent-sidebar-collapsed') === 'true') {
+                document.documentElement.classList.add('sidebar-collapsed');
+            }
+        } catch (error) { /* Storage may be unavailable in restricted contexts. */ }
     </script>
     
     <!-- HTMX for interactivity -->
@@ -46,15 +51,16 @@
     
     <style>
         :root {
-            --lucent-canvas: #f5f3ef;
-            --lucent-paper: #ffffff;
-            --lucent-ink: #090909;
-            --lucent-muted: #68645f;
-            --lucent-line: #d8d3cc;
+            color-scheme: dark;
+            --lucent-canvas: #080808;
+            --lucent-paper: #121212;
+            --lucent-ink: #f7f5f1;
+            --lucent-muted: #a7a3a0;
+            --lucent-line: #333333;
             --lucent-teal: #00cfc1;
             --lucent-pink: #ff3f9b;
             --lucent-yellow: #ffd84d;
-            --lucent-shadow: rgba(0, 0, 0, 0.16);
+            --lucent-shadow: rgba(0, 0, 0, 0.34);
         }
 
         html { background-color: var(--lucent-canvas); }
@@ -64,50 +70,60 @@
             background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.022) 0, rgba(0, 0, 0, 0.022) 1px, transparent 1px, transparent 12px);
         }
         #app-sidebar {
-            isolation: isolate;
             overflow: hidden;
-            background: rgba(255, 255, 255, 0.18) !important;
-            border-color: rgba(255, 255, 255, 0.32) !important;
-            border-radius: 0 1.5rem 1.5rem 0;
-            box-shadow:
-                inset -1px 0 rgba(255, 255, 255, 0.34),
-                inset 0 1px rgba(255, 255, 255, 0.38),
-                1px 0 rgba(0, 0, 0, 0.06),
-                10px 0 32px rgba(0, 0, 0, 0.12);
-            backdrop-filter: blur(16px) saturate(120%) brightness(1.02);
-            -webkit-backdrop-filter: blur(16px) saturate(120%) brightness(1.02);
+            background: var(--lucent-canvas) !important;
+            border-color: var(--lucent-line) !important;
+            transition: width 180ms ease;
         }
-        #app-sidebar::before,
-        #app-sidebar::after {
-            content: '';
-            position: absolute;
-            pointer-events: none;
-            z-index: -1;
-        }
-        #app-sidebar::before {
-            inset: 0;
-            background:
-                linear-gradient(108deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.02) 28%, transparent 54%),
-                linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 22%, transparent 76%, rgba(255, 255, 255, 0.035));
-        }
-        #app-sidebar::after {
-            top: 8%;
-            right: 0;
-            bottom: 8%;
-            width: 1px;
-            border-radius: 999px;
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(0, 207, 193, 0.08) 32%, rgba(255, 63, 155, 0.06) 66%, rgba(255, 255, 255, 0.22));
-            box-shadow: -1px 0 5px rgba(255, 255, 255, 0.06);
-        }
-        #app-sidebar > .flex {
-            position: relative;
-            z-index: 1;
-        }
-        #app-sidebar nav a { border: 1px solid transparent; }
+        #app-content { transition: padding-left 180ms ease; }
+        #app-sidebar nav a { position: relative; border: 1px solid transparent; }
         #app-sidebar nav a:hover { transform: translateY(-1px); }
         #app-sidebar nav a.bg-primary-50 {
             border-color: #00cfc1;
             box-shadow: 0 2px 0 #007f78, 0 6px 14px rgba(0, 207, 193, 0.14);
+        }
+        .sidebar-count-badge {
+            color: #60f0e5 !important;
+            background-color: rgba(0, 207, 193, 0.18) !important;
+            border: 1px solid rgba(0, 207, 193, 0.42);
+        }
+        #sidebar-collapse-button {
+            position: absolute;
+            top: 1rem;
+            right: 0.75rem;
+            z-index: 2;
+            display: flex;
+            width: 2rem;
+            height: 2rem;
+            align-items: center;
+            justify-content: center;
+            border-radius: 0.375rem;
+            color: var(--lucent-muted);
+        }
+        #sidebar-collapse-button:hover { background: var(--lucent-paper); color: var(--lucent-ink); }
+        #sidebar-collapse-button svg { transition: transform 180ms ease; }
+        @media (min-width: 768px) {
+            html.sidebar-collapsed #app-sidebar { width: 4rem; }
+            html.sidebar-collapsed #app-content { padding-left: 4rem; }
+            html.sidebar-collapsed #app-sidebar .sidebar-label,
+            html.sidebar-collapsed #app-sidebar .sidebar-user-details,
+            html.sidebar-collapsed #app-sidebar .sidebar-sign-out { display: none; }
+            html.sidebar-collapsed #sidebar-collapse-button { inset: 0.75rem auto auto 1rem; }
+            html.sidebar-collapsed #sidebar-collapse-button svg { transform: rotate(180deg); }
+            html.sidebar-collapsed #app-sidebar nav { padding-left: 0.375rem; padding-right: 0.375rem; }
+            html.sidebar-collapsed #app-sidebar nav a { justify-content: center; gap: 0; padding-left: 0.5rem; padding-right: 0.5rem; }
+            html.sidebar-collapsed #app-sidebar nav a > svg { flex-shrink: 0; }
+            html.sidebar-collapsed #app-sidebar nav a > span:not(.sidebar-label) {
+                position: absolute;
+                top: -0.25rem;
+                right: -0.2rem;
+                min-width: 1.15rem;
+                justify-content: center;
+                padding-left: 0.3rem;
+                padding-right: 0.3rem;
+            }
+            html.sidebar-collapsed #app-sidebar > .flex > a:first-child { min-height: 3.5rem; padding: 0; }
+            html.sidebar-collapsed #app-sidebar .sidebar-user { justify-content: center; padding-left: 0; padding-right: 0; }
         }
         main .bg-white.rounded-lg.border,
         main .bg-white.rounded-xl.border {
@@ -163,10 +179,9 @@
                 padding-left: 4.25rem;
                 padding-right: 0.75rem;
             }
-            #app-sidebar > .flex > a:first-child img { width: 2.5rem; }
-            #app-sidebar > .flex > a:first-child span[aria-hidden="true"] { margin-left: 0.75rem; margin-right: 0.75rem; }
             #app-sidebar > .flex > a:first-child span:last-child { font-size: 1.25rem; }
             #app-sidebar.open { transform: translateX(0); }
+            #sidebar-collapse-button { display: none; }
             #app-content { padding-left: 0 !important; }
             #app-content main { padding: 4.75rem 1rem 1.5rem; }
         }
@@ -182,7 +197,7 @@
         .htmx-indicator { display: none; }
 
         /* ─── Dark Mode (system preference) ──────────────────────── */
-        @media (prefers-color-scheme: dark) {
+        @media all {
             :root {
                 --lucent-canvas: #080808;
                 --lucent-paper: #121212;
@@ -199,16 +214,8 @@
             html { background-color: #080808; }
             body { background-color: #080808; color: #f7f5f1; }
             #app-sidebar {
-                background: rgba(8, 8, 8, 0.22) !important;
-                border-color: rgba(255, 255, 255, 0.1) !important;
-                background:
-                    linear-gradient(145deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.008) 38%, rgba(255, 255, 255, 0.018) 100%),
-                    rgba(8, 8, 8, 0.22) !important;
-                box-shadow:
-                    inset -1px 0 rgba(255, 255, 255, 0.1),
-                    inset 0 1px rgba(255, 255, 255, 0.08),
-                    1px 0 rgba(0, 0, 0, 0.28),
-                    10px 0 32px rgba(0, 0, 0, 0.28);
+                background: var(--lucent-canvas) !important;
+                border-color: var(--lucent-line) !important;
             }
             #mobile-nav-button {
                 color: #f7f5f1;
@@ -259,6 +266,11 @@
             .text-primary-700 { color: #60f0e5 !important; }
             .text-primary-600 { color: #22dfd2 !important; }
             .bg-primary-600 { background-color: #00a89f !important; }
+            .sidebar-count-badge {
+                color: #60f0e5 !important;
+                background-color: rgba(0, 207, 193, 0.18) !important;
+                border-color: rgba(0, 207, 193, 0.42);
+            }
 
             /* Status backgrounds — soften for dark */
             .bg-green-50 { background-color: rgba(34, 197, 94, 0.1) !important; }
@@ -318,14 +330,17 @@
             </svg>
         </button>
         <div id="mobile-nav-backdrop" aria-hidden="true"></div>
-        <div id="app-sidebar" class="fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800">
+        <div id="app-sidebar" class="fixed inset-y-0 left-0 z-50 w-56 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800">
             <div class="flex flex-col h-full">
-                <!-- Logo -->
-                <a href="/chat" aria-label="Lucent chat" class="group flex items-center border-b border-gray-100 px-5 py-5 dark:border-gray-800">
-                    <img src="/static/lucent_logo_64.png" alt="" class="h-auto w-14 shrink-0 object-contain transition-opacity group-hover:opacity-80">
-                    <span class="mx-4 h-8 w-px bg-gray-200 dark:bg-gray-700" aria-hidden="true"></span>
-                    <span class="text-2xl font-semibold leading-none text-gray-900 dark:text-gray-100">Lucent</span>
+                <!-- Brand -->
+            <a href="/chat" aria-label="Lucent chat" class="group flex min-h-14 items-center border-b border-gray-100 px-3 py-3 dark:border-gray-800">
+                    <span class="sidebar-label text-2xl font-semibold leading-none text-gray-900 dark:text-gray-100">Lucent</span>
                 </a>
+                <button type="button" id="sidebar-collapse-button" aria-label="Collapse sidebar" aria-controls="app-sidebar" aria-expanded="true" title="Collapse sidebar">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 18l-6-6 6-6" />
+                    </svg>
+                </button>
                 
                 <!-- Navigation -->
                 {% set context_definition_proposal_count = 0 %}
@@ -336,83 +351,69 @@
                 {% endif %}
                 {% set state_definition_proposal_count = request.state.definition_proposal_count | default(0) %}
                 {% set definition_proposal_count = [state_definition_proposal_count, context_definition_proposal_count] | max %}
-                <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-                    <a href="/chat" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if request.url.path == '/chat' %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                <nav class="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
+                    <a href="/chat" aria-label="Chat" title="Chat" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if request.url.path == '/chat' %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if request.url.path == '/chat' %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
                         </svg>
-                        Chat
+                        <span class="sidebar-label">Chat</span>
                     </a>
 
-                    <a href="/handoffs" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/handoffs') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/handoffs" aria-label="Handoffs" title="Handoffs" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/handoffs') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if request.url.path.startswith('/handoffs') %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5A2.25 2.25 0 0119.5 19.5h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0l-7.5-4.615a2.25 2.25 0 01-1.07-1.916V6.75" />
                         </svg>
-                        Handoffs
-                        {% if request.state.user_interaction_count > 0 %}
-                        <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-primary-100 text-primary-700" title="Handoffs needing your attention">
+                        <span class="sidebar-label">Handoffs</span>
+                        {% if request.state.user_interaction_count > 0 and not request.url.path.startswith('/handoffs') %}
+                        <span class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold" title="Handoffs needing your attention">
                             {{ request.state.user_interaction_count }}
                         </span>
                         {% endif %}
                     </a>
                     
-                    <a href="/" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if request.url.path == '/' %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
-                        <svg class="w-5 h-5 {% if request.url.path == '/' %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
-                        </svg>
-                        Dashboard
-                    </a>
-                    
-                    <a href="/memories" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/memories' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/memories" aria-label="Memories" title="Memories" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/memories' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/memories' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
                         </svg>
-                        Memories
+                        <span class="sidebar-label">Memories</span>
                     </a>
 
-                    <a href="/files" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/files') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/files" aria-label="Files" title="Files" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/files') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if request.url.path.startswith('/files') %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5A3.375 3.375 0 0010.125 2.25H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.625a9.375 9.375 0 00-9.375-9.375z" />
                         </svg>
-                        Files
+                        <span class="sidebar-label">Files</span>
                     </a>
 
-                    <a href="/knowledge" class="flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors {% if request.url.path == '/knowledge' %}bg-primary-50 text-primary-700{% else %}text-gray-600 hover:bg-gray-50{% endif %}">
-                        <svg class="w-4 h-4 {% if request.url.path == '/knowledge' %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
-                        </svg>
-                        Knowledge Tree
-                    </a>
-                    
-                    <a href="/activity" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/activity' in request.url.path or '/requests' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/activity" aria-label="Activity" title="Activity" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/activity' in request.url.path or '/requests' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/activity' in request.url.path or '/requests' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
                         </svg>
-                        Activity
-                        {% if request.state.pending_approval_count > 0 %}
-                        <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800" title="Requests awaiting approval">
+                        <span class="sidebar-label">Activity</span>
+                        {% if request.state.pending_approval_count > 0 and '/activity' not in request.url.path and '/requests' not in request.url.path %}
+                        <span class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold" title="Requests awaiting approval">
                             {{ request.state.pending_approval_count }}
                         </span>
                         {% endif %}
                     </a>
                     
-                    <a id="agent-composer-nav-link" href="/definitions" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/definitions' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a id="agent-composer-nav-link" href="/definitions" aria-label="Agents" title="Agents" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/definitions' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/definitions' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
                         </svg>
-                        Agent Composer
-                        {% if definition_proposal_count > 0 %}
-                        <span id="definition-proposal-sidebar-badge" class="ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800" title="Definition proposals awaiting review">
+                        <span class="sidebar-label">Agents</span>
+                        {% if definition_proposal_count > 0 and '/definitions' not in request.url.path %}
+                        <span id="definition-proposal-sidebar-badge" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold" title="Definition proposals awaiting review">
                             {{ definition_proposal_count }}
                         </span>
                         {% endif %}
                     </a>
                     
-                    <a href="/workflows" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if '/workflows' in request.url.path or '/schedules' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/workflows" aria-label="Workflows" title="Workflows" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/workflows' in request.url.path or '/schedules' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/workflows' in request.url.path or '/schedules' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        Workflows
+                        <span class="sidebar-label">Workflows</span>
                     </a>
                     
                     {% if team_mode() %}
@@ -422,33 +423,33 @@
                     
                     {# Groups, Connections, Secrets, Models all live under /settings now. #}
 
-                    <a href="/sandboxes" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/sandboxes') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/sandboxes" aria-label="Sandboxes" title="Sandboxes" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/sandboxes') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if request.url.path.startswith('/sandboxes') %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z" />
                         </svg>
-                        Sandboxes
+                        <span class="sidebar-label">Sandboxes</span>
                     </a>
                     
-                    <a href="/settings" class="flex items-center gap-3 px-3 py-2.5 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/settings') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/settings" aria-label="Settings" title="Settings" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if request.url.path.startswith('/settings') %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if request.url.path.startswith('/settings') %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                         </svg>
-                        Settings
+                        <span class="sidebar-label">Settings</span>
                     </a>
                 </nav>
                 
                 <!-- User info -->
                 <div class="px-4 py-4 border-t border-gray-100">
-                    <div class="flex items-center gap-3 px-2">
+                    <div class="sidebar-user flex items-center gap-3 px-2">
                         <div class="flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-white text-sm font-semibold shadow-md">
                             {{ (user.display_name or user.email or 'U')[0] | upper }}
                         </div>
-                        <div class="flex-1 min-w-0">
+                        <div class="sidebar-user-details flex-1 min-w-0">
                             <p class="text-sm font-medium text-gray-900 truncate">{{ user.display_name or user.email or "User" }}</p>
                             <p class="text-xs text-gray-500 capitalize">{{ user.role.value if user.role.__class__.__name__ == 'Role' else user.role }}</p>
                         </div>
-                        <form method="post" action="/logout" class="inline">
+                        <form method="post" action="/logout" class="sidebar-sign-out inline">
                             <button type="submit" class="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg hover:bg-gray-100 transition-colors" title="Sign out">
                                 <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
@@ -461,7 +462,7 @@
         </div>
         
         <!-- Main content -->
-        <div id="app-content" class="pl-64">
+        <div id="app-content" class="pl-56">
             <!-- Impersonation Banner (shows on all pages) -->
             {% if user.is_impersonated %}
             <div class="bg-amber-50 border-b border-amber-200 px-8 py-3">
@@ -502,6 +503,14 @@
         const sidebar = document.getElementById('app-sidebar');
         const button = document.getElementById('mobile-nav-button');
         const backdrop = document.getElementById('mobile-nav-backdrop');
+        const collapseButton = document.getElementById('sidebar-collapse-button');
+        function setDesktopSidebar(collapsed) {
+            document.documentElement.classList.toggle('sidebar-collapsed', collapsed);
+            collapseButton.setAttribute('aria-expanded', String(!collapsed));
+            collapseButton.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+            collapseButton.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+            try { localStorage.setItem('lucent-sidebar-collapsed', String(collapsed)); } catch (error) { /* Best effort. */ }
+        }
         function setMobileNavigation(open) {
             sidebar.classList.toggle('open', open);
             backdrop.classList.toggle('open', open);
@@ -510,6 +519,10 @@
         }
         button.addEventListener('click', function() {
             setMobileNavigation(!sidebar.classList.contains('open'));
+        });
+        setDesktopSidebar(document.documentElement.classList.contains('sidebar-collapsed'));
+        collapseButton.addEventListener('click', function() {
+            setDesktopSidebar(!document.documentElement.classList.contains('sidebar-collapsed'));
         });
         backdrop.addEventListener('click', function() { setMobileNavigation(false); });
         sidebar.addEventListener('click', function(event) {
@@ -549,7 +562,7 @@
     // reloads and pages that do not already carry proposal context.
     document.addEventListener('DOMContentLoaded', function() {
         const link = document.getElementById('agent-composer-nav-link');
-        if (!link) return;
+        if (!link || link.classList.contains('bg-primary-50')) return;
 
         const existing = document.getElementById('definition-proposal-sidebar-badge');
         const existingCount = existing ? parseInt(existing.textContent.trim(), 10) : 0;
@@ -561,7 +574,7 @@
             if (!badge) {
                 badge = document.createElement('span');
                 badge.id = 'definition-proposal-sidebar-badge';
-                badge.className = 'ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800';
+                badge.className = 'sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold';
                 badge.title = 'Definition proposals awaiting review';
                 link.appendChild(badge);
             }

@@ -1,14 +1,14 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light dark">
+    <meta name="color-scheme" content="dark">
     <title>Setup - Lucent</title>
     <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
     <script nonce="{{ request.state.csp_nonce }}">
         tailwind.config = {
-            darkMode: 'media',
+            darkMode: 'class',
             theme: {
                 extend: {
                     colors: {
@@ -23,7 +23,8 @@
         }
     </script>
     <style>
-        @media (prefers-color-scheme: dark) {
+        :root { color-scheme: dark; }
+        @media all {
             input { background-color: #1a2233 !important; color: #e2e8f0 !important; border-color: #334155 !important; }
             input::placeholder { color: #4b5e78 !important; }
             input:focus { border-color: #6366f1 !important; box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2) !important; }

@@ -7,7 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer as FastMCP
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
@@ -143,7 +143,7 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 
 
 async def _call_mcp_tool(mcp: FastMCP, tool_name: str, args: dict | None = None):
-    result = await mcp._tool_manager.call_tool(tool_name, args or {})
+    result = await mcp._tool_manager.call_tool(tool_name, args or {}, None)
     return json.loads(result)
 
 
@@ -756,8 +756,16 @@ async def test_handoff_inline_chat_uses_session_and_mirrors_user_turn(
 ):
     seen: dict = {}
     fake_engine = _FakeHandoffChatEngine(seen)
+
+    async def allow_model_access(*_args):
+        return True
+
     monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: fake_engine)
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+    monkeypatch.setattr(
+        "lucent.api.routers.chat._can_user_access_model",
+        allow_model_access,
+    )
     monkeypatch.setattr(
         "lucent.model_registry.validate_reasoning_effort",
         lambda _model, _effort: None,

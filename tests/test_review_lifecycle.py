@@ -41,6 +41,8 @@ from lucent.db.requests import RequestRepository
 async def _make_request(repo, org_id, **kwargs):
     """Create a request with sensible defaults."""
     defaults = dict(title=f"Review-test {uuid4().hex[:6]}", org_id=org_id)
+    if "created_by" not in kwargs and hasattr(repo, "test_user_id"):
+        defaults["created_by"] = repo.test_user_id
     defaults.update(kwargs)
     return await repo.create_request(**defaults)
 
@@ -78,61 +80,14 @@ def _enable_review_mode(monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def rl_prefix(db_pool):
+async def rl_prefix(db_pool, delete_test_organizations):
     """Unique prefix and cleanup for review lifecycle tests."""
     test_id = str(uuid4())[:8]
     prefix = f"test_rl_{test_id}_"
     yield prefix
 
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM task_events WHERE task_id IN ("
-            "SELECT id FROM tasks WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1))",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM task_memories WHERE task_id IN ("
-            "SELECT id FROM tasks WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1))",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM tasks WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM requests WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM memory_access_log WHERE memory_id IN ("
-            "SELECT id FROM memories WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1))",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM memory_audit_log WHERE memory_id IN ("
-            "SELECT id FROM memories WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1))",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM memories WHERE organization_id IN ("
-            "SELECT id FROM organizations WHERE name LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute(
-            "DELETE FROM api_keys WHERE user_id IN "
-            "(SELECT id FROM users WHERE external_id LIKE $1)",
-            f"{prefix}%",
-        )
-        await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
-        await conn.execute(
-            "DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%"
-        )
+        await delete_test_organizations(conn, [f"{prefix}%"])
 
 
 @pytest_asyncio.fixture
@@ -154,12 +109,27 @@ async def rl_user(db_pool, rl_org, rl_prefix):
 
 
 @pytest_asyncio.fixture
-def repo(db_pool):
-    return RequestRepository(db_pool)
+async def rl_admin_user(db_pool, rl_org, rl_prefix):
+    repo = UserRepository(db_pool)
+    return await repo.create(
+        external_id=f"{rl_prefix}admin",
+        provider="local",
+        organization_id=rl_org["id"],
+        email=f"{rl_prefix}admin@test.com",
+        display_name=f"{rl_prefix}Admin",
+        role="admin",
+    )
 
 
 @pytest_asyncio.fixture
-def org_id(rl_org):
+def repo(db_pool, rl_user):
+    request_repo = RequestRepository(db_pool)
+    request_repo.test_user_id = str(rl_user["id"])
+    return request_repo
+
+
+@pytest_asyncio.fixture
+def org_id(rl_org, rl_user):
     return str(rl_org["id"])
 
 
@@ -194,9 +164,9 @@ async def api_client(rl_user):
 
 
 @pytest_asyncio.fixture
-async def admin_client(rl_user):
+async def admin_client(rl_admin_user):
     """Client with admin role — needed for deprecated approve/reject endpoints."""
-    client, app = await _make_client(rl_user, role="admin")
+    client, app = await _make_client(rl_admin_user, role="admin")
     async with client:
         yield client
     app.dependency_overrides.clear()
@@ -866,7 +836,9 @@ class TestResponseModels:
         assert data["review_count"] == 0
         assert data["max_reviews"] == 3
 
-    async def test_review_fields_after_rejection(self, repo, org_id, admin_client):
+    async def test_review_fields_after_rejection(
+        self, repo, org_id, admin_client, api_client
+    ):
         """After rejection, review fields are populated in response."""
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
@@ -877,7 +849,7 @@ class TestResponseModels:
             json={"feedback": "Needs more detail"},
         )
 
-        resp = await admin_client.get(f"/api/requests/{req['id']}")
+        resp = await api_client.get(f"/api/requests/{req['id']}")
         data = resp.json()
         assert data["review_count"] == 1
         assert data["review_feedback"] == "Needs more detail"
