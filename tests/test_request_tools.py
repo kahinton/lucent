@@ -584,11 +584,55 @@ class TestListPendingRequests:
         await repo.create_request(
             title="Pending One",
             org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
         )
         result = await _call(mcp, "list_pending_requests")
         assert isinstance(result, dict)
         titles = [r["title"] for r in result["items"]]
         assert "Pending One" in titles
+
+    @pytest.mark.asyncio
+    async def test_hides_other_users_activity(
+        self, mcp, auth_user, repo, db_pool, clean_test_data
+    ):
+        users = UserRepository(db_pool)
+        other_user = await users.create(
+            external_id=f"{clean_test_data}request-tool-peer",
+            provider="local",
+            organization_id=auth_user["organization_id"],
+            email=f"{clean_test_data}request-tool-peer@test.com",
+            display_name="Request Tool Peer",
+        )
+        own_request = await repo.create_request(
+            title="Own pending request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+        )
+        other_request = await repo.create_request(
+            title="Other pending request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(other_user["id"]),
+        )
+        own_task = await repo.create_task(
+            request_id=str(own_request["id"]),
+            title="Own pending task",
+            org_id=str(auth_user["organization_id"]),
+        )
+        other_task = await repo.create_task(
+            request_id=str(other_request["id"]),
+            title="Other pending task",
+            org_id=str(auth_user["organization_id"]),
+        )
+
+        pending = await _call(mcp, "list_pending_requests")
+        assert {item["id"] for item in pending["items"]} == {str(own_request["id"])}
+
+        active = await _call(mcp, "list_active_work")
+        assert {item["id"] for item in active["items"]} == {str(own_request["id"])}
+
+        tasks = await _call(mcp, "list_pending_tasks")
+        assert {item["id"] for item in tasks["items"]} == {str(own_task["id"])}
+        assert str(other_task["id"]) not in {item["id"] for item in tasks["items"]}
 
     @pytest.mark.asyncio
     async def test_no_auth(self, mcp, test_user):
@@ -714,6 +758,7 @@ class TestListPendingTasks:
         req = await repo.create_request(
             title="Task List Test",
             org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
         )
         await repo.create_task(
             request_id=str(req["id"]),

@@ -294,7 +294,9 @@ async def list_active_work(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_active_work(str(user.organization_id))
+    return await repo.list_active_work(
+        str(user.organization_id), **_request_visibility_args(user)
+    )
 
 
 @router.get("/planning-targets")
@@ -354,7 +356,9 @@ async def list_recently_completed(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    items = await repo.list_recently_completed(str(user.organization_id), hours=hours)
+    items = await repo.list_recently_completed(
+        str(user.organization_id), hours=hours, **_request_visibility_args(user)
+    )
     return {"items": items}
 
 
@@ -370,7 +374,8 @@ async def list_requests_in_review(
 
     repo = RequestRepository(pool)
     return await repo.get_requests_in_review(
-        str(user.organization_id), limit=limit, offset=offset
+        str(user.organization_id), limit=limit, offset=offset,
+        **_request_visibility_args(user),
     )
 
 

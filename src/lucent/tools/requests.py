@@ -51,6 +51,22 @@ async def _get_pool():
     return await init_db(database_url)
 
 
+def _request_visibility_args(
+    user_id: UUID | None,
+    role: str | None,
+    memory_scope: str | None,
+) -> dict[str, Any]:
+    """Scope human request-list tools while preserving daemon operational reads."""
+    if user_id is None:
+        return {}
+    if role == "daemon" and memory_scope != "user":
+        return {}
+    return {
+        "requester_user_id": str(user_id),
+        "include_system": role in {"admin", "owner"} and memory_scope != "user",
+    }
+
+
 def _valid_uuid(value: str | UUID | None) -> str | None:
     if value in (None, ""):
         return None
@@ -1809,12 +1825,15 @@ Requests with 0 tasks need to be broken into tasks before they can be dispatched
 Use this during cognitive cycles to discover new work."""
     )
     async def list_pending_requests() -> str:
-        _, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
-        requests = await repo.list_pending_requests(str(org_id))
+        requests = await repo.list_pending_requests(
+            str(org_id),
+            **_request_visibility_args(user_id, role, memory_scope),
+        )
 
         def serialize(obj):
             if hasattr(obj, "isoformat"):
@@ -1836,12 +1855,15 @@ cognitive cycles to understand what's already being worked on BEFORE creating
 new requests. This prevents duplicate work items."""
     )
     async def list_active_work() -> str:
-        _, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
-        work = await repo.list_active_work(str(org_id))
+        work = await repo.list_active_work(
+            str(org_id),
+            **_request_visibility_args(user_id, role, memory_scope),
+        )
 
         def serialize(obj):
             if hasattr(obj, "isoformat"):
@@ -2000,12 +2022,15 @@ Returns tasks that are waiting to be claimed and executed, ordered by priority.
 Use this to see what work is queued up."""
     )
     async def list_pending_tasks() -> str:
-        _, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
-        tasks = await repo.list_pending_tasks(str(org_id))
+        tasks = await repo.list_pending_tasks(
+            str(org_id),
+            **_request_visibility_args(user_id, role, memory_scope),
+        )
 
         def serialize(obj):
             if hasattr(obj, "isoformat"):
