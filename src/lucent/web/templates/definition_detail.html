@@ -50,8 +50,8 @@
 </div>
 
 {% if definition_type == 'agent' %}
-<div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Skills</h2>
         {% if skills %}
         <div class="space-y-2 mb-3">
@@ -73,18 +73,18 @@
         <p class="text-sm text-gray-400 italic mb-3">No skills granted.</p>
         {% endif %}
         {% if all_skills %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <select name="skill_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
+            <select name="skill_id" class="min-w-0 w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm">
                 <option value="">Add a skill...</option>
                 {% for s in all_skills %}{% if s.id|string not in granted_skill_ids %}<option value="{{ s.id }}">{{ s.name }}</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
 
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Custom Tools</h2>
         {% if managed_tools %}
         <div class="space-y-2 mb-3">
@@ -107,18 +107,18 @@
         <p class="text-sm text-gray-400 italic mb-3">No custom tools granted.</p>
         {% endif %}
         {% if all_tools %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="tool_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm min-w-0">
                 <option value="">Add a tool...</option>
                 {% for t in all_tools %}{% if t.id|string not in granted_tool_ids %}<option value="{{ t.id }}">{{ t.name }} ({{ t.runtime_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
 
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Hooks</h2>
         {% if hooks %}
         <div class="space-y-2 mb-3">
@@ -141,18 +141,18 @@
         <p class="text-sm text-gray-400 italic mb-3">No hooks granted.</p>
         {% endif %}
         {% if all_hooks %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-hook" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-hook" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="hook_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm min-w-0">
                 <option value="">Add a hook...</option>
                 {% for h in all_hooks %}{% if h.id|string not in granted_hook_ids %}<option value="{{ h.id }}">{{ h.name }} ({{ h.action_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
 
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted External Providers</h2>
         {% if mcp_servers %}
         <div class="space-y-2 mb-3">
@@ -263,13 +263,13 @@
         <p class="text-sm text-gray-400 italic mb-3">No external tool providers granted.</p>
         {% endif %}
         {% if all_mcp %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <select name="mcp_server_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
+            <select name="mcp_server_id" class="min-w-0 w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm">
                 <option value="">Add an MCP server...</option>
                 {% for m in all_mcp %}{% if m.id|string not in granted_mcp_ids %}<option value="{{ m.id }}">{{ m.name }} ({{ m.server_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>

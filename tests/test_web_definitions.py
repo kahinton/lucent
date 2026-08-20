@@ -558,6 +558,21 @@ class TestAgentDetail:
         resp = await client.get(f"/definitions/agents/{agent_def['id']}")
         assert "Test Agent" in resp.text
 
+    async def test_detail_capability_grants_keep_actions_visible(
+        self, client, agent_def, skill_def, db_pool, web_user
+    ):
+        user, org, _token = web_user
+        await DefinitionRepository(db_pool).approve_skill(
+            str(skill_def["id"]), str(org["id"]), str(user["id"])
+        )
+        resp = await client.get(f"/definitions/agents/{agent_def['id']}")
+
+        assert 'grid-cols-1 xl:grid-cols-2 gap-4 mb-6' in resp.text
+        assert 'action="/definitions/agents/' in resp.text
+        assert 'grant-skill" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2"' in resp.text
+        assert 'min-w-0 w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm' in resp.text
+        assert 'shrink-0 px-3 py-1.5 text-sm bg-blue-50 text-blue-700' in resp.text
+
     async def test_detail_edit_modal_controls_are_csp_safe(self, client, agent_def):
         resp = await client.get(f"/definitions/agents/{agent_def['id']}")
 
