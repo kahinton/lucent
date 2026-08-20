@@ -33,6 +33,16 @@ The test: **Would future-me benefit from knowing this in a different conversatio
 | Discovered a working process | Update/create a skill for reusable workflow knowledge, or capture the outcome as `experience` if it is session-specific | `skill` or `experience` | 6-7 |
 | Completed significant work | `create_memory` summarizing what was built and learned | `experience` | 6-8 |
 
+### Individual Profile Enrichment
+
+Every authenticated user normally has one account-linked, private individual memory. When that profile is absent from context or contains only account details, improve it through the work rather than conducting an intake interview.
+
+1. Notice durable facts the user explicitly volunteers: preferred name, role, responsibilities, current projects, technical environment, working style, communication preferences, recurring constraints, and corrections.
+2. Ask at most one natural, high-value question when an answer would materially improve the collaboration. Do not ask a survey of profile questions or interrupt active work to collect data.
+3. Update the existing individual memory immediately after a meaningful fact or correction is clear. Preserve existing content and metadata; add only the durable new detail.
+4. Never infer personal facts. Do not store sensitive information unless the user explicitly asks for it to be remembered, and do not store temporary task context or one-off decisions.
+5. Do not call `create_memory(type="individual")`: individual memories are account-linked and system-created. If the expected profile is missing, refresh the current-user context or report the limitation.
+
 ### Correction Tagging
 
 When capturing a memory after a **user correction**, add the `correction` tag:
@@ -94,6 +104,17 @@ update_memory(
   content="<existing content>\n\n## Update <date>\n<new information>"
 )
 ```
+
+**Updating an individual profile:**
+```
+update_memory(
+  memory_id="<account-linked individual memory id>",
+  content="<preserved profile content with a concise, durable update>",
+  metadata={"name": "...", "role": "...", "preferences": ["..."]}
+)
+```
+
+Only include metadata fields that are known and relevant. Preserve existing metadata fields such as contact information when updating.
 
 ## Writing Good Memories
 
@@ -164,3 +185,5 @@ Users can override these defaults for active memory types. Private technical mem
 - Missing the "why" — just recording what changed with no reasoning
 - Using importance 9 for a routine code pattern
 - Skipping `shared=true` for daemon work — invisible to other instances
+- Creating a second individual memory instead of updating the user's account-linked profile
+- Treating a sparse profile as permission to infer details or interrogate the user

@@ -354,6 +354,81 @@ class TestShippedBuiltins:
     """The on-disk catalog includes capabilities required by product UI."""
 
     @pytest.mark.asyncio
+    async def test_lucent_conversation_contract_is_seeded_for_new_org(
+        self, db_pool, sync_org
+    ):
+        repo = DefinitionRepository(db_pool)
+        github_dir = Path(__file__).resolve().parents[1] / ".github"
+        try:
+            await repo.sync_built_in_skills(sync_org, str(github_dir / "skills"))
+            await repo.sync_built_in_agents(
+                sync_org, str(github_dir / "agents" / "definitions")
+            )
+
+            async with db_pool.acquire() as conn:
+                agent = await conn.fetchrow(
+                    """SELECT content, description, status, scope
+                       FROM agent_definitions
+                       WHERE organization_id = $1 AND name = 'lucent'""",
+                    sync_org,
+                )
+                request_skill = await conn.fetchrow(
+                    """SELECT content, status, scope
+                       FROM skill_definitions
+                       WHERE organization_id = $1 AND name = 'daemon-task-authoring'""",
+                    sync_org,
+                )
+                profile_skill = await conn.fetchrow(
+                    """SELECT content, status, scope
+                       FROM skill_definitions
+                       WHERE organization_id = $1 AND name = 'memory-capture'""",
+                    sync_org,
+                )
+                granted_skills = await conn.fetch(
+                    """SELECT s.name
+                       FROM agent_skills agent_skill
+                       JOIN skill_definitions s ON s.id = agent_skill.skill_id
+                       JOIN agent_definitions a ON a.id = agent_skill.agent_id
+                       WHERE a.organization_id = $1 AND a.name = 'lucent'
+                       ORDER BY s.name""",
+                    sync_org,
+                )
+
+            assert agent["status"] == "active"
+            assert agent["scope"] == "built-in"
+            assert "durable memory, or daemon-owned work" in agent["description"]
+            assert "## Conversation Operations" in agent["content"]
+            assert "Do not create, edit, assign, or sequence tasks." in agent["content"]
+            assert "### Individual Profile Enrichment" in agent["content"]
+            assert "do not turn the chat into an intake form." in agent["content"]
+            assert request_skill["status"] == "active"
+            assert request_skill["scope"] == "built-in"
+            assert "## Conversation Path: Activate Durable Work" in request_skill["content"]
+            assert "Stop there. Do not call `create_task`" in request_skill["content"]
+            assert profile_skill["status"] == "active"
+            assert profile_skill["scope"] == "built-in"
+            assert "### Individual Profile Enrichment" in profile_skill["content"]
+            assert "Do not call `create_memory(type=\"individual\")`" in profile_skill["content"]
+            assert "daemon-task-authoring" in [row["name"] for row in granted_skills]
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """DELETE FROM agent_skills
+                       WHERE agent_id IN (
+                           SELECT id FROM agent_definitions WHERE organization_id = $1
+                       )""",
+                    sync_org,
+                )
+                await conn.execute(
+                    "DELETE FROM agent_definitions WHERE organization_id = $1",
+                    sync_org,
+                )
+                await conn.execute(
+                    "DELETE FROM skill_definitions WHERE organization_id = $1",
+                    sync_org,
+                )
+
+    @pytest.mark.asyncio
     async def test_workflow_wizard_assistant_is_seeded_for_new_org(
         self, db_pool, sync_org
     ):
