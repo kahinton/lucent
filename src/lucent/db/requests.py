@@ -2869,6 +2869,28 @@ class RequestRepository:
             return task
         return None
 
+    async def cancel_task(self, task_id: str, org_id: str | None = None) -> dict | None:
+        """Cancel a task that is not currently executing or completed."""
+        now = datetime.now(timezone.utc)
+        query = """UPDATE tasks
+                   SET status = 'cancelled',
+                       completed_at = COALESCE(completed_at, $2),
+                       updated_at = $2
+                   WHERE id = $1
+                     AND status NOT IN ('claimed', 'running', 'completed', 'cancelled')"""
+        params: list[Any] = [UUID(task_id), now]
+        if org_id:
+            query += " AND organization_id = $3"
+            params.append(UUID(org_id))
+        query += " RETURNING *"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+        if not row:
+            return None
+        task = dict(row)
+        await self.add_task_event(task_id, "cancelled", "Task cancelled by user")
+        return task
+
     async def retry_task_with_feedback(
         self, task_id: str, feedback: str, org_id: str | None = None
     ) -> dict | None:

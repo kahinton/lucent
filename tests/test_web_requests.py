@@ -489,6 +489,78 @@ class TestRequestApprovalAction:
         assert updated["approval_status"] == "approved"
 
 
+class TestRequestCancellation:
+    async def test_cancel_owned_request(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Cancel from request detail",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.post(
+            f"/requests/{req['id']}/cancel",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        assert (await repo.get_request(str(req["id"]), str(org["id"])))["status"] == "cancelled"
+
+    async def test_cancel_inactive_task(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Cancel task from request detail",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Inactive task",
+            org_id=str(org["id"]),
+        )
+
+        resp = await client.post(
+            f"/requests/tasks/{task['id']}/cancel",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        assert (await repo.get_task(str(task["id"]), str(org["id"])))["status"] == "cancelled"
+
+    async def test_cannot_cancel_peer_task(self, client, db_pool, web_user, web_prefix):
+        user, org, _token = web_user
+        peer = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}peer",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}peer@test.com",
+        )
+        repo = RequestRepository(db_pool)
+        peer_request = await repo.create_request(
+            title="Peer request",
+            org_id=str(org["id"]),
+            created_by=str(peer["id"]),
+        )
+        peer_task = await repo.create_task(
+            request_id=str(peer_request["id"]),
+            title="Peer task",
+            org_id=str(org["id"]),
+        )
+
+        resp = await client.post(
+            f"/requests/tasks/{peer_task['id']}/cancel",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 404
+        assert (await repo.get_task(str(peer_task["id"]), str(org["id"])))["status"] == "pending"
+
+
 # ============================================================================
 # POST /requests/tasks/{task_id}/retry
 # ============================================================================

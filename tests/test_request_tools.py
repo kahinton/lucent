@@ -642,6 +642,83 @@ class TestListPendingRequests:
 
 
 # ============================================================================
+# Request and task mutations
+# ============================================================================
+
+
+class TestRequestTaskMutations:
+    @pytest.mark.asyncio
+    async def test_updates_and_cancels_owned_work(self, mcp, auth_user, repo):
+        request = await repo.create_request(
+            title="Mutable request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(request["id"]),
+            title="Original task title",
+            org_id=str(auth_user["organization_id"]),
+        )
+
+        updated_task = await _call(
+            mcp,
+            "update_task",
+            {"task_id": str(task["id"]), "title": "Updated task title"},
+        )
+        assert updated_task["title"] == "Updated task title"
+
+        cancelled_task = await _call(mcp, "cancel_task", {"task_id": str(task["id"])})
+        assert cancelled_task["status"] == "cancelled"
+
+        cancelled_request = await _call(
+            mcp,
+            "update_request_status",
+            {"request_id": str(request["id"]), "status": "cancelled"},
+        )
+        assert cancelled_request["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cannot_mutate_peer_work(self, mcp, auth_user, repo, db_pool, clean_test_data):
+        peer = await UserRepository(db_pool).create(
+            external_id=f"{clean_test_data}mutation-peer",
+            provider="local",
+            organization_id=auth_user["organization_id"],
+            email=f"{clean_test_data}mutation-peer@test.com",
+            display_name="Mutation Peer",
+        )
+        request = await repo.create_request(
+            title="Peer request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(peer["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(request["id"]),
+            title="Peer task",
+            org_id=str(auth_user["organization_id"]),
+        )
+
+        task_result = await _call(
+            mcp,
+            "update_task",
+            {"task_id": str(task["id"]), "title": "Attempted peer edit"},
+        )
+        assert "error" in task_result
+        request_result = await _call(
+            mcp,
+            "update_request_status",
+            {"request_id": str(request["id"]), "status": "cancelled"},
+        )
+        assert "error" in request_result
+
+        assert (await repo.get_task(str(task["id"]), str(auth_user["organization_id"])))[
+            "title"
+        ] == "Peer task"
+        assert (await repo.get_request(str(request["id"]), str(auth_user["organization_id"])))[
+            "status"
+        ] == "pending"
+
+
+# ============================================================================
 # list_available_models
 # ============================================================================
 

@@ -67,6 +67,60 @@ def _request_visibility_args(
     }
 
 
+def _can_mutate_request(
+    request: dict[str, Any], user_id: UUID | None, role: str | None
+) -> bool:
+    return role in {"admin", "owner", "daemon"} or (
+        user_id is not None and str(request.get("created_by")) == str(user_id)
+    )
+
+
+async def _get_mutable_request(
+    repo: RequestRepository,
+    request_id: str,
+    *,
+    user_id: UUID | None,
+    org_id: UUID | None,
+    role: str | None,
+    memory_scope: str | None,
+) -> dict[str, Any] | None:
+    if user_id is None or org_id is None:
+        return None
+    request = await repo.get_request(
+        request_id,
+        str(org_id),
+        **_request_visibility_args(user_id, role, memory_scope),
+    )
+    if not request or not _can_mutate_request(request, user_id, role):
+        return None
+    return request
+
+
+async def _get_mutable_task(
+    repo: RequestRepository,
+    task_id: str,
+    *,
+    user_id: UUID | None,
+    org_id: UUID | None,
+    role: str | None,
+    memory_scope: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if org_id is None:
+        return None
+    task = await repo.get_task(task_id, org_id=str(org_id))
+    if not task:
+        return None
+    request = await _get_mutable_request(
+        repo,
+        str(task["request_id"]),
+        user_id=user_id,
+        org_id=org_id,
+        role=role,
+        memory_scope=memory_scope,
+    )
+    return (task, request) if request else None
+
+
 def _valid_uuid(value: str | UUID | None) -> str | None:
     if value in (None, ""):
         return None
@@ -1815,6 +1869,128 @@ Returns: JSON with request details, task breakdown, events timeline, memory link
             return str(obj)
 
         return json.dumps(req, default=serialize)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Update a request's lifecycle status.
+
+Use `cancelled` to stop stale or unwanted work while retaining its activity
+history. You may update only requests you own; admins, owners, and unscoped
+daemon execution may also update visible system work."""
+    )
+    async def update_request_status(request_id: str, status: str) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        repo = await _get_request_repository()
+        request = await _get_mutable_request(
+            repo,
+            request_id,
+            user_id=user_id,
+            org_id=org_id,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if not request:
+            return json.dumps({"error": "Request not found or not editable"})
+        try:
+            updated = await repo.update_request_status(
+                request_id, status, org_id=str(org_id)
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        return json.dumps(updated, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Update the title or description of an inactive task.
+
+Tasks that are claimed, running, or completed cannot be edited. You may edit
+only tasks belonging to requests you are allowed to update."""
+    )
+    async def update_task(
+        task_id: str,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if title is not None and not title.strip():
+            return json.dumps({"error": "title cannot be blank"})
+        if title is None and description is None:
+            return json.dumps({"error": "Provide title or description to update"})
+        repo = await _get_request_repository()
+        pair = await _get_mutable_task(
+            repo,
+            task_id,
+            user_id=user_id,
+            org_id=org_id,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if not pair:
+            return json.dumps({"error": "Task not found or not editable"})
+        task, _request = pair
+        if task.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
+            return json.dumps({"error": "Task is running or completed and cannot be edited"})
+        updated = await repo.update_pending_task(
+            task_id,
+            str(org_id),
+            title=title.strip() if title is not None else None,
+            description=description,
+        )
+        if not updated:
+            return json.dumps({"error": "Task could not be updated"})
+        return json.dumps(updated, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Retry a failed task owned by an accessible request."""
+    )
+    async def retry_task(task_id: str) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        repo = await _get_request_repository()
+        pair = await _get_mutable_task(
+            repo,
+            task_id,
+            user_id=user_id,
+            org_id=org_id,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if not pair:
+            return json.dumps({"error": "Task not found or not editable"})
+        updated = await repo.retry_task(task_id, org_id=str(org_id))
+        if not updated:
+            return json.dumps({"error": "Task is not in failed state"})
+        return json.dumps(updated, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Cancel an inactive task while preserving its request history."""
+    )
+    async def cancel_task(task_id: str) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        repo = await _get_request_repository()
+        pair = await _get_mutable_task(
+            repo,
+            task_id,
+            user_id=user_id,
+            org_id=org_id,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if not pair:
+            return json.dumps({"error": "Task not found or not editable"})
+        updated = await repo.cancel_task(task_id, org_id=str(org_id))
+        if not updated:
+            return json.dumps({"error": "Task is running, completed, or already cancelled"})
+        return json.dumps(updated, default=str)
 
     @mcp.tool(
         description="""List pending requests \u2014 top-level work items

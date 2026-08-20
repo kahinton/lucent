@@ -167,6 +167,17 @@
 </div>
 {% endif %}
 
+{% if can_review_request and req.status not in ('completed', 'cancelled') %}
+<div class="mb-6 flex justify-end">
+    <form method="post" action="/requests/{{ req.id }}/cancel" data-confirm="Cancel this request? Its work history will remain available.">
+        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+        <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 transition-colors">
+            Cancel request
+        </button>
+    </form>
+</div>
+{% endif %}
+
 {% macro markdown_block(content, classes='') %}
 <div class="js-markdown-block request-markdown {{ classes }}"><script type="application/json" nonce="{{ request.state.csp_nonce }}">{{ (content or '') | tojson }}</script></div>
 {% endmacro %}
@@ -364,10 +375,11 @@
 
             <div class="px-3 pb-3 border-t border-gray-100 pt-2 space-y-3">
                 <!-- Retry button for failed tasks -->
-                {% if task.status == 'failed' %}
+                {% if can_review_request and task.status == 'failed' %}
                 <div class="flex items-center justify-between">
                     <span class="text-xs text-red-500">This task failed and can be retried.</span>
                     <form method="POST" action="/requests/tasks/{{ task.id }}/retry">
+                        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                         <button type="submit" class="px-3 py-1 text-xs font-medium rounded-md bg-amber-100 text-amber-700 hover:bg-amber-200 transition-colors">
                             Retry Task
                         </button>
@@ -376,13 +388,14 @@
                 {% endif %}
 
                 <!-- Inline edit form for any task that isn't running or already completed -->
-                {% if task.status not in ('claimed', 'running', 'completed') %}
+                {% if can_review_request and task.status not in ('claimed', 'running', 'completed') %}
                 <details class="bg-blue-50 rounded-lg border border-blue-200" id="task-{{ task.id }}-edit">
                     <summary class="cursor-pointer px-3 py-2 text-xs font-semibold text-blue-700 uppercase tracking-wider hover:bg-blue-100 rounded-lg flex items-center gap-2">
                         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.862 4.487z"/></svg>
                         Edit task
                     </summary>
                     <form method="POST" action="/requests/tasks/{{ task.id }}/edit" class="px-3 pb-3 pt-2 space-y-3">
+                        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                         <div>
                             <label class="block text-xs font-medium text-gray-600 mb-1">Title</label>
                             <input type="text" name="title" value="{{ task.title or '' }}" maxlength="512"
@@ -434,6 +447,14 @@
                         </div>
                     </form>
                 </details>
+                {% if task.status != 'cancelled' %}
+                <form method="POST" action="/requests/tasks/{{ task.id }}/cancel" class="flex justify-end" data-confirm="Cancel this task? Its activity history will remain available.">
+                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1 text-xs font-medium rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50 transition-colors">
+                        Cancel task
+                    </button>
+                </form>
+                {% endif %}
                 {% endif %}
 
                 <!-- Execution Details: sandbox, model, validation, timing -->

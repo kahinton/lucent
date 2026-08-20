@@ -32,6 +32,24 @@ def can_review_request(user, req: dict) -> bool:
     )
 
 
+async def _get_mutable_task_request(repo, task_id: str, user) -> tuple[dict, dict]:
+    """Load a task and require visibility plus mutation rights on its parent request."""
+    org_id = str(user.organization_id)
+    task = await repo.get_task(task_id, org_id=org_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    requester_user_id, include_system = request_visibility_context(user)
+    req = await repo.get_request(
+        str(task["request_id"]),
+        org_id,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
+    if not req or not can_review_request(user, req):
+        raise HTTPException(404, "Task not found")
+    return task, req
+
+
 async def _notify_request_ready(pool, *, request_id: str, action: str) -> None:
     """Best-effort wake notification for daemon request/review state changes."""
     try:
@@ -494,6 +512,34 @@ async def request_approval_action(
     return RedirectResponse(f"/requests/{request_id}", status_code=303)
 
 
+@router.post("/requests/{request_id}/cancel", response_class=HTMLResponse)
+async def cancel_request(request: Request, request_id: str):
+    """Cancel an accessible request without deleting its audit history."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    org_id = str(user.organization_id)
+    requester_user_id, include_system = request_visibility_context(user)
+    req = await repo.get_request(
+        request_id,
+        org_id,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
+    if not req or not can_review_request(user, req):
+        raise HTTPException(404, "Request not found")
+    if req.get("status") in ("completed", "cancelled"):
+        raise HTTPException(409, "Completed or cancelled requests cannot be cancelled")
+    result = await repo.update_request_status(request_id, "cancelled", org_id=org_id)
+    if not result:
+        raise HTTPException(404, "Request not found")
+    await _notify_request_ready(pool, request_id=request_id, action="cancel")
+    return RedirectResponse(f"/requests/{request_id}", status_code=303)
+
+
 @router.post("/requests/tasks/{task_id}/edit", response_class=HTMLResponse)
 async def edit_task(request: Request, task_id: str):
     """Edit a pending task's description, model, agent, or sandbox template."""
@@ -506,9 +552,7 @@ async def edit_task(request: Request, task_id: str):
     repo = RequestRepository(pool)
     org_id = str(user.organization_id)
 
-    existing = await repo.get_task(task_id, org_id=org_id)
-    if not existing:
-        raise HTTPException(404, "Task not found")
+    existing, _req = await _get_mutable_task_request(repo, task_id, user)
     if existing.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
         raise HTTPException(
             409,
@@ -593,10 +637,26 @@ async def retry_task(request: Request, task_id: str):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
+    _existing, parent_request = await _get_mutable_task_request(repo, task_id, user)
 
     task = await repo.retry_task(task_id, org_id=str(user.organization_id))
     if not task:
         raise HTTPException(409, "Task not in failed state")
 
-    request_id = str(task["request_id"])
-    return RedirectResponse(f"/requests/{request_id}", status_code=303)
+    return RedirectResponse(f"/requests/{parent_request['id']}", status_code=303)
+
+
+@router.post("/requests/tasks/{task_id}/cancel", response_class=HTMLResponse)
+async def cancel_task(request: Request, task_id: str):
+    """Cancel an inactive task while retaining it in the request audit trail."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    _existing, parent_request = await _get_mutable_task_request(repo, task_id, user)
+    task = await repo.cancel_task(task_id, org_id=str(user.organization_id))
+    if not task:
+        raise HTTPException(409, "Task is running, completed, or already cancelled")
+    return RedirectResponse(f"/requests/{parent_request['id']}#task-{task_id}", status_code=303)

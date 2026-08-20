@@ -1073,6 +1073,19 @@ async def retry_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
     return task
 
 
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
+    """Cancel a pending, planned, failed, or otherwise inactive task."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
+    task = await repo.cancel_task(str(task_id), org_id=str(user.organization_id))
+    if not task:
+        raise HTTPException(409, "Task is running, completed, already cancelled, or not found")
+    return task
+
+
 @router.post("/tasks/{task_id}/retry-with-feedback")
 async def retry_task_with_feedback(
     task_id: UUID,
