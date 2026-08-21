@@ -393,6 +393,21 @@ class TestListPendingTasks:
         matching = [t for t in result["items"] if t["id"] == task["id"]]
         assert matching[0]["request_title"] == "Test Request"
 
+    @pytest.mark.asyncio
+    async def test_includes_durable_output_flag(self, repo, req, task, test_organization):
+        await repo.create_task_output(
+            task_id=str(task["id"]),
+            org_id=str(test_organization["id"]),
+            output={
+                "output_type": "file",
+                "title": "Completed deliverable",
+                "external_id": "file-123",
+            },
+        )
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        matching = [t for t in result["items"] if t["id"] == task["id"]]
+        assert matching[0]["has_durable_output"] is True
+
 
 class TestListQueuedTasks:
     @pytest.mark.asyncio

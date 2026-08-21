@@ -34,5 +34,8 @@ class RuntimeModuleProxy:
     def __getattr__(self, name: str):
         return getattr(self._module(), name)
 
+    def __setattr__(self, name: str, value) -> None:
+        setattr(self._module(), name, value)
+
 
 runtime = RuntimeModuleProxy()

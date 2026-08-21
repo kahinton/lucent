@@ -130,6 +130,22 @@ def required_task_tool_names(
     return required
 
 
+def missing_required_task_tools(
+    required_tools: set[str],
+    tool_counts: dict[str, int],
+    *,
+    has_durable_output: bool = False,
+) -> list[str]:
+    """Return required tools that were not satisfied by this task attempt."""
+    missing: list[str] = []
+    for required_tool in sorted(required_tools):
+        if required_tool == "store_user_file" and has_durable_output:
+            continue
+        if not tool_counts.get(required_tool, 0):
+            missing.append(required_tool)
+    return missing
+
+
 def task_requires_mcp_tool_usage(
     agent_type: str | None,
     title: str | None = None,

@@ -2292,7 +2292,12 @@ class RequestRepository:
             )
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
-                f"""SELECT t.*, r.title as request_title
+                                f"""SELECT t.*, r.title as request_title,
+                                                    EXISTS (
+                                                            SELECT 1 FROM task_outputs o
+                                                            WHERE o.task_id = t.id
+                                                                AND o.organization_id = t.organization_id
+                                                    ) AS has_durable_output
                    {base}
                    ORDER BY
                      CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1

@@ -663,3 +663,67 @@ async def test_request_review_needs_rework_auto_transitions(monkeypatch):
     # Verify request was auto-transitioned to needs_rework
     assert len(status_updates) == 1
     assert status_updates[0] == (request_id, "needs_rework")
+
+
+@pytest.mark.asyncio
+async def test_failed_request_review_waits_for_manual_review(monkeypatch):
+    daemon = LucentDaemon()
+    task_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    request_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+    events: list[tuple[str, str, str | None, dict | None]] = []
+    completions: list[tuple[str, str, str | None]] = []
+    status_updates: list[tuple[str, str]] = []
+
+    async def _complete_task(tid, result, instance_id=None):
+        completions.append((tid, result, instance_id))
+        return {"id": tid}
+
+    async def _update_status(rid, status):
+        status_updates.append((rid, status))
+        return {"id": rid, "status": status}
+
+    async def _add_event(tid, event_type, detail=None, metadata=None):
+        events.append((tid, event_type, detail, metadata))
+        return {"id": tid}
+
+    monkeypatch.setattr("daemon.daemon.RequestAPI.complete_task", _complete_task)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _update_status)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _add_event)
+
+    await daemon._handle_review_task_failure(
+        {"id": task_id, "request_id": request_id},
+        "stream idle timeout",
+    )
+
+    expected_result = (
+        "Automatic request review failed; manual review required.\n\n"
+        "Reason: stream idle timeout"
+    )
+    assert completions == [(task_id, expected_result, daemon.instance_id)]
+    assert status_updates == [(request_id, "review")]
+    assert events[0][1] == "request_review_manual_required"
+
+
+@pytest.mark.asyncio
+async def test_completed_review_task_does_not_auto_complete_manual_review(monkeypatch):
+    daemon = LucentDaemon()
+
+    async def _forbidden(*_args, **_kwargs):
+        raise AssertionError("manual review must not be auto-completed or re-dispatched")
+
+    monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _forbidden)
+    monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _forbidden)
+
+    review_task = await daemon._create_request_review_task(
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        {
+            "tasks": [
+                {
+                    "title": "Post-completion review",
+                    "status": "completed",
+                }
+            ]
+        },
+    )
+
+    assert review_task is None

@@ -278,7 +278,7 @@ async def reset_user_password_web(request: Request, user_id: UUID):
 
 @router.post("/users/{user_id}/impersonate")
 async def start_impersonation(request: Request, user_id: UUID):
-    """Start impersonating a user (team mode only)."""
+    """Start impersonating a user."""
     await _check_csrf(request)
     user = await get_user_context(request)
 

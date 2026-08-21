@@ -320,9 +320,9 @@ async def get_user_context(
         auth_method="session",
     )
 
-    # Handle impersonation (team mode only)
+    # Handle session-bound impersonation.
     impersonate_cookie = request.cookies.get("lucent_impersonate")
-    if impersonate_cookie and is_team_mode():
+    if impersonate_cookie:
         from lucent.auth import set_impersonating_user
 
         # Verify the cookie signature

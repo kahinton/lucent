@@ -314,7 +314,7 @@ def _refresh_config_from_runtime_settings() -> None:
     global SHADOW_FORGET_OFFSET_MINUTES, COMPRESSION_MINUTES
     global REQUIRE_APPROVAL
     global REQUEST_REVIEW_AGENT_TYPE, REQUEST_REVIEW_FALLBACK_AGENT_TYPE
-    global REQUEST_REVIEW_MODEL, ALLOW_GIT_COMMIT, ALLOW_GIT_PUSH, MCP_URL, MCP_API_KEY
+    global REQUEST_REVIEW_MODEL, ALLOW_GIT_COMMIT, ALLOW_GIT_PUSH, MCP_URL
 
     MAX_CONCURRENT_SESSIONS = runtime_settings.daemon_max_sessions()
     DAEMON_INTERVAL_MINUTES = runtime_settings.daemon_interval_minutes()
@@ -342,7 +342,6 @@ def _refresh_config_from_runtime_settings() -> None:
     ALLOW_GIT_COMMIT = runtime_settings.daemon_git_commit_allowed()
     ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
     MCP_URL = runtime_settings.daemon_mcp_url()
-    MCP_API_KEY = runtime_settings.daemon_mcp_api_key()
 
 
 def _resolve_default_model(preferred_model: str | None = None) -> str:
@@ -387,6 +386,20 @@ def _required_task_tool_names(
 ) -> set[str]:
     """Return specific tools a task must call to satisfy explicit instructions."""
     return task_policy.required_task_tool_names(agent_type, title, description)
+
+
+def _missing_required_task_tools(
+    required_tools: set[str],
+    tool_counts: dict[str, int],
+    *,
+    has_durable_output: bool = False,
+) -> list[str]:
+    """Return required task tools that remain unsatisfied after a retry."""
+    return task_policy.missing_required_task_tools(
+        required_tools,
+        tool_counts,
+        has_durable_output=has_durable_output,
+    )
 
 
 def _task_skips_tool_validation(agent_type: str | None) -> bool:
@@ -625,13 +638,14 @@ def _should_rotate_proactively() -> bool:
 
 
 async def ensure_valid_api_key(instance_id: str = "local") -> str:
-    """Ensure the daemon has a valid hs_ API key.
+    """Ensure the daemon has a valid instance-owned service API key.
 
-    Checks (in order): env var, provision new.
-    Updates global MCP_CONFIG and API_HEADERS.
-    Returns the valid key.
+    The daemon must not adopt a generic key from its environment: editor MCP
+    keys may be memory-scoped to a human user and would silently filter the
+    dispatch queue. Only a key this process provisioned for its daemon-service
+    principal may be reused.
     """
-    global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_expires_at
+    global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_db_id, _current_key_expires_at
 
     # One-time cleanup: remove legacy key file if it exists
     _key_file = Path(__file__).parent / ".daemon_api_key"
@@ -642,8 +656,8 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
         except Exception:
             pass
 
-    # 1. Check if the env var key works
-    if MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
+    # Reuse only a key provisioned and tracked by this daemon process.
+    if _current_key_db_id and MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
         if _should_rotate_proactively():
             remaining = _get_key_time_remaining()
             remaining_minutes = max(0, int((remaining or timedelta()).total_seconds() // 60))
@@ -652,12 +666,14 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
                 f"({remaining_minutes}m remaining) — rotating proactively"
             )
         else:
-            log("API key from environment is valid")
+            log("Daemon service API key is valid")
             MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
             return MCP_API_KEY
 
-    # 2. Provision a new key (instance-scoped, 24h expiry)
-    log("No valid API key found — provisioning daemon service account...")
+    # Provision a new key when starting or recovering. Do not fall back to an
+    # inherited environment key, which may belong to a user-scoped MCP client.
+    _current_key_db_id = None
+    log("Provisioning daemon service API key...")
     new_key = await _provision_daemon_api_key(instance_id)
     if new_key:
         MCP_API_KEY = new_key
@@ -665,11 +681,11 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
         log("Daemon API key provisioned")
         return new_key
 
-    # 3. Fall back to whatever we have (may not work)
-    log("WARNING: Could not provision a valid API key", "WARN")
+    log("WARNING: Could not provision a daemon service API key", "WARN")
     _current_key_expires_at = None
-    MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
-    return MCP_API_KEY
+    MCP_API_KEY = ""
+    MCP_CONFIG, API_HEADERS = _build_auth_config("")
+    return ""
 
 
 async def _handle_auth_failure(instance_id: str, *, force_rotate: bool = False) -> bool:
@@ -683,8 +699,14 @@ async def _handle_auth_failure(instance_id: str, *, force_rotate: bool = False) 
 
     lock = _get_key_lock()
     async with lock:
-        # Re-check after acquiring lock — another loop may have already fixed it
-        if not force_rotate and MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
+        # Re-check after acquiring lock — another loop may have already fixed it.
+        # A valid but inherited user key is not suitable for daemon dispatch.
+        if (
+            not force_rotate
+            and _current_key_db_id
+            and MCP_API_KEY
+            and await _verify_api_key(MCP_API_KEY)
+        ):
             return True
 
         if force_rotate:
@@ -713,7 +735,7 @@ async def _handle_auth_failure(instance_id: str, *, force_rotate: bool = False) 
 
 async def _verify_and_provision_key(instance_id: str) -> bool:
     """Validate daemon key and rotate when invalid or near expiry."""
-    if MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
+    if _current_key_db_id and MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
         if _should_rotate_proactively():
             return await _handle_auth_failure(instance_id, force_rotate=True)
         return True
@@ -3232,6 +3254,7 @@ class LucentDaemon(
             self._sessions_active.add(1)
 
         retried_after_auth_failure = False
+        retried_after_empty_response = False
         try:
             while True:
                 try:
@@ -3255,6 +3278,22 @@ class LucentDaemon(
                         ),
                         timeout=SESSION_TOTAL_TIMEOUT,
                     )
+                    if not result:
+                        if retried_after_empty_response:
+                            status = "error"
+                            log(
+                                f"Session '{name}' returned no response after retry",
+                                "ERROR",
+                            )
+                            if span:
+                                span.set_attribute("daemon.session.error", "empty_response")
+                            return None
+                        retried_after_empty_response = True
+                        log(
+                            f"Session '{name}' returned no response; retrying once",
+                            "WARN",
+                        )
+                        continue
                     if span:
                         span.set_attribute("daemon.session.output_length", len(result) if result else 0)
                     return result
@@ -4407,14 +4446,11 @@ class LucentDaemon(
                 required_tools = set()
             else:
                 required_tools = _required_task_tool_names(agent_type, title, description)
-            missing_required_tools: list[str] = []
-            for required_tool in sorted(required_tools):
-                if required_tool == "send_handoff":
-                    satisfied = bool(validation_tool_counts.get("send_handoff", 0))
-                else:
-                    satisfied = bool(validation_tool_counts.get(required_tool, 0))
-                if not satisfied:
-                    missing_required_tools.append(required_tool)
+            missing_required_tools = _missing_required_task_tools(
+                required_tools,
+                validation_tool_counts,
+                has_durable_output=bool(task.get("has_durable_output")),
+            )
             if missing_required_tools:
                 reason = (
                     "Task instructions required tool call(s) "
@@ -4499,7 +4535,7 @@ class LucentDaemon(
                         )
                         request_id = str(task.get("request_id", ""))
                         if request_id:
-                            await RequestAPI.update_request_status(request_id, "needs_rework")
+                            await RequestAPI.update_request_status(request_id, "review")
                         await RequestAPI.add_event(
                             task_id,
                             "request_review_processing_failed",

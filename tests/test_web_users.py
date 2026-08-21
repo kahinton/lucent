@@ -26,8 +26,11 @@ from lucent.auth_providers import (
     set_user_password,
 )
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.license import create_license
+from lucent.mode import get_mode
 
 TEST_PASSWORD = "TestPass1"
+_TEST_LICENSE_PRIVATE_KEY = "eeddca8cb93457f6e6064745285738aef75c9a281d876677c2fb4690fca5b095"
 
 
 # ============================================================================
@@ -60,6 +63,19 @@ async def web_prefix(db_pool):
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
+
+
+@pytest.fixture
+def team_mode(monkeypatch):
+    """Enable licensed team mode for impersonation behavior tests."""
+    monkeypatch.setenv("LUCENT_MODE", "team")
+    monkeypatch.setenv(
+        "LUCENT_LICENSE_KEY",
+        create_license(_TEST_LICENSE_PRIVATE_KEY, "test-org", max_users=10),
+    )
+    get_mode.cache_clear()
+    yield
+    get_mode.cache_clear()
 
 
 @pytest_asyncio.fixture
@@ -108,12 +124,10 @@ async def client(db_pool, owner_user):
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://test",
-        cookies={
-            SESSION_COOKIE_NAME: session_token,
-            CSRF_COOKIE_NAME: csrf_token,
-        },
+        base_url="https://test",
     ) as c:
+        c.cookies.set(SESSION_COOKIE_NAME, session_token, domain="test.local", path="/")
+        c.cookies.set(CSRF_COOKIE_NAME, csrf_token, domain="test.local", path="/")
         c._csrf_token = csrf_token  # type: ignore[attr-defined]
         yield c
 
@@ -128,12 +142,10 @@ async def member_client(db_pool, member_user):
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://test",
-        cookies={
-            SESSION_COOKIE_NAME: session_token,
-            CSRF_COOKIE_NAME: csrf_token,
-        },
+        base_url="https://test",
     ) as c:
+        c.cookies.set(SESSION_COOKIE_NAME, session_token, domain="test.local", path="/")
+        c.cookies.set(CSRF_COOKIE_NAME, csrf_token, domain="test.local", path="/")
         c._csrf_token = csrf_token  # type: ignore[attr-defined]
         yield c
 
@@ -216,7 +228,7 @@ async def test_create_user_without_permission_returns_403(member_client):
 
 
 @pytest.mark.asyncio
-async def test_impersonate_user(client, member_user):
+async def test_impersonate_user(client, member_user, team_mode):
     """Owner can impersonate a member; expect 303 redirect."""
     target_user, _, _ = member_user
     resp = await client.post(
@@ -229,7 +241,22 @@ async def test_impersonate_user(client, member_user):
 
 
 @pytest.mark.asyncio
-async def test_impersonate_self_redirects_with_error(client, owner_user):
+async def test_impersonation_follows_redirect_as_target_user(client, member_user, team_mode):
+    """The signed impersonation cookie must take effect after the redirect."""
+    target_user, _, _ = member_user
+    response = await client.post(
+        f"/settings/users/{target_user['id']}/impersonate",
+        data=_csrf_data(client),
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert "Impersonating" in response.text
+    assert target_user["display_name"] in response.text
+
+
+@pytest.mark.asyncio
+async def test_impersonate_self_redirects_with_error(client, owner_user, team_mode):
     """Owner cannot impersonate themselves; expect settings users error redirect."""
     owner, _, _ = owner_user
     resp = await client.post(
@@ -239,6 +266,25 @@ async def test_impersonate_self_redirects_with_error(client, owner_user):
     )
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
+
+
+@pytest.mark.asyncio
+async def test_personal_mode_impersonation_follows_redirect_as_target_user(client, member_user):
+    """Personal mode honors the same signed impersonation flow as team mode."""
+    target_user, _, _ = member_user
+
+    members = await client.get("/settings/users")
+    response = await client.post(
+        f"/settings/users/{target_user['id']}/impersonate",
+        data=_csrf_data(client),
+        follow_redirects=True,
+    )
+
+    assert members.status_code == 200
+    assert "Impersonate" in members.text
+    assert response.status_code == 200
+    assert "Impersonating" in response.text
+    assert target_user["display_name"] in response.text
 
 
 # ============================================================================
