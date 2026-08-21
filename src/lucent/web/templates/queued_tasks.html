@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Queued Tasks - Lucent{% endblock %}
+
+{% block content %}
+<div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div>
+        <h1 class="text-2xl font-bold text-gray-900">Queued Tasks</h1>
+        <p class="mt-1 text-sm text-gray-500">{{ total_count }} pending or planned task{% if total_count != 1 %}s{% endif %} in your visible backlog.</p>
+    </div>
+    <a href="/activity" class="inline-flex items-center justify-center rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Back to activity</a>
+</div>
+
+<div class="mb-6 border-l-4 border-blue-400 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+    <strong>{{ ready_count }}</strong> ready now. The rest are queued but waiting for request approval or an earlier task stage.
+</div>
+
+{% if tasks %}
+<div class="overflow-hidden rounded-lg border border-gray-200 bg-white">
+    <div class="divide-y divide-gray-100">
+        {% for task in tasks %}
+        <a href="/activity/{{ task.request_id }}#task-{{ task.id }}" class="block px-4 py-3 hover:bg-gray-50">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="font-medium text-gray-900">{{ task.title }}</span>
+                        {% if task.status == 'pending' %}
+                        <span class="rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-700">{{ task.status }}</span>
+                        {% else %}
+                        <span class="rounded bg-purple-100 px-2 py-0.5 text-xs text-purple-700">{{ task.status }}</span>
+                        {% endif %}
+                        <span class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">stage {{ task.sequence_order }}</span>
+                    </div>
+                    <p class="mt-1 truncate text-sm text-gray-500">{{ task.request_title }}</p>
+                </div>
+                <div class="flex shrink-0 flex-wrap gap-2 text-xs text-gray-500">
+                    <span>request: {{ task.request_status | replace('_', ' ') }}</span>
+                    <span>approval: {{ task.request_approval_status | replace('_', ' ') }}</span>
+                </div>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</div>
+{% else %}
+<div class="border border-dashed border-gray-300 py-12 text-center text-sm text-gray-500">No queued tasks are visible to you.</div>
+{% endif %}
+
+{% if total_pages > 1 %}
+<nav class="mt-6 flex items-center justify-between" aria-label="Queued task pages">
+    {% if page > 1 %}
+    <a href="/activity/queue?page={{ page - 1 }}&per_page={{ per_page }}" class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Previous</a>
+    {% else %}
+    <span></span>
+    {% endif %}
+    <span class="text-sm text-gray-500">Page {{ page }} of {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="/activity/queue?page={{ page + 1 }}&per_page={{ per_page }}" class="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Next</a>
+    {% else %}
+    <span></span>
+    {% endif %}
+</nav>
+{% endif %}
+{% endblock %}

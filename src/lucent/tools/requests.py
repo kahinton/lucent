@@ -1838,7 +1838,11 @@ Returns: JSON with request details, task breakdown, events timeline, memory link
             return json.dumps({"error": "No user context"})
 
         repo = await _get_request_repository()
-        req = await repo.get_request_with_tasks(request_id, str(org_id))
+        req = await repo.get_request_with_tasks(
+            request_id,
+            str(org_id),
+            **_request_visibility_args(user_id, user_role, memory_scope),
+        )
         if not req:
             return json.dumps({"error": "Request not found"})
 
@@ -2194,8 +2198,9 @@ provided, the recommended model plus a selection reason."""
     @mcp.tool(
         description="""List pending tracked tasks in the queue.
 
-Returns tasks that are waiting to be claimed and executed, ordered by priority.
-Use this to see what work is queued up."""
+Returns only tasks ready for the daemon to claim now, ordered by priority.
+Tasks blocked by approval or an earlier sequence stage are omitted; use
+`list_queued_tasks` to inspect the full pending/planned backlog."""
     )
     async def list_pending_tasks() -> str:
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
@@ -2216,6 +2221,26 @@ Use this to see what work is queued up."""
             return str(obj)
 
         return json.dumps(tasks, default=serialize)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List every queued task visible to you.
+
+Queued means the task status is `pending` or `planned`; this includes tasks
+waiting for request approval or for earlier sequence stages. Each result
+includes its parent request status and approval state. Use
+`list_pending_tasks` when you need only work ready to run now."""
+    )
+    async def list_queued_tasks() -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        repo = await _get_request_repository()
+        tasks = await repo.list_queued_tasks(
+            str(org_id),
+            **_request_visibility_args(user_id, role, memory_scope),
+        )
+        return json.dumps(tasks, default=str)
 
     @mcp.tool(
         description="""Close out a rejected request after the feedback loop has been processed.

@@ -376,6 +376,30 @@ class TestListPendingTasks:
         assert matching[0]["request_title"] == "Test Request"
 
 
+class TestListQueuedTasks:
+    @pytest.mark.asyncio
+    async def test_includes_sequence_blocked_task(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        first = await repo.create_task(
+            request_id=str(req["id"]), title="First stage", org_id=org, sequence_order=0
+        )
+        blocked = await repo.create_task(
+            request_id=str(req["id"]), title="Blocked stage", org_id=org, sequence_order=1
+        )
+
+        queued = await repo.list_queued_tasks(org)
+        ready = await repo.list_pending_tasks(org)
+
+        queued_ids = {task["id"] for task in queued["items"]}
+        ready_ids = {task["id"] for task in ready["items"]}
+        assert {first["id"], blocked["id"]} <= queued_ids
+        assert first["id"] in ready_ids
+        assert blocked["id"] not in ready_ids
+        queued_blocked = next(task for task in queued["items"] if task["id"] == blocked["id"])
+        assert queued_blocked["request_title"] == "Test Request"
+        assert queued_blocked["request_approval_status"] == "auto_approved"
+
+
 class TestTaskLifecycle:
     @pytest.mark.asyncio
     async def test_claim_task(self, repo, task):

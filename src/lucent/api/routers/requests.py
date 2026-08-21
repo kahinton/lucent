@@ -399,6 +399,25 @@ async def recent_events(user: AuthenticatedUser, limit: int = 50, pool=Depends(g
     )
 
 
+@router.get("/queue")
+async def queued_tasks(
+    user: AuthenticatedUser,
+    limit: int = 50,
+    offset: int = 0,
+    pool=Depends(get_pool),
+):
+    """List the full pending/planned backlog, including work not ready to run."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    return await repo.list_queued_tasks(
+        str(user.organization_id),
+        limit=min(max(limit, 1), 100),
+        offset=max(offset, 0),
+        **_request_visibility_args(user),
+    )
+
+
 @router.get("/{request_id}/memories")
 async def request_memories(request_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
@@ -1182,7 +1201,9 @@ async def pending_queue(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_pending_tasks(str(user.organization_id))
+    return await repo.list_pending_tasks(
+        str(user.organization_id), **_request_visibility_args(user)
+    )
 
 
 @router.post("/queue/release-stale")

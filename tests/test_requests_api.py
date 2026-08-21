@@ -84,6 +84,11 @@ async def test_request_api_scopes_members_and_system_work(db_pool):
             org_id=str(org["id"]),
             created_by=str(member_b["id"]),
         )
+        await requests.create_task(
+            request_id=str(request_b["id"]),
+            title="Member B private task",
+            org_id=str(org["id"]),
+        )
         system_request = await requests.create_request(
             title="System daemon request",
             org_id=str(org["id"]),
@@ -100,6 +105,14 @@ async def test_request_api_scopes_members_and_system_work(db_pool):
             ]
             hidden = await client.get(f"/api/requests/{request_a['id']}")
             assert hidden.status_code == 200
+
+            queued = await client.get("/api/requests/queue")
+            assert queued.status_code == 200
+            assert {row["id"] for row in queued.json()["items"]} == {str(task_a["id"])}
+
+            ready = await client.get("/api/requests/queue/pending")
+            assert ready.status_code == 200
+            assert {row["id"] for row in ready.json()["items"]} == {str(task_a["id"])}
 
             cancelled_task = await client.post(f"/api/requests/tasks/{task_a['id']}/cancel")
             assert cancelled_task.status_code == 200

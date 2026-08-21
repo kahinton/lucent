@@ -196,6 +196,46 @@ async def activity_list(
     )
 
 
+@router.get("/activity/queue", response_class=HTMLResponse)
+async def queued_tasks_list(request: Request, page: int = 1, per_page: int = 25):
+    """Show the full pending/planned task backlog visible to the user."""
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+
+    page = max(1, page)
+    per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
+    repo = RequestRepository(pool)
+    requester_user_id, include_system = request_visibility_context(user)
+    result = await repo.list_queued_tasks(
+        str(user.organization_id),
+        limit=per_page,
+        offset=(page - 1) * per_page,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
+    ready = await repo.list_pending_tasks(
+        str(user.organization_id),
+        limit=1,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
+    total_pages = ceil(result["total_count"] / per_page) if result["total_count"] else 1
+    return templates.TemplateResponse(
+        request,
+        "queued_tasks.html",
+        {
+            "user": user,
+            "tasks": result["items"],
+            "total_count": result["total_count"],
+            "ready_count": ready["total_count"],
+            "page": min(page, total_pages),
+            "per_page": per_page,
+            "total_pages": total_pages,
+        },
+    )
+
+
 @router.get("/requests", response_class=HTMLResponse)
 async def requests_redirect(request: Request):
     """Redirect old /requests URL to /activity."""

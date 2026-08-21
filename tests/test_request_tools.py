@@ -539,6 +539,7 @@ class TestGetRequestDetails:
             title="Details Test",
             org_id=str(test_organization["id"]),
             description="Testing details endpoint",
+            created_by=str(auth_user["id"]),
         )
         return str(req["id"])
 
@@ -852,3 +853,30 @@ class TestListPendingTasks:
         set_current_user(None)
         result = await _call(mcp, "list_pending_tasks")
         assert "error" in result
+
+
+class TestListQueuedTasks:
+    @pytest.mark.asyncio
+    async def test_returns_sequence_blocked_task(self, mcp, auth_user, repo, test_organization):
+        req = await repo.create_request(
+            title="Queued List Test",
+            org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
+        )
+        await repo.create_task(
+            request_id=str(req["id"]),
+            title="Ready stage",
+            org_id=str(test_organization["id"]),
+            sequence_order=0,
+        )
+        await repo.create_task(
+            request_id=str(req["id"]),
+            title="Blocked stage",
+            org_id=str(test_organization["id"]),
+            sequence_order=1,
+        )
+
+        result = await _call(mcp, "list_queued_tasks")
+
+        titles = {task["title"] for task in result["items"]}
+        assert {"Ready stage", "Blocked stage"} <= titles

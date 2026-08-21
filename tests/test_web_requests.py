@@ -186,6 +186,29 @@ class TestActivityList:
         resp = await client.get("/activity")
         assert "Web Test Request" in resp.text
 
+    async def test_queued_tasks_page_lists_visible_backlog(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Queued Web Request",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        await repo.create_task(
+            request_id=str(req["id"]),
+            title="Queued Web Task",
+            org_id=str(org["id"]),
+        )
+
+        activity = await client.get("/activity")
+        assert activity.status_code == 200
+        assert 'href="/activity/queue"' in activity.text
+
+        queued = await client.get("/activity/queue")
+        assert queued.status_code == 200
+        assert "Queued Web Task" in queued.text
+        assert "Queued Web Request" in queued.text
+
     async def test_list_filter_by_status(self, client, sample_request):
         resp = await client.get("/activity", params={"status": "pending"})
         assert resp.status_code == 200

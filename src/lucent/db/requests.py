@@ -2288,6 +2288,56 @@ class RequestRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
+    async def list_queued_tasks(
+        self,
+        org_id: str,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict:
+        """List all queued tasks, including work blocked from dispatch.
+
+        Queued is the operational backlog: tasks in either ``pending`` or
+        ``planned`` state. Unlike :meth:`list_pending_tasks`, this does not
+        exclude work waiting on approval or an earlier sequence stage.
+        """
+        base = """FROM tasks t
+                   JOIN requests r ON r.id = t.request_id
+                   WHERE t.organization_id = $1
+                     AND t.status IN ('pending', 'planned')"""
+        params: list[Any] = [UUID(org_id)]
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            base += " AND " + self._request_visibility_condition("$2", "$3")
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total {base}",
+                *params,
+            )
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(
+                f"""SELECT t.*, r.title AS request_title,
+                          r.status AS request_status,
+                          r.approval_status AS request_approval_status
+                   {base}
+                   ORDER BY
+                     CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                                     WHEN 'medium' THEN 2 ELSE 3 END,
+                     t.created_at
+                   LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+                *params,
+                limit,
+                offset,
+            )
+        return {
+            "items": [dict(row) for row in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
     async def claim_task(
         self,
         task_id: str,

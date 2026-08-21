@@ -23,6 +23,7 @@ def test_core_read_only_tools_are_annotated():
         "get_memory",
         "get_current_user_context",
         "list_active_work",
+        "list_queued_tasks",
         "list_planning_targets",
         "list_available_models",
         "list_agent_definitions",
