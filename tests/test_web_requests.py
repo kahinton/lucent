@@ -209,6 +209,36 @@ class TestActivityList:
         assert "Queued Web Task" in queued.text
         assert "Queued Web Request" in queued.text
 
+    async def test_activity_excludes_peer_queued_tasks(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        peer = await UserRepository(db_pool).create(
+            external_id=f"peer_{uuid4()}",
+            provider="local",
+            organization_id=org["id"],
+            email=f"peer_{uuid4()}@test.com",
+            display_name="Peer",
+        )
+        repo = RequestRepository(db_pool)
+        peer_request = await repo.create_request(
+            title="Peer Queued Request",
+            org_id=str(org["id"]),
+            created_by=str(peer["id"]),
+        )
+        await repo.create_task(
+            request_id=str(peer_request["id"]),
+            title="Peer Queued Task",
+            org_id=str(org["id"]),
+        )
+
+        summary = await repo.get_active_summary(
+            str(org["id"]), requester_user_id=str(user["id"])
+        )
+        response = await client.get("/activity")
+
+        assert summary["tasks"]["queued"] == 0
+        assert response.status_code == 200
+        assert "Peer Queued Request" not in response.text
+
     async def test_list_filter_by_status(self, client, sample_request):
         resp = await client.get("/activity", params={"status": "pending"})
         assert resp.status_code == 200

@@ -1101,35 +1101,58 @@ class RequestRepository:
         reviewed_at = (
             now if status in (REQUEST_STATUS_REVIEW, REQUEST_STATUS_NEEDS_REWORK) else None
         )
-        if org_id:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """UPDATE requests
-                       SET status = $2, updated_at = $3,
-                           completed_at = COALESCE($4, completed_at),
-                           reviewed_at = COALESCE($5, reviewed_at)
-                       WHERE id = $1 AND organization_id = $6 RETURNING *""",
-                    UUID(request_id),
-                    status,
-                    now,
-                    completed_at,
-                    reviewed_at,
-                    UUID(org_id),
-                )
-        else:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """UPDATE requests
-                       SET status = $2, updated_at = $3,
-                           completed_at = COALESCE($4, completed_at),
-                           reviewed_at = COALESCE($5, reviewed_at)
-                       WHERE id = $1 RETURNING *""",
-                    UUID(request_id),
-                    status,
-                    now,
-                    completed_at,
-                    reviewed_at,
-                )
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if org_id:
+                    row = await conn.fetchrow(
+                        """UPDATE requests
+                           SET status = $2, updated_at = $3,
+                               completed_at = COALESCE($4, completed_at),
+                               reviewed_at = COALESCE($5, reviewed_at)
+                           WHERE id = $1 AND organization_id = $6 RETURNING *""",
+                        UUID(request_id),
+                        status,
+                        now,
+                        completed_at,
+                        reviewed_at,
+                        UUID(org_id),
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """UPDATE requests
+                           SET status = $2, updated_at = $3,
+                               completed_at = COALESCE($4, completed_at),
+                               reviewed_at = COALESCE($5, reviewed_at)
+                           WHERE id = $1 RETURNING *""",
+                        UUID(request_id),
+                        status,
+                        now,
+                        completed_at,
+                        reviewed_at,
+                    )
+
+                if row and status in (REQUEST_STATUS_COMPLETED, REQUEST_STATUS_CANCELLED):
+                    cancelled_tasks = await conn.fetch(
+                        """UPDATE tasks
+                           SET status = 'cancelled', completed_at = $2, updated_at = $2
+                           WHERE request_id = $1 AND status IN ('pending', 'planned')
+                           RETURNING id""",
+                        UUID(request_id),
+                        now,
+                    )
+                    if cancelled_tasks:
+                        await conn.executemany(
+                            """INSERT INTO task_events (task_id, event_type, detail, metadata)
+                               VALUES ($1, 'cancelled', $2, $3)""",
+                            [
+                                (
+                                    task["id"],
+                                    f"Task cancelled because parent request was {status}",
+                                    json.dumps({"request_status": status}),
+                                )
+                                for task in cancelled_tasks
+                            ],
+                        )
 
         # When a request reaches a terminal state, close any linked schedule run.
         # This runs in a separate connection from the request status update above,

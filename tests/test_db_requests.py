@@ -188,6 +188,24 @@ class TestUpdateRequestStatus:
         assert updated["completed_at"] is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["completed", "cancelled"])
+    async def test_terminal_status_cancels_queued_tasks(
+        self, repo, req, task, test_organization, status
+    ):
+        updated = await repo.update_request_status(
+            str(req["id"]), status, org_id=str(test_organization["id"])
+        )
+
+        assert updated["status"] == status
+        updated_task = await repo.get_task(str(task["id"]))
+        assert updated_task["status"] == "cancelled"
+        events = await repo.list_task_events(str(task["id"]))
+        assert any(
+            event["detail"] == f"Task cancelled because parent request was {status}"
+            for event in events["items"]
+        )
+
+    @pytest.mark.asyncio
     async def test_update_nonexistent(self, repo):
         result = await repo.update_request_status(
             "00000000-0000-0000-0000-000000000000", "completed"
