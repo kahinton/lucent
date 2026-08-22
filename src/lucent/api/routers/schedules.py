@@ -469,10 +469,11 @@ async def _trigger_schedule_execution(
     req_repo = RequestRepository(pool)
 
     if user is not None:
+        created_by = None if _is_daemon_user(user) else str(user.id)
         sched = await sched_repo.get_schedule(
             schedule_id,
             str(user.organization_id),
-            created_by=str(user.id),
+            created_by=created_by,
             include_daemon_created=_include_daemon_workflows(user),
         )
         if not sched:

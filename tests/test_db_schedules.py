@@ -1755,6 +1755,64 @@ class TestBuiltInScheduleEligibility:
         assert result["request"]["created_by"] == test_user["id"]
         assert result["tasks"][0]["requesting_user_id"] == test_user["id"]
 
+    async def test_daemon_can_trigger_owner_created_workflow(
+        self,
+        repo,
+        db_pool,
+        test_user,
+    ):
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+
+        org_id = str(test_user["organization_id"])
+        user_id = str(test_user["id"])
+        daemon_id = "00000000-0000-0000-0000-0000000000db"
+        await _insert_agent_definition(db_pool, org_id, user_id, "code")
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO users (
+                       id, organization_id, external_id, provider, email,
+                       display_name, role
+                   ) VALUES (
+                       $1::uuid, $2::uuid, 'daemon-service', 'local',
+                       'daemon@test.local', 'Lucent Daemon', 'daemon'
+                   )
+                   ON CONFLICT (id) DO NOTHING""",
+                daemon_id,
+                org_id,
+            )
+
+        sched = await repo.create_schedule(
+            title="Owner-created scheduled workflow",
+            org_id=org_id,
+            schedule_type="interval",
+            interval_seconds=3600,
+            description="The daemon must be able to execute this workflow.",
+            agent_type="code",
+            created_by=user_id,
+            actions=[
+                {
+                    "action_type": "task",
+                    "title": "Create a recommendation",
+                    "description": "Provide the scheduled recommendation.",
+                    "agent_type": "code",
+                }
+            ],
+        )
+        daemon = CurrentUser(
+            id=daemon_id,
+            organization_id=test_user["organization_id"],
+            role="daemon",
+            email="daemon@test.local",
+            display_name="Lucent Daemon",
+            external_id="daemon-service",
+        )
+
+        result = await trigger_now(str(sched["id"]), daemon, force=True, pool=db_pool)
+
+        assert result["request"]["created_by"] == test_user["id"]
+        assert result["tasks"][0]["requesting_user_id"] == test_user["id"]
+
     async def test_shadow_forget_positive_requires_feature_flag(
         self,
         repo,
