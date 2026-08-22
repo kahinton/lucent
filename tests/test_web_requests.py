@@ -449,6 +449,49 @@ class TestRequestDetail:
         assert resp.status_code == 200
         assert f'action="/requests/{req["id"]}/approval"' in resp.text
 
+    async def test_detail_shows_manual_review_actions_for_owner(
+        self, client, db_pool, web_user
+    ):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Manual Review From Detail",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(req["id"]), "review", str(org["id"]))
+
+        resp = await client.get(f"/activity/{req['id']}")
+
+        assert resp.status_code == 200
+        assert "This request is ready for review" in resp.text
+        assert f'hx-post="/daemon/review/{req["id"]}/action"' in resp.text
+        assert 'value="approve"' in resp.text
+        assert 'value="reject"' in resp.text
+
+
+class TestManualReviewAction:
+    async def test_owner_can_approve_manual_review(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Owner Manual Review",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(req["id"]), "review", str(org["id"]))
+
+        resp = await client.post(
+            f"/daemon/review/{req['id']}/action",
+            data=_csrf_data(client, {"action": "approve", "comment": "Approved by owner"}),
+        )
+
+        assert resp.status_code == 200
+        updated = await repo.get_request(str(req["id"]), str(org["id"]))
+        assert updated["status"] == "completed"
+
 
 class TestRequestApprovalAction:
     async def test_approve_pending_request_from_detail(self, client, db_pool, web_user):

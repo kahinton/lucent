@@ -167,6 +167,59 @@
 </div>
 {% endif %}
 
+{% if req.status == 'review' %}
+<div class="mb-6 rounded-xl border border-blue-200 bg-blue-50 p-4 shadow-sm">
+    <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div class="flex items-start gap-3">
+            <div class="mt-0.5 rounded-lg bg-blue-100 p-2 text-blue-700">
+                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 8.25v3.75m0 3h.008v.008H12V15zm9-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+            </div>
+            <div>
+                <h2 class="text-sm font-semibold text-blue-950">This request is ready for review</h2>
+                <p class="mt-1 max-w-2xl text-sm text-blue-800">
+                    Approve the completed work, or return it for rework with the changes you need.
+                </p>
+            </div>
+        </div>
+        <div id="review-actions-{{ req.id }}" class="flex flex-col gap-2 sm:min-w-[24rem]">
+            {% if can_review_request %}
+            <form hx-post="/daemon/review/{{ req.id }}/action" hx-target="#review-actions-{{ req.id }}" hx-swap="innerHTML" class="flex flex-col gap-2 sm:flex-row">
+                <input type="hidden" name="action" value="approve">
+                <input type="text" name="comment" maxlength="10000" placeholder="Optional approval note" class="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+                <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700">
+                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Approve
+                </button>
+            </form>
+            <details class="rounded-lg border border-blue-200 bg-white/70">
+                <summary class="cursor-pointer list-none rounded-lg px-3 py-2 text-sm font-medium text-blue-800 hover:bg-blue-100/60">
+                    Return for rework
+                </summary>
+                <form hx-post="/daemon/review/{{ req.id }}/action" hx-target="#review-actions-{{ req.id }}" hx-swap="innerHTML" class="space-y-2 border-t border-blue-100 p-3" data-confirm="Return this request for rework?">
+                    <input type="hidden" name="action" value="reject">
+                    <label class="block text-xs font-medium text-blue-900" for="review-comment">Required changes</label>
+                    <textarea id="review-comment" name="comment" rows="3" maxlength="10000" required placeholder="What should Lucent revise?" class="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"></textarea>
+                    <div class="flex justify-end">
+                        <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-red-700">
+                            Return for rework
+                        </button>
+                    </div>
+                </form>
+            </details>
+            {% else %}
+            <div class="rounded-lg border border-blue-200 bg-white/70 px-3 py-2 text-sm text-blue-800">
+                Admin or request-owner review is required.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {% if can_review_request and req.status not in ('completed', 'cancelled') %}
 <div class="mb-6 flex justify-end">
     <form method="post" action="/requests/{{ req.id }}/cancel" data-confirm="Cancel this request? Its work history will remain available.">

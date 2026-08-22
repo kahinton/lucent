@@ -245,14 +245,6 @@ async def daemon_review_action(
 
         review_repo = ReviewRepository(pool)
 
-        # Block self-review
-        request_creator = req.get("created_by")
-        if request_creator and str(request_creator) == str(user.id):
-            raise HTTPException(
-                status_code=403,
-                detail="Request creators cannot review their own requests",
-            )
-
         status = "approved" if action == "approve" else "rejected"
         async with pool.acquire() as conn:
             async with conn.transaction():

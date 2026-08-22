@@ -367,14 +367,22 @@ def create_app() -> FastAPI:
                     pool = await get_pool()
                     user = await validate_session(pool, session_token)
                     if user:
-                        org_id = user.get("organization_id")
+                        from lucent.web.routes._shared import get_user_context
+
+                        effective_user = await get_user_context(request)
+                        org_id = effective_user.organization_id
+                        role_value = (
+                            effective_user.role.value
+                            if hasattr(effective_user.role, "value")
+                            else str(effective_user.role)
+                        )
                         from lucent.db.requests import RequestRepository
 
                         request_repo = RequestRepository(pool)
                         count = await request_repo.count_pending_approvals(
                             org_id=str(org_id),
-                            requester_user_id=str(user["id"]),
-                            include_system=user.get("role") in {"admin", "owner"},
+                            requester_user_id=str(effective_user.id),
+                            include_system=role_value in {"admin", "owner"},
                         )
                         from lucent.db.definitions import DefinitionRepository
 
@@ -382,8 +390,8 @@ def create_app() -> FastAPI:
                             pool
                         ).count_pending_proposals(
                             org_id=str(org_id),
-                            requester_user_id=str(user["id"]),
-                            requester_role=user.get("role"),
+                            requester_user_id=str(effective_user.id),
+                            requester_role=role_value,
                         )
                         request.state.pending_approval_count = count
                         request.state.definition_proposal_count = definition_count or 0
@@ -394,7 +402,7 @@ def create_app() -> FastAPI:
                             request.state.user_interaction_count = (
                                 await interaction_repo.count_attention_needed(
                                     org_id=str(org_id),
-                                    user_id=str(user["id"]),
+                                    user_id=str(effective_user.id),
                                 )
                             )
                         except Exception:

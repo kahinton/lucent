@@ -9,6 +9,7 @@ Tests:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
+import re
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -26,6 +27,7 @@ from lucent.auth_providers import (
     set_user_password,
 )
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.db.definitions import DefinitionRepository
 from lucent.license import create_license
 from lucent.mode import get_mode
 
@@ -45,6 +47,17 @@ async def web_prefix(db_pool):
     prefix = f"test_webusr_{test_id}_"
     yield prefix
     async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM agent_hooks WHERE agent_id IN "
+            "(SELECT id FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
@@ -253,6 +266,47 @@ async def test_impersonation_follows_redirect_as_target_user(client, member_user
     assert response.status_code == 200
     assert "Impersonating" in response.text
     assert target_user["display_name"] in response.text
+
+
+@pytest.mark.asyncio
+async def test_impersonated_badge_counts_only_target_proposals(
+    client, db_pool, owner_user, member_user, team_mode
+):
+    """The sidebar proposal count must use the impersonated user's visibility."""
+    owner, org, _ = owner_user
+    member, _, _ = member_user
+    repo = DefinitionRepository(db_pool)
+
+    for index in range(5):
+        await repo.create_agent(
+            name=f"Owner proposal {uuid4()} {index}",
+            description="Owner-only proposal",
+            content="# Owner proposal",
+            org_id=str(org["id"]),
+            created_by=str(owner["id"]),
+        )
+    await repo.create_agent(
+        name=f"Member proposal {uuid4()}",
+        description="Member-visible proposal",
+        content="# Member proposal",
+        org_id=str(org["id"]),
+        created_by=str(member["id"]),
+    )
+
+    await client.post(
+        f"/settings/users/{member['id']}/impersonate",
+        data=_csrf_data(client),
+        follow_redirects=False,
+    )
+    response = await client.get("/activity")
+
+    assert response.status_code == 200
+    badge = re.search(
+        r'id="definition-proposal-sidebar-badge"[^>]*>\s*(\d+)\s*<',
+        response.text,
+    )
+    assert badge is not None
+    assert badge.group(1) == "1"
 
 
 @pytest.mark.asyncio
