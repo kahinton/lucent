@@ -100,7 +100,7 @@ class DefinitionRepository:
         user_param: str,
         role_param: str,
     ) -> str:
-        """Return the requester ACL, keeping unowned proposals system-private."""
+        """Return the requester ACL, keeping unowned pending definitions private."""
         prefix = f"{alias}." if alias else ""
         return (
             f"({prefix}scope = 'built-in' "
@@ -110,7 +110,7 @@ class DefinitionRepository:
             f"OR ({prefix}scope = 'instance' "
             f"AND {prefix}owner_user_id IS NULL "
             f"AND {prefix}owner_group_id IS NULL "
-            f"AND ({prefix}status <> 'proposed' "
+            f"AND ({prefix}status NOT IN ('proposed', 'owner_approved') "
             f"OR {role_param} IN ('admin', 'owner'))) "
             f"OR {role_param} IN ('admin', 'owner'))"
         )
@@ -374,8 +374,8 @@ class DefinitionRepository:
 
         count_query = f"SELECT COUNT(*) AS total {base}"
         query = f"""
-            SELECT id, name, description, status, scope,
-                   created_by, approved_by, approved_at,
+                 SELECT id, name, description, status, scope,
+                     created_by, approved_by, approved_at,
                    owner_user_id, owner_group_id,
                      proposal_reason, proposal_evidence,
                    created_at, updated_at
@@ -604,8 +604,8 @@ class DefinitionRepository:
 
         count_query = f"SELECT COUNT(*) AS total {base}"
         query = f"""
-            SELECT id, name, description, status, scope,
-                   created_by, approved_by, approved_at,
+                 SELECT id, name, description, status, scope,
+                     created_by, approved_by, approved_at,
                                      owner_user_id, owner_group_id,
                                      proposal_reason, proposal_evidence,
                    created_at, updated_at
@@ -838,8 +838,8 @@ class DefinitionRepository:
 
         count_query = f"SELECT COUNT(*) AS total {base}"
         query = f"""
-            SELECT id, name, description, trigger_event, action_type, status, scope,
-                   created_by, approved_by, approved_at,
+                 SELECT id, name, description, trigger_event, action_type, status, scope,
+                     created_by, approved_by, approved_at, owner_approved_by, owner_approved_at,
                    owner_user_id, owner_group_id,
                      proposal_reason, proposal_evidence,
                    created_at, updated_at
@@ -989,20 +989,42 @@ class DefinitionRepository:
             )
         return result
 
-    async def approve_hook(self, hook_id: str, org_id: str, approved_by: str) -> dict | None:
-        query = """
-            UPDATE hook_definitions
-            SET status = 'active', approved_by = $3, approved_at = NOW(), updated_at = NOW()
-            WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
-            RETURNING *
-        """
+    async def approve_hook(
+        self,
+        hook_id: str,
+        org_id: str,
+        approved_by: str,
+        *,
+        require_admin_approval: bool = True,
+    ) -> dict | None:
+        if require_admin_approval:
+            query = """
+                UPDATE hook_definitions
+                SET status = CASE WHEN status = 'proposed' THEN 'owner_approved' ELSE 'active' END,
+                    owner_approved_by = CASE WHEN status = 'proposed' THEN $3 ELSE owner_approved_by END,
+                    owner_approved_at = CASE WHEN status = 'proposed' THEN NOW() ELSE owner_approved_at END,
+                    approved_by = CASE WHEN status = 'owner_approved' THEN $3 ELSE approved_by END,
+                    approved_at = CASE WHEN status = 'owner_approved' THEN NOW() ELSE approved_at END,
+                    updated_at = NOW()
+                WHERE id = $1 AND organization_id = $2 AND status IN ('proposed', 'owner_approved')
+                RETURNING *
+            """
+        else:
+            query = """
+                UPDATE hook_definitions
+                SET status = 'active', approved_by = $3, approved_at = NOW(), updated_at = NOW()
+                WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
+                RETURNING *
+            """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, hook_id, org_id, approved_by)
         result = self._normalize_hook_row(row)
         if result:
             await self._audit(
                 DEFINITION_APPROVE, org_id, "hook", hook_id,
-                user_id=approved_by, notes=f"Approved hook '{hook_id}'",
+                user_id=approved_by,
+                context={"status": result["status"]},
+                notes=f"Approved hook '{hook_id}'",
             )
         return result
 
@@ -1010,7 +1032,7 @@ class DefinitionRepository:
         query = """
             UPDATE hook_definitions
             SET status = 'rejected', approved_by = $3, approved_at = NOW(), updated_at = NOW()
-            WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
+            WHERE id = $1 AND organization_id = $2 AND status IN ('proposed', 'owner_approved')
             RETURNING *
         """
         async with self.pool.acquire() as conn:
@@ -1067,9 +1089,9 @@ class DefinitionRepository:
 
         count_query = f"SELECT COUNT(*) AS total {base}"
         query = f"""
-            SELECT id, name, description, runtime_type, entrypoint,
-                   input_schema, output_schema, status, scope,
-                   created_by, approved_by, approved_at,
+                 SELECT id, name, description, runtime_type, entrypoint,
+                     input_schema, output_schema, status, scope,
+                     created_by, approved_by, approved_at, owner_approved_by, owner_approved_at,
                    owner_user_id, owner_group_id,
                    auth_policy, network_policy, resource_limits,
                    proposal_reason, proposal_evidence,
@@ -1310,21 +1332,41 @@ class DefinitionRepository:
         return result
 
     async def approve_managed_tool(
-        self, tool_id: str, org_id: str, approved_by: str,
+        self,
+        tool_id: str,
+        org_id: str,
+        approved_by: str,
+        *,
+        require_admin_approval: bool = True,
     ) -> dict | None:
-        query = """
-            UPDATE managed_tool_definitions
-            SET status = 'active', approved_by = $3, approved_at = NOW(), updated_at = NOW()
-            WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
-            RETURNING *
-        """
+        if require_admin_approval:
+            query = """
+                UPDATE managed_tool_definitions
+                SET status = CASE WHEN status = 'proposed' THEN 'owner_approved' ELSE 'active' END,
+                    owner_approved_by = CASE WHEN status = 'proposed' THEN $3 ELSE owner_approved_by END,
+                    owner_approved_at = CASE WHEN status = 'proposed' THEN NOW() ELSE owner_approved_at END,
+                    approved_by = CASE WHEN status = 'owner_approved' THEN $3 ELSE approved_by END,
+                    approved_at = CASE WHEN status = 'owner_approved' THEN NOW() ELSE approved_at END,
+                    updated_at = NOW()
+                WHERE id = $1 AND organization_id = $2 AND status IN ('proposed', 'owner_approved')
+                RETURNING *
+            """
+        else:
+            query = """
+                UPDATE managed_tool_definitions
+                SET status = 'active', approved_by = $3, approved_at = NOW(), updated_at = NOW()
+                WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
+                RETURNING *
+            """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, tool_id, org_id, approved_by)
         result = self._normalize_tool_row(row)
         if result:
             await self._audit(
                 DEFINITION_APPROVE, org_id, "managed_tool", tool_id,
-                user_id=approved_by, notes=f"Approved managed tool '{tool_id}'",
+                user_id=approved_by,
+                context={"status": result["status"]},
+                notes=f"Approved managed tool '{tool_id}'",
             )
         return result
 
@@ -1334,7 +1376,7 @@ class DefinitionRepository:
         query = """
             UPDATE managed_tool_definitions
             SET status = 'rejected', approved_by = $3, approved_at = NOW(), updated_at = NOW()
-            WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
+            WHERE id = $1 AND organization_id = $2 AND status IN ('proposed', 'owner_approved')
             RETURNING *
         """
         async with self.pool.acquire() as conn:
@@ -2188,14 +2230,20 @@ class DefinitionRepository:
         hook_result = await self.list_hooks(
             org_id, status="proposed", limit=1000, **visibility
         )
+        hook_owner_approved_result = await self.list_hooks(
+            org_id, status="owner_approved", limit=1000, **visibility
+        )
         tool_result = await self.list_managed_tools(
             org_id, status="proposed", limit=1000, **visibility
+        )
+        tool_owner_approved_result = await self.list_managed_tools(
+            org_id, status="owner_approved", limit=1000, **visibility
         )
         agents = agent_result["items"]
         skills = skill_result["items"]
         mcp_servers = mcp_result["items"]
-        hooks = hook_result["items"]
-        managed_tools = tool_result["items"]
+        hooks = [*hook_result["items"], *hook_owner_approved_result["items"]]
+        managed_tools = [*tool_result["items"], *tool_owner_approved_result["items"]]
         return {
             "agents": agents,
             "skills": skills,
@@ -2209,7 +2257,9 @@ class DefinitionRepository:
                     skill_result,
                     mcp_result,
                     hook_result,
+                    hook_owner_approved_result,
                     tool_result,
+                    tool_owner_approved_result,
                 )
             ),
         }
@@ -2231,7 +2281,7 @@ class DefinitionRepository:
         )
         counts = " UNION ALL ".join(
             f"SELECT COUNT(*) AS total FROM {table} d "
-            f"WHERE d.organization_id = $1 AND d.status = 'proposed' "
+            f"WHERE d.organization_id = $1 AND d.status IN ('proposed', 'owner_approved') "
             f"AND {visibility}"
             for table in tables
         )

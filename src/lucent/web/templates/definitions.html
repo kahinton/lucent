@@ -23,7 +23,7 @@
 </div>
 
 {% macro status_badge(status) %}
-<span class="px-2 py-0.5 rounded text-xs {% if status == 'active' %}bg-green-100 text-green-700{% elif status == 'proposed' %}bg-amber-100 text-amber-700{% elif status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ status }}</span>
+<span class="px-2 py-0.5 rounded text-xs {% if status == 'active' %}bg-green-100 text-green-700{% elif status == 'proposed' %}bg-amber-100 text-amber-700{% elif status == 'owner_approved' %}bg-blue-100 text-blue-700{% elif status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ status | replace('_', ' ') }}</span>
 {% endmacro %}
 
 {% macro scope_badge(item) %}
@@ -53,11 +53,13 @@
 {% endif %}
 {% endmacro %}
 
-{% macro approval_buttons(type, id) %}
+{% macro approval_buttons(type, item) %}
+{% if item.can_approve %}
 <div class="flex gap-2 shrink-0">
-    <form method="POST" action="/definitions/{{ type }}/{{ id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-green-50 text-green-700 rounded-md hover:bg-green-100 font-medium">Approve</button></form>
-    <form method="POST" action="/definitions/{{ type }}/{{ id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button></form>
+    <form method="POST" action="/definitions/{{ type }}/{{ item.id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-green-50 text-green-700 rounded-md hover:bg-green-100 font-medium">{{ item.approval_label }}</button></form>
+    <form method="POST" action="/definitions/{{ type }}/{{ item.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button></form>
 </div>
+{% endif %}
 {% endmacro %}
 
 {% macro proposal_evidence(item) %}
@@ -586,7 +588,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Agents</h3>
 <div class="space-y-3 mb-6">
     {% for agent in proposals.agents %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>{% if agent.description %}<p class="text-sm text-gray-600 mt-1">{{ agent.description }}</p>{% endif %}{{ proposal_evidence(agent) }}</div>{{ approval_buttons('agents', agent.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/agents/{{ agent.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ agent.name }}</a>{% if agent.description %}<p class="text-sm text-gray-600 mt-1">{{ agent.description }}</p>{% endif %}{{ proposal_evidence(agent) }}</div>{{ approval_buttons('agents', agent) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -594,7 +596,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Skills</h3>
 <div class="space-y-3 mb-6">
     {% for skill in proposals.skills %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>{% if skill.description %}<p class="text-sm text-gray-600 mt-1">{{ skill.description }}</p>{% endif %}{{ proposal_evidence(skill) }}</div>{{ approval_buttons('skills', skill.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>{% if skill.description %}<p class="text-sm text-gray-600 mt-1">{{ skill.description }}</p>{% endif %}{{ proposal_evidence(skill) }}</div>{{ approval_buttons('skills', skill) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -602,7 +604,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">External Tool Providers</h3>
 <div class="space-y-3 mb-6">
     {% for server in proposals.mcp_servers %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>{% if server.description %}<p class="text-sm text-gray-600 mt-1">{{ server.description }}</p>{% endif %}{{ proposal_evidence(server) }}</div>{{ approval_buttons('mcp-servers', server.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>{% if server.description %}<p class="text-sm text-gray-600 mt-1">{{ server.description }}</p>{% endif %}{{ proposal_evidence(server) }}</div>{{ approval_buttons('mcp-servers', server) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -610,7 +612,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Custom Tools</h3>
 <div class="space-y-3 mb-6">
     {% for tool in proposals.managed_tools %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/tools/{{ tool.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ tool.name }}</a>{% if tool.description %}<p class="text-sm text-gray-600 mt-1">{{ tool.description }}</p>{% endif %}{{ proposal_evidence(tool) }}</div>{{ approval_buttons('tools', tool.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/tools/{{ tool.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ tool.name }}</a>{% if tool.description %}<p class="text-sm text-gray-600 mt-1">{{ tool.description }}</p>{% endif %}{{ proposal_evidence(tool) }}</div>{{ approval_buttons('tools', tool) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}
@@ -618,7 +620,7 @@
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Hooks</h3>
 <div class="space-y-3 mb-6">
     {% for hook in proposals.hooks %}
-    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/hooks/{{ hook.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ hook.name }}</a>{% if hook.description %}<p class="text-sm text-gray-600 mt-1">{{ hook.description }}</p>{% endif %}{{ proposal_evidence(hook) }}</div>{{ approval_buttons('hooks', hook.id) }}</div></div>
+    <div class="bg-amber-50/50 rounded-lg border border-amber-200 p-4"><div class="flex items-start justify-between gap-4"><div class="flex-1 min-w-0"><a href="/definitions/hooks/{{ hook.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ hook.name }}</a>{% if hook.description %}<p class="text-sm text-gray-600 mt-1">{{ hook.description }}</p>{% endif %}{{ proposal_evidence(hook) }}</div>{{ approval_buttons('hooks', hook) }}</div></div>
     {% endfor %}
 </div>
 {% endif %}

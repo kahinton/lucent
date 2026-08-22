@@ -14,7 +14,7 @@
         <div class="flex-1 min-w-0">
             <div class="flex items-center gap-3 flex-wrap">
                 <h1 class="text-2xl font-bold text-gray-900">{{ definition.name }}</h1>
-                <span class="px-2.5 py-1 rounded text-sm font-medium {% if definition.status == 'active' %}bg-green-100 text-green-700{% elif definition.status == 'proposed' %}bg-amber-100 text-amber-700{% elif definition.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ definition.status }}</span>
+                <span class="px-2.5 py-1 rounded text-sm font-medium {% if definition.status == 'active' %}bg-green-100 text-green-700{% elif definition.status == 'proposed' %}bg-amber-100 text-amber-700{% elif definition.status == 'owner_approved' %}bg-blue-100 text-blue-700{% elif definition.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ definition.status | replace('_', ' ') }}</span>
                 <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500 capitalize">{{ definition_type | replace('-', ' ') }}</span>
                 {% if definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'persona' %}<span class="px-2.5 py-1 rounded text-sm bg-pink-50 text-pink-700">persona</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'hybrid' %}<span class="px-2.5 py-1 rounded text-sm bg-violet-50 text-violet-700">hybrid</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'functional' %}<span class="px-2.5 py-1 rounded text-sm bg-slate-100 text-slate-600">functional</span>{% endif %}
                 {% if definition.scope == 'built-in' %}<span class="px-2.5 py-1 rounded text-sm bg-indigo-100 text-indigo-700 font-medium">built-in</span>{% elif definition.scope == 'instance' %}<span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500">instance</span>{% endif %}
@@ -31,8 +31,8 @@
             {% if definition.description %}<p class="text-gray-500 mt-2">{{ definition.description }}</p>{% endif %}
         </div>
         <div class="flex gap-2 shrink-0">
-            {% if definition.status == 'proposed' %}
-            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">Approve</button></form>
+            {% if can_approve and definition.status in ('proposed', 'owner_approved') %}
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">{{ approval_label }}</button></form>
             <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button></form>
             {% endif %}
             {% if definition.scope != 'built-in' %}
@@ -44,6 +44,7 @@
     <div class="flex flex-wrap gap-x-6 gap-y-1 mt-4 text-xs text-gray-400">
         <span>Created {{ definition.created_at.strftime('%b %d, %Y at %H:%M') if definition.created_at else 'unknown' }}</span>
         {% if definition.approved_at %}<span>Approved {{ definition.approved_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
+        {% if definition.owner_approved_at %}<span>Owner approved{% if definition.owner_approved_by_name %} by {{ definition.owner_approved_by_name }}{% endif %} {{ definition.owner_approved_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
         {% if definition.updated_at %}<span>Updated {{ definition.updated_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
         <span class="font-mono">{{ definition.id }}</span>
     </div>

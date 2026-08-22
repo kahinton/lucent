@@ -137,6 +137,24 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         ),
     ),
     RuntimeSettingDefinition(
+        key="definitions.require_admin_approval_for_managed_tools",
+        env_var="LUCENT_REQUIRE_ADMIN_TOOL_APPROVAL",
+        value_type="boolean",
+        default=False,
+        title="Require admin approval for managed tools",
+        section="Definitions",
+        description="Require an administrator to approve a tool after its owner approves it.",
+    ),
+    RuntimeSettingDefinition(
+        key="definitions.require_admin_approval_for_hooks",
+        env_var="LUCENT_REQUIRE_ADMIN_HOOK_APPROVAL",
+        value_type="boolean",
+        default=False,
+        title="Require admin approval for hooks",
+        section="Definitions",
+        description="Require an administrator to approve a hook after its owner approves it.",
+    ),
+    RuntimeSettingDefinition(
         key="requests.skip_post_completion_review",
         env_var="LUCENT_SKIP_POST_REVIEW",
         value_type="boolean",
@@ -1493,6 +1511,26 @@ def daemon_auto_approve_enabled(*, organization_id: Any | None = None) -> bool:
     return bool(
         get_runtime_setting(
             "requests.daemon_auto_approve",
+            organization_id=organization_id,
+        )
+    )
+
+
+def managed_tool_admin_approval_required(*, organization_id: Any | None = None) -> bool:
+    """Whether managed tools need final administrative approval after owner approval."""
+    return bool(
+        get_runtime_setting(
+            "definitions.require_admin_approval_for_managed_tools",
+            organization_id=organization_id,
+        )
+    )
+
+
+def hook_admin_approval_required(*, organization_id: Any | None = None) -> bool:
+    """Whether hooks need final administrative approval after owner approval."""
+    return bool(
+        get_runtime_setting(
+            "definitions.require_admin_approval_for_hooks",
             organization_id=organization_id,
         )
     )

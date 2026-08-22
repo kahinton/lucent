@@ -168,6 +168,9 @@ async def get_file_content(
     if not result:
         raise HTTPException(404, "File not found")
     item, content = result
+    await UserFileService(pool).repository.mark_current_revision_viewed_owned(
+        str(file_id), str(user.organization_id), _owner_id(user)
+    )
     active_content = item["mime_type"] in {
         "text/html",
         "application/xhtml+xml",

@@ -1575,19 +1575,19 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
-    async def test_member_cannot_approve_agent(self, member_client, member_agent_def):
+    async def test_member_can_approve_owned_agent(self, member_client, member_agent_def):
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/approve",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
-    async def test_member_cannot_reject_agent(self, member_client, member_agent_def):
+    async def test_member_can_reject_owned_agent(self, member_client, member_agent_def):
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/reject",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
     # --- Skill CRUD ---
 
@@ -1614,19 +1614,19 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
-    async def test_member_cannot_approve_skill(self, member_client, member_skill_def):
+    async def test_member_can_approve_owned_skill(self, member_client, member_skill_def):
         resp = await member_client.post(
             f"/definitions/skills/{member_skill_def['id']}/approve",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
-    async def test_member_cannot_reject_skill(self, member_client, member_skill_def):
+    async def test_member_can_reject_owned_skill(self, member_client, member_skill_def):
         resp = await member_client.post(
             f"/definitions/skills/{member_skill_def['id']}/reject",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
     # --- Hook CRUD ---
 
@@ -1663,12 +1663,12 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
-    async def test_member_cannot_approve_hook(self, member_client, member_hook_def):
+    async def test_member_can_stage_owned_hook_approval(self, member_client, member_hook_def):
         resp = await member_client.post(
             f"/definitions/hooks/{member_hook_def['id']}/approve",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
     async def test_member_cannot_reject_hook(self, member_client, member_hook_def):
         resp = await member_client.post(

@@ -197,6 +197,58 @@ async def test_file_revisions_keep_content_and_chat_provenance(
 
 
 @pytest.mark.asyncio
+async def test_unseen_file_count_tracks_only_the_owner_latest_revision(
+    db_pool, test_user, test_organization, clean_test_data, tmp_path
+):
+    service = _service(db_pool, tmp_path)
+    other_user = await UserRepository(db_pool).create(
+        external_id=f"{clean_test_data}file-view-other-user",
+        provider="local",
+        organization_id=test_organization["id"],
+        email=f"{clean_test_data}file-view-other@test.com",
+        display_name="Other file viewer",
+    )
+    created = await service.create(
+        org_id=str(test_organization["id"]),
+        user_id=str(test_user["id"]),
+        created_by=str(test_user["id"]),
+        filename="unseen.md",
+        content=b"# First version\n",
+    )
+
+    repository = service.repository
+    assert await repository.count_unseen_current_revisions(
+        str(test_organization["id"]), str(test_user["id"])
+    ) == 1
+    assert await repository.count_unseen_current_revisions(
+        str(test_organization["id"]), str(other_user["id"])
+    ) == 0
+    assert await repository.mark_current_revision_viewed_owned(
+        str(created["id"]), str(test_organization["id"]), str(other_user["id"])
+    ) is False
+    assert await repository.mark_current_revision_viewed_owned(
+        str(created["id"]), str(test_organization["id"]), str(test_user["id"])
+    ) is True
+    assert await repository.count_unseen_current_revisions(
+        str(test_organization["id"]), str(test_user["id"])
+    ) == 0
+
+    await service.update(
+        file_id=str(created["id"]),
+        org_id=str(test_organization["id"]),
+        user_id=str(test_user["id"]),
+        edited_by=str(test_user["id"]),
+        content=b"# Second version\n",
+    )
+
+    listed = await repository.list_owned(
+        str(test_organization["id"]), str(test_user["id"])
+    )
+    assert listed["unseen_count"] == 1
+    assert listed["items"][0]["has_unseen_revision"] is True
+
+
+@pytest.mark.asyncio
 async def test_local_provider_rejects_parent_traversal(tmp_path):
     provider = LocalFileStorageProvider(tmp_path)
 

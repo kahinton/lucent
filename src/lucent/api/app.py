@@ -355,6 +355,7 @@ def create_app() -> FastAPI:
         request.state.pending_approval_count = 0
         request.state.user_interaction_count = 0
         request.state.definition_proposal_count = 0
+        request.state.user_file_unseen_count = 0
 
         # Only needed for web page rendering, not API/static/other methods.
         if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
@@ -395,6 +396,13 @@ def create_app() -> FastAPI:
                         )
                         request.state.pending_approval_count = count
                         request.state.definition_proposal_count = definition_count or 0
+                        from lucent.db.files import UserFileRepository
+
+                        request.state.user_file_unseen_count = (
+                            await UserFileRepository(pool).count_unseen_current_revisions(
+                                str(org_id), str(effective_user.id)
+                            )
+                        )
                         try:
                             from lucent.db.user_interactions import UserInteractionRepository
 
