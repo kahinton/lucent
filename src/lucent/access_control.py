@@ -47,7 +47,7 @@ def normalize_resource_type(resource_type: str) -> str:
 
 
 class AccessControlService:
-    """Resolve resource access by built-in, ownership, group, then admin override."""
+    """Resolve resource access by built-in, ownership, group, and org sharing."""
 
     _GROUP_CACHE_TTL = timedelta(seconds=5)
     _group_cache: dict[str, tuple[datetime, list[str]]] = {}
@@ -86,7 +86,7 @@ class AccessControlService:
     async def can_access(
         self, user_id: str, resource_type: str, resource_id: str, org_id: str
     ) -> bool:
-        """Resolve access: built-in → owner → group owner → admin/owner → deny."""
+        """Resolve access without exposing private definition resources to org roles."""
         normalized = normalize_resource_type(resource_type)
         table = RESOURCE_TABLE_MAP[normalized]
         role = await self._get_user_role(user_id, org_id)
@@ -107,6 +107,17 @@ class AccessControlService:
         )
         if table == "models":
             org_shared_clause = "OR (owner_user_id IS NULL AND owner_group_id IS NULL) "
+        role_override_clause = ""
+        if table not in _TABLES_WITH_SCOPE:
+            role_override_clause = "OR $5 IN ('admin', 'owner')"
+        query_params: list[object] = [
+            resource_id_param,
+            UUID(org_id),
+            UUID(user_id),
+            group_ids,
+        ]
+        if role_override_clause:
+            query_params.append(role)
         query = f"""
             SELECT EXISTS(
                 SELECT 1
@@ -117,31 +128,24 @@ class AccessControlService:
                       {builtin_clause}owner_user_id = $3
                       OR owner_group_id = ANY($4::uuid[])
                       {org_shared_clause}
-                      OR $5 IN ('admin', 'owner')
+                      {role_override_clause}
                   )
             ) AS allowed
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                query,
-                resource_id_param,
-                UUID(org_id),
-                UUID(user_id),
-                group_ids,
-                role,
-            )
+            row = await conn.fetchrow(query, *query_params)
         return bool(row["allowed"]) if row else False
 
     async def can_modify(
         self, user_id: str, resource_type: str, resource_id: str, org_id: str
     ) -> bool:
-        """Check write access: only direct owner or admin/owner role can modify."""
+        """Check write access without granting org roles private definition control."""
         normalized = normalize_resource_type(resource_type)
         table = RESOURCE_TABLE_MAP[normalized]
         role = await self._get_user_role(user_id, org_id)
         if role is None:
             return False
-        if role in ("admin", "owner"):
+        if role in ("admin", "owner") and table not in _TABLES_WITH_SCOPE:
             # Admin/owner can modify any resource in their org (verify it exists)
             async with self.pool.acquire() as conn:
                 resource_id_param = (
@@ -160,9 +164,10 @@ class AccessControlService:
                     UUID(org_id),
                 )
             return bool(row["e"]) if row else False
-        # Members can only modify resources they directly own. Group admins can
-        # modify resources owned by their group. Org-shared resources are
-        # intentionally admin/owner-only for writes.
+        # Users can modify resources they directly own. Group admins can modify
+        # resources owned by their group. Organization-shared definitions remain
+        # admin/owner-only, while private definitions remain private to their
+        # owner or owning group even for organization administrators.
         group_ids = [UUID(g) for g in await self.get_user_group_ids(user_id)]
         resource_id_param = resource_id if table in _TABLES_WITH_TEXT_IDS else UUID(resource_id)
         org_clause = (
@@ -170,6 +175,22 @@ class AccessControlService:
             if table in _TABLES_WITH_GLOBAL_ROWS
             else "organization_id = $2"
         )
+        org_shared_write_clause = ""
+        if table in _TABLES_WITH_SCOPE:
+            org_shared_write_clause = (
+                " OR ($5 IN ('admin', 'owner')"
+                " AND scope = 'instance'"
+                " AND owner_user_id IS NULL"
+                " AND owner_group_id IS NULL)"
+            )
+        query_params: list[object] = [
+            resource_id_param,
+            UUID(org_id),
+            UUID(user_id),
+            group_ids,
+        ]
+        if org_shared_write_clause:
+            query_params.append(role)
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"SELECT EXISTS("
@@ -178,12 +199,10 @@ class AccessControlService:
                 f" AND (owner_user_id = $3 OR owner_group_id IN ("
                 f"SELECT group_id FROM user_groups"
                 f" WHERE user_id = $3 AND role = 'admin'"
-                f" AND group_id = ANY($4::uuid[])))"
+                f" AND group_id = ANY($4::uuid[]))"
+                f"{org_shared_write_clause})"
                 f") AS e",
-                resource_id_param,
-                UUID(org_id),
-                UUID(user_id),
-                group_ids,
+                *query_params,
             )
         return bool(row["e"]) if row else False
 
@@ -208,6 +227,12 @@ class AccessControlService:
         )
         if table == "models":
             org_shared_clause = "OR (owner_user_id IS NULL AND owner_group_id IS NULL) "
+        role_override_clause = ""
+        if table not in _TABLES_WITH_SCOPE:
+            role_override_clause = "OR $4 IN ('admin', 'owner')"
+        query_params: list[object] = [UUID(org_id), UUID(user_id), group_ids]
+        if role_override_clause:
+            query_params.append(role)
         query = f"""
             SELECT id
             FROM {table}
@@ -216,10 +241,10 @@ class AccessControlService:
                   {builtin_clause}owner_user_id = $2
                   OR owner_group_id = ANY($3::uuid[])
                   {org_shared_clause}
-                  OR $4 IN ('admin', 'owner')
+                  {role_override_clause}
               )
             ORDER BY id
         """
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, UUID(org_id), UUID(user_id), group_ids, role)
+            rows = await conn.fetch(query, *query_params)
         return [str(r["id"]) for r in rows]

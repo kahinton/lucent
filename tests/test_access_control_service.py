@@ -132,8 +132,10 @@ async def test_access_control_service_resolution(db_pool, test_organization, acl
     assert await acl.can_access(user2_id, "agent", str(group_agent["id"]), org_id) is True
     assert await acl.can_access(user2_id, "agent", str(own_agent["id"]), org_id) is False
     assert await acl.can_access(user2_id, "agent", str(other_group_agent["id"]), org_id) is False
-    assert await acl.can_access(admin_id, "agent", str(own_agent["id"]), org_id) is True
-    assert await acl.can_access(owner_id, "agent", str(own_agent["id"]), org_id) is True
+    assert await acl.can_access(admin_id, "agent", str(own_agent["id"]), org_id) is False
+    assert await acl.can_access(owner_id, "agent", str(own_agent["id"]), org_id) is False
+    assert await acl.can_modify(admin_id, "agent", str(own_agent["id"]), org_id) is False
+    assert await acl.can_modify(owner_id, "agent", str(own_agent["id"]), org_id) is False
     assert await acl.can_access(user2_id, "agent", str(built_in["id"]), org_id) is True
 
     org_shared_agent = await def_repo.create_agent(
@@ -155,6 +157,27 @@ async def test_access_control_service_resolution(db_pool, test_organization, acl
     assert str(own_agent["id"]) not in accessible_user2
     assert str(built_in["id"]) in accessible_user2
     assert str(org_shared_agent["id"]) in accessible_user2
+
+    accessible_admin = await acl.list_accessible(admin_id, "agent", org_id)
+    assert str(own_agent["id"]) not in accessible_admin
+    assert str(org_shared_agent["id"]) in accessible_admin
+
+    private_skill = await def_repo.create_skill(
+        name=f"{acl_prefix}private_skill",
+        description="private",
+        content="# private",
+        org_id=org_id,
+        created_by=user1_id,
+        owner_user_id=user1_id,
+    )
+    assert await acl.can_access(admin_id, "skill", str(private_skill["id"]), org_id) is False
+    assert await acl.can_modify(owner_id, "skill", str(private_skill["id"]), org_id) is False
+    assert await def_repo.get_skill(
+        str(private_skill["id"]),
+        org_id,
+        requester_user_id=admin_id,
+        requester_role="admin",
+    ) is None
 
     await group_repo.remove_member(str(group["id"]), user2_id)
     assert await acl.can_access(user2_id, "agent", str(group_agent["id"]), org_id) is False

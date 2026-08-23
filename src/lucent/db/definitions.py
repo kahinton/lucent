@@ -100,7 +100,7 @@ class DefinitionRepository:
         user_param: str,
         role_param: str,
     ) -> str:
-        """Return the requester ACL, keeping unowned pending definitions private."""
+        """Return the requester ACL for private and organization-shared definitions."""
         prefix = f"{alias}." if alias else ""
         return (
             f"({prefix}scope = 'built-in' "
@@ -111,8 +111,7 @@ class DefinitionRepository:
             f"AND {prefix}owner_user_id IS NULL "
             f"AND {prefix}owner_group_id IS NULL "
             f"AND ({prefix}status NOT IN ('proposed', 'owner_approved') "
-            f"OR {role_param} IN ('admin', 'owner'))) "
-            f"OR {role_param} IN ('admin', 'owner'))"
+            f"OR {role_param} IN ('admin', 'owner'))))"
         )
 
     async def _default_owner_user_id(

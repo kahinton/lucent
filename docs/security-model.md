@@ -306,12 +306,12 @@ Built-in resources cannot be modified or deleted by users.
 
 **User Ownership** (`owner_user_id`):
 The resource belongs to a specific user. The owner has full read/write/delete
-access. Set automatically during resource creation to the authenticated user's ID.
+access. It is not visible or manageable by unrelated organization administrators
+or owners. Set automatically during resource creation to the authenticated user's ID.
 
 **Group Ownership** (`owner_group_id`):
 The resource belongs to a group. All members of the group can access (read) the
-resource. Users with organization `admin`/`owner` role can modify group-owned
-resources; group admins can also modify resources owned by their group.
+resource. Group administrators can modify resources owned by their group.
 
 **Organization-shared definitions** (`scope = 'instance'` with both owner columns NULL):
 Instance-scoped definitions with neither `owner_user_id` nor `owner_group_id` set
@@ -388,7 +388,7 @@ as a SQL WHERE clause that evaluates conditions in priority order.
 2. Direct owner    →  ALLOW (owner_user_id = requesting user)
 3. Group member    →  ALLOW (owner_group_id in user's groups)
 4. Org-shared      →  ALLOW (scope='instance' and both owner columns are NULL)
-5. Role override   →  ALLOW (user role is admin or owner)
+5. Unowned pending definition review → ALLOW to organization `admin`/`owner`
 6. Default         →  DENY
 ```
 
@@ -404,7 +404,6 @@ AND (
         SELECT group_id FROM user_groups WHERE user_id = $3
     )
    OR (a.scope = 'instance' AND a.owner_user_id IS NULL AND a.owner_group_id IS NULL)
-    OR $4 IN ('admin', 'owner')
 )
 ```
 
@@ -422,8 +421,8 @@ restrictive:
 
 | Role   | Can Modify                                           |
 |--------|------------------------------------------------------|
-| Owner  | Any resource in the organization                     |
-| Admin  | Any resource in the organization                     |
+| Owner  | Directly owned resources, group-admin resources, and organization-shared resources |
+| Admin  | Directly owned resources, group-admin resources, and organization-shared resources |
 | Member | Directly owned resources; group-owned resources only when they are a group admin |
 
 Organization-shared definitions are readable by all organization members but are
