@@ -954,6 +954,7 @@ class TestUserRepository:
         user_memories = [m for m in result["memories"] if m["user_id"] == user["id"]]
         assert len(user_memories) >= 1
         assert user_memories[0]["type"] == "individual"
+        assert user_memories[0]["shared"] is False
 
     async def test_get_user_by_id(self, db_pool, test_user):
         """Test retrieving a user by ID."""

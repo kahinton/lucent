@@ -218,6 +218,27 @@ async def test_create_user_as_owner(_mock_pw, client):
 
 
 @pytest.mark.asyncio
+@patch("secrets.token_urlsafe", return_value="TemporaryPassword")
+async def test_create_user_accepts_random_token_without_digits(_mock_pw, client):
+    """Temporary password generation must not depend on a token containing a digit."""
+    resp = await client.post(
+        "/settings/users/create",
+        data=_csrf_data(
+            client,
+            {
+                "display_name": "Digit-Safe User",
+                "email": "digit-safe-user@test.com",
+                "role": "member",
+            },
+        ),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/settings/users?success=user_created"
+
+
+@pytest.mark.asyncio
 async def test_create_user_without_permission_returns_403(member_client):
     """A member user cannot create users; expect 403."""
     resp = await member_client.post(

@@ -172,11 +172,11 @@ async def create_user(
     if role != "member":
         await user_repo.update_role(new_user["id"], role)
 
-    # Set a temporary password so the user can log in
-    from lucent.auth_providers import set_user_password
+    # Set a temporary password so the user can log in.
+    from lucent.auth_providers import generate_temporary_password, set_user_password
 
-    temp_password = secrets.token_urlsafe(12)
-    await set_user_password(pool, new_user["id"], temp_password)
+    temp_password = generate_temporary_password()
+    await set_user_password(pool, new_user["id"], temp_password, force_change=True)
 
     # Audit-log creation. Avoids logging password — only metadata.
     audit_repo = AdminAuditRepository(pool)
