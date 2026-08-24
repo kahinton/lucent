@@ -384,6 +384,18 @@ class TestShippedBuiltins:
                        WHERE organization_id = $1 AND name = 'memory-capture'""",
                     sync_org,
                 )
+                capability_skill = await conn.fetchrow(
+                    """SELECT content, status, scope
+                       FROM skill_definitions
+                       WHERE organization_id = $1 AND name = 'capability-orientation'""",
+                    sync_org,
+                )
+                capability_reference_skill = await conn.fetchrow(
+                    """SELECT content, status, scope
+                       FROM skill_definitions
+                       WHERE organization_id = $1 AND name = 'capability-reference'""",
+                    sync_org,
+                )
                 granted_skills = await conn.fetch(
                     """SELECT s.name
                        FROM agent_skills agent_skill
@@ -409,7 +421,24 @@ class TestShippedBuiltins:
             assert profile_skill["scope"] == "built-in"
             assert "### Individual Profile Enrichment" in profile_skill["content"]
             assert "Do not call `create_memory(type=\"individual\")`" in profile_skill["content"]
-            assert "daemon-task-authoring" in [row["name"] for row in granted_skills]
+            assert capability_skill["status"] == "active"
+            assert capability_skill["scope"] == "built-in"
+            assert "agents, give them reusable skills" in capability_skill["content"]
+            assert "organize shopping and task lists" in capability_skill["content"]
+            assert "Handoffs" in capability_skill["content"]
+            assert "Files and artifacts" in capability_skill["content"]
+            assert "Technical work is a major capability" in capability_skill["content"]
+            assert capability_reference_skill["status"] == "active"
+            assert capability_reference_skill["scope"] == "built-in"
+            assert "### Handoffs" in capability_reference_skill["content"]
+            assert "### Durable Files" in capability_reference_skill["content"]
+            assert "almost any useful outcome" in agent["content"]
+            granted_skill_names = [row["name"] for row in granted_skills]
+            assert "daemon-task-authoring" in granted_skill_names
+            assert "capability-orientation" in granted_skill_names
+            assert "capability-reference" in granted_skill_names
+            assert "definition-engineering" in granted_skill_names
+            assert "workflow-design" in granted_skill_names
         finally:
             async with db_pool.acquire() as conn:
                 await conn.execute(
