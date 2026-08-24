@@ -128,12 +128,16 @@ async def activity_list(
     if source is None:
         source = "user,cognitive,daemon"
 
+    # Keep the summary card and its drill-down aligned. "Active" is a UI
+    # grouping rather than a persisted request status.
+    status_filter = "in_progress,review,needs_rework" if status == "active" else status
+
     org_id = str(user.organization_id)
     requester_user_id, include_system = request_visibility_context(user)
     # Hide cancelled requests by default unless explicitly filtered
     exclude_status = None if status else "cancelled"
     requests_result = await repo.list_requests(
-        org_id, status=status, source=source, limit=per_page, offset=offset,
+        org_id, status=status_filter, source=source, limit=per_page, offset=offset,
         exclude_status=exclude_status, viewer_user_id=str(user.id),
         requester_user_id=requester_user_id, include_system=include_system,
     )

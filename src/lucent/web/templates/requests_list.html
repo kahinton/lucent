@@ -30,10 +30,10 @@
 <!-- Summary Cards -->
 {% if summary %}
 <div class="grid grid-cols-4 gap-4 mb-6">
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
+    <a href="/activity?status=active&per_page={{ per_page }}&source=user,cognitive,daemon,schedule" class="block bg-white rounded-lg border border-gray-200 p-4 transition-colors hover:border-blue-300 hover:shadow-sm" aria-label="View active requests">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Active</p>
         <p class="text-2xl font-bold text-blue-600">{{ summary.requests.active or 0 }}</p>
-    </div>
+    </a>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Pending</p>
         <p class="text-2xl font-bold text-amber-600">{{ summary.requests.pending or 0 }}</p>
@@ -75,6 +75,7 @@
     <span class="text-gray-300">|</span>
     <div class="flex gap-2">
         <a href="/activity?per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if not filter_status %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
+        <a href="/activity?status=active&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'active' %}bg-blue-600 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">Active</a>
         <a href="/activity?status=pending&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'pending' %}bg-amber-500 text-white{% else %}bg-amber-50 text-amber-700 hover:bg-amber-100{% endif %}">Pending</a>
         <a href="/activity?status=in_progress&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'in_progress' %}bg-blue-500 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">In Progress</a>
         <a href="/activity?status=completed&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'completed' %}bg-green-500 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Completed</a>

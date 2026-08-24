@@ -243,6 +243,32 @@ class TestActivityList:
         resp = await client.get("/activity", params={"status": "pending"})
         assert resp.status_code == 200
 
+    async def test_active_filter_matches_active_summary(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        active_statuses = ("in_progress", "review", "needs_rework")
+        for status in active_statuses:
+            request = await repo.create_request(
+                title=f"Active {status}",
+                org_id=str(org["id"]),
+                created_by=str(user["id"]),
+            )
+            await repo.update_request_status(str(request["id"]), status, str(org["id"]))
+        completed = await repo.create_request(
+            title="Completed control request",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(completed["id"]), "completed", str(org["id"]))
+
+        resp = await client.get("/activity", params={"status": "active"})
+
+        assert resp.status_code == 200
+        assert 'href="/activity?status=active&amp;per_page=25&amp;source=user,cognitive,daemon,schedule"' in resp.text
+        for status in active_statuses:
+            assert f"Active {status}" in resp.text
+        assert "Completed control request" not in resp.text
+
     async def test_list_filter_by_source(self, client, sample_request):
         resp = await client.get("/activity", params={"source": "user"})
         assert resp.status_code == 200

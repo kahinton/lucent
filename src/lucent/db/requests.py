@@ -987,8 +987,16 @@ class RequestRepository:
                 f"${len(params) - 1}", f"${len(params)}"
             )
         if status:
-            params.append(status)
-            base += f" AND r.status = ${len(params)}"
+            statuses = [value.strip() for value in status.split(",") if value.strip()]
+            if len(statuses) == 1:
+                params.append(statuses[0])
+                base += f" AND r.status = ${len(params)}"
+            elif statuses:
+                placeholders = ", ".join(
+                    f"${len(params) + index + 1}" for index in range(len(statuses))
+                )
+                params.extend(statuses)
+                base += f" AND r.status IN ({placeholders})"
         elif exclude_status:
             excluded = [s.strip() for s in exclude_status.split(",") if s.strip()]
             if excluded:
