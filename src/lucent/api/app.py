@@ -192,6 +192,9 @@ async def lifespan(app: FastAPI):
     started_system_schedule_runner = False
     if database_url:
         await init_db(database_url)
+        from lucent.web.live_events import live_event_broker
+
+        await live_event_broker.start(database_url)
         from lucent.db import get_pool as _get_pool_for_secrets
 
         _secret_pool = await _get_pool_for_secrets()
@@ -235,6 +238,9 @@ async def lifespan(app: FastAPI):
         # Shutdown: stop runner, close database pool, then telemetry
         if started_system_schedule_runner:
             await stop_server_system_schedule_runner()
+        from lucent.web.live_events import live_event_broker
+
+        await live_event_broker.stop()
         await close_db()
         shutdown_telemetry()
 

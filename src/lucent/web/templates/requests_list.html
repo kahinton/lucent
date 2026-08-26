@@ -3,6 +3,13 @@
 {% block title %}Activity - Lucent{% endblock %}
 
 {% block content %}
+<div id="activity-live-content" data-live-refresh
+    hx-get="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}"
+    hx-trigger="lucent:live-refresh"
+    hx-headers='{"X-Live-Refresh": "true"}'
+    hx-select="#activity-live-content"
+    hx-target="this"
+    hx-swap="outerHTML">
 <div class="mb-6">
     <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
@@ -88,6 +95,7 @@
 <!-- Activity Results (HTMX target) -->
 <div id="activity-results">
     {% include "partials/activity_list.html" %}
+</div>
 </div>
 
 <script nonce="{{ request.state.csp_nonce }}">

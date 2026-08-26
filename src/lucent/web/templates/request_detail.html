@@ -28,6 +28,13 @@
 {% endblock %}
 
 {% block content %}
+<div id="request-live-content" data-live-refresh
+    hx-get="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}"
+    hx-trigger="lucent:live-refresh"
+    hx-headers='{"X-Live-Refresh": "true"}'
+    hx-select="#request-live-content"
+    hx-target="this"
+    hx-swap="outerHTML">
 <!-- Header -->
 <div class="mb-6">
     <div class="flex items-center gap-2 text-sm text-gray-500 mb-2">
@@ -1020,6 +1027,7 @@
         </div>
         {% endif %}
     </div>
+</div>
 </div>
 {% endblock %}
 

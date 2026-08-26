@@ -172,6 +172,22 @@ async def _promote_web_user(db_pool, user: dict, role: str = "admin") -> None:
 
 
 # ============================================================================
+# GET /ui/live-status
+# ============================================================================
+
+
+class TestLiveStatus:
+    async def test_returns_authenticated_navigation_badge_counts(self, client):
+        response = await client.get("/ui/live-status")
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        badges = response.json()["badges"]
+        assert set(badges) == {"activity", "definitions", "files", "handoffs"}
+        assert all(isinstance(count, int) and count >= 0 for count in badges.values())
+
+
+# ============================================================================
 # GET /activity — list
 # ============================================================================
 
@@ -181,6 +197,16 @@ class TestActivityList:
         resp = await client.get("/activity")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
+
+    async def test_live_refresh_returns_full_marked_region(self, client, sample_request):
+        pagination = await client.get("/activity", headers={"HX-Request": "true"})
+        live_refresh = await client.get(
+            "/activity",
+            headers={"HX-Request": "true", "X-Live-Refresh": "true"},
+        )
+
+        assert 'id="activity-live-content"' not in pagination.text
+        assert 'id="activity-live-content"' in live_refresh.text
 
     async def test_list_contains_request_title(self, client, sample_request):
         resp = await client.get("/activity")

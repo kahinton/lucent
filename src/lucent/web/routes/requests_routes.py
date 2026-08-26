@@ -185,8 +185,9 @@ async def activity_list(
         "total_count": total_count,
     }
 
-    # For HTMX partial updates (pagination clicks)
-    if request.headers.get("HX-Request"):
+    # Pagination requests need only the list. Live refreshes select their
+    # marked region from the complete page so summary counts update too.
+    if request.headers.get("HX-Request") and not request.headers.get("X-Live-Refresh"):
         return templates.TemplateResponse(
             request,
             "partials/activity_list.html",
