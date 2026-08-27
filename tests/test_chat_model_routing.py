@@ -292,6 +292,8 @@ def test_chat_history_rehydrates_persisted_tool_events():
 
     assert "renderSessionMessages(session.messages || [], session.events || [])" in template
     assert "function replaySessionEvents(assistantEl, events)" in template
+    assert "const turnId = event.turn_id || turnIdByMessageId.get(event.message_id);" in template
+    assert "turnEvents.length && !assistantTurns.has(msg.turn_id)" in template
     assert "appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input)" in template
     assert "updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output)" in template
     assert "replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || [])" in template
