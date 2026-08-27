@@ -299,6 +299,20 @@ def test_chat_history_rehydrates_persisted_tool_events():
     assert "replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || [])" in template
 
 
+def test_chat_history_supports_soft_deleting_sessions():
+    template = Path("src/lucent/web/templates/chat.html").read_text()
+
+    assert 'id="archive-session-dialog"' in template
+    assert 'deleteButton.dataset.archiveSessionId = session.id' in template
+    assert "body: JSON.stringify({ status: 'archived' })" in template
+    assert "await archiveSession(sessionId);" in template
+    assert "document.getElementById('archive-session-confirm').disabled = false;" in template
+    assert "finally {\n        this.disabled = false;" in template
+    assert "function updateSessionStatus()" in template
+    assert "state.sessions = state.sessions.filter(session => session.id !== sessionId);\n    updateSessionStatus();" in template
+    assert "Related files, requests, and provenance will remain available." in template
+
+
 def test_session_experience_summary_defaults_and_context_not_capped():
     assert chat.SESSION_EXPERIENCE_TIMEOUT == 180
 
