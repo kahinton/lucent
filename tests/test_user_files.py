@@ -1,5 +1,6 @@
 """Tests for user-owned file storage and request artifact integration."""
 
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -18,6 +19,14 @@ from lucent.llm.context import clear_llm_context, set_llm_context
 from lucent.storage.providers import FileStorageRegistry, LocalFileStorageProvider
 from lucent.storage.service import UserFileService
 from lucent.tools.requests import register_request_tools
+
+
+def test_file_detail_template_embeds_svg_preview_as_an_image():
+    template = Path("src/lucent/web/templates/file_detail.html").read_text()
+
+    assert "file.mime_type == 'image/svg+xml'" in template
+    assert 'src="/files/{{ file.id }}/content"' in template
+    assert 'alt="Preview of {{ file.display_name }}"' in template
 
 
 def _service(db_pool, tmp_path) -> UserFileService:

@@ -72,7 +72,17 @@
     </ol>
 </section>
 
-{% if preview is not none %}
+{% if file.mime_type == 'image/svg+xml' %}
+<section aria-labelledby="preview-heading">
+    <div class="mb-3 flex items-center justify-between">
+        <h2 id="preview-heading" class="text-sm font-semibold uppercase tracking-wide text-gray-500">Preview</h2>
+        <a href="/files/{{ file.id }}/content" target="_blank" rel="noopener" class="text-sm font-medium text-primary-600 hover:text-primary-700">Open raw</a>
+    </div>
+    <div class="flex max-h-[70vh] min-h-64 items-center justify-center overflow-auto rounded-lg border border-gray-200 bg-[linear-gradient(45deg,#e5e7eb_25%,transparent_25%),linear-gradient(-45deg,#e5e7eb_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#e5e7eb_75%),linear-gradient(-45deg,transparent_75%,#e5e7eb_75%)] bg-[length:20px_20px] bg-[position:0_0,0_10px,10px_-10px,-10px_0px] p-6">
+        <img src="/files/{{ file.id }}/content" alt="Preview of {{ file.display_name }}" class="max-h-[60vh] max-w-full object-contain" />
+    </div>
+</section>
+{% elif preview is not none %}
 <section aria-labelledby="preview-heading">
     <div class="mb-3 flex items-center justify-between">
         <h2 id="preview-heading" class="text-sm font-semibold uppercase tracking-wide text-gray-500">Preview</h2>
