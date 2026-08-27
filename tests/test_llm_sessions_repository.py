@@ -121,6 +121,53 @@ async def test_llm_session_messages_events_and_request_origin(db_pool, test_user
 
 
 @pytest.mark.asyncio
+async def test_llm_session_events_append_across_turns(db_pool, test_user):
+    session_repo = LLMSessionRepository(db_pool)
+    session = await session_repo.create_session(
+        org_id=test_user["organization_id"],
+        user_id=test_user["id"],
+        kind="chat",
+        title="Keep tool history",
+    )
+
+    for turn_id, tool_name in (
+        ("00000000-0000-0000-0000-000000000001", "store_user_file"),
+        ("00000000-0000-0000-0000-000000000002", "edit_user_file"),
+    ):
+        await session_repo.add_event(
+            session["id"],
+            org_id=test_user["organization_id"],
+            turn_id=turn_id,
+            event_type="tool_call",
+            tool_name=tool_name,
+        )
+        await session_repo.add_event(
+            session["id"],
+            org_id=test_user["organization_id"],
+            turn_id=turn_id,
+            event_type="tool_result",
+            tool_name=tool_name,
+            tool_output="completed",
+        )
+
+    events = await session_repo.list_events(session["id"], test_user["organization_id"])
+
+    assert [event["sequence"] for event in events] == [1, 2, 3, 4]
+    assert [event["tool_name"] for event in events] == [
+        "store_user_file",
+        "store_user_file",
+        "edit_user_file",
+        "edit_user_file",
+    ]
+    assert [str(event["turn_id"]) for event in events] == [
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000001",
+        "00000000-0000-0000-0000-000000000002",
+        "00000000-0000-0000-0000-000000000002",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_session_experience_capture_skips_trivial_chat(db_pool, test_user):
     session_repo = LLMSessionRepository(db_pool)
 

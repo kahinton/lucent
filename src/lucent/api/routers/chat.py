@@ -1430,16 +1430,12 @@ async def chat_stream_v2(
     # Use an asyncio.Queue to bridge callback events → SSE stream
     event_queue: asyncio.Queue[dict | None] = asyncio.Queue()
     event_persist_tasks: list[asyncio.Task] = []
-    event_sequence = 0
     tool_call_inputs: dict[str, Any] = {}
 
     def persist_event(payload: dict, event: SessionEvent) -> None:
         """Persist a normalized session event without blocking SDK callbacks."""
-        nonlocal event_sequence
         if not chat_session.repo or not chat_session.session_id:
             return
-        event_sequence += 1
-        sequence = event_sequence
 
         async def persist_and_audit() -> None:
             row = await chat_session.repo.add_event(
@@ -1447,7 +1443,6 @@ async def chat_stream_v2(
                 org_id=str(user["organization_id"]),
                 turn_id=chat_session.turn_id,
                 message_id=chat_session.user_message_id,
-                sequence=sequence,
                 event_type=payload.get("type", event.type.value),
                 tool_name=payload.get("tool") or event.tool_name,
                 tool_input=event.tool_input or payload.get("input"),
