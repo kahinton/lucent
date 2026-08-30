@@ -11,7 +11,7 @@
     hx-target="this"
     hx-swap="outerHTML">
 <div class="mb-6">
-    <div class="flex items-center justify-between">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex items-center gap-3">
             <div class="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 shadow-md">
                 <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -24,7 +24,7 @@
             </div>
         </div>
         {% if pending_approval_count > 0 %}
-        <div class="inline-flex items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 text-sm font-medium rounded-lg">
+        <div class="inline-flex w-fit items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 text-sm font-medium rounded-lg">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
             </svg>
@@ -36,7 +36,7 @@
 
 <!-- Summary Cards -->
 {% if summary %}
-<div class="grid grid-cols-4 gap-4 mb-6">
+<div class="grid grid-cols-2 gap-3 mb-6 sm:grid-cols-4 sm:gap-4">
     <a href="/activity?status=active&per_page={{ per_page }}&source=user,cognitive,daemon,schedule" class="block bg-white rounded-lg border border-gray-200 p-4 transition-colors hover:border-blue-300 hover:shadow-sm" aria-label="View active requests">
         <p class="text-xs text-gray-500 uppercase tracking-wider">Active</p>
         <p class="text-2xl font-bold text-blue-600">{{ summary.requests.active or 0 }}</p>
@@ -56,8 +56,36 @@
 </div>
 {% endif %}
 
-<!-- Source Filter -->
-<div class="flex items-center gap-4 mb-4">
+<!-- Mobile filters -->
+<form method="GET" action="/activity" class="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-gray-200 bg-white p-3 sm:hidden">
+    <input type="hidden" name="per_page" value="{{ per_page }}">
+    <label class="min-w-0 text-xs font-medium text-gray-600">
+        Source
+        <select name="source" class="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none">
+            <option value="user,cognitive,daemon" {% if not filter_source or filter_source == 'user,cognitive,daemon' %}selected{% endif %}>All activity</option>
+            <option value="user" {% if filter_source == 'user' %}selected{% endif %}>You</option>
+            <option value="cognitive,daemon" {% if filter_source in ('cognitive', 'cognitive,daemon') %}selected{% endif %}>Lucent</option>
+            <option value="schedule" {% if filter_source == 'schedule' %}selected{% endif %}>System</option>
+        </select>
+    </label>
+    <label class="min-w-0 text-xs font-medium text-gray-600">
+        Status
+        <select name="status" class="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none">
+            <option value="" {% if not filter_status %}selected{% endif %}>All statuses</option>
+            <option value="active" {% if filter_status == 'active' %}selected{% endif %}>Active</option>
+            <option value="pending" {% if filter_status == 'pending' %}selected{% endif %}>Pending</option>
+            <option value="in_progress" {% if filter_status == 'in_progress' %}selected{% endif %}>In progress</option>
+            <option value="completed" {% if filter_status == 'completed' %}selected{% endif %}>Completed</option>
+            <option value="failed" {% if filter_status == 'failed' %}selected{% endif %}>Failed</option>
+            <option value="cancelled" {% if filter_status == 'cancelled' %}selected{% endif %}>Cancelled</option>
+            <option value="rejection_processing" {% if filter_status == 'rejection_processing' %}selected{% endif %}>Rejection processing</option>
+        </select>
+    </label>
+    <button type="submit" class="col-span-2 rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800">Apply filters</button>
+</form>
+
+<!-- Desktop filters -->
+<div class="mb-4 hidden items-center gap-4 sm:flex">
     <div class="flex gap-2">
         <a href="/activity?source=user,cognitive,daemon&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md {% if not filter_source or filter_source == 'user,cognitive,daemon' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
         <a href="/activity?source=user&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md flex items-center gap-1.5 {% if filter_source == 'user' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">

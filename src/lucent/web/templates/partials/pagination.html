@@ -24,10 +24,10 @@
 {% set end_item = [page * per_page, total_count] | min %}
 
 {% if total_count > 0 %}
-<div class="mb-3 flex items-center justify-between text-sm text-gray-500">
+<div class="mb-3 flex flex-col gap-2 text-sm text-gray-500 sm:flex-row sm:items-center sm:justify-between">
     <span>Showing <span class="font-medium text-gray-900">{{ start_item }}–{{ end_item }}</span> of <span class="font-medium text-gray-900">{{ total_count }}</span> {{ entity_name }}</span>
     {% if show_per_page %}
-    <div class="flex items-center gap-2">
+    <div class="flex items-center justify-between gap-2 sm:justify-start">
         <label class="text-xs text-gray-500">Per page:</label>
         <select class="px-2 py-1 border border-gray-300 rounded text-xs bg-white focus:ring-1 focus:ring-primary-500 outline-none"
             data-redirect-prefix="{{ base_url }}?{% for k, v in filter_params.items() %}{% if v is not none %}{{ k }}={{ v }}&{% endif %}{% endfor %}per_page=" data-redirect-suffix="&page=1">

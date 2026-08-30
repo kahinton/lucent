@@ -197,6 +197,11 @@ class TestActivityList:
         resp = await client.get("/activity")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
+        assert '<form method="GET" action="/activity"' in resp.text
+        assert 'name="source"' in resp.text
+        assert 'name="status"' in resp.text
+        assert 'value="user,cognitive,daemon"' in resp.text
+        assert "Apply filters" in resp.text
 
     async def test_live_refresh_returns_full_marked_region(self, client, sample_request):
         pagination = await client.get("/activity", headers={"HX-Request": "true"})

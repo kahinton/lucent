@@ -212,9 +212,14 @@ async def _create_request_review_task(daemon, request_id: str, request_data: dic
         incomplete_note = '\n\nNOTE: dependency_policy is permissive and some tasks are incomplete/failed. Account for this in your review and require rework if needed.'
     target_repo = request_data.get('target_repo') or ''
     target_paths = request_data.get('target_paths') or []
-    target_section = ''
+    target_section = """\n\n=== RESEARCH DELIVERY REQUIREMENT ===
+If the original request asks for research, investigation, analysis, or a recommendation based on gathered findings, do not approve based only on narrative task output or review feedback. Before approving, ensure the findings are delivered through the appropriate durable user-facing channel:
+- Create a handoff with `send_handoff` when the investigation may need follow-up questions, a user decision, or further discussion. Summarize findings, remaining uncertainty, and the useful next question or decision, with request/task references.
+- Create or update a file when the findings have an obvious documentation home, such as a project document, research report, decision record, or a named documentation file. Ensure it is recorded as a task output when needed so it is visible from Activity.
+Memories and review prose do not satisfy this requirement. If the research outcome has neither a handoff nor a file, return NEEDS_REWORK and instruct the task agent to create the appropriate deliverable.
+=== END RESEARCH DELIVERY REQUIREMENT ==="""
     if target_repo or target_paths:
-        target_section = f"\n\nTarget persistence scope:\n- target_repo: {target_repo or 'unspecified'}\n- target_paths: {target_paths or []}\nIf this request produced docs/files/reports intended for the target repository, do not approve unless the task outputs show actual durable repo changes (paths plus commit/URL or equivalent recorded artifact)."
+        target_section += f"\n\nTarget persistence scope:\n- target_repo: {target_repo or 'unspecified'}\n- target_paths: {target_paths or []}\nIf this request produced docs/files/reports intended for the target repository, do not approve unless the task outputs show actual durable repo changes (paths plus commit/URL or equivalent recorded artifact)."
     linked_memories = await runtime.RequestAPI.get_request_memories(request_id)
     memory_section = ''
     if linked_memories:

@@ -9,8 +9,8 @@
         </div>
     </div>
 </div>
-<div class="border-b border-gray-200 mb-6">
-    <nav class="flex gap-6">
+<div class="border-b border-gray-200 mb-6 overflow-x-auto">
+    <nav class="flex min-w-max gap-6 pr-4">
         <a href="/definitions?tab=composer&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'composer' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agent Wizard</a>
         <a href="/definitions?tab=agents&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'agents' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Agents {% if agents_total is defined %}({{ agents_total }}){% elif agents %}({{ agents|length }}){% endif %}</a>
         <a href="/definitions?tab=skills&per_page={{ per_page }}" class="py-2 px-1 border-b-2 text-sm font-medium {% if tab == 'skills' %}border-primary-500 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Skills {% if skills_total is defined %}({{ skills_total }}){% elif skills %}({{ skills|length }}){% endif %}</a>
@@ -173,17 +173,27 @@
 </div>
 
 {% elif tab == 'agents' %}
-<div class="mb-4 flex items-center justify-between">
+<div class="mb-4 rounded-lg border border-teal-300 bg-teal-50 p-4">
+    <div class="flex items-start gap-3">
+        <svg class="mt-0.5 h-5 w-5 shrink-0 text-teal-700" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.625a3.375 3.375 0 0 0-3.375-3.375h-4.5A3.375 3.375 0 0 0 4.5 5.625v12.75a3.375 3.375 0 0 0 3.375 3.375V15m0-6 3-3m0 0 3 3m-3-3v12" /></svg>
+        <div>
+            <h2 class="text-sm font-semibold text-teal-950">Agents bring capabilities together</h2>
+            <p class="mt-1 text-sm text-teal-900">An agent is the role that takes on work: its instructions establish the goal, working style, and boundaries for a particular kind of task. Add skills for repeatable methods and specialist knowledge, then grant the tools, external providers, and hooks the agent needs to act.</p>
+            <p class="mt-2 text-sm text-teal-900">Keep each agent focused on a clear responsibility. Explicit grants let you create capable agents without giving every role access to every integration or action.</p>
+        </div>
+    </div>
+</div>
+<div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "agents"}, entity_name="agents") }}
-    <div class="flex gap-2">
-    <button id="open-import-btn-agents" class="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-primary-50 border border-primary-200 text-primary-700 rounded-md hover:bg-primary-100 hover:border-primary-300 font-medium transition-colors"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="M12 6v4"/><path d="M7 14l5 6 5-6"/><path d="M4 14c0-2 1.5-4 4-5"/><path d="M20 14c0-2-1.5-4-4-5"/><path d="M4 14h16"/><path d="M6 18h12"/><path d="M8 22h8"/></svg>Import</button>
-    <button id="open-create-agent-modal" type="button" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Agent</button>
+    <div class="flex w-full gap-2 sm:w-auto">
+    <button id="open-import-btn-agents" class="inline-flex flex-1 items-center justify-center gap-1.5 px-4 py-2 text-sm bg-primary-50 border border-primary-200 text-primary-700 rounded-md hover:bg-primary-100 hover:border-primary-300 font-medium transition-colors sm:flex-none"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="M12 6v4"/><path d="M7 14l5 6 5-6"/><path d="M4 14c0-2 1.5-4 4-5"/><path d="M20 14c0-2-1.5-4-4-5"/><path d="M4 14h16"/><path d="M6 18h12"/><path d="M8 22h8"/></svg>Import</button>
+    <button id="open-create-agent-modal" type="button" class="flex-1 px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium sm:flex-none">+ New Agent</button>
     </div>
 </div>
 <div class="space-y-3">
     {% for agent in agents %}
     <details class="bg-white rounded-lg border border-gray-200 group">
-        <summary class="p-4 cursor-pointer list-none flex items-start justify-between gap-4">
+        <summary class="p-4 cursor-pointer list-none flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                     <svg class="w-4 h-4 text-gray-400 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
@@ -302,17 +312,27 @@
 </div>
 
 {% elif tab == 'skills' %}
-<div class="mb-4 flex items-center justify-between">
+<div class="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+    <div class="flex items-start gap-3">
+        <svg class="mt-0.5 h-5 w-5 shrink-0 text-amber-700" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.847.814a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" /></svg>
+        <div>
+            <h2 class="text-sm font-semibold text-amber-950">Skills give agents reusable expertise</h2>
+            <p class="mt-1 text-sm text-amber-900">A skill packages a focused procedure, specialist context, or quality standard that can be shared across agents. Use skills to capture how work should be approached, what to verify, and the conventions that make results dependable.</p>
+            <p class="mt-2 text-sm text-amber-900">Grant a skill to every agent that needs it. Updating the skill improves the shared method everywhere it is used, without duplicating instructions in each agent definition.</p>
+        </div>
+    </div>
+</div>
+<div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "skills"}, entity_name="skills") }}
-    <div class="flex gap-2">
-    <button id="open-import-btn-skills" class="inline-flex items-center gap-1.5 px-4 py-2 text-sm bg-primary-50 border border-primary-200 text-primary-700 rounded-md hover:bg-primary-100 hover:border-primary-300 font-medium transition-colors"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="M12 6v4"/><path d="M7 14l5 6 5-6"/><path d="M4 14c0-2 1.5-4 4-5"/><path d="M20 14c0-2-1.5-4-4-5"/><path d="M4 14h16"/><path d="M6 18h12"/><path d="M8 22h8"/></svg>Import</button>
-    <button type="button" data-toggle-target="create-skill-modal" data-toggle-mode="remove" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Skill</button>
+    <div class="flex w-full gap-2 sm:w-auto">
+    <button id="open-import-btn-skills" class="inline-flex flex-1 items-center justify-center gap-1.5 px-4 py-2 text-sm bg-primary-50 border border-primary-200 text-primary-700 rounded-md hover:bg-primary-100 hover:border-primary-300 font-medium transition-colors sm:flex-none"><svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><path d="M12 6v4"/><path d="M7 14l5 6 5-6"/><path d="M4 14c0-2 1.5-4 4-5"/><path d="M20 14c0-2-1.5-4-4-5"/><path d="M4 14h16"/><path d="M6 18h12"/><path d="M8 22h8"/></svg>Import</button>
+    <button type="button" data-toggle-target="create-skill-modal" data-toggle-mode="remove" class="flex-1 px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium sm:flex-none">+ New Skill</button>
     </div>
 </div>
 <div class="space-y-3">
     {% for skill in skills %}
     <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <div class="flex items-start justify-between gap-4">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
                     <a href="/definitions/skills/{{ skill.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ skill.name }}</a>
@@ -375,16 +395,16 @@
         <h2 class="text-lg font-semibold text-gray-900">Tools</h2>
         <p class="text-sm text-gray-500">{{ tools_total + mcp_total }} total: {{ tools_total }} custom, {{ mcp_total }} external provider{{ 's' if mcp_total != 1 }}</p>
     </div>
-    <div class="flex flex-wrap gap-2">
-        <button id="open-create-tool-modal" type="button" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Custom Tool</button>
-        <button id="open-create-mcp-modal" type="button" class="px-4 py-2 text-sm bg-purple-50 text-purple-700 border border-purple-200 rounded-md hover:bg-purple-100 font-medium">+ Connect Tool Provider</button>
+    <div class="flex w-full gap-2 sm:w-auto">
+        <button id="open-create-tool-modal" type="button" class="flex-1 px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium sm:flex-none">+ New Custom Tool</button>
+        <button id="open-create-mcp-modal" type="button" class="flex-1 px-4 py-2 text-sm bg-purple-50 text-purple-700 border border-purple-200 rounded-md hover:bg-purple-100 font-medium sm:flex-none">+ Connect Tool Provider</button>
     </div>
 </div>
 <h3 class="text-sm font-semibold text-gray-700 mb-2">Custom tools</h3>
 <div class="space-y-3">
     {% for tool in managed_tools %}
     <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <div class="flex items-start justify-between gap-4">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                     <a href="/definitions/tools/{{ tool.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ tool.name }}</a>
@@ -408,7 +428,7 @@
 <div class="space-y-3">
     {% for server in mcp_servers %}
     <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <div class="flex items-start justify-between gap-4">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                     <a href="/definitions/mcp-servers/{{ server.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ server.name }}</a>
@@ -509,18 +529,18 @@
         <svg class="w-5 h-5 text-emerald-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a7.723 7.723 0 010 .255c-.007.379.138.752.43.992l1.005.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.379-.138-.752-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
         <div>
             <h2 class="text-sm font-semibold text-emerald-900">Hooks are safe agent middleware</h2>
-            <p class="text-sm text-emerald-800 mt-1">They add approved context around model and tool lifecycle events. Command hooks can run approved shell commands/scripts out-of-process with timeout and output limits. The built-in memory hook is on by default for every agent, so agents can remember relevant repo knowledge when they touch files.</p>
+            <p class="text-sm text-emerald-800 mt-1">They add approved context around model and tool lifecycle events. Command hooks can run approved shell commands or scripts out-of-process with timeout and output limits. The built-in memory hook is on by default for every agent, so agents can carry relevant knowledge into the work they do.</p>
         </div>
     </div>
 </div>
-<div class="mb-4 flex items-center justify-between">
+<div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     {{ pagination_controls(base_url="/definitions", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "hooks"}, entity_name="hooks") }}
-    <button id="open-create-hook-modal" type="button" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">+ New Hook</button>
+    <button id="open-create-hook-modal" type="button" class="w-full px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium sm:w-auto">+ New Hook</button>
 </div>
 <div class="space-y-3">
     {% for hook in hooks %}
     <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <div class="flex items-start justify-between gap-4">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
             <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2 flex-wrap">
                     <a href="/definitions/hooks/{{ hook.id }}" class="font-medium text-gray-900 hover:text-primary-600">{{ hook.name }}</a>

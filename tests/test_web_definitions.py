@@ -311,6 +311,19 @@ class TestDefinitionsList:
     async def test_list_tab_agents(self, client, agent_def):
         resp = await client.get("/definitions", params={"tab": "agents"})
         assert resp.status_code == 200
+        assert "Agents bring capabilities together" in resp.text
+        assert "its instructions establish the goal" in resp.text
+        assert "Explicit grants let you create capable agents" in resp.text
+        assert "border-teal-300 bg-teal-50" in resp.text
+
+    async def test_list_tab_skills_explains_reusable_expertise(self, client, skill_def):
+        resp = await client.get("/definitions", params={"tab": "skills"})
+
+        assert resp.status_code == 200
+        assert "Skills give agents reusable expertise" in resp.text
+        assert "specialist context, or quality standard" in resp.text
+        assert "Updating the skill improves the shared method" in resp.text
+        assert "border-amber-300 bg-amber-50" in resp.text
 
     async def test_agent_composer_chat_uses_definition_engineer(self, client, db_pool, web_user):
         _user, org, _token = web_user
@@ -521,6 +534,8 @@ class TestDefinitionsList:
         assert resp.status_code == 200
         assert "Hooks are safe agent middleware" in resp.text
         assert "default on all agents" in resp.text
+        assert "carry relevant knowledge into the work they do" in resp.text
+        assert "relevant repo knowledge" not in resp.text
         assert "Finds accessible memories related to those file paths" in resp.text
         assert "command — run a shell command or script" in resp.text
         assert "JSON on stdin" in resp.text

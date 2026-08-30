@@ -1,0 +1,30 @@
+<svg width="500" height="500" viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="lucent-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff3f9b" />
+      <stop offset="50%" stop-color="#00cfc1" />
+      <stop offset="100%" stop-color="#ff3f9b" />
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#lucent-gradient)" stroke-width="2">
+    <circle cx="250" cy="250" r="50" />
+    <circle cx="250" cy="200" r="50" />
+    <circle cx="293.3" cy="225" r="50" />
+    <circle cx="293.3" cy="275" r="50" />
+    <circle cx="250" cy="300" r="50" />
+    <circle cx="206.7" cy="275" r="50" />
+    <circle cx="206.7" cy="225" r="50" />
+    <circle cx="250" cy="150" r="50" />
+    <circle cx="293.3" cy="175" r="50" />
+    <circle cx="336.6" cy="200" r="50" />
+    <circle cx="343.3" cy="250" r="50" />
+    <circle cx="336.6" cy="300" r="50" />
+    <circle cx="293.3" cy="325" r="50" />
+    <circle cx="250" cy="350" r="50" />
+    <circle cx="206.7" cy="325" r="50" />
+    <circle cx="163.4" cy="300" r="50" />
+    <circle cx="156.7" cy="250" r="50" />
+    <circle cx="163.4" cy="200" r="50" />
+    <circle cx="206.7" cy="175" r="50" />
+  </g>
+</svg>
