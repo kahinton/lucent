@@ -191,6 +191,40 @@ async def test_ollama_discovery_marks_models_without_tool_capability_false(db_po
 
 
 @pytest.mark.asyncio
+async def test_ollama_discovery_maps_thinking_capability_to_efforts(db_pool, monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
+    service = ModelDiscoveryService(db_pool)
+
+    async def fake_get_json(url, **_kwargs):
+        assert url.endswith("/tags")
+        return {
+            "models": [
+                {
+                    "model": "qwen-thinking:4b",
+                    "details": {},
+                    "capabilities": ["completion", "thinking"],
+                }
+            ]
+        }
+
+    async def fake_post_json(url, *, json=None, **_kwargs):
+        assert url.endswith("/show")
+        assert json == {"model": "qwen-thinking:4b"}
+        return {"capabilities": ["completion", "thinking"], "model_info": {}}
+
+    monkeypatch.setattr(service, "_get_json", fake_get_json)
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+
+    models = await service._discover_ollama()
+
+    assert models[0].reasoning_efforts == ["low", "medium", "high"]
+    assert "reasoning-effort" in models[0].tags
+    assert models[0].discovery_metadata["reasoning_efforts_source"] == (
+        "ollama-thinking-capability"
+    )
+
+
+@pytest.mark.asyncio
 async def test_ollama_discovery_uses_structured_tool_probe(db_pool, monkeypatch):
     monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
     service = ModelDiscoveryService(db_pool)

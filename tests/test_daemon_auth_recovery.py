@@ -4,11 +4,28 @@ import pytest
 
 import daemon.daemon as daemon_module
 from daemon.daemon import AuthFailureDetectedError, LucentDaemon
+from daemon.runtime.module_proxy import RuntimeModuleProxy
+
+
+def test_runtime_proxy_writes_to_live_daemon_module():
+    proxy = RuntimeModuleProxy()
+    sentinel = object()
+    previous = getattr(daemon_module, "_test_runtime_proxy_value", sentinel)
+
+    try:
+        proxy._test_runtime_proxy_value = "updated"
+        assert daemon_module._test_runtime_proxy_value == "updated"
+    finally:
+        if previous is sentinel:
+            delattr(daemon_module, "_test_runtime_proxy_value")
+        else:
+            daemon_module._test_runtime_proxy_value = previous
 
 
 @pytest.mark.asyncio
 async def test_proactive_rotation_triggers_under_60_minutes(monkeypatch):
     daemon_module.MCP_API_KEY = "hs_test_key"
+    daemon_module._current_key_db_id = "daemon-key-id"
     daemon_module._current_key_expires_at = datetime.now(timezone.utc) + timedelta(minutes=45)
 
     called: dict[str, object] = {}
@@ -29,6 +46,90 @@ async def test_proactive_rotation_triggers_under_60_minutes(monkeypatch):
     assert ok is True
     assert called["instance_id"] == "inst-1"
     assert called["force_rotate"] is True
+
+
+@pytest.mark.asyncio
+async def test_startup_replaces_inherited_user_scoped_key(monkeypatch):
+    previous_key = daemon_module.MCP_API_KEY
+    previous_key_id = daemon_module._current_key_db_id
+    previous_expiry = daemon_module._current_key_expires_at
+    provisioned_for: list[str] = []
+
+    async def _unexpected_verify(_api_key: str) -> bool:
+        raise AssertionError("Startup must not validate or adopt an inherited key")
+
+    async def _provision(instance_id: str) -> str:
+        provisioned_for.append(instance_id)
+        daemon_module._current_key_db_id = "daemon-key-id"
+        return "hs_daemon_service_key"
+
+    try:
+        daemon_module.MCP_API_KEY = "hs_user_scoped_mcp_key"
+        daemon_module._current_key_db_id = None
+        daemon_module._current_key_expires_at = None
+        monkeypatch.setattr(daemon_module, "_verify_api_key", _unexpected_verify)
+        monkeypatch.setattr(daemon_module, "_provision_daemon_api_key", _provision)
+
+        key = await daemon_module.ensure_valid_api_key("instance-startup")
+
+        assert key == "hs_daemon_service_key"
+        assert provisioned_for == ["instance-startup"]
+        assert daemon_module.API_HEADERS["Authorization"] == "Bearer hs_daemon_service_key"
+    finally:
+        daemon_module.MCP_API_KEY = previous_key
+        daemon_module._current_key_db_id = previous_key_id
+        daemon_module._current_key_expires_at = previous_expiry
+
+
+@pytest.mark.asyncio
+async def test_untracked_valid_key_is_reprovisioned(monkeypatch):
+    previous_key = daemon_module.MCP_API_KEY
+    previous_key_id = daemon_module._current_key_db_id
+    previous_expiry = daemon_module._current_key_expires_at
+    recoveries: list[str] = []
+
+    async def _verify(_api_key: str) -> bool:
+        return True
+
+    async def _recover(instance_id: str, *, force_rotate: bool = False) -> bool:
+        assert force_rotate is False
+        recoveries.append(instance_id)
+        return True
+
+    try:
+        daemon_module.MCP_API_KEY = "hs_user_scoped_mcp_key"
+        daemon_module._current_key_db_id = None
+        daemon_module._current_key_expires_at = None
+        monkeypatch.setattr(daemon_module, "_verify_api_key", _verify)
+        monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
+
+        assert await daemon_module._verify_and_provision_key("instance-recovery") is True
+        assert recoveries == ["instance-recovery"]
+    finally:
+        daemon_module.MCP_API_KEY = previous_key
+        daemon_module._current_key_db_id = previous_key_id
+        daemon_module._current_key_expires_at = previous_expiry
+
+
+def test_runtime_settings_refresh_preserves_daemon_service_key(monkeypatch):
+    previous_key = daemon_module.MCP_API_KEY
+
+    def _unexpected_runtime_key() -> str:
+        raise AssertionError("Runtime settings must not replace the daemon service key")
+
+    try:
+        daemon_module.MCP_API_KEY = "hs_daemon_service_key"
+        monkeypatch.setattr(
+            daemon_module.runtime_settings,
+            "daemon_mcp_api_key",
+            _unexpected_runtime_key,
+        )
+
+        daemon_module._refresh_config_from_runtime_settings()
+
+        assert daemon_module.MCP_API_KEY == "hs_daemon_service_key"
+    finally:
+        daemon_module.MCP_API_KEY = previous_key
 
 
 @pytest.mark.asyncio
@@ -248,6 +349,40 @@ async def test_run_session_auth_retry_guard_prevents_infinite_loop(monkeypatch):
 
     assert result is None
     assert recover_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_session_retries_once_after_empty_response(monkeypatch):
+    daemon = LucentDaemon()
+    attempts = {"count": 0}
+
+    async def _inner(*_args, **_kwargs):
+        attempts["count"] += 1
+        return None if attempts["count"] == 1 else "review decision"
+
+    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+
+    result = await daemon.run_session("empty-response-test", "system", "prompt")
+
+    assert result == "review decision"
+    assert attempts["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_session_stops_after_second_empty_response(monkeypatch):
+    daemon = LucentDaemon()
+    attempts = {"count": 0}
+
+    async def _inner(*_args, **_kwargs):
+        attempts["count"] += 1
+        return None
+
+    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+
+    result = await daemon.run_session("empty-response-guard-test", "system", "prompt")
+
+    assert result is None
+    assert attempts["count"] == 2
 
 
 @pytest.mark.asyncio

@@ -4,8 +4,8 @@
 {% block extra_head %}
 <style>
     .lucent-mark {
-        width: 68px;
-        height: 68px;
+        width: 192px;
+        height: 192px;
         object-fit: contain;
         filter: drop-shadow(0 7px 5px rgba(42, 50, 42, 0.2));
         animation: mark-settle 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -107,6 +107,17 @@
         color: #064a46;
         border-color: #00cfc1;
         box-shadow: 0 2px 0 rgba(0, 127, 120, 0.3);
+    }
+    .session-delete-button {
+        opacity: 0;
+    }
+    .session-list > div:hover .session-delete-button,
+    .session-list > div:focus-within .session-delete-button {
+        opacity: 1;
+    }
+    .chat-confirm-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(2px);
     }
 
     /* Chat container fills the viewport below the sidebar header */
@@ -306,7 +317,7 @@
         #empty-state { padding-left: 1rem; padding-right: 1rem; }
         #empty-state .grid { grid-template-columns: 1fr; gap: 0.65rem; }
         #empty-state .grid button { padding: 0.7rem 0.85rem; }
-        .lucent-mark { width: 54px; height: 54px; margin-bottom: 1rem !important; }
+        .lucent-mark { width: 96px; height: 96px; margin-bottom: 1rem !important; }
         .chat-input-area { padding: 0.75rem !important; }
         .input-glow { gap: 0.35rem; padding: 0.65rem !important; }
         .chat-input-area .relative.flex.items-center { flex-wrap: wrap; gap: 0.4rem; }
@@ -452,7 +463,7 @@
     <div id="messages" class="messages-area">
         <!-- Empty state -->
         <div id="empty-state" class="flex flex-col items-center px-6">
-            <img src="/static/lucent_logo_64.png" alt="" class="lucent-mark mb-6">
+            <img src="/static/lucent_logo_v2.svg" alt="" class="lucent-mark mb-6">
             <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
             <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
                 Pick up where we left off, start something new, or just think out loud.
@@ -562,6 +573,16 @@
     </div>
     <div id="session-list" class="session-list flex-1 p-3 space-y-1"></div>
 </aside>
+<dialog id="archive-session-dialog" class="chat-confirm-dialog w-[min(24rem,calc(100vw-2rem))] rounded-lg border border-gray-700 bg-[#181818] p-0 text-gray-100 shadow-2xl">
+    <div class="p-5">
+        <h2 class="text-base font-semibold">Delete conversation?</h2>
+        <p class="mt-2 text-sm leading-6 text-gray-400">It will be removed from History. Related files, requests, and provenance will remain available.</p>
+        <div class="mt-5 flex justify-end gap-2">
+            <button type="button" id="archive-session-cancel" class="rounded-md border border-gray-600 px-3 py-2 text-sm font-semibold text-gray-300 hover:border-gray-400 hover:bg-[#242424]">Cancel</button>
+            <button type="button" id="archive-session-confirm" class="rounded-md bg-pink-500 px-3 py-2 text-sm font-semibold text-white hover:bg-pink-400">Delete</button>
+        </div>
+    </div>
+</dialog>
 </div>
 
 <script nonce="{{ request.state.csp_nonce }}">
@@ -832,6 +853,11 @@ function applySessionConfig(session) {
 // Session Persistence
 // ═══════════════════════════════════════════════════════════════════
 
+function updateSessionStatus() {
+    const status = document.getElementById('session-status');
+    status.textContent = state.sessions.length ? `${state.sessions.length} saved` : 'No saved conversations yet';
+}
+
 async function loadSessions() {
     const status = document.getElementById('session-status');
     try {
@@ -840,7 +866,7 @@ async function loadSessions() {
         const data = await resp.json();
         state.sessions = data.items || [];
         renderSessionList();
-        status.textContent = state.sessions.length ? `${state.sessions.length} saved` : 'No saved conversations yet';
+        updateSessionStatus();
     } catch(e) {
         status.textContent = 'Sessions unavailable';
     }
@@ -854,17 +880,40 @@ function renderSessionList() {
     }
     list.innerHTML = '';
     for (const session of state.sessions) {
+        const item = document.createElement('div');
+        item.className = 'group flex items-center gap-1 rounded-xl border border-transparent hover:bg-white hover:border-gray-200 transition-colors ' + (session.id === state.sessionId ? 'session-row active' : '');
         const row = document.createElement('button');
         row.type = 'button';
         row.dataset.sessionId = session.id;
-        row.className = 'session-row w-full text-left rounded-xl border border-transparent px-3 py-2.5 hover:bg-white hover:border-gray-200 transition-colors ' + (session.id === state.sessionId ? 'active' : '');
+        row.className = 'min-w-0 flex-1 px-3 py-2.5 text-left';
         const title = session.title || 'Untitled conversation';
         const meta = [session.model, session.linked_request_count ? `${session.linked_request_count} request${session.linked_request_count === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ');
         row.innerHTML = `
             <div class="font-medium text-sm truncate">${escapeHtml(title)}</div>
             <div class="mt-0.5 text-[11px] text-gray-400 truncate">${escapeHtml(meta || 'No messages yet')}</div>`;
-        list.appendChild(row);
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.dataset.archiveSessionId = session.id;
+        deleteButton.className = 'session-delete-button mr-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-500 hover:bg-pink-500/15 hover:text-pink-400 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-pink-400';
+        deleteButton.title = 'Delete conversation';
+        deleteButton.setAttribute('aria-label', `Delete conversation: ${title}`);
+        deleteButton.innerHTML = '<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.108 48.108 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0Z" /></svg>';
+        item.append(row, deleteButton);
+        list.appendChild(item);
     }
+}
+
+async function archiveSession(sessionId) {
+    const response = await fetch(`/api/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'archived' }),
+    });
+    if (!response.ok) throw new Error('Unable to delete conversation');
+    state.sessions = state.sessions.filter(session => session.id !== sessionId);
+    updateSessionStatus();
+    if (state.sessionId === sessionId) clearConversation();
+    else renderSessionList();
 }
 
 async function createSession(firstMessage) {
@@ -903,18 +952,65 @@ async function loadSession(sessionId) {
         state.sessionId = session.id;
         history.replaceState(null, '', `/chat/${session.id}`);
         applySessionConfig(session);
-        renderSessionMessages(session.messages || []);
+        renderSessionMessages(session.messages || [], session.events || []);
         await loadSessions();
     } catch(e) {
         console.error('Failed to load session:', e);
     }
 }
 
-function renderSessionMessages(messages) {
+function eventTypeMatches(event, ...types) {
+    return types.includes(event.event_type || event.type);
+}
+
+function replaySessionEvents(assistantEl, events) {
+    if (!events.length) return;
+    const toolsEl = assistantEl.querySelector('.tools-container');
+    let reasoningEl = null;
+    let reasoningText = '';
+
+    for (const event of events) {
+        if (eventTypeMatches(event, 'tool_call', 'tool.call')) {
+            appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input);
+        } else if (eventTypeMatches(event, 'tool_result', 'tool.result')) {
+            updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output);
+        } else if (eventTypeMatches(event, 'reasoning')) {
+            if (!reasoningEl) reasoningEl = createReasoningBlock(toolsEl);
+            reasoningText += event.detail || '';
+            updateReasoningBlock(reasoningEl, reasoningText);
+        }
+    }
+
+    if (reasoningEl) collapseReasoningBlock(reasoningEl);
+    finalizeToolCalls(toolsEl);
+}
+
+function renderSessionMessages(messages, events = []) {
     const msgs = document.getElementById('messages');
     msgs.innerHTML = '';
     state.messages = [];
     const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant');
+    const turnIdByMessageId = new Map(
+        visible
+            .filter(m => m.id && m.turn_id)
+            .map(m => [m.id, m.turn_id])
+    );
+    const assistantTurns = new Set(
+        visible
+            .filter(m => m.role === 'assistant' && m.turn_id)
+            .map(m => m.turn_id)
+    );
+    const eventsByTurn = new Map();
+    for (const event of events) {
+        const turnId = event.turn_id || turnIdByMessageId.get(event.message_id);
+        if (event.visible === false || !turnId) continue;
+        const turnEvents = eventsByTurn.get(turnId) || [];
+        turnEvents.push(event);
+        eventsByTurn.set(turnId, turnEvents);
+    }
+    for (const turnEvents of eventsByTurn.values()) {
+        turnEvents.sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
+    }
     if (!visible.length) {
         clearConversation({ keepSession: true });
         return;
@@ -925,8 +1021,14 @@ function renderSessionMessages(messages) {
         if (msg.role === 'user') {
             const att = msg.metadata && msg.metadata.attachments;
             appendUserMessage(msg.content || '', att);
+            const turnEvents = eventsByTurn.get(msg.turn_id) || [];
+            if (turnEvents.length && !assistantTurns.has(msg.turn_id)) {
+                const assistantEl = appendAssistantMessage('');
+                replaySessionEvents(assistantEl, turnEvents);
+            }
         } else {
-            appendAssistantMessage(msg.content || '');
+            const assistantEl = appendAssistantMessage(msg.content || '');
+            replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || []);
         }
     }
     hideStatus();
@@ -1596,6 +1698,14 @@ document.getElementById('session-menu-btn').addEventListener('click', function(e
 
 // Session drawer picker
 document.getElementById('session-list').addEventListener('click', function(e) {
+    const deleteButton = e.target.closest('[data-archive-session-id]');
+    if (deleteButton) {
+        const dialog = document.getElementById('archive-session-dialog');
+        document.getElementById('archive-session-confirm').disabled = false;
+        dialog.dataset.sessionId = deleteButton.dataset.archiveSessionId;
+        dialog.showModal();
+        return;
+    }
     const row = e.target.closest('[data-session-id]');
     if (row && !state.streaming) {
         loadSession(row.dataset.sessionId);
@@ -1609,6 +1719,27 @@ document.getElementById('session-drawer-close').addEventListener('click', functi
 
 document.getElementById('session-drawer-backdrop').addEventListener('click', function() {
     toggleSessionDrawer(false);
+});
+
+document.getElementById('archive-session-cancel').addEventListener('click', function() {
+    document.getElementById('archive-session-dialog').close();
+});
+
+document.getElementById('archive-session-confirm').addEventListener('click', async function() {
+    const dialog = document.getElementById('archive-session-dialog');
+    const sessionId = dialog.dataset.sessionId;
+    if (!sessionId) return;
+    this.disabled = true;
+    try {
+        await archiveSession(sessionId);
+        dialog.dataset.sessionId = '';
+        dialog.close();
+    } catch (error) {
+        console.error('Failed to archive session:', error);
+        document.getElementById('session-status').textContent = 'Unable to delete conversation';
+    } finally {
+        this.disabled = false;
+    }
 });
 </script>
 {% endblock %}

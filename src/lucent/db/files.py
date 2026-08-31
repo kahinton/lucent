@@ -246,11 +246,32 @@ class UserFileRepository:
                 org_id,
                 user_id,
             )
+            unseen_count = await conn.fetchval(
+                                """SELECT COUNT(*)
+                                     FROM user_files f
+                                     LEFT JOIN user_file_views v
+                                         ON v.file_id = f.id
+                                        AND v.organization_id = f.organization_id
+                                        AND v.user_id = f.user_id
+                                     WHERE f.organization_id = $1::uuid AND f.user_id = $2::uuid
+                                         AND f.deleted_at IS NULL
+                                         AND f.current_revision > COALESCE(v.last_viewed_revision, 0)""",
+                                org_id,
+                                user_id,
+                        )
             rows = await conn.fetch(
-                """SELECT * FROM user_files
-                   WHERE organization_id = $1::uuid AND user_id = $2::uuid
-                     AND deleted_at IS NULL
-                   ORDER BY created_at DESC LIMIT $3 OFFSET $4""",
+                                """SELECT f.*,
+                                                    f.current_revision > COALESCE(v.last_viewed_revision, 0)
+                                                            AS has_unseen_revision
+                                     FROM user_files f
+                                     LEFT JOIN user_file_views v
+                                         ON v.file_id = f.id
+                                        AND v.organization_id = f.organization_id
+                                        AND v.user_id = f.user_id
+                                     WHERE f.organization_id = $1::uuid AND f.user_id = $2::uuid
+                                         AND f.deleted_at IS NULL
+                                     ORDER BY has_unseen_revision DESC, f.updated_at DESC
+                                     LIMIT $3 OFFSET $4""",
                 org_id,
                 user_id,
                 limit,
@@ -259,9 +280,55 @@ class UserFileRepository:
         return {
             "items": [self._to_dict(row) for row in rows],
             "total_count": int(total or 0),
+            "unseen_count": int(unseen_count or 0),
             "limit": limit,
             "offset": offset,
         }
+
+    async def count_unseen_current_revisions(self, org_id: str, user_id: str) -> int:
+        """Count owner-visible files whose latest revision has not been viewed."""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """SELECT COUNT(*)
+                   FROM user_files f
+                   LEFT JOIN user_file_views v
+                     ON v.file_id = f.id
+                    AND v.organization_id = f.organization_id
+                    AND v.user_id = f.user_id
+                   WHERE f.organization_id = $1::uuid AND f.user_id = $2::uuid
+                     AND f.deleted_at IS NULL
+                     AND f.current_revision > COALESCE(v.last_viewed_revision, 0)""",
+                org_id,
+                user_id,
+            )
+        return int(count or 0)
+
+    async def mark_current_revision_viewed_owned(
+        self, file_id: str, org_id: str, user_id: str
+    ) -> bool:
+        """Record that the owner viewed the current revision, if the file is accessible."""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO user_file_views (
+                       file_id, organization_id, user_id, last_viewed_revision
+                   )
+                   SELECT id, organization_id, user_id, current_revision
+                   FROM user_files
+                   WHERE id = $1::uuid AND organization_id = $2::uuid
+                     AND user_id = $3::uuid AND deleted_at IS NULL
+                   ON CONFLICT (file_id, user_id) DO UPDATE
+                   SET organization_id = EXCLUDED.organization_id,
+                       last_viewed_revision = GREATEST(
+                           user_file_views.last_viewed_revision,
+                           EXCLUDED.last_viewed_revision
+                       ),
+                       last_viewed_at = NOW()
+                   RETURNING file_id""",
+                file_id,
+                org_id,
+                user_id,
+            )
+        return row is not None
 
     async def soft_delete(self, file_id: str, org_id: str, user_id: str) -> dict | None:
         async with self.pool.acquire() as conn:

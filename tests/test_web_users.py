@@ -9,6 +9,7 @@ Tests:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
+import re
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -26,8 +27,12 @@ from lucent.auth_providers import (
     set_user_password,
 )
 from lucent.db import OrganizationRepository, UserRepository
+from lucent.db.definitions import DefinitionRepository
+from lucent.license import create_license
+from lucent.mode import get_mode
 
 TEST_PASSWORD = "TestPass1"
+_TEST_LICENSE_PRIVATE_KEY = "eeddca8cb93457f6e6064745285738aef75c9a281d876677c2fb4690fca5b095"
 
 
 # ============================================================================
@@ -42,6 +47,17 @@ async def web_prefix(db_pool):
     prefix = f"test_webusr_{test_id}_"
     yield prefix
     async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM agent_hooks WHERE agent_id IN "
+            "(SELECT id FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM agent_definitions WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
@@ -60,6 +76,19 @@ async def web_prefix(db_pool):
         )
         await conn.execute("DELETE FROM users WHERE external_id LIKE $1", f"{prefix}%")
         await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
+
+
+@pytest.fixture
+def team_mode(monkeypatch):
+    """Enable licensed team mode for impersonation behavior tests."""
+    monkeypatch.setenv("LUCENT_MODE", "team")
+    monkeypatch.setenv(
+        "LUCENT_LICENSE_KEY",
+        create_license(_TEST_LICENSE_PRIVATE_KEY, "test-org", max_users=10),
+    )
+    get_mode.cache_clear()
+    yield
+    get_mode.cache_clear()
 
 
 @pytest_asyncio.fixture
@@ -108,12 +137,10 @@ async def client(db_pool, owner_user):
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://test",
-        cookies={
-            SESSION_COOKIE_NAME: session_token,
-            CSRF_COOKIE_NAME: csrf_token,
-        },
+        base_url="https://test",
     ) as c:
+        c.cookies.set(SESSION_COOKIE_NAME, session_token, domain="test.local", path="/")
+        c.cookies.set(CSRF_COOKIE_NAME, csrf_token, domain="test.local", path="/")
         c._csrf_token = csrf_token  # type: ignore[attr-defined]
         yield c
 
@@ -128,12 +155,10 @@ async def member_client(db_pool, member_user):
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(
         transport=transport,
-        base_url="http://test",
-        cookies={
-            SESSION_COOKIE_NAME: session_token,
-            CSRF_COOKIE_NAME: csrf_token,
-        },
+        base_url="https://test",
     ) as c:
+        c.cookies.set(SESSION_COOKIE_NAME, session_token, domain="test.local", path="/")
+        c.cookies.set(CSRF_COOKIE_NAME, csrf_token, domain="test.local", path="/")
         c._csrf_token = csrf_token  # type: ignore[attr-defined]
         yield c
 
@@ -193,6 +218,27 @@ async def test_create_user_as_owner(_mock_pw, client):
 
 
 @pytest.mark.asyncio
+@patch("secrets.token_urlsafe", return_value="TemporaryPassword")
+async def test_create_user_accepts_random_token_without_digits(_mock_pw, client):
+    """Temporary password generation must not depend on a token containing a digit."""
+    resp = await client.post(
+        "/settings/users/create",
+        data=_csrf_data(
+            client,
+            {
+                "display_name": "Digit-Safe User",
+                "email": "digit-safe-user@test.com",
+                "role": "member",
+            },
+        ),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/settings/users?success=user_created"
+
+
+@pytest.mark.asyncio
 async def test_create_user_without_permission_returns_403(member_client):
     """A member user cannot create users; expect 403."""
     resp = await member_client.post(
@@ -216,7 +262,7 @@ async def test_create_user_without_permission_returns_403(member_client):
 
 
 @pytest.mark.asyncio
-async def test_impersonate_user(client, member_user):
+async def test_impersonate_user(client, member_user, team_mode):
     """Owner can impersonate a member; expect 303 redirect."""
     target_user, _, _ = member_user
     resp = await client.post(
@@ -229,7 +275,63 @@ async def test_impersonate_user(client, member_user):
 
 
 @pytest.mark.asyncio
-async def test_impersonate_self_redirects_with_error(client, owner_user):
+async def test_impersonation_follows_redirect_as_target_user(client, member_user, team_mode):
+    """The signed impersonation cookie must take effect after the redirect."""
+    target_user, _, _ = member_user
+    response = await client.post(
+        f"/settings/users/{target_user['id']}/impersonate",
+        data=_csrf_data(client),
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert "Impersonating" in response.text
+    assert target_user["display_name"] in response.text
+
+
+@pytest.mark.asyncio
+async def test_impersonated_badge_counts_only_target_proposals(
+    client, db_pool, owner_user, member_user, team_mode
+):
+    """The sidebar proposal count must use the impersonated user's visibility."""
+    owner, org, _ = owner_user
+    member, _, _ = member_user
+    repo = DefinitionRepository(db_pool)
+
+    for index in range(5):
+        await repo.create_agent(
+            name=f"Owner proposal {uuid4()} {index}",
+            description="Owner-only proposal",
+            content="# Owner proposal",
+            org_id=str(org["id"]),
+            created_by=str(owner["id"]),
+        )
+    await repo.create_agent(
+        name=f"Member proposal {uuid4()}",
+        description="Member-visible proposal",
+        content="# Member proposal",
+        org_id=str(org["id"]),
+        created_by=str(member["id"]),
+    )
+
+    await client.post(
+        f"/settings/users/{member['id']}/impersonate",
+        data=_csrf_data(client),
+        follow_redirects=False,
+    )
+    response = await client.get("/activity")
+
+    assert response.status_code == 200
+    badge = re.search(
+        r'id="definition-proposal-sidebar-badge"[^>]*>\s*(\d+)\s*<',
+        response.text,
+    )
+    assert badge is not None
+    assert badge.group(1) == "1"
+
+
+@pytest.mark.asyncio
+async def test_impersonate_self_redirects_with_error(client, owner_user, team_mode):
     """Owner cannot impersonate themselves; expect settings users error redirect."""
     owner, _, _ = owner_user
     resp = await client.post(
@@ -239,6 +341,25 @@ async def test_impersonate_self_redirects_with_error(client, owner_user):
     )
     assert resp.status_code == 303
     assert "error=" in resp.headers["location"]
+
+
+@pytest.mark.asyncio
+async def test_personal_mode_impersonation_follows_redirect_as_target_user(client, member_user):
+    """Personal mode honors the same signed impersonation flow as team mode."""
+    target_user, _, _ = member_user
+
+    members = await client.get("/settings/users")
+    response = await client.post(
+        f"/settings/users/{target_user['id']}/impersonate",
+        data=_csrf_data(client),
+        follow_redirects=True,
+    )
+
+    assert members.status_code == 200
+    assert "Impersonate" in members.text
+    assert response.status_code == 200
+    assert "Impersonating" in response.text
+    assert target_user["display_name"] in response.text
 
 
 # ============================================================================

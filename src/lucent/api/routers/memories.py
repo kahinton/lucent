@@ -8,6 +8,10 @@ from fastapi import APIRouter, HTTPException, status
 from lucent.api.deps import AuthenticatedUser
 from lucent.api.models import (
     ErrorResponse,
+    MemoryAccessGrantCreate,
+    MemoryAccessGrantListResponse,
+    MemoryAccessGrantResponse,
+    MemoryAccessGrantRevoke,
     MemoryCreate,
     MemoryResponse,
     MemoryUpdate,
@@ -85,6 +89,23 @@ def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
         last_accessed_at=memory.get("last_accessed_at"),
         access_count=memory.get("access_count", 0),
     )
+
+
+async def _get_access_managed_memory(
+    repo: MemoryRepository, memory_id: UUID, user: AuthenticatedUser
+) -> dict[str, Any]:
+    """Return a memory only when the caller may manage its read grants."""
+    if user.is_memory_scoped:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Scoped credentials cannot manage memory access",
+        )
+    memory = await repo.get(memory_id)
+    if memory is None or memory.get("organization_id") != user.organization_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+    if memory.get("user_id") != _effective_memory_user_id(user) and not _memory_admin_override(user):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+    return memory
 
 
 def _raise_duplicate_technical_memory(error: DuplicateTechnicalMemoryError) -> None:
@@ -588,6 +609,132 @@ async def delete_memory(
     )
 
     return SuccessResponse(success=True, message=f"Memory {memory_id} deleted")
+
+
+@router.get(
+    "/{memory_id}/access",
+    response_model=MemoryAccessGrantListResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def list_memory_access(
+    memory_id: UUID,
+    user: AuthenticatedUser,
+) -> MemoryAccessGrantListResponse:
+    """List the read grants configured for a memory."""
+    user.require_permission(Permission.MEMORY_SHARE)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    memory = await _get_access_managed_memory(repo, memory_id, user)
+    grants = await repo.list_access_grants(memory_id, memory["organization_id"])
+    return MemoryAccessGrantListResponse(
+        grants=[MemoryAccessGrantResponse(**grant) for grant in grants]
+    )
+
+
+@router.post(
+    "/{memory_id}/access",
+    response_model=MemoryAccessGrantResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={404: {"model": ErrorResponse}},
+)
+async def grant_memory_access(
+    memory_id: UUID,
+    data: MemoryAccessGrantCreate,
+    user: AuthenticatedUser,
+) -> MemoryAccessGrantResponse:
+    """Grant read access to the whole organization, one user, or one group."""
+    user.require_permission(Permission.MEMORY_SHARE)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    audit_repo = AuditRepository(pool)
+    memory = await _get_access_managed_memory(repo, memory_id, user)
+
+    if data.grantee_type == "organization":
+        duplicate = await repo.find_duplicate_technical_file_memory(
+            metadata=memory.get("metadata"),
+            requesting_user_id=_effective_memory_user_id(user),
+            requesting_org_id=user.organization_id,
+            exclude_id=memory_id,
+        )
+        if duplicate is not None:
+            scope = repo._technical_file_scope(memory.get("metadata"))
+            if scope is not None:
+                _raise_duplicate_technical_memory(
+                    DuplicateTechnicalMemoryError(
+                        existing_memory=duplicate,
+                        repo=scope["repo"],
+                        filename=scope["filename"],
+                    )
+                )
+
+    try:
+        grant = await repo.grant_access(
+            memory_id=memory_id,
+            organization_id=memory["organization_id"],
+            grantee_type=data.grantee_type,
+            grantee_id=data.grantee_id,
+            created_by=_effective_memory_user_id(user),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    await audit_repo.log(
+        memory_id=memory_id,
+        action_type="grant_access",
+        user_id=_effective_memory_user_id(user),
+        organization_id=user.organization_id,
+        changed_fields=["access"],
+        new_values={
+            "grantee_type": data.grantee_type,
+            "grantee_id": str(data.grantee_id) if data.grantee_id else None,
+        },
+        context=user.get_audit_context(),
+    )
+    return MemoryAccessGrantResponse(**grant)
+
+
+@router.post(
+    "/{memory_id}/access/revoke",
+    response_model=SuccessResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def revoke_memory_access(
+    memory_id: UUID,
+    data: MemoryAccessGrantRevoke,
+    user: AuthenticatedUser,
+) -> SuccessResponse:
+    """Revoke one organization, user, or group read grant."""
+    user.require_permission(Permission.MEMORY_SHARE)
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    audit_repo = AuditRepository(pool)
+    memory = await _get_access_managed_memory(repo, memory_id, user)
+
+    try:
+        revoked = await repo.revoke_access(
+            memory_id=memory_id,
+            organization_id=memory["organization_id"],
+            grantee_type=data.grantee_type,
+            grantee_id=data.grantee_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if not revoked:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Access grant not found")
+
+    await audit_repo.log(
+        memory_id=memory_id,
+        action_type="revoke_access",
+        user_id=_effective_memory_user_id(user),
+        organization_id=user.organization_id,
+        changed_fields=["access"],
+        old_values={
+            "grantee_type": data.grantee_type,
+            "grantee_id": str(data.grantee_id) if data.grantee_id else None,
+        },
+        context=user.get_audit_context(),
+    )
+    return SuccessResponse(success=True, message="Memory access grant revoked")
 
 
 @router.post(

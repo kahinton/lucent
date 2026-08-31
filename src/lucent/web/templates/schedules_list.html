@@ -124,7 +124,7 @@
                 </a>
                 <div class="flex items-center gap-3 shrink-0 ml-4">
                     <!-- Toggle button -->
-                    <form method="POST" action="{{ base_path }}/{{ sched.id }}/toggle" onclick="event.stopPropagation();">
+                    <form method="POST" action="{{ base_path }}/{{ sched.id }}/toggle">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         {% if sched.enabled %}
                         <button type="submit" class="p-1.5 rounded-md text-indigo-600 hover:bg-indigo-100 transition-colors" title="Pause workflow">
@@ -220,7 +220,7 @@
             </a>
             <div class="flex items-center gap-3 shrink-0 ml-4">
                 <!-- Toggle button -->
-                <form method="POST" action="{{ base_path }}/{{ sched.id }}/toggle" onclick="event.stopPropagation();">
+                <form method="POST" action="{{ base_path }}/{{ sched.id }}/toggle">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     {% if sched.enabled %}
                     <button type="submit" class="p-1.5 rounded-md text-blue-600 hover:bg-blue-50 transition-colors" title="Pause workflow">

@@ -69,10 +69,9 @@
                 </form>
                 {% endif %}
                 {% if memory.type != 'individual' %}
-                <form method="post" action="/memories/{{ memory.id }}/delete" class="inline-flex">
+                <form method="post" action="/memories/{{ memory.id }}/delete" class="inline-flex" data-confirm="Delete this memory? This soft-deletes it and removes it from normal search results.">
                     <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                     <button type="submit"
-                        onclick="return confirm('Delete this memory? This soft-deletes it and removes it from normal search results.')"
                         class="inline-flex items-center gap-1.5 px-3 py-2 bg-red-50 text-red-700 text-sm font-medium rounded-lg border border-red-100 hover:bg-red-100 transition-colors">
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
@@ -88,6 +87,99 @@
             </div>
         </div>
     </div>
+
+    <!-- Ownership Details -->
+    <div class="border-t border-gray-100 px-6 py-5">
+        <h3 class="text-sm font-semibold text-gray-900">Details</h3>
+        <dl class="mt-4 grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div>
+                <dt class="text-xs text-gray-500">Owner</dt>
+                <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.username }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs text-gray-500">Created</dt>
+                <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.created_at | datetime }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs text-gray-500">Updated</dt>
+                <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.updated_at | datetime }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs text-gray-500">Last Accessed</dt>
+                <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.last_accessed_at | datetime }}</dd>
+            </div>
+            <div>
+                <dt class="text-xs text-gray-500">Access Count</dt>
+                <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.access_count | default(0) }}</dd>
+            </div>
+        </dl>
+    </div>
+
+    {% if can_manage_access %}
+    <div class="border-t border-gray-100 bg-gray-50 px-6 py-5">
+        <div class="flex items-center justify-between gap-4">
+            <div>
+                <h3 class="text-sm font-semibold text-gray-900">Access</h3>
+                <p class="mt-1 text-xs text-gray-500">Owners, organization admins, and configured recipients can read this memory.</p>
+            </div>
+            {% if memory.shared %}
+            <span class="rounded bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700">Organization</span>
+            {% endif %}
+        </div>
+
+        <div class="mt-4 grid gap-3 md:grid-cols-3">
+            <form method="post" action="/memories/{{ memory.id }}/access">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="grantee_type" value="organization">
+                <button type="submit" class="w-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100">Share with organization</button>
+            </form>
+            {% if org_users | selectattr('id', 'ne', memory.user_id) | list %}
+            <form method="post" action="/memories/{{ memory.id }}/access" class="flex gap-2">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="grantee_type" value="user">
+                <select name="grantee_id" class="min-w-0 flex-1 rounded-md border border-gray-300 px-2 py-2 text-sm">
+                    {% for org_user in org_users if org_user.id != memory.user_id %}
+                    <option value="{{ org_user.id }}">{{ org_user.display_name or org_user.email or org_user.id }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Add user</button>
+            </form>
+            {% endif %}
+            {% if groups %}
+            <form method="post" action="/memories/{{ memory.id }}/access" class="flex gap-2">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="grantee_type" value="group">
+                <select name="grantee_id" class="min-w-0 flex-1 rounded-md border border-gray-300 px-2 py-2 text-sm">
+                    {% for group in groups %}
+                    <option value="{{ group.id }}">{{ group.name }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Add group</button>
+            </form>
+            {% endif %}
+        </div>
+
+        {% if access_grants %}
+        <div class="mt-4 space-y-2">
+            {% for grant in access_grants %}
+            <div class="flex items-center justify-between gap-3 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm">
+                <span class="min-w-0 truncate text-gray-700">
+                    {% if grant.grantee_type == 'organization' %}Entire organization
+                    {% elif grant.grantee_type == 'user' %}{{ grant.user_display_name or grant.user_email or grant.grantee_user_id }}
+                    {% else %}{{ grant.group_name or grant.grantee_group_id }}{% endif %}
+                </span>
+                <form method="post" action="/memories/{{ memory.id }}/access/revoke">
+                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                    <input type="hidden" name="grantee_type" value="{{ grant.grantee_type }}">
+                    <input type="hidden" name="grantee_id" value="{{ grant.grantee_user_id or grant.grantee_group_id or '' }}">
+                    <button type="submit" class="rounded px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50">Remove</button>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
     
     <!-- Content -->
     <div class="p-6">
@@ -108,33 +200,6 @@
             </div>
         </div>
         {% endif %}
-        
-        <!-- Metadata Grid -->
-        <div class="mt-6 pt-6 border-t border-gray-100">
-            <h4 class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-4">Details</h4>
-            <dl class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div>
-                    <dt class="text-xs text-gray-500">Username</dt>
-                    <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.username }}</dd>
-                </div>
-                <div>
-                    <dt class="text-xs text-gray-500">Created</dt>
-                    <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.created_at | datetime }}</dd>
-                </div>
-                <div>
-                    <dt class="text-xs text-gray-500">Updated</dt>
-                    <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.updated_at | datetime }}</dd>
-                </div>
-                <div>
-                    <dt class="text-xs text-gray-500">Last Accessed</dt>
-                    <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.last_accessed_at | datetime }}</dd>
-                </div>
-                <div>
-                    <dt class="text-xs text-gray-500">Access Count</dt>
-                    <dd class="mt-1 text-sm font-medium text-gray-900">{{ memory.access_count | default(0) }}</dd>
-                </div>
-            </dl>
-        </div>
         
         <!-- Memory ID -->
         <div class="mt-4 p-3 bg-gray-50 rounded-lg">
@@ -661,10 +726,9 @@
                         {% endif %}
                     </div>
                     {% if is_owner and entry.version != memory.version and entry.snapshot is not none %}
-                    <form method="post" action="/memories/{{ memory.id }}/restore/{{ entry.version }}" class="shrink-0">
+                    <form method="post" action="/memories/{{ memory.id }}/restore/{{ entry.version }}" class="shrink-0" data-confirm="Restore this memory to version {{ entry.version }}? This will create a new version with the old content.">
                         <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                         <button type="submit"
-                            onclick="return confirm('Restore this memory to version {{ entry.version }}? This will create a new version with the old content.')"
                             class="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded-md hover:bg-gray-50 hover:text-primary-600 hover:border-primary-200 transition-colors"
                             title="Restore to this version">
                             <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

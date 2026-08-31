@@ -367,6 +367,10 @@ class TestReviewOutputGuidance:
         assert "Implementation PR" in description
         assert "OUTPUT ARTIFACT REVIEW" in description
         assert "record_task_output" in description
+        assert "RESEARCH DELIVERY REQUIREMENT" in description
+        assert "Create a handoff with `send_handoff`" in description
+        assert "Create or update a file" in description
+        assert "Memories and review prose do not satisfy this requirement" in description
 
     @pytest.mark.asyncio
     async def test_review_task_prompt_keeps_large_task_outputs(self, monkeypatch):

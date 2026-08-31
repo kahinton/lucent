@@ -137,6 +137,19 @@ class MemoryRepository:
         """
 
     @classmethod
+    def daemon_owner_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Allow organization owners to read daemon-authored memories."""
+        return (
+            f"(memories.organization_id = {org_param}::uuid "
+            f"AND ({cls._daemon_authored_condition()}) "
+            f"AND EXISTS ("
+            f"SELECT 1 FROM users memory_requester "
+            f"WHERE memory_requester.id = {user_param}::uuid "
+            f"AND memory_requester.organization_id = {org_param}::uuid "
+            f"AND memory_requester.role = 'owner'))"
+        )
+
+    @classmethod
     def owned_memory_access_condition(cls, org_param: str, user_param: str) -> str:
         """Allow scoped daemon output only to privileged readers."""
         return (
@@ -147,19 +160,42 @@ class MemoryRepository:
 
     @classmethod
     def shared_memory_access_condition(cls, org_param: str, user_param: str) -> str:
-        """Allow daemon-authored shared memories only to privileged readers."""
+        """Allow organization-granted memories only to privileged daemon readers."""
         return (
-            f"(memories.organization_id = {org_param}::uuid AND memories.shared IS TRUE "
+            f"(EXISTS ("
+            f"SELECT 1 FROM memory_access_grants memory_grant "
+            f"WHERE memory_grant.memory_id = memories.id "
+            f"AND memory_grant.organization_id = {org_param}::uuid "
+            f"AND memory_grant.grantee_type = 'organization') "
+            f"AND (NOT ({cls._daemon_authored_condition()}) "
+            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
+        )
+
+    @classmethod
+    def granted_memory_access_condition(cls, org_param: str, user_param: str) -> str:
+        """Allow readers with an organization, user, or group access grant."""
+        return (
+            f"(EXISTS ("
+            f"SELECT 1 FROM memory_access_grants memory_grant "
+            f"WHERE memory_grant.memory_id = memories.id "
+            f"AND memory_grant.organization_id = {org_param}::uuid "
+            f"AND (memory_grant.grantee_type = 'organization' "
+            f"OR (memory_grant.grantee_type = 'user' "
+            f"AND memory_grant.grantee_user_id = {user_param}::uuid) "
+            f"OR (memory_grant.grantee_type = 'group' "
+            f"AND memory_grant.grantee_group_id IN ("
+            f"SELECT group_id FROM user_groups WHERE user_id = {user_param}::uuid)))) "
             f"AND (NOT ({cls._daemon_authored_condition()}) "
             f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
         )
 
     @classmethod
     def user_memory_access_condition(cls, org_param: str, user_param: str) -> str:
-        """Return the complete owner-or-shared visibility condition."""
+        """Return the complete owner-or-granted visibility condition."""
         owned = cls.owned_memory_access_condition(org_param, user_param)
-        shared = cls.shared_memory_access_condition(org_param, user_param)
-        return f"({owned} OR {shared})"
+        granted = cls.granted_memory_access_condition(org_param, user_param)
+        daemon_owner = cls.daemon_owner_access_condition(org_param, user_param)
+        return f"({owned} OR {granted} OR {daemon_owner})"
 
     async def is_daemon_authored(self, memory: Mapping[str, Any]) -> bool:
         """Return whether a memory was authored by a daemon principal."""
@@ -365,6 +401,16 @@ class MemoryRepository:
                 create_params.append(initial_stage)
 
             row = await conn.fetchrow(query, *create_params)
+            if effective_shared and organization_id is not None:
+                await conn.execute(
+                    """INSERT INTO memory_access_grants
+                           (memory_id, organization_id, grantee_type, created_by)
+                       VALUES ($1, $2, 'organization', $3)
+                       ON CONFLICT DO NOTHING""",
+                    row["id"],
+                    str(organization_id),
+                    str(user_id) if user_id else None,
+                )
 
         return self._row_to_dict(row)
 
@@ -589,16 +635,19 @@ class MemoryRepository:
         # Keep placeholder numbering stable to avoid scope-dependent
         # bind count mismatches in prepared statement execution paths.
         owned_access = self.owned_memory_access_condition("$3", "$2")
-        shared_access = self.shared_memory_access_condition("$3", "$2")
+        organization_access = self.shared_memory_access_condition("$3", "$2")
+        granted_access = self.granted_memory_access_condition("$3", "$2")
+        daemon_owner_access = self.daemon_owner_access_condition("$3", "$2")
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1
               AND deleted_at IS NULL
               AND (
-                    ($4 = 'user' AND {owned_access})
-                     OR ($4 = 'org_shared_only' AND {shared_access})
-                     OR ($4 IS NULL AND ({owned_access} OR {shared_access}))
+                  {daemon_owner_access}
+                 OR ($4 = 'user' AND {owned_access})
+                 OR ($4 = 'org_shared_only' AND {organization_access})
+                   OR ($4 IS NULL AND ({owned_access} OR {granted_access}))
               )
         """
 
@@ -659,20 +708,187 @@ class MemoryRepository:
         Returns:
             The updated memory record, or None if not found or not owned by user.
         """
-        query = f"""
-            UPDATE memories
-            SET shared = $1
-            WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL
-            RETURNING {self._FULL_COLUMNS}
-        """
-
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, shared, str(memory_id), str(user_id))
-
-        if row is None:
-            return None
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""
+                        UPDATE memories
+                        SET shared = $1
+                        WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL
+                        RETURNING {self._FULL_COLUMNS}
+                    """,
+                    shared,
+                    str(memory_id),
+                    str(user_id),
+                )
+                if row is None:
+                    return None
+                if shared:
+                    await conn.execute(
+                        """INSERT INTO memory_access_grants
+                               (memory_id, organization_id, grantee_type, created_by)
+                           VALUES ($1, $2, 'organization', $3)
+                           ON CONFLICT DO NOTHING""",
+                        row["id"],
+                        row["organization_id"],
+                        str(user_id),
+                    )
+                else:
+                    await conn.execute(
+                        """DELETE FROM memory_access_grants
+                           WHERE memory_id = $1 AND grantee_type = 'organization'""",
+                        row["id"],
+                    )
 
         return self._row_to_dict(row)
+
+    async def grant_access(
+        self,
+        memory_id: UUID,
+        organization_id: UUID,
+        grantee_type: str,
+        grantee_id: UUID | None,
+        created_by: UUID | None,
+    ) -> dict[str, Any]:
+        """Grant organization, user, or group read access to a memory.
+
+        The caller must have already passed the ownership/administration check.
+        This method validates that the memory and target principal belong to the
+        supplied organization so grants cannot cross tenancy boundaries.
+        """
+        if grantee_type not in {"organization", "user", "group"}:
+            raise ValueError("grantee_type must be organization, user, or group")
+        if grantee_type == "organization" and grantee_id is not None:
+            raise ValueError("organization grants do not take a grantee_id")
+        if grantee_type != "organization" and grantee_id is None:
+            raise ValueError(f"{grantee_type} grants require a grantee_id")
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                memory_exists = await conn.fetchval(
+                    """SELECT EXISTS(
+                           SELECT 1 FROM memories
+                           WHERE id = $1 AND organization_id = $2 AND deleted_at IS NULL
+                       )""",
+                    str(memory_id),
+                    str(organization_id),
+                )
+                if not memory_exists:
+                    raise ValueError("Memory not found in organization")
+
+                if grantee_type == "user":
+                    target_exists = await conn.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND organization_id = $2)",
+                        str(grantee_id),
+                        str(organization_id),
+                    )
+                    if not target_exists:
+                        raise ValueError("User not found in organization")
+                elif grantee_type == "group":
+                    target_exists = await conn.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND organization_id = $2)",
+                        str(grantee_id),
+                        str(organization_id),
+                    )
+                    if not target_exists:
+                        raise ValueError("Group not found in organization")
+
+                row = await conn.fetchrow(
+                    """INSERT INTO memory_access_grants
+                           (memory_id, organization_id, grantee_type, grantee_user_id,
+                            grantee_group_id, created_by)
+                       VALUES ($1, $2, $3, $4, $5, $6)
+                       ON CONFLICT DO NOTHING
+                       RETURNING id, memory_id, organization_id, grantee_type,
+                                 grantee_user_id, grantee_group_id, created_by, created_at""",
+                    str(memory_id),
+                    str(organization_id),
+                    grantee_type,
+                    str(grantee_id) if grantee_type == "user" else None,
+                    str(grantee_id) if grantee_type == "group" else None,
+                    str(created_by) if created_by else None,
+                )
+                if row is None:
+                    row = await conn.fetchrow(
+                        """SELECT id, memory_id, organization_id, grantee_type,
+                                  grantee_user_id, grantee_group_id, created_by, created_at
+                           FROM memory_access_grants
+                           WHERE memory_id = $1
+                             AND grantee_type = $2
+                             AND grantee_user_id IS NOT DISTINCT FROM $3::uuid
+                             AND grantee_group_id IS NOT DISTINCT FROM $4::uuid""",
+                        str(memory_id),
+                        grantee_type,
+                        str(grantee_id) if grantee_type == "user" else None,
+                        str(grantee_id) if grantee_type == "group" else None,
+                    )
+                if grantee_type == "organization":
+                    await conn.execute(
+                        "UPDATE memories SET shared = TRUE WHERE id = $1",
+                        str(memory_id),
+                    )
+
+        return dict(row)
+
+    async def revoke_access(
+        self,
+        memory_id: UUID,
+        organization_id: UUID,
+        grantee_type: str,
+        grantee_id: UUID | None,
+    ) -> bool:
+        """Remove one access grant and synchronize legacy organization sharing."""
+        if grantee_type not in {"organization", "user", "group"}:
+            raise ValueError("grantee_type must be organization, user, or group")
+        if grantee_type == "organization" and grantee_id is not None:
+            raise ValueError("organization grants do not take a grantee_id")
+        if grantee_type != "organization" and grantee_id is None:
+            raise ValueError(f"{grantee_type} grants require a grantee_id")
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                result = await conn.execute(
+                    """DELETE FROM memory_access_grants
+                       WHERE memory_id = $1
+                         AND organization_id = $2
+                         AND grantee_type = $3
+                         AND grantee_user_id IS NOT DISTINCT FROM $4::uuid
+                         AND grantee_group_id IS NOT DISTINCT FROM $5::uuid""",
+                    str(memory_id),
+                    str(organization_id),
+                    grantee_type,
+                    str(grantee_id) if grantee_type == "user" else None,
+                    str(grantee_id) if grantee_type == "group" else None,
+                )
+                if result != "DELETE 1":
+                    return False
+                if grantee_type == "organization":
+                    await conn.execute(
+                        "UPDATE memories SET shared = FALSE WHERE id = $1",
+                        str(memory_id),
+                    )
+        return True
+
+    async def list_access_grants(
+        self, memory_id: UUID, organization_id: UUID
+    ) -> list[dict[str, Any]]:
+        """List configured read grants with safe display names for the UI/API."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT grant_row.id, grant_row.memory_id, grant_row.organization_id,
+                          grant_row.grantee_type, grant_row.grantee_user_id,
+                          grant_row.grantee_group_id, grant_row.created_by,
+                          grant_row.created_at, user_target.display_name AS user_display_name,
+                          user_target.email AS user_email, group_target.name AS group_name
+                   FROM memory_access_grants grant_row
+                   LEFT JOIN users user_target ON user_target.id = grant_row.grantee_user_id
+                   LEFT JOIN groups group_target ON group_target.id = grant_row.grantee_group_id
+                   WHERE grant_row.memory_id = $1 AND grant_row.organization_id = $2
+                   ORDER BY grant_row.grantee_type, user_target.display_name, group_target.name""",
+                str(memory_id),
+                str(organization_id),
+            )
+        return [dict(row) for row in rows]
 
     async def update(
         self,

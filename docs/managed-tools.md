@@ -31,7 +31,7 @@ Custom tools fail closed by default:
 - **No host execution** — tool source code runs inside a Lucent sandbox container.
 - **No network by default** — `network_policy.network_mode` defaults to `none`; API tools should use `allowlist` with explicit hosts.
 - **Agent grant required** — when invoked from an agent session, the trusted `X-Lucent-Agent-Definition-Id` context must match an `agent_managed_tools` grant.
-- **User ACL required** — the caller must be able to access the tool definition by ownership, group, org-shared scope, built-in scope, or admin/owner override.
+- **User ACL required** — the caller must be able to access the tool definition by ownership, group, organization-shared scope, or built-in scope.
 - **Schema-gated input/output** — input is validated before sandbox execution; output is validated after execution when an output schema is provided.
 - **Scoped credentials** — environment values can use `secret://...` or `credential://...` references resolved for the authenticated user immediately before sandbox launch.
 - **Resource bounded** — memory, CPU, disk, and timeout settings are part of the definition.

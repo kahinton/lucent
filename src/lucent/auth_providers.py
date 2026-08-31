@@ -419,6 +419,11 @@ def validate_password_complexity(password: str) -> str | None:
     return None
 
 
+def generate_temporary_password() -> str:
+    """Generate a random temporary password that satisfies the complexity policy."""
+    return f"{secrets.token_urlsafe(12)}Aa1"
+
+
 async def set_user_password(
     pool: Pool, user_id: UUID, password: str, *, force_change: bool = False
 ) -> None:
@@ -451,7 +456,7 @@ async def admin_reset_password(pool: Pool, user_id: UUID) -> str:
     Returns:
         The temporary plaintext password.
     """
-    temp_password = secrets.token_urlsafe(12)
+    temp_password = generate_temporary_password()
     await set_user_password(pool, user_id, temp_password, force_change=True)
     # Invalidate existing sessions so user must re-login
     await destroy_session(pool, user_id)

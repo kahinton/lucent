@@ -14,7 +14,7 @@
         <div class="flex-1 min-w-0">
             <div class="flex items-center gap-3 flex-wrap">
                 <h1 class="text-2xl font-bold text-gray-900">{{ definition.name }}</h1>
-                <span class="px-2.5 py-1 rounded text-sm font-medium {% if definition.status == 'active' %}bg-green-100 text-green-700{% elif definition.status == 'proposed' %}bg-amber-100 text-amber-700{% elif definition.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ definition.status }}</span>
+                <span class="px-2.5 py-1 rounded text-sm font-medium {% if definition.status == 'active' %}bg-green-100 text-green-700{% elif definition.status == 'proposed' %}bg-amber-100 text-amber-700{% elif definition.status == 'owner_approved' %}bg-blue-100 text-blue-700{% elif definition.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ definition.status | replace('_', ' ') }}</span>
                 <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500 capitalize">{{ definition_type | replace('-', ' ') }}</span>
                 {% if definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'persona' %}<span class="px-2.5 py-1 rounded text-sm bg-pink-50 text-pink-700">persona</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'hybrid' %}<span class="px-2.5 py-1 rounded text-sm bg-violet-50 text-violet-700">hybrid</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'functional' %}<span class="px-2.5 py-1 rounded text-sm bg-slate-100 text-slate-600">functional</span>{% endif %}
                 {% if definition.scope == 'built-in' %}<span class="px-2.5 py-1 rounded text-sm bg-indigo-100 text-indigo-700 font-medium">built-in</span>{% elif definition.scope == 'instance' %}<span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500">instance</span>{% endif %}
@@ -31,8 +31,8 @@
             {% if definition.description %}<p class="text-gray-500 mt-2">{{ definition.description }}</p>{% endif %}
         </div>
         <div class="flex gap-2 shrink-0">
-            {% if definition.status == 'proposed' %}
-            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">Approve</button></form>
+            {% if can_approve and definition.status in ('proposed', 'owner_approved') %}
+            <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/approve"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">{{ approval_label }}</button></form>
             <form method="POST" action="/definitions/{{ definition_type }}s/{{ definition.id }}/reject"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" class="px-4 py-2 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button></form>
             {% endif %}
             {% if definition.scope != 'built-in' %}
@@ -44,14 +44,15 @@
     <div class="flex flex-wrap gap-x-6 gap-y-1 mt-4 text-xs text-gray-400">
         <span>Created {{ definition.created_at.strftime('%b %d, %Y at %H:%M') if definition.created_at else 'unknown' }}</span>
         {% if definition.approved_at %}<span>Approved {{ definition.approved_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
+        {% if definition.owner_approved_at %}<span>Owner approved{% if definition.owner_approved_by_name %} by {{ definition.owner_approved_by_name }}{% endif %} {{ definition.owner_approved_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
         {% if definition.updated_at %}<span>Updated {{ definition.updated_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
         <span class="font-mono">{{ definition.id }}</span>
     </div>
 </div>
 
 {% if definition_type == 'agent' %}
-<div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+<div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Skills</h2>
         {% if skills %}
         <div class="space-y-2 mb-3">
@@ -73,18 +74,18 @@
         <p class="text-sm text-gray-400 italic mb-3">No skills granted.</p>
         {% endif %}
         {% if all_skills %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <select name="skill_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
+            <select name="skill_id" class="min-w-0 w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm">
                 <option value="">Add a skill...</option>
                 {% for s in all_skills %}{% if s.id|string not in granted_skill_ids %}<option value="{{ s.id }}">{{ s.name }}</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-blue-50 text-blue-700 rounded-md hover:bg-blue-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
 
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Custom Tools</h2>
         {% if managed_tools %}
         <div class="space-y-2 mb-3">
@@ -107,18 +108,18 @@
         <p class="text-sm text-gray-400 italic mb-3">No custom tools granted.</p>
         {% endif %}
         {% if all_tools %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="tool_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm min-w-0">
                 <option value="">Add a tool...</option>
                 {% for t in all_tools %}{% if t.id|string not in granted_tool_ids %}<option value="{{ t.id }}">{{ t.name }} ({{ t.runtime_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
 
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Hooks</h2>
         {% if hooks %}
         <div class="space-y-2 mb-3">
@@ -141,18 +142,18 @@
         <p class="text-sm text-gray-400 italic mb-3">No hooks granted.</p>
         {% endif %}
         {% if all_hooks %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-hook" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-hook" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <select name="hook_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm min-w-0">
                 <option value="">Add a hook...</option>
                 {% for h in all_hooks %}{% if h.id|string not in granted_hook_ids %}<option value="{{ h.id }}">{{ h.name }} ({{ h.action_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
 
-    <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
         <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted External Providers</h2>
         {% if mcp_servers %}
         <div class="space-y-2 mb-3">
@@ -178,12 +179,12 @@
                     </div>
                     <form method="POST" action="/definitions/agents/{{ definition.id }}/mcp-tools/{{ mcp.id }}"
                           id="tools-form-{{ mcp.id }}"
-                          onsubmit="return prepareToolsSubmit('{{ mcp.id }}')">
+                          data-tools-form-id="{{ mcp.id }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <input type="hidden" name="allowed_tools" id="tools-hidden-{{ mcp.id }}">
                         <label class="flex items-center gap-2 mb-2 cursor-pointer">
                             <input type="checkbox" id="allow-all-{{ mcp.id }}"
-                                   onchange="toggleAllowAll('{{ mcp.id }}')"
+                                data-tool-action="toggle-allow-all" data-server-id="{{ mcp.id }}"
                                    {% if mcp.allowed_tools is none %}checked{% endif %}
                                    class="rounded border-gray-300 text-purple-600 focus:ring-purple-500">
                             <span class="text-xs font-medium text-gray-600">Allow all tools (unrestricted)</span>
@@ -192,15 +193,15 @@
                         {% set discovered_names = mcp.discovered_tools | map(attribute='name') | list %}
                         <div id="tools-checklist-{{ mcp.id }}" class="{% if mcp.allowed_tools is none %}opacity-40 pointer-events-none{% endif %}">
                             <div class="flex gap-1 mb-1">
-                                <button type="button" onclick="selectAllServerTools('{{ mcp.id }}')" class="text-xs text-purple-600 hover:text-purple-800 px-1.5 py-0.5 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
-                                <button type="button" onclick="clearAllServerTools('{{ mcp.id }}')" class="text-xs text-gray-500 hover:text-gray-700 px-1.5 py-0.5 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
+                                <button type="button" data-tool-action="select-all" data-server-id="{{ mcp.id }}" class="text-xs text-purple-600 hover:text-purple-800 px-1.5 py-0.5 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
+                                <button type="button" data-tool-action="clear-all" data-server-id="{{ mcp.id }}" class="text-xs text-gray-500 hover:text-gray-700 px-1.5 py-0.5 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
                             </div>
                             <div class="space-y-0.5 max-h-48 overflow-y-auto border border-gray-100 rounded p-1.5 mb-2">
                                 {% for tool in mcp.discovered_tools %}
                                 <label class="flex items-start gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
                                     <input type="checkbox" class="tool-cb tool-cb-{{ mcp.id }} mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                            value="{{ tool.name }}"
-                                           onchange="updateToolSummary('{{ mcp.id }}')"
+                                           data-tool-action="update-summary" data-server-id="{{ mcp.id }}"
                                            {% if mcp.allowed_tools is none or (mcp.allowed_tools and tool.name in mcp.allowed_tools) %}checked{% endif %}>
                                     <div class="min-w-0 flex-1">
                                         <span class="text-xs font-medium text-gray-800">{{ tool.name }}</span>
@@ -215,11 +216,11 @@
                             {% for tool_name in mcp.allowed_tools %}
                             {% if tool_name not in discovered_names %}
                             <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                       value="{{ tool_name }}" onchange="updateToolSummary('{{ mcp.id }}')">
+                                    <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                        value="{{ tool_name }}" data-tool-action="update-summary" data-server-id="{{ mcp.id }}">
                                 <span class="text-xs font-medium text-gray-800">{{ tool_name }}</span>
                                 <span class="text-xs text-gray-400 italic">(custom)</span>
-                                <button type="button" onclick="this.closest('label').remove(); updateToolSummary('{{ mcp.id }}')" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
+                                <button type="button" data-tool-action="remove-custom" data-server-id="{{ mcp.id }}" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
                             </label>
                             {% endif %}
                             {% endfor %}
@@ -235,11 +236,11 @@
                         <div id="custom-tools-{{ mcp.id }}" class="space-y-0.5 mb-2">
                             {% for tool_name in mcp.allowed_tools %}
                             <label class="flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer">
-                                <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
-                                       value="{{ tool_name }}" onchange="updateToolSummary('{{ mcp.id }}')">
+                                    <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                        value="{{ tool_name }}" data-tool-action="update-summary" data-server-id="{{ mcp.id }}">
                                 <span class="text-xs font-medium text-gray-800">{{ tool_name }}</span>
                                 <span class="text-xs text-gray-400 italic">(custom)</span>
-                                <button type="button" onclick="this.closest('label').remove(); updateToolSummary('{{ mcp.id }}')" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
+                                <button type="button" data-tool-action="remove-custom" data-server-id="{{ mcp.id }}" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
                             </label>
                             {% endfor %}
                         </div>
@@ -249,7 +250,7 @@
                         {% endif %}
                         <div class="flex gap-1 mt-2 {% if mcp.allowed_tools is none %}hidden{% endif %}" id="custom-tool-section-{{ mcp.id }}">
                             <input id="custom-input-{{ mcp.id }}" class="flex-1 px-2 py-1 border border-gray-200 rounded text-xs font-mono" placeholder="Custom tool name...">
-                            <button type="button" onclick="addCustomTool('{{ mcp.id }}')" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Add</button>
+                            <button type="button" data-tool-action="add-custom" data-server-id="{{ mcp.id }}" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Add</button>
                         </div>
                         <div class="mt-2">
                             <button type="submit" class="text-xs text-purple-600 hover:text-purple-800 px-3 py-1 border border-purple-200 rounded hover:bg-purple-50 font-medium">Save</button>
@@ -263,13 +264,13 @@
         <p class="text-sm text-gray-400 italic mb-3">No external tool providers granted.</p>
         {% endif %}
         {% if all_mcp %}
-        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp" class="flex gap-2">
+        <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <select name="mcp_server_id" class="flex-1 px-2 py-1.5 border border-gray-300 rounded-md text-sm">
+            <select name="mcp_server_id" class="min-w-0 w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm">
                 <option value="">Add an MCP server...</option>
                 {% for m in all_mcp %}{% if m.id|string not in granted_mcp_ids %}<option value="{{ m.id }}">{{ m.name }} ({{ m.server_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Grant</button>
         </form>
         {% endif %}
     </div>
@@ -582,10 +583,26 @@
         var container = document.getElementById('custom-tools-' + serverId);
         var label = document.createElement('label');
         label.className = 'flex items-center gap-2 p-1 rounded hover:bg-gray-50 cursor-pointer';
-        label.innerHTML = '<input type="checkbox" checked class="tool-cb tool-cb-' + serverId + ' rounded border-gray-300 text-purple-600 focus:ring-purple-500" value="' + escapeHtml(name).replace(/"/g, '&quot;') + '" onchange="updateToolSummary(\'' + serverId + '\')">'
-            + '<span class="text-xs font-medium text-gray-800">' + escapeHtml(name) + '</span>'
-            + '<span class="text-xs text-gray-400 italic">(custom)</span>'
-            + '<button type="button" onclick="this.closest(\'label\').remove(); updateToolSummary(\'' + serverId + '\')" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>';
+        var checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = true;
+        checkbox.className = 'tool-cb tool-cb-' + serverId + ' rounded border-gray-300 text-purple-600 focus:ring-purple-500';
+        checkbox.value = name;
+        checkbox.dataset.toolAction = 'update-summary';
+        checkbox.dataset.serverId = serverId;
+        var nameLabel = document.createElement('span');
+        nameLabel.className = 'text-xs font-medium text-gray-800';
+        nameLabel.textContent = name;
+        var customLabel = document.createElement('span');
+        customLabel.className = 'text-xs text-gray-400 italic';
+        customLabel.textContent = '(custom)';
+        var removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'text-xs text-red-400 hover:text-red-600 ml-auto';
+        removeButton.dataset.toolAction = 'remove-custom';
+        removeButton.dataset.serverId = serverId;
+        removeButton.textContent = '\u00d7';
+        label.append(checkbox, nameLabel, customLabel, removeButton);
         container.appendChild(label);
         input.value = '';
         updateToolSummary(serverId);
@@ -630,6 +647,29 @@
         document.querySelectorAll('[id^="tool-summary-"]').forEach(function(badge) {
             var serverId = badge.dataset.serverId;
             if (serverId) updateToolSummary(serverId);
+        });
+        document.addEventListener('submit', function(event) {
+            var form = event.target.closest('[data-tools-form-id]');
+            if (form && !prepareToolsSubmit(form.dataset.toolsFormId)) event.preventDefault();
+        });
+        document.addEventListener('change', function(event) {
+            var control = event.target.closest('[data-tool-action]');
+            if (!control) return;
+            var serverId = control.dataset.serverId;
+            if (control.dataset.toolAction === 'toggle-allow-all') toggleAllowAll(serverId);
+            if (control.dataset.toolAction === 'update-summary') updateToolSummary(serverId);
+        });
+        document.addEventListener('click', function(event) {
+            var control = event.target.closest('[data-tool-action]');
+            if (!control) return;
+            var serverId = control.dataset.serverId;
+            if (control.dataset.toolAction === 'select-all') selectAllServerTools(serverId);
+            if (control.dataset.toolAction === 'clear-all') clearAllServerTools(serverId);
+            if (control.dataset.toolAction === 'add-custom') addCustomTool(serverId);
+            if (control.dataset.toolAction === 'remove-custom') {
+                control.closest('label')?.remove();
+                updateToolSummary(serverId);
+            }
         });
     });
     {% endif %}

@@ -11,6 +11,7 @@ from lucent.db import (
     AccessRepository,
     AuditRepository,
     DuplicateTechnicalMemoryError,
+    GroupRepository,
     MemoryRepository,
     UserRepository,
     get_pool,
@@ -411,6 +412,25 @@ async def memory_detail(request: Request, memory_id: UUID):
 
     is_owner = memory.get("user_id") == user.id
     can_edit = await _can_edit_memory(repo, memory, user)
+    can_manage_access = (
+        not getattr(user, "memory_scope", None)
+        and (is_owner or user.role in (Role.ADMIN, Role.OWNER))
+    )
+    access_grants = (
+        await repo.list_access_grants(memory_id, user.organization_id)
+        if can_manage_access
+        else []
+    )
+    org_users = (
+        await UserRepository(pool).get_by_organization(user.organization_id)
+        if can_manage_access and user.organization_id
+        else []
+    )
+    groups = (
+        (await GroupRepository(pool).list_groups(str(user.organization_id)))["items"]
+        if can_manage_access and user.organization_id
+        else []
+    )
 
     return templates.TemplateResponse(
         request,
@@ -422,6 +442,10 @@ async def memory_detail(request: Request, memory_id: UUID):
             "version_entries": versions["versions"],
             "is_owner": is_owner,
             "can_edit": can_edit,
+            "can_manage_access": can_manage_access,
+            "access_grants": access_grants,
+            "org_users": org_users,
+            "groups": groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -648,6 +672,96 @@ async def memory_edit_submit(
         else None,
     )
 
+    return RedirectResponse(f"/memories/{memory_id}", status_code=303)
+
+
+async def _get_web_access_managed_memory(
+    repo: MemoryRepository, memory_id: UUID, user
+) -> dict:
+    """Return a memory when the current web user may administer its grants."""
+    memory = await repo.get(memory_id)
+    if memory is None or memory.get("organization_id") != user.organization_id:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if memory.get("user_id") != user.id and user.role not in (Role.ADMIN, Role.OWNER):
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return memory
+
+
+@router.post("/memories/{memory_id}/access", response_class=HTMLResponse)
+async def memory_grant_access(
+    request: Request,
+    memory_id: UUID,
+    grantee_type: str = Form(...),
+    grantee_id: str = Form(""),
+):
+    """Grant organization, user, or group read access from the detail page."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    if getattr(user, "memory_scope", None):
+        raise HTTPException(status_code=403, detail="Scoped credentials cannot manage memory access")
+    try:
+        target_id = UUID(grantee_id) if grantee_id else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid access target") from exc
+
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    memory = await _get_web_access_managed_memory(repo, memory_id, user)
+    try:
+        await repo.grant_access(
+            memory_id, memory["organization_id"], grantee_type, target_id, user.id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    await AuditRepository(pool).log(
+        memory_id=memory_id,
+        action_type="grant_access",
+        user_id=user.id,
+        organization_id=user.organization_id,
+        changed_fields=["access"],
+        new_values={"grantee_type": grantee_type, "grantee_id": grantee_id or None},
+    )
+    return RedirectResponse(f"/memories/{memory_id}", status_code=303)
+
+
+@router.post("/memories/{memory_id}/access/revoke", response_class=HTMLResponse)
+async def memory_revoke_access(
+    request: Request,
+    memory_id: UUID,
+    grantee_type: str = Form(...),
+    grantee_id: str = Form(""),
+):
+    """Revoke one configured read grant from the detail page."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    if getattr(user, "memory_scope", None):
+        raise HTTPException(status_code=403, detail="Scoped credentials cannot manage memory access")
+    try:
+        target_id = UUID(grantee_id) if grantee_id else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid access target") from exc
+
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    memory = await _get_web_access_managed_memory(repo, memory_id, user)
+    try:
+        revoked = await repo.revoke_access(
+            memory_id, memory["organization_id"], grantee_type, target_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not revoked:
+        raise HTTPException(status_code=404, detail="Access grant not found")
+
+    await AuditRepository(pool).log(
+        memory_id=memory_id,
+        action_type="revoke_access",
+        user_id=user.id,
+        organization_id=user.organization_id,
+        changed_fields=["access"],
+        old_values={"grantee_type": grantee_type, "grantee_id": grantee_id or None},
+    )
     return RedirectResponse(f"/memories/{memory_id}", status_code=303)
 
 

@@ -57,6 +57,48 @@ class MemoryResponse(BaseModel):
     access_count: int = 0
 
 
+class MemoryAccessGrantCreate(BaseModel):
+    """Request to grant memory read access to an organization, user, or group."""
+
+    grantee_type: str = Field(pattern=r"^(organization|user|group)$")
+    grantee_id: UUID | None = Field(
+        default=None,
+        description="Required for user and group grants; omitted for organization grants",
+    )
+
+
+class MemoryAccessGrantRevoke(BaseModel):
+    """Request to revoke one memory read grant."""
+
+    grantee_type: str = Field(pattern=r"^(organization|user|group)$")
+    grantee_id: UUID | None = Field(
+        default=None,
+        description="Required for user and group grants; omitted for organization grants",
+    )
+
+
+class MemoryAccessGrantResponse(BaseModel):
+    """A configured read grant for a memory."""
+
+    id: UUID
+    memory_id: UUID
+    organization_id: UUID
+    grantee_type: str
+    grantee_user_id: UUID | None
+    grantee_group_id: UUID | None
+    created_by: UUID | None
+    created_at: datetime
+    user_display_name: str | None = None
+    user_email: str | None = None
+    group_name: str | None = None
+
+
+class MemoryAccessGrantListResponse(BaseModel):
+    """Read grants configured for a memory."""
+
+    grants: list[MemoryAccessGrantResponse]
+
+
 class MemoryListResponse(BaseModel):
     """Response model for a list of memories."""
 

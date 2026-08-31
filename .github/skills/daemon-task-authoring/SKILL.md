@@ -1,21 +1,66 @@
 ---
 name: daemon-task-authoring
-description: 'Guide creation of well-structured daemon tasks — clear descriptions, appropriate agent_type, priority calibration, and context that leads to high validation rates. Use when creating requests or tasks for the daemon, calibrating priority, writing task descriptions, task validation rates are low, or restructuring existing tasks that failed or were rejected.'
+description: 'Turn a user's durable-work intent into a complete request in chat, or decompose approved requests into tasks when running as the daemon planner. Use for queued work, goal-linked work, task authoring, priority calibration, or task validation failures.'
 ---
 
-# Daemon Task Authoring
+# Durable Work and Daemon Task Authoring
 
-## Procedure
+This skill has two operating paths. Choose the path from the runtime context before using any work-creation tool.
 
-Follow these steps in order when creating daemon work items.
+| Runtime context | Responsibility | Allowed work creation |
+|---|---|---|
+| Direct conversation | Recognize intent, track goals, and hand complete work to the daemon | `create_request` only |
+| Daemon cognitive planner | Turn a request into executable, validated tasks | `create_task` only after receiving a request |
 
-1. **Check active work** — Call `list_active_work()` to see what already exists. Do not create duplicate requests. If an existing request covers the same intent, add tasks to it instead.
-2. **Define the request** — Write a clear title (under 80 chars) and a description following the [Description Checklist](#description-checklist). The description is the daemon's entire brief — make it self-contained.
-3. **Set priority** — Follow the [Priority Calibration](#priority-calibration) rules (high = blocks other work, medium = standard, low = nice-to-have).
-4. **Submit the request** — Call `create_request()` with title, description, source, and priority. See [Creating a Request](#creating-a-request) for the API shape.
-5. **Break into tasks** — Decompose the request into individual tasks. For each task, follow the [Per-Task Authoring](#per-task-authoring) steps below. Keep each task completable within a single 720-second session (see [Task Size](#task-size)).
-6. **Verify task descriptions** — Each task description must be self-contained. An agent reading only the description should understand what to do without external context. Run every description through the [Description Checklist](#description-checklist).
-7. **Submit tasks** — Call `create_task()` for each task, setting `request_id` to the ID returned in step 4.
+## Conversation Path: Activate Durable Work
+
+Use this path whenever a person is talking to Lucent directly. The user does not need to know whether requests, goals, or tasks exist.
+
+### 1. Classify the Intent
+
+- **Direct help now:** answer, investigate, edit, or otherwise work in the conversation. Do not queue a duplicate of work that can be completed now.
+- **Durable work:** create a request when the user wants follow-through, background progress, later investigation, a fix, or an outcome that should survive the chat. Phrases such as "look into," "fix," "follow up," "keep working on," or "make sure" are sufficient when their target is clear.
+- **Sustained outcome:** also track a goal when the user describes ongoing progress, multiple milestones, a deadline, or an objective that will outlive one request.
+- **Recurring automation:** design a workflow or schedule and obtain confirmation before activating it, unless the user explicitly asks for immediate creation.
+
+Tentative brainstorming and questions about what is possible are not authorization to create a request. Ask one focused question only when the necessary outcome or scope is genuinely ambiguous.
+
+### 2. Reuse Existing Work and Goals
+
+1. Call `list_active_work()` before creating a request.
+2. Search relevant memories, including goal memories, before creating a goal or request.
+3. If an active request already covers the intent, report it and link or update context rather than duplicating work.
+4. If a matching goal exists, update or link it. If not, create a goal memory only when the user described an enduring outcome.
+
+### 3. Create a Complete Request
+
+Write a clear title (under 80 characters), a self-contained description, and calibrated priority. Include the desired outcome, available context, constraints, and the evidence that will establish completion. For code work, set `target_repo` and narrow with `target_paths` when known.
+
+When a request advances an active structured goal milestone, pass that goal and milestone to `create_request`. Otherwise link the request to the relevant goal after creation.
+
+```
+create_request(
+  title="Short title for the work",
+  description="Full instructions — everything the daemon needs to do.",
+  source="user",
+  priority="medium",
+  target_repo="owner/repo",
+  target_paths=["relevant/path"]
+)
+```
+
+### 4. Hand Off to the Daemon
+
+After creating or linking the request, tell the user what is being tracked or queued and its expected next state. **Stop there. Do not call `create_task`, choose an agent type, choose a model, or decompose the work in conversation mode.** The daemon picks up the request, creates tasks, and dispatches them.
+
+## Daemon Path: Decompose an Accepted Request
+
+Use this path only as the daemon cognitive planner after a request exists. Do not ask the chat agent to perform it.
+
+1. **Read the request and context** — Confirm the request is self-contained, inspect linked goals and memories, and identify its completion evidence.
+2. **Break into tasks** — Decompose only when multiple independently accountable steps are needed. Keep each task completable within a single 720-second session (see [Task Size](#task-size)).
+3. **Verify task descriptions** — Each task description must be self-contained. An agent reading only the description should understand what to do without external context. Run every description through the [Description Checklist](#description-checklist).
+4. **Submit tasks** — Call `create_task()` for each task, setting `request_id` to the request already received. Follow the [Per-Task Authoring](#per-task-authoring) steps below.
 
 ## Per-Task Authoring
 
@@ -27,21 +72,6 @@ For each task within a request, follow these steps:
 4. **Set priority and size** — Use [Priority Calibration](#priority-calibration) for priority. Ensure the task fits within a single 720-second session (see [Task Size](#task-size)); decompose if too large.
 5. **Add context** — Include specific file paths, search terms, constraints, and references to prior task results stored in memory. Omit nothing the agent would need.
 6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=...)`. Set `model` per the model-selection skill (MANDATORY).
-
-## Creating a Request
-
-Use the `create_request` MCP tool:
-
-```
-create_request(
-  title="Short title for the work",
-  description="Full instructions — everything the daemon needs to do.",
-  source="user",
-  priority="medium"
-)
-```
-
-The daemon picks it up, creates tasks, and dispatches to the appropriate agent.
 
 ### Target Repository
 
@@ -129,6 +159,9 @@ After completion, the daemon validates task results:
 
 ## Anti-Patterns
 
+- **Demanding internal vocabulary:** Waiting for a user to say "create a request" or "make a goal" → classify the outcome and take the appropriate conversation-path action.
+- **Chat-side decomposition:** Creating a request and immediately calling `create_task()` from direct chat → stop at the request handoff; the daemon owns decomposition.
+- **Goal inflation:** Creating a goal for every task → use a goal only for an enduring outcome with meaningful progress to track.
 - **Circular tasks:** "Review the last task's output and create a new task" → infinite loop
 - **Approval-dependent chains:** Task B needs Task A approved, but approval is async → B stalls
 - **Overly ambitious scope:** "Refactor the entire auth system" → timeout, partial results, validation failure

@@ -17,6 +17,10 @@ from lucent.db.audit import AuditRepository
 from lucent.db.definitions import BuiltInProtectionError
 from lucent.rbac import Role
 from lucent.security import scan_content_for_injection
+from lucent.settings import (
+    hook_admin_approval_required,
+    managed_tool_admin_approval_required,
+)
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
     discover_mcp_tools,
@@ -52,6 +56,36 @@ def _require_admin_for_stdio(
 ) -> None:
     if (server_type == "stdio" or command is not None) and user.role < Role.ADMIN:
         raise HTTPException(403, "Stdio MCP servers require admin or owner role")
+
+
+async def _require_definition_approval_access(
+    pool,
+    user: AuthenticatedUser,
+    definition_type: str,
+    definition_id: str,
+) -> dict:
+    """Authorize a definition owner or the administrator performing final approval."""
+    acl = AccessControlService(pool)
+    org_id = str(user.organization_id)
+    if not await acl.can_modify(str(user.id), definition_type, definition_id, org_id):
+        raise HTTPException(404, "Definition not found")
+    repo = DefinitionRepository(pool)
+    getters = {
+        "agent": repo.get_agent,
+        "skill": repo.get_skill,
+        "hook": repo.get_hook,
+        "managed_tool": repo.get_managed_tool,
+    }
+    definition = await getters[definition_type](definition_id, org_id)
+    if not definition:
+        raise HTTPException(404, "Definition not found")
+    if (
+        definition_type in {"hook", "managed_tool"}
+        and definition.get("status") == "owner_approved"
+        and user.role < Role.ADMIN
+    ):
+        raise HTTPException(403, "Administrative approval required")
+    return definition
 
 
 # ── Request Models ────────────────────────────────────────────────────────
@@ -287,9 +321,10 @@ async def update_agent(agent_id: str, body: CreateAgent, user: AuthenticatedUser
 
 
 @router.post("/agents/{agent_id}/approve")
-async def approve_agent(agent_id: str, user: AdminUser):
+async def approve_agent(agent_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "agent", agent_id)
     result = await repo.approve_agent(agent_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "Agent not found or not in proposed status")
@@ -297,9 +332,10 @@ async def approve_agent(agent_id: str, user: AdminUser):
 
 
 @router.post("/agents/{agent_id}/reject")
-async def reject_agent(agent_id: str, user: AdminUser):
+async def reject_agent(agent_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "agent", agent_id)
     result = await repo.reject_agent(agent_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "Agent not found or not in proposed status")
@@ -491,9 +527,10 @@ async def get_skill(skill_id: str, user: AuthenticatedUser):
 
 
 @router.post("/skills/{skill_id}/approve")
-async def approve_skill(skill_id: str, user: AdminUser):
+async def approve_skill(skill_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "skill", skill_id)
     result = await repo.approve_skill(skill_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "Skill not found or not in proposed status")
@@ -501,9 +538,10 @@ async def approve_skill(skill_id: str, user: AdminUser):
 
 
 @router.post("/skills/{skill_id}/reject")
-async def reject_skill(skill_id: str, user: AdminUser):
+async def reject_skill(skill_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "skill", skill_id)
     result = await repo.reject_skill(skill_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "Skill not found or not in proposed status")
@@ -682,7 +720,7 @@ async def discover_mcp_server_tools(
 @router.get("/hooks")
 async def list_hooks(
     user: AuthenticatedUser,
-    status: Literal["proposed", "active", "rejected"] | None = None,
+    status: Literal["proposed", "owner_approved", "active", "rejected"] | None = None,
     limit: int = 25,
     offset: int = 0,
 ):
@@ -768,19 +806,28 @@ async def update_hook(hook_id: str, body: UpdateHook, user: AuthenticatedUser):
 
 
 @router.post("/hooks/{hook_id}/approve")
-async def approve_hook(hook_id: str, user: AdminUser):
+async def approve_hook(hook_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    result = await repo.approve_hook(hook_id, str(user.organization_id), str(user.id))
+    await _require_definition_approval_access(pool, user, "hook", hook_id)
+    result = await repo.approve_hook(
+        hook_id,
+        str(user.organization_id),
+        str(user.id),
+        require_admin_approval=hook_admin_approval_required(
+            organization_id=user.organization_id
+        ),
+    )
     if not result:
         raise HTTPException(404, "Hook not found or not in proposed status")
     return result
 
 
 @router.post("/hooks/{hook_id}/reject")
-async def reject_hook(hook_id: str, user: AdminUser):
+async def reject_hook(hook_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "hook", hook_id)
     result = await repo.reject_hook(hook_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "Hook not found or not in proposed status")
@@ -806,7 +853,7 @@ async def delete_hook(hook_id: str, user: AuthenticatedUser):
 @router.get("/tools")
 async def list_managed_tools(
     user: AuthenticatedUser,
-    status: Literal["proposed", "active", "rejected"] | None = None,
+    status: Literal["proposed", "owner_approved", "active", "rejected"] | None = None,
     limit: int = 25,
     offset: int = 0,
 ):
@@ -902,19 +949,28 @@ async def update_managed_tool(tool_id: str, body: UpdateManagedTool, user: Authe
 
 
 @router.post("/tools/{tool_id}/approve")
-async def approve_managed_tool(tool_id: str, user: AdminUser):
+async def approve_managed_tool(tool_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    result = await repo.approve_managed_tool(tool_id, str(user.organization_id), str(user.id))
+    await _require_definition_approval_access(pool, user, "managed_tool", tool_id)
+    result = await repo.approve_managed_tool(
+        tool_id,
+        str(user.organization_id),
+        str(user.id),
+        require_admin_approval=managed_tool_admin_approval_required(
+            organization_id=user.organization_id
+        ),
+    )
     if not result:
         raise HTTPException(404, "Managed tool not found or not in proposed status")
     return result
 
 
 @router.post("/tools/{tool_id}/reject")
-async def reject_managed_tool(tool_id: str, user: AdminUser):
+async def reject_managed_tool(tool_id: str, user: AuthenticatedUser):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "managed_tool", tool_id)
     result = await repo.reject_managed_tool(tool_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "Managed tool not found or not in proposed status")

@@ -42,14 +42,14 @@
         </div>
         <div class="flex items-center gap-2">
             {% if can_edit %}
-            <button onclick="document.getElementById('editGroupModal').classList.remove('hidden')"
+            <button type="button" data-open-group-modal="editGroupModal"
                     class="px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
                 Edit
             </button>
             {% endif %}
             {% if can_delete %}
             <form action="/settings/groups/{{ group.id }}/delete" method="POST" class="inline"
-                  onsubmit="return confirm('Are you sure you want to delete this group? This cannot be undone.')">
+                data-group-confirm="Are you sure you want to delete this group? This cannot be undone.">
                 <button type="submit" class="px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors">
                     Delete Group
                 </button>
@@ -85,7 +85,7 @@
             <h2 class="text-lg font-semibold text-gray-900">Members</h2>
         </div>
         {% if can_edit and available_users %}
-        <button onclick="document.getElementById('addMemberModal').classList.remove('hidden')"
+        <button type="button" data-open-group-modal="addMemberModal"
                 class="flex items-center gap-2 px-3 py-1.5 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors">
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -132,7 +132,7 @@
                     {% if can_edit %}
                     <td class="px-6 py-4 text-right">
                         <form action="/settings/groups/{{ group.id }}/members/{{ m.user_id }}/remove" method="POST" class="inline"
-                              onsubmit="return confirm('Remove {{ m.display_name or m.email or 'this user' }} from group?')">
+                              data-group-confirm="Remove {{ m.display_name or m.email or 'this user' }} from group?">
                             <button type="submit" class="text-sm text-red-600 hover:text-red-700 font-medium">Remove</button>
                         </form>
                     </td>
@@ -157,11 +157,11 @@
 {% if can_edit %}
 <div id="editGroupModal" class="hidden fixed inset-0 z-50 overflow-y-auto">
     <div class="flex items-center justify-center min-h-screen px-4">
-        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" onclick="document.getElementById('editGroupModal').classList.add('hidden')"></div>
+        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" data-close-group-modal="editGroupModal"></div>
         <div class="relative bg-white rounded-xl shadow-xl max-w-md w-full p-6 z-10">
             <div class="flex items-center justify-between mb-6">
                 <h3 class="text-lg font-semibold text-gray-900">Edit Group</h3>
-                <button onclick="document.getElementById('editGroupModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-500">
+                <button type="button" data-close-group-modal="editGroupModal" class="text-gray-400 hover:text-gray-500">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -179,7 +179,7 @@
                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500">{{ group.description or '' }}</textarea>
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
-                    <button type="button" onclick="document.getElementById('editGroupModal').classList.add('hidden')"
+                    <button type="button" data-close-group-modal="editGroupModal"
                             class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
                         Cancel
                     </button>
@@ -198,11 +198,11 @@
 {% if can_edit and available_users %}
 <div id="addMemberModal" class="hidden fixed inset-0 z-50 overflow-y-auto">
     <div class="flex items-center justify-center min-h-screen px-4">
-        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" onclick="document.getElementById('addMemberModal').classList.add('hidden')"></div>
+        <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" data-close-group-modal="addMemberModal"></div>
         <div class="relative bg-white rounded-xl shadow-xl max-w-md w-full p-6 z-10">
             <div class="flex items-center justify-between mb-6">
                 <h3 class="text-lg font-semibold text-gray-900">Add Member</h3>
-                <button onclick="document.getElementById('addMemberModal').classList.add('hidden')" class="text-gray-400 hover:text-gray-500">
+                <button type="button" data-close-group-modal="addMemberModal" class="text-gray-400 hover:text-gray-500">
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -228,7 +228,7 @@
                     </select>
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
-                    <button type="button" onclick="document.getElementById('addMemberModal').classList.add('hidden')"
+                    <button type="button" data-close-group-modal="addMemberModal"
                             class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
                         Cancel
                     </button>
@@ -242,4 +242,25 @@
     </div>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+{{ super() }}
+<script nonce="{{ request.state.csp_nonce }}">
+document.querySelectorAll('[data-open-group-modal]').forEach((button) => {
+    button.addEventListener('click', () => {
+        document.getElementById(button.dataset.openGroupModal)?.classList.remove('hidden');
+    });
+});
+document.querySelectorAll('[data-close-group-modal]').forEach((button) => {
+    button.addEventListener('click', () => {
+        document.getElementById(button.dataset.closeGroupModal)?.classList.add('hidden');
+    });
+});
+document.querySelectorAll('[data-group-confirm]').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+        if (!window.confirm(form.dataset.groupConfirm)) event.preventDefault();
+    });
+});
+</script>
 {% endblock %}

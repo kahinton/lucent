@@ -987,8 +987,16 @@ class RequestRepository:
                 f"${len(params) - 1}", f"${len(params)}"
             )
         if status:
-            params.append(status)
-            base += f" AND r.status = ${len(params)}"
+            statuses = [value.strip() for value in status.split(",") if value.strip()]
+            if len(statuses) == 1:
+                params.append(statuses[0])
+                base += f" AND r.status = ${len(params)}"
+            elif statuses:
+                placeholders = ", ".join(
+                    f"${len(params) + index + 1}" for index in range(len(statuses))
+                )
+                params.extend(statuses)
+                base += f" AND r.status IN ({placeholders})"
         elif exclude_status:
             excluded = [s.strip() for s in exclude_status.split(",") if s.strip()]
             if excluded:
@@ -1101,35 +1109,58 @@ class RequestRepository:
         reviewed_at = (
             now if status in (REQUEST_STATUS_REVIEW, REQUEST_STATUS_NEEDS_REWORK) else None
         )
-        if org_id:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """UPDATE requests
-                       SET status = $2, updated_at = $3,
-                           completed_at = COALESCE($4, completed_at),
-                           reviewed_at = COALESCE($5, reviewed_at)
-                       WHERE id = $1 AND organization_id = $6 RETURNING *""",
-                    UUID(request_id),
-                    status,
-                    now,
-                    completed_at,
-                    reviewed_at,
-                    UUID(org_id),
-                )
-        else:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """UPDATE requests
-                       SET status = $2, updated_at = $3,
-                           completed_at = COALESCE($4, completed_at),
-                           reviewed_at = COALESCE($5, reviewed_at)
-                       WHERE id = $1 RETURNING *""",
-                    UUID(request_id),
-                    status,
-                    now,
-                    completed_at,
-                    reviewed_at,
-                )
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if org_id:
+                    row = await conn.fetchrow(
+                        """UPDATE requests
+                           SET status = $2, updated_at = $3,
+                               completed_at = COALESCE($4, completed_at),
+                               reviewed_at = COALESCE($5, reviewed_at)
+                           WHERE id = $1 AND organization_id = $6 RETURNING *""",
+                        UUID(request_id),
+                        status,
+                        now,
+                        completed_at,
+                        reviewed_at,
+                        UUID(org_id),
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """UPDATE requests
+                           SET status = $2, updated_at = $3,
+                               completed_at = COALESCE($4, completed_at),
+                               reviewed_at = COALESCE($5, reviewed_at)
+                           WHERE id = $1 RETURNING *""",
+                        UUID(request_id),
+                        status,
+                        now,
+                        completed_at,
+                        reviewed_at,
+                    )
+
+                if row and status in (REQUEST_STATUS_COMPLETED, REQUEST_STATUS_CANCELLED):
+                    cancelled_tasks = await conn.fetch(
+                        """UPDATE tasks
+                           SET status = 'cancelled', completed_at = $2, updated_at = $2
+                           WHERE request_id = $1 AND status IN ('pending', 'planned')
+                           RETURNING id""",
+                        UUID(request_id),
+                        now,
+                    )
+                    if cancelled_tasks:
+                        await conn.executemany(
+                            """INSERT INTO task_events (task_id, event_type, detail, metadata)
+                               VALUES ($1, 'cancelled', $2, $3)""",
+                            [
+                                (
+                                    task["id"],
+                                    f"Task cancelled because parent request was {status}",
+                                    json.dumps({"request_status": status}),
+                                )
+                                for task in cancelled_tasks
+                            ],
+                        )
 
         # When a request reaches a terminal state, close any linked schedule run.
         # This runs in a separate connection from the request status update above,
@@ -1503,25 +1534,34 @@ class RequestRepository:
         }
 
     async def get_requests_in_review(
-        self, org_id: str, limit: int = 25, offset: int = 0
+        self,
+        org_id: str,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
     ) -> dict:
         """List requests currently awaiting or undergoing review."""
-        base = """FROM requests
-                   WHERE organization_id = $1
-                     AND status IN ('review', 'needs_rework')"""
+        base = """FROM requests r
+                   WHERE r.organization_id = $1
+                     AND r.status IN ('review', 'needs_rework')"""
+        params: list[Any] = [UUID(org_id)]
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            base += " AND " + self._request_visibility_condition("$2", "$3")
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
-                UUID(org_id),
+                *params,
             )
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
-                f"""SELECT * {base}
+                f"""SELECT r.* {base}
                     ORDER BY
-                      CASE status WHEN 'review' THEN 0 ELSE 1 END,
-                      updated_at DESC
-                    LIMIT $2 OFFSET $3""",
-                UUID(org_id),
+                      CASE r.status WHEN 'review' THEN 0 ELSE 1 END,
+                      r.updated_at DESC
+                    LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+                *params,
                 limit,
                 offset,
             )
@@ -1880,15 +1920,26 @@ class RequestRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
-    async def list_pending_requests(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
+    async def list_pending_requests(
+        self,
+        org_id: str,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict:
         """Get pending requests, including those with no tasks yet."""
         base = """FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
                    WHERE r.organization_id = $1
                      AND r.status = 'pending'"""
+        params: list[Any] = [UUID(org_id)]
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            base += " AND " + self._request_visibility_condition("$2", "$3")
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(DISTINCT r.id) AS total {base}",
-                UUID(org_id),
+                *params,
             )
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
@@ -1899,10 +1950,10 @@ class RequestRepository:
                      CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                      WHEN 'medium' THEN 2 ELSE 3 END,
                      r.created_at
-                   LIMIT $2 OFFSET $3""",
-                UUID(org_id),
-                limit,
-                offset,
+                         LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+                     *params,
+                     limit,
+                     offset,
             )
         return {
             "items": [dict(r) for r in rows],
@@ -2088,7 +2139,14 @@ class RequestRepository:
 
         return targets
 
-    async def list_active_work(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
+    async def list_active_work(
+        self,
+        org_id: str,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict:
         """Get all non-terminal requests with task status summaries.
 
         Returns requests that are pending/in_progress/planned/needs_rework/review
@@ -2099,10 +2157,14 @@ class RequestRepository:
         base = """FROM requests r LEFT JOIN tasks t ON t.request_id = r.id
                    WHERE r.organization_id = $1
                      AND r.status NOT IN ('completed', 'cancelled')"""
+        params: list[Any] = [UUID(org_id)]
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            base += " AND " + self._request_visibility_condition("$2", "$3")
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(DISTINCT r.id) AS total {base}",
-                UUID(org_id),
+                *params,
             )
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
@@ -2122,10 +2184,10 @@ class RequestRepository:
                      CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                      WHEN 'medium' THEN 2 ELSE 3 END,
                      r.created_at
-                   LIMIT $2 OFFSET $3""",
-                UUID(org_id),
-                limit,
-                offset,
+                         LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+                     *params,
+                     limit,
+                     offset,
             )
         return {
             "items": [dict(r) for r in rows],
@@ -2136,7 +2198,12 @@ class RequestRepository:
         }
 
     async def list_recently_completed(
-        self, org_id: str, hours: int = 2, limit: int = 25,
+        self,
+        org_id: str,
+        hours: int = 2,
+        limit: int = 25,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
     ) -> list[dict]:
         """Get requests completed within the last N hours.
 
@@ -2145,6 +2212,12 @@ class RequestRepository:
         and the goal memory being updated leaves a gap where duplicates
         can be created.
         """
+        params: list[Any] = [UUID(org_id), hours]
+        visibility = ""
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            visibility = " AND " + self._request_visibility_condition("$3", "$4")
+        params.append(limit)
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT r.id, r.title, r.source, r.status, r.completed_at
@@ -2152,15 +2225,21 @@ class RequestRepository:
                    WHERE r.organization_id = $1
                      AND r.status IN ('completed', 'review')
                      AND r.completed_at > NOW() - make_interval(hours => $2)
+                 """ + visibility + """
                    ORDER BY r.completed_at DESC
-                   LIMIT $3""",
-                UUID(org_id),
-                hours,
-                limit,
+               LIMIT $""" + str(len(params)),
+            *params,
             )
         return [dict(r) for r in rows]
 
-    async def list_pending_tasks(self, org_id: str, limit: int = 25, offset: int = 0) -> dict:
+    async def list_pending_tasks(
+        self,
+        org_id: str,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict:
         """Get all tasks ready to be claimed.
 
         Respects sequence_order as a stage gate: tasks at the same level are
@@ -2188,7 +2267,9 @@ class RequestRepository:
                                              SELECT 1 FROM tasks unfinished
                                              WHERE unfinished.request_id = t.request_id
                                                  AND unfinished.sequence_order < t.sequence_order
-                                                 AND unfinished.status NOT IN ('completed', 'failed', 'cancelled')
+                                                 AND unfinished.status NOT IN (
+                                                     'completed', 'failed', 'cancelled'
+                                                 )
                                          )
                      AND NOT EXISTS (
                        SELECT 1 FROM (
@@ -2208,26 +2289,85 @@ class RequestRepository:
                                  END
                        )
                      )"""
+        params: list[Any] = [UUID(org_id)]
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            base += " AND " + self._request_visibility_condition("$2", "$3")
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
-                UUID(org_id),
+                *params,
             )
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(
-                f"""SELECT t.*, r.title as request_title
+                                f"""SELECT t.*, r.title as request_title,
+                                                    EXISTS (
+                                                            SELECT 1 FROM task_outputs o
+                                                            WHERE o.task_id = t.id
+                                                                AND o.organization_id = t.organization_id
+                                                    ) AS has_durable_output
                    {base}
                    ORDER BY
                      CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
                                      WHEN 'medium' THEN 2 ELSE 3 END,
                      t.sequence_order, t.created_at
-                   LIMIT $2 OFFSET $3""",
-                UUID(org_id),
+                         LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+                     *params,
+                     limit,
+                     offset,
+            )
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def list_queued_tasks(
+        self,
+        org_id: str,
+        limit: int = 25,
+        offset: int = 0,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict:
+        """List all queued tasks, including work blocked from dispatch.
+
+        Queued is the operational backlog: tasks in either ``pending`` or
+        ``planned`` state. Unlike :meth:`list_pending_tasks`, this does not
+        exclude work waiting on approval or an earlier sequence stage.
+        """
+        base = """FROM tasks t
+                   JOIN requests r ON r.id = t.request_id
+                   WHERE t.organization_id = $1
+                     AND t.status IN ('pending', 'planned')"""
+        params: list[Any] = [UUID(org_id)]
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            base += " AND " + self._request_visibility_condition("$2", "$3")
+        async with self.pool.acquire() as conn:
+            count_row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS total {base}",
+                *params,
+            )
+            total_count = count_row["total"] if count_row else 0
+            rows = await conn.fetch(
+                f"""SELECT t.*, r.title AS request_title,
+                          r.status AS request_status,
+                          r.approval_status AS request_approval_status
+                   {base}
+                   ORDER BY
+                     CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                                     WHEN 'medium' THEN 2 ELSE 3 END,
+                     t.created_at
+                   LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}""",
+                *params,
                 limit,
                 offset,
             )
         return {
-            "items": [dict(r) for r in rows],
+            "items": [dict(row) for row in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
@@ -2814,6 +2954,28 @@ class RequestRepository:
             await self._ensure_request_in_progress(str(task["request_id"]))
             return task
         return None
+
+    async def cancel_task(self, task_id: str, org_id: str | None = None) -> dict | None:
+        """Cancel a task that is not currently executing or completed."""
+        now = datetime.now(timezone.utc)
+        query = """UPDATE tasks
+                   SET status = 'cancelled',
+                       completed_at = COALESCE(completed_at, $2),
+                       updated_at = $2
+                   WHERE id = $1
+                     AND status NOT IN ('claimed', 'running', 'completed', 'cancelled')"""
+        params: list[Any] = [UUID(task_id), now]
+        if org_id:
+            query += " AND organization_id = $3"
+            params.append(UUID(org_id))
+        query += " RETURNING *"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+        if not row:
+            return None
+        task = dict(row)
+        await self.add_task_event(task_id, "cancelled", "Task cancelled by user")
+        return task
 
     async def retry_task_with_feedback(
         self, task_id: str, feedback: str, org_id: str | None = None

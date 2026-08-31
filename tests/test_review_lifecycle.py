@@ -1022,10 +1022,10 @@ class TestReviewAgentFailure:
     """Test what happens when a review task itself fails."""
 
     async def test_review_task_failure_doesnt_break_request(self, repo, org_id):
-        """A failed review task moves request to needs_rework (daemon behavior).
+        """A failed review task remains available for manual review.
 
         At the DB level, we verify the states are valid. The daemon's
-        _handle_review_task_failure sets needs_rework.
+        _handle_review_task_failure restores the review state.
         """
         req = await _make_request(repo, org_id)
         rid = str(req["id"])
@@ -1041,12 +1041,12 @@ class TestReviewAgentFailure:
         )
         await _fail_task_flow(repo, review_task, "LLM error")
 
-        # At DB level, request will be 'failed' because a task failed
-        # The daemon would override this with needs_rework via update_request_status
-        await repo.update_request_status(rid, "needs_rework")
+        # At DB level, request will be 'failed' because a task failed.
+        # The daemon restores review so a human can make the final decision.
+        await repo.update_request_status(rid, "review")
 
         req_after = await repo.get_request(rid, org_id)
-        assert req_after["status"] == REQUEST_STATUS_NEEDS_REWORK
+        assert req_after["status"] == REQUEST_STATUS_REVIEW
 
 
 class TestBackwardsCompatibility:

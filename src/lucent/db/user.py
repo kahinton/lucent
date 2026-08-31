@@ -134,7 +134,7 @@ class UserRepository:
             INSERT INTO memories (username, type, content, tags,
                 importance, related_memory_ids, metadata,
                 user_id, organization_id, shared)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
                       created_at, updated_at, deleted_at, user_id,
                       organization_id, shared, last_accessed_at

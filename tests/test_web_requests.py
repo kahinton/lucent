@@ -172,6 +172,22 @@ async def _promote_web_user(db_pool, user: dict, role: str = "admin") -> None:
 
 
 # ============================================================================
+# GET /ui/live-status
+# ============================================================================
+
+
+class TestLiveStatus:
+    async def test_returns_authenticated_navigation_badge_counts(self, client):
+        response = await client.get("/ui/live-status")
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        badges = response.json()["badges"]
+        assert set(badges) == {"activity", "definitions", "files", "handoffs"}
+        assert all(isinstance(count, int) and count >= 0 for count in badges.values())
+
+
+# ============================================================================
 # GET /activity — list
 # ============================================================================
 
@@ -181,14 +197,108 @@ class TestActivityList:
         resp = await client.get("/activity")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
+        assert '<form method="GET" action="/activity"' in resp.text
+        assert 'name="source"' in resp.text
+        assert 'name="status"' in resp.text
+        assert 'value="user,cognitive,daemon"' in resp.text
+        assert "Apply filters" in resp.text
+
+    async def test_live_refresh_returns_full_marked_region(self, client, sample_request):
+        pagination = await client.get("/activity", headers={"HX-Request": "true"})
+        live_refresh = await client.get(
+            "/activity",
+            headers={"HX-Request": "true", "X-Live-Refresh": "true"},
+        )
+
+        assert 'id="activity-live-content"' not in pagination.text
+        assert 'id="activity-live-content"' in live_refresh.text
 
     async def test_list_contains_request_title(self, client, sample_request):
         resp = await client.get("/activity")
         assert "Web Test Request" in resp.text
 
+    async def test_queued_tasks_page_lists_visible_backlog(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Queued Web Request",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        await repo.create_task(
+            request_id=str(req["id"]),
+            title="Queued Web Task",
+            org_id=str(org["id"]),
+        )
+
+        activity = await client.get("/activity")
+        assert activity.status_code == 200
+        assert 'href="/activity/queue"' in activity.text
+
+        queued = await client.get("/activity/queue")
+        assert queued.status_code == 200
+        assert "Queued Web Task" in queued.text
+        assert "Queued Web Request" in queued.text
+
+    async def test_activity_excludes_peer_queued_tasks(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        peer = await UserRepository(db_pool).create(
+            external_id=f"peer_{uuid4()}",
+            provider="local",
+            organization_id=org["id"],
+            email=f"peer_{uuid4()}@test.com",
+            display_name="Peer",
+        )
+        repo = RequestRepository(db_pool)
+        peer_request = await repo.create_request(
+            title="Peer Queued Request",
+            org_id=str(org["id"]),
+            created_by=str(peer["id"]),
+        )
+        await repo.create_task(
+            request_id=str(peer_request["id"]),
+            title="Peer Queued Task",
+            org_id=str(org["id"]),
+        )
+
+        summary = await repo.get_active_summary(
+            str(org["id"]), requester_user_id=str(user["id"])
+        )
+        response = await client.get("/activity")
+
+        assert summary["tasks"]["queued"] == 0
+        assert response.status_code == 200
+        assert "Peer Queued Request" not in response.text
+
     async def test_list_filter_by_status(self, client, sample_request):
         resp = await client.get("/activity", params={"status": "pending"})
         assert resp.status_code == 200
+
+    async def test_active_filter_matches_active_summary(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        active_statuses = ("in_progress", "review", "needs_rework")
+        for status in active_statuses:
+            request = await repo.create_request(
+                title=f"Active {status}",
+                org_id=str(org["id"]),
+                created_by=str(user["id"]),
+            )
+            await repo.update_request_status(str(request["id"]), status, str(org["id"]))
+        completed = await repo.create_request(
+            title="Completed control request",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(completed["id"]), "completed", str(org["id"]))
+
+        resp = await client.get("/activity", params={"status": "active"})
+
+        assert resp.status_code == 200
+        assert 'href="/activity?status=active&amp;per_page=25&amp;source=user,cognitive,daemon,schedule"' in resp.text
+        for status in active_statuses:
+            assert f"Active {status}" in resp.text
+        assert "Completed control request" not in resp.text
 
     async def test_list_filter_by_source(self, client, sample_request):
         resp = await client.get("/activity", params={"source": "user"})
@@ -396,6 +506,49 @@ class TestRequestDetail:
         assert resp.status_code == 200
         assert f'action="/requests/{req["id"]}/approval"' in resp.text
 
+    async def test_detail_shows_manual_review_actions_for_owner(
+        self, client, db_pool, web_user
+    ):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Manual Review From Detail",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(req["id"]), "review", str(org["id"]))
+
+        resp = await client.get(f"/activity/{req['id']}")
+
+        assert resp.status_code == 200
+        assert "This request is ready for review" in resp.text
+        assert f'hx-post="/daemon/review/{req["id"]}/action"' in resp.text
+        assert 'value="approve"' in resp.text
+        assert 'value="reject"' in resp.text
+
+
+class TestManualReviewAction:
+    async def test_owner_can_approve_manual_review(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Owner Manual Review",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(req["id"]), "review", str(org["id"]))
+
+        resp = await client.post(
+            f"/daemon/review/{req['id']}/action",
+            data=_csrf_data(client, {"action": "approve", "comment": "Approved by owner"}),
+        )
+
+        assert resp.status_code == 200
+        updated = await repo.get_request(str(req["id"]), str(org["id"]))
+        assert updated["status"] == "completed"
+
 
 class TestRequestApprovalAction:
     async def test_approve_pending_request_from_detail(self, client, db_pool, web_user):
@@ -487,6 +640,78 @@ class TestRequestApprovalAction:
         assert resp.status_code == 303
         updated = await repo.get_request(str(req["id"]), str(org["id"]))
         assert updated["approval_status"] == "approved"
+
+
+class TestRequestCancellation:
+    async def test_cancel_owned_request(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Cancel from request detail",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.post(
+            f"/requests/{req['id']}/cancel",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        assert (await repo.get_request(str(req["id"]), str(org["id"])))["status"] == "cancelled"
+
+    async def test_cancel_inactive_task(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Cancel task from request detail",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Inactive task",
+            org_id=str(org["id"]),
+        )
+
+        resp = await client.post(
+            f"/requests/tasks/{task['id']}/cancel",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        assert (await repo.get_task(str(task["id"]), str(org["id"])))["status"] == "cancelled"
+
+    async def test_cannot_cancel_peer_task(self, client, db_pool, web_user, web_prefix):
+        user, org, _token = web_user
+        peer = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}peer",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}peer@test.com",
+        )
+        repo = RequestRepository(db_pool)
+        peer_request = await repo.create_request(
+            title="Peer request",
+            org_id=str(org["id"]),
+            created_by=str(peer["id"]),
+        )
+        peer_task = await repo.create_task(
+            request_id=str(peer_request["id"]),
+            title="Peer task",
+            org_id=str(org["id"]),
+        )
+
+        resp = await client.post(
+            f"/requests/tasks/{peer_task['id']}/cancel",
+            data=_csrf_data(client),
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 404
+        assert (await repo.get_task(str(peer_task["id"]), str(org["id"])))["status"] == "pending"
 
 
 # ============================================================================

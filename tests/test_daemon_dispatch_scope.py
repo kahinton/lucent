@@ -11,6 +11,7 @@ from daemon.daemon import (
     REQUEST_REVIEW_TASK_TITLE,
     _get_required_memory_scope,
     _memory_server_tools_for_task,
+    _missing_required_task_tools,
     _required_task_tool_names,
     _task_requires_mcp_tool_usage,
 )
@@ -165,6 +166,14 @@ class TestRequiredToolUsage:
             "Create configuration file",
             "Add pyproject.toml to the target repository.",
         ) == set()
+
+    def test_durable_output_satisfies_file_requirement_on_retry(self):
+        assert _missing_required_task_tools(
+            {"store_user_file"}, {}, has_durable_output=True
+        ) == []
+        assert _missing_required_task_tools(
+            {"send_handoff", "store_user_file"}, {}, has_durable_output=True
+        ) == ["send_handoff"]
 
     def test_generic_handoff_word_does_not_require_tool_usage(self):
         assert (

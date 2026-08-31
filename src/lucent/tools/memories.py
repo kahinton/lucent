@@ -15,6 +15,7 @@ from lucent.db import (
     AuditRepository,
     DuplicateTechnicalMemoryError,
     MemoryRepository,
+    UserRepository,
     VersionConflictError,
     get_pool,
     init_db,
@@ -330,25 +331,41 @@ Returns:
             # Validate and normalize metadata for the memory type
             validated_metadata = validate_metadata(memory_type, metadata)
 
-            # Always derive username from authenticated user — never trust
-            # caller-supplied username to prevent display-name spoofing
-            # (anti-spoofing: V1/V2). The username parameter is accepted
-            # for backward compatibility but ignored when authenticated.
-            auth_username = _get_current_username()
-            effective_username = auth_username or username or "unknown"
-
-            logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
-
             # Get current user context (from auth context or dev mode)
             user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
-            # Detect daemon caller for auto-sharing and auto-tagging
             current_user = get_current_user()
             _ext_id = (current_user or {}).get("external_id") or ""
-            is_daemon = bool(
+            is_daemon_key_owner = bool(
                 current_user
                 and (_ext_id == "daemon-service" or _ext_id.startswith("daemon-service:"))
             )
+            is_scoped_to_human = bool(
+                memory_scope == "user"
+                and memory_scope_user_id is not None
+                and current_user
+                and memory_scope_user_id != current_user["id"]
+            )
+
+            # Scoped daemon keys execute on a user's behalf. Attribute the
+            # resulting memory to that effective user rather than the key owner.
+            attribution_user = current_user
+            if is_scoped_to_human:
+                pool = await get_pool()
+                attribution_user = await UserRepository(pool).get_by_id(memory_scope_user_id)
+
+            auth_username = (
+                attribution_user.get("display_name")
+                or attribution_user.get("email")
+                or attribution_user.get("username")
+                or str(attribution_user["id"])
+                if attribution_user
+                else None
+            )
+            effective_username = auth_username or username or "unknown"
+            is_daemon = is_daemon_key_owner and not is_scoped_to_human
+
+            logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
 
             # Normalize tags: replace prohibited tags, auto-tag daemon content
             effective_tags = normalize_tags(tags, is_daemon=is_daemon)

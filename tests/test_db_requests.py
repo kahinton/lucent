@@ -188,6 +188,24 @@ class TestUpdateRequestStatus:
         assert updated["completed_at"] is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["completed", "cancelled"])
+    async def test_terminal_status_cancels_queued_tasks(
+        self, repo, req, task, test_organization, status
+    ):
+        updated = await repo.update_request_status(
+            str(req["id"]), status, org_id=str(test_organization["id"])
+        )
+
+        assert updated["status"] == status
+        updated_task = await repo.get_task(str(task["id"]))
+        assert updated_task["status"] == "cancelled"
+        events = await repo.list_task_events(str(task["id"]))
+        assert any(
+            event["detail"] == f"Task cancelled because parent request was {status}"
+            for event in events["items"]
+        )
+
+    @pytest.mark.asyncio
     async def test_update_nonexistent(self, repo):
         result = await repo.update_request_status(
             "00000000-0000-0000-0000-000000000000", "completed"
@@ -374,6 +392,45 @@ class TestListPendingTasks:
         result = await repo.list_pending_tasks(str(test_organization["id"]))
         matching = [t for t in result["items"] if t["id"] == task["id"]]
         assert matching[0]["request_title"] == "Test Request"
+
+    @pytest.mark.asyncio
+    async def test_includes_durable_output_flag(self, repo, req, task, test_organization):
+        await repo.create_task_output(
+            task_id=str(task["id"]),
+            org_id=str(test_organization["id"]),
+            output={
+                "output_type": "file",
+                "title": "Completed deliverable",
+                "external_id": "file-123",
+            },
+        )
+        result = await repo.list_pending_tasks(str(test_organization["id"]))
+        matching = [t for t in result["items"] if t["id"] == task["id"]]
+        assert matching[0]["has_durable_output"] is True
+
+
+class TestListQueuedTasks:
+    @pytest.mark.asyncio
+    async def test_includes_sequence_blocked_task(self, repo, req, test_organization):
+        org = str(test_organization["id"])
+        first = await repo.create_task(
+            request_id=str(req["id"]), title="First stage", org_id=org, sequence_order=0
+        )
+        blocked = await repo.create_task(
+            request_id=str(req["id"]), title="Blocked stage", org_id=org, sequence_order=1
+        )
+
+        queued = await repo.list_queued_tasks(org)
+        ready = await repo.list_pending_tasks(org)
+
+        queued_ids = {task["id"] for task in queued["items"]}
+        ready_ids = {task["id"] for task in ready["items"]}
+        assert {first["id"], blocked["id"]} <= queued_ids
+        assert first["id"] in ready_ids
+        assert blocked["id"] not in ready_ids
+        queued_blocked = next(task for task in queued["items"] if task["id"] == blocked["id"])
+        assert queued_blocked["request_title"] == "Test Request"
+        assert queued_blocked["request_approval_status"] == "auto_approved"
 
 
 class TestTaskLifecycle:

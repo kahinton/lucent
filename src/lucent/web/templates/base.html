@@ -7,9 +7,8 @@
     <title>{% block title %}Lucent{% endblock %}</title>
     
     <!-- Favicon -->
-    <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png">
-    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+    <link rel="icon" type="image/svg+xml" sizes="any" href="/static/lucent_logo_v2.svg">
+    <link rel="apple-touch-icon" href="/static/lucent_logo_v2.svg">
     
     <!-- DOMPurify for HTML sanitization -->
     <script src="/static/vendor/purify-3.2.4.min.js"></script>
@@ -364,11 +363,9 @@
                             <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5A2.25 2.25 0 0119.5 19.5h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0l-7.5-4.615a2.25 2.25 0 01-1.07-1.916V6.75" />
                         </svg>
                         <span class="sidebar-label">Handoffs</span>
-                        {% if request.state.user_interaction_count > 0 and not request.url.path.startswith('/handoffs') %}
-                        <span class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold" title="Handoffs needing your attention">
+                        <span data-live-badge="handoffs" data-live-badge-suppressed="{{ 'true' if request.url.path.startswith('/handoffs') else 'false' }}" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold {% if request.state.user_interaction_count <= 0 or request.url.path.startswith('/handoffs') %}hidden{% endif %}" title="Handoffs needing your attention" aria-live="polite">
                             {{ request.state.user_interaction_count }}
                         </span>
-                        {% endif %}
                     </a>
                     
                     <a href="/memories" aria-label="Memories" title="Memories" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/memories' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
@@ -383,6 +380,9 @@
                             <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5A3.375 3.375 0 0010.125 2.25H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.625a9.375 9.375 0 00-9.375-9.375z" />
                         </svg>
                         <span class="sidebar-label">Files</span>
+                        <span data-live-badge="files" data-live-badge-suppressed="{{ 'true' if request.url.path.startswith('/files') else 'false' }}" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold {% if request.state.user_file_unseen_count <= 0 or request.url.path.startswith('/files') %}hidden{% endif %}" title="Files with a new version" aria-live="polite">
+                            {{ request.state.user_file_unseen_count }}
+                        </span>
                     </a>
 
                     <a href="/activity" aria-label="Activity" title="Activity" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/activity' in request.url.path or '/requests' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
@@ -390,11 +390,9 @@
                             <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
                         </svg>
                         <span class="sidebar-label">Activity</span>
-                        {% if request.state.pending_approval_count > 0 and '/activity' not in request.url.path and '/requests' not in request.url.path %}
-                        <span class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold" title="Requests awaiting approval">
+                        <span data-live-badge="activity" data-live-badge-suppressed="{{ 'true' if '/activity' in request.url.path or '/requests' in request.url.path else 'false' }}" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold {% if request.state.pending_approval_count <= 0 or '/activity' in request.url.path or '/requests' in request.url.path %}hidden{% endif %}" title="Requests awaiting approval" aria-live="polite">
                             {{ request.state.pending_approval_count }}
                         </span>
-                        {% endif %}
                     </a>
                     
                     <a id="agent-composer-nav-link" href="/definitions" aria-label="Agents" title="Agents" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/definitions' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
@@ -402,11 +400,9 @@
                             <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" />
                         </svg>
                         <span class="sidebar-label">Agents</span>
-                        {% if definition_proposal_count > 0 and '/definitions' not in request.url.path %}
-                        <span id="definition-proposal-sidebar-badge" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold" title="Definition proposals awaiting review">
+                        <span id="definition-proposal-sidebar-badge" data-live-badge="definitions" data-live-badge-suppressed="{{ 'true' if '/definitions' in request.url.path else 'false' }}" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold {% if definition_proposal_count <= 0 or '/definitions' in request.url.path %}hidden{% endif %}" title="Definition proposals awaiting review" aria-live="polite">
                             {{ definition_proposal_count }}
                         </span>
-                        {% endif %}
                     </a>
                     
                     <a href="/workflows" aria-label="Workflows" title="Workflows" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/workflows' in request.url.path or '/schedules' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
@@ -496,6 +492,67 @@
     </div>
     
     {% block extra_scripts %}{% endblock %}
+
+    <script nonce="{{ request.state.csp_nonce }}">
+    document.addEventListener('submit', function(event) {
+        const form = event.target.closest('form[data-confirm]');
+        if (form && !window.confirm(form.dataset.confirm)) event.preventDefault();
+    });
+    document.addEventListener('click', function(event) {
+        const toggle = event.target.closest('[data-toggle-target]');
+        if (toggle) {
+            const target = document.getElementById(toggle.dataset.toggleTarget);
+            if (target) {
+                const mode = toggle.dataset.toggleMode || 'toggle';
+                target.classList[mode]('hidden');
+                const focus = toggle.dataset.focusSelector;
+                if (focus) target.querySelector(focus)?.focus();
+            }
+            return;
+        }
+        const copy = event.target.closest('[data-copy-target]');
+        if (copy) {
+            const source = document.getElementById(copy.dataset.copyTarget);
+            if (!source) return;
+            navigator.clipboard.writeText(source.textContent || '').then(function() {
+                const label = copy.textContent;
+                copy.textContent = copy.dataset.copiedLabel || 'Copied!';
+                window.setTimeout(function() { copy.textContent = label; }, 2000);
+            });
+            return;
+        }
+        const feedbackAction = event.target.closest('[data-feedback-action]');
+        if (feedbackAction) {
+            const container = feedbackAction.closest('.feedback-actions');
+            if (!container) return;
+            if (feedbackAction.dataset.feedbackAction === 'reject') {
+                const form = container.querySelector('.reject-form');
+                form?.classList.remove('hidden');
+                form?.querySelector('input[name="comment"]')?.focus();
+            } else if (feedbackAction.dataset.feedbackAction === 'comment') {
+                container.querySelector('.comment-form')?.classList.toggle('hidden');
+            } else if (feedbackAction.dataset.feedbackAction === 'cancel-reject') {
+                feedbackAction.closest('.reject-form')?.classList.add('hidden');
+            }
+        }
+    });
+    document.addEventListener('change', function(event) {
+        const redirect = event.target.closest('[data-redirect-prefix]');
+        if (redirect) {
+            window.location.href = redirect.dataset.redirectPrefix + encodeURIComponent(redirect.value) + (redirect.dataset.redirectSuffix || '');
+            return;
+        }
+        const autoSubmit = event.target.closest('[data-auto-submit]');
+        if (autoSubmit?.form) autoSubmit.form.requestSubmit();
+    });
+    document.addEventListener('input', function(event) {
+        const input = event.target.closest('[data-value-output]');
+        if (input) {
+            const output = document.getElementById(input.dataset.valueOutput);
+            if (output) output.textContent = input.value;
+        }
+    });
+    </script>
     
     <!-- Auto-inject CSRF tokens into all forms and HTMX requests -->
     <script nonce="{{ request.state.csp_nonce }}">
@@ -557,44 +614,83 @@
         }
     });
 
-    // Keep the Agent Composer proposal badge visible on every page. The server-side
-    // middleware provides this after process reload; this fallback covers template-only
-    // reloads and pages that do not already carry proposal context.
+    // Refresh lightweight attention counts and operational page regions while the
+    // tab is visible. PostgreSQL-backed SSE provides immediate signals; polling
+    // remains a recovery path for reconnects and any notification missed in transit.
     document.addEventListener('DOMContentLoaded', function() {
-        const link = document.getElementById('agent-composer-nav-link');
-        if (!link || link.classList.contains('bg-primary-50')) return;
+        let refreshing = false;
+        let liveEvents = null;
 
-        const existing = document.getElementById('definition-proposal-sidebar-badge');
-        const existingCount = existing ? parseInt(existing.textContent.trim(), 10) : 0;
-        if (existingCount > 0) return;
-
-        function setDefinitionProposalBadge(count) {
-            if (!Number.isFinite(count) || count <= 0) return;
-            let badge = document.getElementById('definition-proposal-sidebar-badge');
-            if (!badge) {
-                badge = document.createElement('span');
-                badge.id = 'definition-proposal-sidebar-badge';
-                badge.className = 'sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold';
-                badge.title = 'Definition proposals awaiting review';
-                link.appendChild(badge);
-            }
+        function updateBadge(name, value) {
+            const badge = document.querySelector('[data-live-badge="' + name + '"]');
+            if (!badge || badge.dataset.liveBadgeSuppressed === 'true') return;
+            const count = Number(value) || 0;
+            const changed = Number(badge.textContent.trim()) !== count;
             badge.textContent = String(count);
+            badge.classList.toggle('hidden', count <= 0);
+            if (changed && count > 0) {
+                badge.classList.add('animate-pulse');
+                window.setTimeout(function() { badge.classList.remove('animate-pulse'); }, 700);
+            }
         }
 
-        fetch('/definitions?tab=proposals&per_page=1', {
-            credentials: 'same-origin',
-            headers: { 'X-Requested-With': 'definition-badge-prefetch' },
-        })
-            .then(function(resp) { return resp.ok ? resp.text() : ''; })
-            .then(function(html) {
-                if (!html) return;
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-                const source = doc.getElementById('definition-proposal-sidebar-badge')
-                    || doc.querySelector('a[href*="tab=proposals"] span');
-                if (!source) return;
-                setDefinitionProposalBadge(parseInt(source.textContent.trim(), 10));
-            })
-            .catch(function() { /* Best-effort badge only. */ });
+        function hasFocusedEditor(region) {
+            const active = document.activeElement;
+            return active && region.contains(active) && active.matches('input, textarea, select, [contenteditable="true"]');
+        }
+
+        function refreshOperationalRegions() {
+            if (!window.htmx) return;
+            document.querySelectorAll('[data-live-refresh]').forEach(function(region) {
+                if (!hasFocusedEditor(region)) window.htmx.trigger(region, 'lucent:live-refresh');
+            });
+        }
+
+        function refreshLiveState() {
+            if (refreshing || document.visibilityState !== 'visible') return;
+            refreshing = true;
+            fetch('/ui/live-status', { credentials: 'same-origin', cache: 'no-store' })
+                .then(function(response) { return response.ok ? response.json() : null; })
+                .then(function(state) {
+                    if (!state || !state.badges) return;
+                    Object.keys(state.badges).forEach(function(name) {
+                        updateBadge(name, state.badges[name]);
+                    });
+                    refreshOperationalRegions();
+                })
+                .catch(function() { /* Live updates are a best-effort enhancement. */ })
+                .finally(function() { refreshing = false; });
+        }
+
+        function closeLiveEvents() {
+            if (liveEvents) {
+                liveEvents.close();
+                liveEvents = null;
+            }
+        }
+
+        function connectLiveEvents() {
+            if (!window.EventSource || liveEvents || document.visibilityState !== 'visible') return;
+            liveEvents = new EventSource('/ui/events');
+            liveEvents.addEventListener('refresh', refreshLiveState);
+            liveEvents.addEventListener('error', function() {
+                // EventSource retries automatically. The polling fallback keeps
+                // the page current while PostgreSQL or a proxy reconnects.
+            });
+        }
+
+        refreshLiveState();
+        window.setInterval(refreshLiveState, 10000);
+        connectLiveEvents();
+        document.addEventListener('visibilitychange', function() {
+            if (document.visibilityState === 'visible') {
+                refreshLiveState();
+                connectLiveEvents();
+            } else {
+                closeLiveEvents();
+            }
+        });
+        window.addEventListener('beforeunload', closeLiveEvents);
     });
     </script>
 

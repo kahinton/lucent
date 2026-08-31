@@ -192,6 +192,9 @@ async def lifespan(app: FastAPI):
     started_system_schedule_runner = False
     if database_url:
         await init_db(database_url)
+        from lucent.web.live_events import live_event_broker
+
+        await live_event_broker.start(database_url)
         from lucent.db import get_pool as _get_pool_for_secrets
 
         _secret_pool = await _get_pool_for_secrets()
@@ -235,6 +238,9 @@ async def lifespan(app: FastAPI):
         # Shutdown: stop runner, close database pool, then telemetry
         if started_system_schedule_runner:
             await stop_server_system_schedule_runner()
+        from lucent.web.live_events import live_event_broker
+
+        await live_event_broker.stop()
         await close_db()
         shutdown_telemetry()
 
@@ -355,6 +361,7 @@ def create_app() -> FastAPI:
         request.state.pending_approval_count = 0
         request.state.user_interaction_count = 0
         request.state.definition_proposal_count = 0
+        request.state.user_file_unseen_count = 0
 
         # Only needed for web page rendering, not API/static/other methods.
         if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
@@ -367,14 +374,22 @@ def create_app() -> FastAPI:
                     pool = await get_pool()
                     user = await validate_session(pool, session_token)
                     if user:
-                        org_id = user.get("organization_id")
+                        from lucent.web.routes._shared import get_user_context
+
+                        effective_user = await get_user_context(request)
+                        org_id = effective_user.organization_id
+                        role_value = (
+                            effective_user.role.value
+                            if hasattr(effective_user.role, "value")
+                            else str(effective_user.role)
+                        )
                         from lucent.db.requests import RequestRepository
 
                         request_repo = RequestRepository(pool)
                         count = await request_repo.count_pending_approvals(
                             org_id=str(org_id),
-                            requester_user_id=str(user["id"]),
-                            include_system=user.get("role") in {"admin", "owner"},
+                            requester_user_id=str(effective_user.id),
+                            include_system=role_value in {"admin", "owner"},
                         )
                         from lucent.db.definitions import DefinitionRepository
 
@@ -382,11 +397,18 @@ def create_app() -> FastAPI:
                             pool
                         ).count_pending_proposals(
                             org_id=str(org_id),
-                            requester_user_id=str(user["id"]),
-                            requester_role=user.get("role"),
+                            requester_user_id=str(effective_user.id),
+                            requester_role=role_value,
                         )
                         request.state.pending_approval_count = count
                         request.state.definition_proposal_count = definition_count or 0
+                        from lucent.db.files import UserFileRepository
+
+                        request.state.user_file_unseen_count = (
+                            await UserFileRepository(pool).count_unseen_current_revisions(
+                                str(org_id), str(effective_user.id)
+                            )
+                        )
                         try:
                             from lucent.db.user_interactions import UserInteractionRepository
 
@@ -394,7 +416,7 @@ def create_app() -> FastAPI:
                             request.state.user_interaction_count = (
                                 await interaction_repo.count_attention_needed(
                                     org_id=str(org_id),
-                                    user_id=str(user["id"]),
+                                    user_id=str(effective_user.id),
                                 )
                             )
                         except Exception:

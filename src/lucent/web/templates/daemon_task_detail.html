@@ -79,9 +79,8 @@
 
         <!-- Cancel button for pending tasks -->
         {% if task.status == 'pending' %}
-        <form method="post" action="/daemon/tasks/{{ task.id }}/cancel" class="shrink-0">
-            <button type="submit" 
-                    onclick="return confirm('Cancel this task?')"
+        <form method="post" action="/daemon/tasks/{{ task.id }}/cancel" class="shrink-0" data-confirm="Cancel this task?">
+            <button type="submit"
                     class="px-3 py-1.5 text-sm font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">
                 Cancel Task
             </button>

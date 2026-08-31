@@ -294,7 +294,9 @@ async def list_active_work(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_active_work(str(user.organization_id))
+    return await repo.list_active_work(
+        str(user.organization_id), **_request_visibility_args(user)
+    )
 
 
 @router.get("/planning-targets")
@@ -354,7 +356,9 @@ async def list_recently_completed(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    items = await repo.list_recently_completed(str(user.organization_id), hours=hours)
+    items = await repo.list_recently_completed(
+        str(user.organization_id), hours=hours, **_request_visibility_args(user)
+    )
     return {"items": items}
 
 
@@ -370,7 +374,8 @@ async def list_requests_in_review(
 
     repo = RequestRepository(pool)
     return await repo.get_requests_in_review(
-        str(user.organization_id), limit=limit, offset=offset
+        str(user.organization_id), limit=limit, offset=offset,
+        **_request_visibility_args(user),
     )
 
 
@@ -391,6 +396,25 @@ async def recent_events(user: AuthenticatedUser, limit: int = 50, pool=Depends(g
     repo = RequestRepository(pool)
     return await repo.get_recent_events(
         str(user.organization_id), limit=limit, **_request_visibility_args(user)
+    )
+
+
+@router.get("/queue")
+async def queued_tasks(
+    user: AuthenticatedUser,
+    limit: int = 50,
+    offset: int = 0,
+    pool=Depends(get_pool),
+):
+    """List the full pending/planned backlog, including work not ready to run."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    return await repo.list_queued_tasks(
+        str(user.organization_id),
+        limit=min(max(limit, 1), 100),
+        offset=max(offset, 0),
+        **_request_visibility_args(user),
     )
 
 
@@ -1068,6 +1092,19 @@ async def retry_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
     return task
 
 
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
+    """Cancel a pending, planned, failed, or otherwise inactive task."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
+    task = await repo.cancel_task(str(task_id), org_id=str(user.organization_id))
+    if not task:
+        raise HTTPException(409, "Task is running, completed, already cancelled, or not found")
+    return task
+
+
 @router.post("/tasks/{task_id}/retry-with-feedback")
 async def retry_task_with_feedback(
     task_id: UUID,
@@ -1164,7 +1201,9 @@ async def pending_queue(user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_pending_tasks(str(user.organization_id))
+    return await repo.list_pending_tasks(
+        str(user.organization_id), **_request_visibility_args(user)
+    )
 
 
 @router.post("/queue/release-stale")

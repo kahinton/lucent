@@ -311,6 +311,19 @@ class TestDefinitionsList:
     async def test_list_tab_agents(self, client, agent_def):
         resp = await client.get("/definitions", params={"tab": "agents"})
         assert resp.status_code == 200
+        assert "Agents bring capabilities together" in resp.text
+        assert "its instructions establish the goal" in resp.text
+        assert "Explicit grants let you create capable agents" in resp.text
+        assert "border-teal-300 bg-teal-50" in resp.text
+
+    async def test_list_tab_skills_explains_reusable_expertise(self, client, skill_def):
+        resp = await client.get("/definitions", params={"tab": "skills"})
+
+        assert resp.status_code == 200
+        assert "Skills give agents reusable expertise" in resp.text
+        assert "specialist context, or quality standard" in resp.text
+        assert "Updating the skill improves the shared method" in resp.text
+        assert "border-amber-300 bg-amber-50" in resp.text
 
     async def test_agent_composer_chat_uses_definition_engineer(self, client, db_pool, web_user):
         _user, org, _token = web_user
@@ -521,6 +534,8 @@ class TestDefinitionsList:
         assert resp.status_code == 200
         assert "Hooks are safe agent middleware" in resp.text
         assert "default on all agents" in resp.text
+        assert "carry relevant knowledge into the work they do" in resp.text
+        assert "relevant repo knowledge" not in resp.text
         assert "Finds accessible memories related to those file paths" in resp.text
         assert "command — run a shell command or script" in resp.text
         assert "JSON on stdin" in resp.text
@@ -557,6 +572,21 @@ class TestAgentDetail:
     async def test_detail_contains_name(self, client, agent_def):
         resp = await client.get(f"/definitions/agents/{agent_def['id']}")
         assert "Test Agent" in resp.text
+
+    async def test_detail_capability_grants_keep_actions_visible(
+        self, client, agent_def, skill_def, db_pool, web_user
+    ):
+        user, org, _token = web_user
+        await DefinitionRepository(db_pool).approve_skill(
+            str(skill_def["id"]), str(org["id"]), str(user["id"])
+        )
+        resp = await client.get(f"/definitions/agents/{agent_def['id']}")
+
+        assert 'grid-cols-1 xl:grid-cols-2 gap-4 mb-6' in resp.text
+        assert 'action="/definitions/agents/' in resp.text
+        assert 'grant-skill" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2"' in resp.text
+        assert 'min-w-0 w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm' in resp.text
+        assert 'shrink-0 px-3 py-1.5 text-sm bg-blue-50 text-blue-700' in resp.text
 
     async def test_detail_edit_modal_controls_are_csp_safe(self, client, agent_def):
         resp = await client.get(f"/definitions/agents/{agent_def['id']}")
@@ -1560,19 +1590,19 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
-    async def test_member_cannot_approve_agent(self, member_client, member_agent_def):
+    async def test_member_can_approve_owned_agent(self, member_client, member_agent_def):
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/approve",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
-    async def test_member_cannot_reject_agent(self, member_client, member_agent_def):
+    async def test_member_can_reject_owned_agent(self, member_client, member_agent_def):
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/reject",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
     # --- Skill CRUD ---
 
@@ -1599,19 +1629,19 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
-    async def test_member_cannot_approve_skill(self, member_client, member_skill_def):
+    async def test_member_can_approve_owned_skill(self, member_client, member_skill_def):
         resp = await member_client.post(
             f"/definitions/skills/{member_skill_def['id']}/approve",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
-    async def test_member_cannot_reject_skill(self, member_client, member_skill_def):
+    async def test_member_can_reject_owned_skill(self, member_client, member_skill_def):
         resp = await member_client.post(
             f"/definitions/skills/{member_skill_def['id']}/reject",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
     # --- Hook CRUD ---
 
@@ -1648,12 +1678,12 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
-    async def test_member_cannot_approve_hook(self, member_client, member_hook_def):
+    async def test_member_can_stage_owned_hook_approval(self, member_client, member_hook_def):
         resp = await member_client.post(
             f"/definitions/hooks/{member_hook_def['id']}/approve",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
     async def test_member_cannot_reject_hook(self, member_client, member_hook_def):
         resp = await member_client.post(

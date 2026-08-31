@@ -243,6 +243,8 @@ async def _get_chat_model(
             kwargs["effort"] = reasoning_effort
         elif provider == "google_genai":
             kwargs["thinking_level"] = reasoning_effort
+        elif provider == "ollama":
+            kwargs["reasoning"] = reasoning_effort
 
     # Ollama: pass base_url from env so Docker containers can reach the host
     if provider == "ollama":

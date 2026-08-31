@@ -552,6 +552,96 @@ class TestNoGoalsNoIteration:
 
 
 # ============================================================================
+# Test: Per-user memory maintenance fan-out
+# ============================================================================
+
+
+class TestMemoryMaintenanceFanout:
+    """Maintenance schedules must run under each eligible owner's scope."""
+
+    @pytest.mark.asyncio
+    async def test_lists_only_owners_with_compressible_experiences(
+        self, db_pool, org, user_a, user_b, mem_repo, prefix
+    ):
+        from daemon.daemon import LucentDaemon
+
+        memory_ids = []
+        for user in (user_a, user_b):
+            memory = await mem_repo.create(
+                username=f"{prefix}{user['external_id']}",
+                type="experience",
+                content=f"{prefix}compressible experience",
+                user_id=user["id"],
+                organization_id=org["id"],
+            )
+            memory_ids.append(memory["id"])
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE memories SET created_at = NOW() - INTERVAL '1 day' "
+                "WHERE id = ANY($1::uuid[])",
+                memory_ids,
+            )
+
+        daemon = LucentDaemon()
+        users = await daemon._list_memory_maintenance_users(
+            str(org["id"]), "Experience Compression"
+        )
+
+        assert {row["user_id"] for row in users} == {
+            str(user_a["id"]),
+            str(user_b["id"]),
+        }
+
+    @pytest.mark.asyncio
+    async def test_learning_fanout_mints_a_user_scoped_key_per_owner(self):
+        from daemon.daemon import LucentDaemon
+
+        daemon = LucentDaemon()
+        user_ids = [str(uuid4()), str(uuid4())]
+        with (
+            patch.object(
+                daemon,
+                "_list_memory_maintenance_users",
+                new_callable=AsyncMock,
+                return_value=[{"user_id": user_id} for user_id in user_ids],
+            ),
+            patch(
+                "daemon.daemon._mint_scoped_api_key",
+                new_callable=AsyncMock,
+                side_effect=["hs_user_a", "hs_user_b"],
+            ) as mint_key,
+            patch(
+                "daemon.daemon._build_scoped_memory_server_config",
+                side_effect=lambda **kwargs: {"headers": kwargs},
+            ),
+            patch.object(
+                daemon, "run_session", new_callable=AsyncMock, return_value="done"
+            ) as run_session,
+        ):
+            result = await daemon._run_memory_maintenance_fanout(
+                task_id=str(uuid4()),
+                request_id=str(uuid4()),
+                org_id=str(uuid4()),
+                schedule_title="Learning Extraction",
+                agent_type="reflection",
+                system_message="test system message",
+                description="test maintenance description",
+                model="test-model",
+                reasoning_effort=None,
+                mcp_config_base={},
+                enable_config_discovery=False,
+                hooks=None,
+                agent_definition_id=str(uuid4()),
+                skill_names=[],
+            )
+
+        assert "fan-out complete" in result
+        assert [call.kwargs["memory_scope_user_id"] for call in mint_key.call_args_list] == user_ids
+        assert run_session.call_count == 2
+        assert [call.kwargs["audit_context"]["user_id"] for call in run_session.call_args_list] == user_ids
+
+
+# ============================================================================
 # Test: Direct target request creation
 # ============================================================================
 

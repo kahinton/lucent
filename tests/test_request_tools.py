@@ -539,6 +539,7 @@ class TestGetRequestDetails:
             title="Details Test",
             org_id=str(test_organization["id"]),
             description="Testing details endpoint",
+            created_by=str(auth_user["id"]),
         )
         return str(req["id"])
 
@@ -584,6 +585,7 @@ class TestListPendingRequests:
         await repo.create_request(
             title="Pending One",
             org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
         )
         result = await _call(mcp, "list_pending_requests")
         assert isinstance(result, dict)
@@ -591,10 +593,130 @@ class TestListPendingRequests:
         assert "Pending One" in titles
 
     @pytest.mark.asyncio
+    async def test_hides_other_users_activity(
+        self, mcp, auth_user, repo, db_pool, clean_test_data
+    ):
+        users = UserRepository(db_pool)
+        other_user = await users.create(
+            external_id=f"{clean_test_data}request-tool-peer",
+            provider="local",
+            organization_id=auth_user["organization_id"],
+            email=f"{clean_test_data}request-tool-peer@test.com",
+            display_name="Request Tool Peer",
+        )
+        own_request = await repo.create_request(
+            title="Own pending request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+        )
+        other_request = await repo.create_request(
+            title="Other pending request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(other_user["id"]),
+        )
+        own_task = await repo.create_task(
+            request_id=str(own_request["id"]),
+            title="Own pending task",
+            org_id=str(auth_user["organization_id"]),
+        )
+        other_task = await repo.create_task(
+            request_id=str(other_request["id"]),
+            title="Other pending task",
+            org_id=str(auth_user["organization_id"]),
+        )
+
+        pending = await _call(mcp, "list_pending_requests")
+        assert {item["id"] for item in pending["items"]} == {str(own_request["id"])}
+
+        active = await _call(mcp, "list_active_work")
+        assert {item["id"] for item in active["items"]} == {str(own_request["id"])}
+
+        tasks = await _call(mcp, "list_pending_tasks")
+        assert {item["id"] for item in tasks["items"]} == {str(own_task["id"])}
+        assert str(other_task["id"]) not in {item["id"] for item in tasks["items"]}
+
+    @pytest.mark.asyncio
     async def test_no_auth(self, mcp, test_user):
         set_current_user(None)
         result = await _call(mcp, "list_pending_requests")
         assert "error" in result
+
+
+# ============================================================================
+# Request and task mutations
+# ============================================================================
+
+
+class TestRequestTaskMutations:
+    @pytest.mark.asyncio
+    async def test_updates_and_cancels_owned_work(self, mcp, auth_user, repo):
+        request = await repo.create_request(
+            title="Mutable request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(request["id"]),
+            title="Original task title",
+            org_id=str(auth_user["organization_id"]),
+        )
+
+        updated_task = await _call(
+            mcp,
+            "update_task",
+            {"task_id": str(task["id"]), "title": "Updated task title"},
+        )
+        assert updated_task["title"] == "Updated task title"
+
+        cancelled_task = await _call(mcp, "cancel_task", {"task_id": str(task["id"])})
+        assert cancelled_task["status"] == "cancelled"
+
+        cancelled_request = await _call(
+            mcp,
+            "update_request_status",
+            {"request_id": str(request["id"]), "status": "cancelled"},
+        )
+        assert cancelled_request["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_cannot_mutate_peer_work(self, mcp, auth_user, repo, db_pool, clean_test_data):
+        peer = await UserRepository(db_pool).create(
+            external_id=f"{clean_test_data}mutation-peer",
+            provider="local",
+            organization_id=auth_user["organization_id"],
+            email=f"{clean_test_data}mutation-peer@test.com",
+            display_name="Mutation Peer",
+        )
+        request = await repo.create_request(
+            title="Peer request",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(peer["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(request["id"]),
+            title="Peer task",
+            org_id=str(auth_user["organization_id"]),
+        )
+
+        task_result = await _call(
+            mcp,
+            "update_task",
+            {"task_id": str(task["id"]), "title": "Attempted peer edit"},
+        )
+        assert "error" in task_result
+        request_result = await _call(
+            mcp,
+            "update_request_status",
+            {"request_id": str(request["id"]), "status": "cancelled"},
+        )
+        assert "error" in request_result
+
+        assert (await repo.get_task(str(task["id"]), str(auth_user["organization_id"])))[
+            "title"
+        ] == "Peer task"
+        assert (await repo.get_request(str(request["id"]), str(auth_user["organization_id"])))[
+            "status"
+        ] == "pending"
 
 
 # ============================================================================
@@ -714,6 +836,7 @@ class TestListPendingTasks:
         req = await repo.create_request(
             title="Task List Test",
             org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
         )
         await repo.create_task(
             request_id=str(req["id"]),
@@ -730,3 +853,30 @@ class TestListPendingTasks:
         set_current_user(None)
         result = await _call(mcp, "list_pending_tasks")
         assert "error" in result
+
+
+class TestListQueuedTasks:
+    @pytest.mark.asyncio
+    async def test_returns_sequence_blocked_task(self, mcp, auth_user, repo, test_organization):
+        req = await repo.create_request(
+            title="Queued List Test",
+            org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
+        )
+        await repo.create_task(
+            request_id=str(req["id"]),
+            title="Ready stage",
+            org_id=str(test_organization["id"]),
+            sequence_order=0,
+        )
+        await repo.create_task(
+            request_id=str(req["id"]),
+            title="Blocked stage",
+            org_id=str(test_organization["id"]),
+            sequence_order=1,
+        )
+
+        result = await _call(mcp, "list_queued_tasks")
+
+        titles = {task["title"] for task in result["items"]}
+        assert {"Ready stage", "Blocked stage"} <= titles

@@ -36,6 +36,7 @@ async def files_list(request: Request, page: int = 1, per_page: int = 25):
             "per_page": per_page,
             "total_pages": total_pages,
             "total_count": result["total_count"],
+            "unseen_count": result["unseen_count"],
         },
     )
 
@@ -48,6 +49,9 @@ async def file_detail(request: Request, file_id: str):
     if not result:
         raise HTTPException(404, "File not found")
     item, content = result
+    await service.repository.mark_current_revision_viewed_owned(
+        file_id, str(user.organization_id), str(user.id)
+    )
     revisions = await service.repository.list_revisions_owned(
         file_id, str(user.organization_id), str(user.id)
     )
@@ -83,6 +87,10 @@ async def file_revision_content(request: Request, file_id: str, revision_number:
     item = await service.get_owned(file_id, str(user.organization_id), str(user.id))
     if not item:
         raise HTTPException(404, "File not found")
+    if revision_number == item["current_revision"]:
+        await service.repository.mark_current_revision_viewed_owned(
+            file_id, str(user.organization_id), str(user.id)
+        )
     return Response(
         content=content,
         media_type=item["mime_type"],
@@ -105,6 +113,9 @@ async def file_content(request: Request, file_id: str, download: bool = False):
     if not result:
         raise HTTPException(404, "File not found")
     item, content = result
+    await UserFileService(await get_pool()).repository.mark_current_revision_viewed_owned(
+        file_id, str(user.organization_id), str(user.id)
+    )
     active_content = item["mime_type"] in {
         "text/html",
         "application/xhtml+xml",

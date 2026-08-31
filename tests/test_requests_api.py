@@ -74,12 +74,22 @@ async def test_request_api_scopes_members_and_system_work(db_pool):
             org_id=str(org["id"]),
             created_by=str(member_a["id"]),
         )
-        await requests.create_request(
+        task_a = await requests.create_task(
+            request_id=str(request_a["id"]),
+            title="Member A private task",
+            org_id=str(org["id"]),
+        )
+        request_b = await requests.create_request(
             title="Member B private request",
             org_id=str(org["id"]),
             created_by=str(member_b["id"]),
         )
-        await requests.create_request(
+        await requests.create_task(
+            request_id=str(request_b["id"]),
+            title="Member B private task",
+            org_id=str(org["id"]),
+        )
+        system_request = await requests.create_request(
             title="System daemon request",
             org_id=str(org["id"]),
             created_by=str(daemon["id"]),
@@ -96,6 +106,30 @@ async def test_request_api_scopes_members_and_system_work(db_pool):
             hidden = await client.get(f"/api/requests/{request_a['id']}")
             assert hidden.status_code == 200
 
+            queued = await client.get("/api/requests/queue")
+            assert queued.status_code == 200
+            assert {row["id"] for row in queued.json()["items"]} == {str(task_a["id"])}
+
+            ready = await client.get("/api/requests/queue/pending")
+            assert ready.status_code == 200
+            assert {row["id"] for row in ready.json()["items"]} == {str(task_a["id"])}
+
+            cancelled_task = await client.post(f"/api/requests/tasks/{task_a['id']}/cancel")
+            assert cancelled_task.status_code == 200
+            assert cancelled_task.json()["status"] == "cancelled"
+
+            active = await client.get("/api/requests/active")
+            assert active.status_code == 200
+            assert {row["id"] for row in active.json()["items"]} == {str(request_a["id"])}
+
+            review = await client.get("/api/requests/review")
+            assert review.status_code == 200
+            assert review.json()["items"] == []
+
+            recent = await client.get("/api/requests/recently-completed")
+            assert recent.status_code == 200
+            assert recent.json()["items"] == []
+
         async with _client_for(member_b) as client:
             hidden = await client.get(f"/api/requests/{request_a['id']}")
             assert hidden.status_code == 404
@@ -107,6 +141,26 @@ async def test_request_api_scopes_members_and_system_work(db_pool):
             rows = payload.get("items", payload.get("requests", []))
             titles = {row["title"] for row in rows}
             assert titles == {"System daemon request"}
+
+            active = await client.get("/api/requests/active")
+            assert active.status_code == 200
+            assert {row["id"] for row in active.json()["items"]} == {str(system_request["id"])}
+
+        await requests.update_request_status(
+            str(request_b["id"]), "review", org_id=str(org["id"])
+        )
+        await requests.update_request_status(
+            str(request_a["id"]), "completed", org_id=str(org["id"])
+        )
+
+        async with _client_for(member_a) as client:
+            review = await client.get("/api/requests/review")
+            assert review.status_code == 200
+            assert review.json()["items"] == []
+
+            recent = await client.get("/api/requests/recently-completed")
+            assert recent.status_code == 200
+            assert {row["id"] for row in recent.json()["items"]} == {str(request_a["id"])}
     finally:
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM requests WHERE organization_id = $1", org["id"])

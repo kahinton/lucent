@@ -7,10 +7,15 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from lucent.access_control import AccessControlService
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.logging import get_logger
 from lucent.rbac import Role
+from lucent.settings import (
+    hook_admin_approval_required,
+    managed_tool_admin_approval_required,
+)
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
@@ -30,7 +35,12 @@ async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
 
 
 async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
-    user_ids = {str(item.get("owner_user_id")) for item in items if item.get("owner_user_id")}
+    user_ids = {
+        str(item.get(user_key))
+        for item in items
+        for user_key in ("owner_user_id", "owner_approved_by")
+        if item.get(user_key)
+    }
     group_ids = {str(item.get("owner_group_id")) for item in items if item.get("owner_group_id")}
     user_map: dict[str, str] = {}
     group_map: dict[str, str] = {}
@@ -67,6 +77,8 @@ def _attach_owner_names(
         owner_group_id = str(d.get("owner_group_id")) if d.get("owner_group_id") else None
         d["owner_user_name"] = user_map.get(owner_user_id) if owner_user_id else None
         d["owner_group_name"] = group_map.get(owner_group_id) if owner_group_id else None
+        owner_approved_by = str(d.get("owner_approved_by")) if d.get("owner_approved_by") else None
+        d["owner_approved_by_name"] = user_map.get(owner_approved_by) if owner_approved_by else None
         enriched.append(d)
     return enriched
 
@@ -128,6 +140,66 @@ def _require_admin(user: object) -> None:
     """Raise 403 if user is not admin or owner."""
     if user.role not in (Role.ADMIN, Role.OWNER):
         raise HTTPException(status_code=403, detail="Permission denied")
+
+
+def _is_admin_or_owner(user) -> bool:
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    return role_value in ("admin", "owner")
+
+
+async def _require_definition_approval_access(
+    pool,
+    user,
+    definition_type: str,
+    definition_id: str,
+) -> dict:
+    """Authorize an owner approval or an administrator's final safety approval."""
+    acl = AccessControlService(pool)
+    org_id = str(user.organization_id)
+    if not await acl.can_modify(str(user.id), definition_type, definition_id, org_id):
+        raise HTTPException(status_code=404, detail="Definition not found")
+
+    from lucent.db.definitions import DefinitionRepository
+
+    repo = DefinitionRepository(pool)
+    getters = {
+        "agent": repo.get_agent,
+        "skill": repo.get_skill,
+        "hook": repo.get_hook,
+        "managed_tool": repo.get_managed_tool,
+    }
+    definition = await getters[definition_type](definition_id, org_id)
+    if not definition:
+        raise HTTPException(status_code=404, detail="Definition not found")
+    if (
+        definition_type in {"hook", "managed_tool"}
+        and definition.get("status") == "owner_approved"
+        and not _is_admin_or_owner(user)
+    ):
+        raise HTTPException(status_code=403, detail="Administrative approval required")
+    return definition
+
+
+async def _approval_button_state(pool, user, definition_type: str, definition: dict) -> tuple[bool, str]:
+    """Return whether the current user can act and the action label to present."""
+    try:
+        await _require_definition_approval_access(
+            pool, user, definition_type, str(definition["id"])
+        )
+    except HTTPException:
+        return False, "Approve"
+    requires_admin = (
+        definition_type == "hook"
+        and hook_admin_approval_required(organization_id=user.organization_id)
+    ) or (
+        definition_type == "managed_tool"
+        and managed_tool_admin_approval_required(organization_id=user.organization_id)
+    )
+    if requires_admin and definition.get("status") == "proposed":
+        return True, "Approve and send to admin"
+    if requires_admin and definition.get("status") == "owner_approved":
+        return True, "Final approve"
+    return True, "Approve"
 
 
 def _parse_json_object(value: str, default: dict | None = None) -> dict:
@@ -269,6 +341,21 @@ async def definitions_page(
         requester_user_id=str(user.id),
         requester_role=role_value,
     )
+    for definition_type, proposal_key in (
+        ("agent", "agents"),
+        ("skill", "skills"),
+        ("hook", "hooks"),
+        ("managed_tool", "managed_tools"),
+    ):
+        for proposal in proposals[proposal_key]:
+            can_approve, approval_label = await _approval_button_state(
+                pool, user, definition_type, proposal
+            )
+            proposal["can_approve"] = can_approve
+            proposal["approval_label"] = approval_label
+    for proposal in proposals["mcp_servers"]:
+        proposal["can_approve"] = _is_admin_or_owner(user)
+        proposal["approval_label"] = "Approve"
     definition_engineer_agent = await _find_agent_composer_agent(
         repo, org_id, user, role_value,
     )
@@ -355,6 +442,7 @@ async def agent_detail_page(request: Request, agent_id: str):
     user_map, group_map = await _resolve_owner_maps(pool, [agent])
     agent = _attach_owner_names([agent], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
+    can_approve, approval_label = await _approval_button_state(pool, user, "agent", agent)
 
     # Get all skills, tools, hooks, and providers for the assignment dropdowns
     all_skills = (
@@ -408,6 +496,8 @@ async def agent_detail_page(request: Request, agent_id: str):
             "user": user,
             "definition": agent,
             "definition_type": "agent",
+            "can_approve": can_approve,
+            "approval_label": approval_label,
             "owner_groups": user_groups,
             "all_skills": all_skills,
             "all_mcp": all_mcp,
@@ -446,6 +536,7 @@ async def skill_detail_page(request: Request, skill_id: str):
     user_map, group_map = await _resolve_owner_maps(pool, [skill])
     skill = _attach_owner_names([skill], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
+    can_approve, approval_label = await _approval_button_state(pool, user, "skill", skill)
 
     return templates.TemplateResponse(
         request,
@@ -454,6 +545,8 @@ async def skill_detail_page(request: Request, skill_id: str):
             "user": user,
             "definition": skill,
             "definition_type": "skill",
+            "can_approve": can_approve,
+            "approval_label": approval_label,
             "owner_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
@@ -483,6 +576,8 @@ async def mcp_server_detail_page(request: Request, server_id: str):
     server["headers_text"] = _json_text(server.get("headers"), {})
     server["env_vars_text"] = _env_vars_text(server.get("env_vars"))
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
+    can_approve = _is_admin_or_owner(user)
+    approval_label = "Approve"
 
     return templates.TemplateResponse(
         request,
@@ -491,6 +586,8 @@ async def mcp_server_detail_page(request: Request, server_id: str):
             "user": user,
             "definition": server,
             "definition_type": "mcp-server",
+            "can_approve": can_approve,
+            "approval_label": approval_label,
             "owner_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
@@ -517,6 +614,7 @@ async def hook_detail_page(request: Request, hook_id: str):
     user_map, group_map = await _resolve_owner_maps(pool, [hook])
     hook = _attach_owner_names([hook], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
+    can_approve, approval_label = await _approval_button_state(pool, user, "hook", hook)
 
     return templates.TemplateResponse(
         request,
@@ -525,6 +623,8 @@ async def hook_detail_page(request: Request, hook_id: str):
             "user": user,
             "definition": hook,
             "definition_type": "hook",
+            "can_approve": can_approve,
+            "approval_label": approval_label,
             "owner_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
@@ -559,6 +659,7 @@ async def managed_tool_detail_page(request: Request, tool_id: str):
     tool["resource_limits_text"] = _json_text(tool.get("resource_limits"), {})
     tool["content"] = tool.get("source_code") or ""
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
+    can_approve, approval_label = await _approval_button_state(pool, user, "managed_tool", tool)
 
     return templates.TemplateResponse(
         request,
@@ -567,6 +668,8 @@ async def managed_tool_detail_page(request: Request, tool_id: str):
             "user": user,
             "definition": tool,
             "definition_type": "tool",
+            "can_approve": can_approve,
+            "approval_label": approval_label,
             "owner_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
@@ -634,13 +737,13 @@ async def discover_tools_ajax(request: Request, server_id: str, refresh: bool = 
 async def approve_agent_web(request: Request, agent_id: str):
     """Approve an agent definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "agent", agent_id)
     await repo.approve_agent(agent_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
@@ -649,13 +752,13 @@ async def approve_agent_web(request: Request, agent_id: str):
 async def reject_agent_web(request: Request, agent_id: str):
     """Reject an agent definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "agent", agent_id)
     await repo.reject_agent(agent_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
@@ -664,13 +767,13 @@ async def reject_agent_web(request: Request, agent_id: str):
 async def approve_skill_web(request: Request, skill_id: str):
     """Approve a skill definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "skill", skill_id)
     await repo.approve_skill(skill_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/skills/{skill_id}", status_code=303)
 
@@ -679,13 +782,13 @@ async def approve_skill_web(request: Request, skill_id: str):
 async def reject_skill_web(request: Request, skill_id: str):
     """Reject a skill definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "skill", skill_id)
     await repo.reject_skill(skill_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/skills/{skill_id}", status_code=303)
 
@@ -724,14 +827,21 @@ async def reject_mcp_web(request: Request, server_id: str):
 async def approve_hook_web(request: Request, hook_id: str):
     """Approve a hook definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    await repo.approve_hook(hook_id, str(user.organization_id), str(user.id))
+    await _require_definition_approval_access(pool, user, "hook", hook_id)
+    await repo.approve_hook(
+        hook_id,
+        str(user.organization_id),
+        str(user.id),
+        require_admin_approval=hook_admin_approval_required(
+            organization_id=user.organization_id
+        ),
+    )
     return RedirectResponse(url=f"/definitions/hooks/{hook_id}", status_code=303)
 
 
@@ -739,13 +849,13 @@ async def approve_hook_web(request: Request, hook_id: str):
 async def reject_hook_web(request: Request, hook_id: str):
     """Reject a hook definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "hook", hook_id)
     await repo.reject_hook(hook_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/hooks/{hook_id}", status_code=303)
 
@@ -754,14 +864,21 @@ async def reject_hook_web(request: Request, hook_id: str):
 async def approve_managed_tool_web(request: Request, tool_id: str):
     """Approve a managed tool definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    await repo.approve_managed_tool(tool_id, str(user.organization_id), str(user.id))
+    await _require_definition_approval_access(pool, user, "managed_tool", tool_id)
+    await repo.approve_managed_tool(
+        tool_id,
+        str(user.organization_id),
+        str(user.id),
+        require_admin_approval=managed_tool_admin_approval_required(
+            organization_id=user.organization_id
+        ),
+    )
     return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
 
 
@@ -769,13 +886,13 @@ async def approve_managed_tool_web(request: Request, tool_id: str):
 async def reject_managed_tool_web(request: Request, tool_id: str):
     """Reject a managed tool definition."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    await _require_definition_approval_access(pool, user, "managed_tool", tool_id)
     await repo.reject_managed_tool(tool_id, str(user.organization_id), str(user.id))
     return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
 

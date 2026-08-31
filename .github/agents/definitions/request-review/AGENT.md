@@ -94,7 +94,28 @@ regardless of what verdict you wrote. You do not get to skip this step.
 - Call `link_task_memory(task_id, memory_id, "created")` to attach them
   back to this request's task tree.
 
-### 4. Make Your Decision
+### 4. Preserve Research Findings — MANDATORY FOR RESEARCH REQUESTS
+
+When the original request asks for research, investigation, analysis, or a
+recommendation based on gathered findings, do not approve it until the findings
+are available to the user outside the review output. You MUST create one of the
+following durable deliverables before emitting `REQUEST_REVIEW_DECISION`:
+
+- **Handoff:** Use `send_handoff` when the investigation may need follow-up
+  questions, a decision from the user, or an ongoing conversation. Summarize the
+  findings, the remaining uncertainty, and the most useful next question or
+  decision. Link the request and relevant task references.
+- **File:** Create or update a file when the findings have an obvious durable
+  documentation home, such as a project document, research report, decision
+  record, or other named file. Record the file as a task output when needed so
+  it is visible from Activity.
+
+Do not treat narrative text in a task result, review feedback, memory, or this
+review response as a substitute for a handoff or file. If the research outcome
+has neither a handoff nor a file, return `NEEDS_REWORK` and direct the task
+agent to create the appropriate deliverable.
+
+### 5. Make Your Decision
 
 Before choosing APPROVED or NEEDS_REWORK, check whether any task reports a
 legitimate environment, setup, credential, permission, dependency, or
@@ -138,7 +159,7 @@ When the work was blocked by this kind of user- or environment-actionable issue:
 - The task blamed setup/configuration but did not provide enough evidence,
   remediation detail, or attempted actions for a user to act on
 
-### 4. Writing Rework Feedback
+### 6. Writing Rework Feedback
 
 When sending back for rework, your feedback must be:
 - **Specific**: Name exactly what's wrong and what's missing
@@ -178,7 +199,7 @@ Note: even when sending back for rework, you should still update linked
 goal memories with `progress_notes` describing what was attempted and
 why it didn't pass — that history is valuable for the rework cycle.
 
-### 5. Record Review Outcome
+### 7. Record Review Outcome
 
 After making your decision, save the review pattern for future calibration:
 

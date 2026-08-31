@@ -17,6 +17,7 @@ from . import (
     definitions,
     files,
     groups,
+    live,
     memories,
     requests_routes,
     sandboxes,
@@ -53,3 +54,4 @@ router.include_router(admin.router, prefix="/settings")
 router.include_router(groups.router, prefix="/settings")
 router.include_router(secrets.router, prefix="/settings")
 router.include_router(connections.router, prefix="/settings")
+router.include_router(live.router)

@@ -16,7 +16,7 @@
         </div>
         <select 
             class="px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none"
-            onchange="window.location.href='/audit?source={{ source }}&action_type=' + this.value"
+            data-redirect-prefix="/audit?source={{ source }}&action_type="
         >
             <option value="">All Actions</option>
             {% for t in action_types %}
