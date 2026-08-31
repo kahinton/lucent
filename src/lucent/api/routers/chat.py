@@ -7,6 +7,8 @@ Lucent MCP server for memory search, creation, and management.
 """
 
 import json
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -39,6 +41,14 @@ from lucent.tool_policy import (
 logger = get_logger("chat")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+COPILOT_BUILTIN_GITHUB_SERVER_TYPES = frozenset({
+    "copilot_github",
+    "copilot_builtin_github",
+    "copilot-builtin-github",
+    "github_builtin",
+    "github-builtin",
+})
 
 # Compatibility constants for tests and older imports. Settings helpers remain
 # the source of the initial values, but callers can monkeypatch these module
@@ -187,6 +197,62 @@ def _build_mcp_config(
             extra_headers=headers,
         ),
     }
+
+
+async def _build_agent_mcp_config(
+    servers: list[dict[str, Any]],
+) -> tuple[dict[str, Any], bool]:
+    """Build runtime MCP configuration from an agent's granted servers."""
+    if not servers:
+        return {}, False
+
+    from lucent.secrets import SecretRegistry, resolve_env_vars
+    from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
+
+    secret_provider = SecretRegistry.get()
+
+    async def resolve_runtime_value(value: str) -> str:
+        resolved = re.sub(
+            r"\$\{([^}]+)\}",
+            lambda match: os.environ.get(match.group(1), match.group(0)),
+            value,
+        )
+        if is_secret_reference(resolved):
+            return await resolve_secret_reference(resolved, secret_provider)
+        return resolved
+
+    mcp_config: dict[str, Any] = {}
+    enable_copilot_github = False
+    for server in servers:
+        server_type = str(server.get("server_type") or "http").lower()
+        if server_type in COPILOT_BUILTIN_GITHUB_SERVER_TYPES:
+            enable_copilot_github = True
+            continue
+
+        runtime_type = "http" if server_type == "http" else "stdio"
+        if runtime_type == "http":
+            config = {
+                "type": "http",
+                "url": await resolve_runtime_value(str(server.get("url") or "")),
+                "headers": {
+                    key: await resolve_runtime_value(value) if isinstance(value, str) else value
+                    for key, value in (server.get("headers") or {}).items()
+                },
+            }
+        else:
+            config = {
+                "type": "stdio",
+                "command": await resolve_runtime_value(str(server.get("command") or "")),
+                "args": [
+                    await resolve_runtime_value(arg) if isinstance(arg, str) else arg
+                    for arg in (server.get("args") or [])
+                ],
+                "env": await resolve_env_vars(server.get("env_vars") or {}, secret_provider),
+            }
+        config["tools"] = server.get("allowed_tools") or ["*"]
+        mcp_config[f"mcp-{server['id']}"] = config
+
+    return mcp_config, enable_copilot_github
 
 
 
@@ -1419,6 +1485,15 @@ async def chat_stream_v2(
         if session_token
         else {}
     )
+    agent_mcp_servers = (
+        await repo.get_agent_mcp_servers(effective_agent_id)
+        if effective_agent_id
+        else []
+    )
+    agent_mcp_config, enable_agent_provider_discovery = await _build_agent_mcp_config(
+        agent_mcp_servers
+    )
+    mcp_config.update(agent_mcp_config)
 
     logger.info(
         "Chat v2 session: engine=%s, model=%s, agent=%s",
@@ -1579,6 +1654,7 @@ async def chat_stream_v2(
                     "agent_definition_id": effective_agent_id,
                     "skill_names": agent_skill_names,
                 },
+                enable_config_discovery=enable_agent_provider_discovery,
             )
             if result and chat_session.repo and chat_session.session_id:
                 await chat_session.repo.add_message(

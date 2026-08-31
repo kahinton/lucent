@@ -225,6 +225,87 @@ async def test_chat_stream_v2_surfaces_langchain_tool_input(monkeypatch):
     assert '\\"query\\": \\"project notes\\"' in body
 
 
+@pytest.mark.asyncio
+async def test_chat_stream_v2_includes_assigned_agent_mcp_servers(monkeypatch):
+    captured: dict = {}
+
+    class _AgentRepo:
+        def __init__(self, _pool):
+            pass
+
+        async def get_agent(self, _agent_id, _organization_id):
+            return {"id": "agent-id", "name": "code", "content": "# Code agent"}
+
+        async def get_agent_skills(self, _agent_id):
+            return []
+
+        async def get_agent_managed_tools(self, _agent_id):
+            return []
+
+        async def get_agent_mcp_servers(self, _agent_id):
+            return [
+                {
+                    "id": "github-server",
+                    "server_type": "http",
+                    "url": "https://mcp.example.test",
+                    "headers": {"X-Token": "token"},
+                    "allowed_tools": ["search_repositories"],
+                },
+                {"id": "copilot-github", "server_type": "copilot_github"},
+            ]
+
+        async def get_agent_hooks(self, _agent_id):
+            return []
+
+    class _CapturingEngine:
+        name = "copilot"
+
+        async def run_session_streaming(self, **kwargs):
+            captured.update(kwargs)
+            return "done"
+
+    async def fake_prepare_persistent_session(**_kwargs):
+        return chat.PersistentChatSession(
+            session_id="session-id",
+            provider_session_id=None,
+            provider_initialized=False,
+            turn_id="turn-id",
+            user_message_id="message-id",
+            previous_messages=[],
+            repo=None,
+        )
+
+    async def fake_render_active_user_context(*_args):
+        return "context"
+
+    monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr(chat, "_can_user_access_model", _allow_model)
+    monkeypatch.setattr(chat, "_render_active_user_context", fake_render_active_user_context)
+    monkeypatch.setattr(chat, "_prepare_persistent_chat_session", fake_prepare_persistent_session)
+    monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+    monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: _CapturingEngine())
+    monkeypatch.setattr("lucent.db.definitions.DefinitionRepository", _AgentRepo)
+    monkeypatch.setattr("lucent.secrets.SecretRegistry.get", lambda: object())
+
+    response = await chat.chat_stream_v2(
+        _FakeRequest(),
+        chat.ChatStreamRequest(
+            messages=[chat.ChatMessage(role="user", content="search repositories")],
+            model="claude-haiku-4.5",
+            agent_id="agent-id",
+        ),
+    )
+
+    async for _chunk in response.body_iterator:
+        pass
+
+    server = captured["mcp_config"]["mcp-github-server"]
+    assert server["url"] == "https://mcp.example.test"
+    assert server["headers"] == {"X-Token": "token"}
+    assert server["tools"] == ["search_repositories"]
+    assert captured["enable_config_discovery"] is True
+
+
 def test_chat_prompt_blocks_invented_security_protocols():
     instructions = chat._chat_tool_grounding_instructions()
 
