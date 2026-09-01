@@ -2855,6 +2855,45 @@ class RequestRepository:
             return task
         return None
 
+    async def mark_task_needs_review(
+        self,
+        task_id: str,
+        error: str,
+        org_id: str | None = None,
+        instance_id: str | None = None,
+        result: str | None = None,
+    ) -> dict | None:
+        """Stop automatic execution while preserving the result for human review."""
+        now = datetime.now(timezone.utc)
+        query = """UPDATE tasks SET status = 'needs_review', error = $2,
+                   result = COALESCE($4, result),
+                   result_summary = CASE
+                       WHEN $4::text IS NULL THEN result_summary
+                       ELSE left($4::text, 500)
+                   END,
+                   completed_at = $3, updated_at = $3
+                   WHERE id = $1 AND status IN ('claimed', 'running')"""
+        params: list[Any] = [UUID(task_id), error, now, result]
+        if org_id:
+            query += f" AND organization_id = ${len(params) + 1}"
+            params.append(UUID(org_id))
+        if instance_id:
+            query += f" AND claimed_by = ${len(params) + 1}"
+            params.append(instance_id)
+        query += " RETURNING *"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *params)
+        if not row:
+            return None
+        task = dict(row)
+        await self.add_task_event(
+            task_id,
+            "needs_review",
+            f"Manual review required: {error[:200]}",
+            {"rejected_output_chars": len(result or "")},
+        )
+        return task
+
     async def release_task(
         self,
         task_id: str,
@@ -2921,7 +2960,7 @@ class RequestRepository:
         return None
 
     async def retry_task(self, task_id: str, org_id: str | None = None) -> dict | None:
-        """Reset a failed task back to pending for retry."""
+        """Reset a failed or manually reviewed task back to pending for retry."""
         now = datetime.now(timezone.utc)
         if org_id:
             async with self.pool.acquire() as conn:
@@ -2930,7 +2969,7 @@ class RequestRepository:
                        claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
                        completed_at = NULL, result = NULL,
                        error = NULL, updated_at = $2
-                       WHERE id = $1 AND status = 'failed'
+                       WHERE id = $1 AND status IN ('failed', 'needs_review')
                        AND organization_id = $3 RETURNING *""",
                     UUID(task_id),
                     now,
@@ -2943,7 +2982,7 @@ class RequestRepository:
                        claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
                        completed_at = NULL, result = NULL,
                        error = NULL, updated_at = $2
-                       WHERE id = $1 AND status = 'failed' RETURNING *""",
+                       WHERE id = $1 AND status IN ('failed', 'needs_review') RETURNING *""",
                     UUID(task_id),
                     now,
                 )

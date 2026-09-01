@@ -1059,6 +1059,33 @@ async def fail_task(
     return task
 
 
+@router.post("/tasks/{task_id}/needs-review")
+async def mark_task_needs_review(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: TaskFailBody = Body(...),
+    pool=Depends(get_pool),
+):
+    """Stop automatic execution and preserve a task for human review."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
+    task = await repo.mark_task_needs_review(
+        str(task_id),
+        body.error,
+        org_id=str(user.organization_id),
+        instance_id=body.instance_id,
+        result=body.result,
+    )
+    if not task:
+        raise HTTPException(
+            409,
+            "Task not found or not in a transitionable state (must be claimed/running)",
+        )
+    return task
+
+
 @router.post("/tasks/{task_id}/release")
 async def release_task(
     task_id: UUID,
@@ -1088,7 +1115,7 @@ async def retry_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
     await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
     task = await repo.retry_task(str(task_id), org_id=str(user.organization_id))
     if not task:
-        raise HTTPException(409, "Task not in failed state")
+        raise HTTPException(409, "Task not in failed or needs_review state")
     return task
 
 

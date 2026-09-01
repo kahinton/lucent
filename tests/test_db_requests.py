@@ -486,6 +486,25 @@ class TestTaskLifecycle:
         assert failed["completed_at"] is not None
 
     @pytest.mark.asyncio
+    async def test_mark_task_needs_review_and_retry(self, repo, task):
+        await repo.claim_task(str(task["id"]), "daemon-1")
+        reviewed = await repo.mark_task_needs_review(
+            str(task["id"]),
+            "Required tool call was not completed",
+            result="Useful investigation output",
+        )
+
+        assert reviewed is not None
+        assert reviewed["status"] == "needs_review"
+        assert reviewed["result"] == "Useful investigation output"
+        assert reviewed["completed_at"] is not None
+
+        retried = await repo.retry_task(str(task["id"]))
+        assert retried is not None
+        assert retried["status"] == "pending"
+        assert retried["error"] is None
+
+    @pytest.mark.asyncio
     async def test_release_claimed_task(self, repo, task):
         await repo.claim_task(str(task["id"]), "daemon-1")
         released = await repo.release_task(str(task["id"]))

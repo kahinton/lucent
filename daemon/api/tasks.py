@@ -93,6 +93,22 @@ class TaskAPI:
         return await TaskAPI._post(f"/requests/tasks/{task_id}/fail", body, "fail_task")
 
     @staticmethod
+    async def mark_task_needs_review(
+        task_id: str,
+        error: str,
+        instance_id: str | None = None,
+        result: str | None = None,
+    ) -> dict | None:
+        body = {"error": error[:10000], "instance_id": instance_id}
+        if result is not None:
+            body["result"] = result[:200000]
+        return await TaskAPI._post(
+            f"/requests/tasks/{task_id}/needs-review",
+            body,
+            "mark_task_needs_review",
+        )
+
+    @staticmethod
     async def add_event(
         task_id: str,
         event_type: str,

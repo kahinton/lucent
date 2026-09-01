@@ -9,6 +9,7 @@ for auto-created post-completion review tasks.
 from daemon.daemon import (
     _ORG_SHARED_SCHEDULE_TITLES,
     REQUEST_REVIEW_TASK_TITLE,
+    _build_missing_tool_continuation_prompt,
     _get_required_memory_scope,
     _memory_server_tools_for_task,
     _missing_required_task_tools,
@@ -62,6 +63,19 @@ class TestRequiredMemoryScope:
 
 
 class TestRequiredToolUsage:
+    def test_missing_tool_continuation_requires_the_exact_tool(self):
+        prompt = _build_missing_tool_continuation_prompt(
+            description="Store a durable report with store_user_file.",
+            prior_result="I completed the research but did not save the report.",
+            missing_tools=["store_user_file"],
+            requires_operational_tool=True,
+        )
+
+        assert "Continue the task" in prompt
+        assert "store_user_file" in prompt
+        assert "do not repeat its investigation" in prompt
+        assert "Prior response" in prompt
+
     def test_memory_agent_requires_mcp_tool_usage_for_mutating_work(self):
         assert _task_requires_mcp_tool_usage("memory", "Soft-delete retired memories") is True
 

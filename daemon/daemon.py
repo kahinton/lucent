@@ -406,6 +406,36 @@ def _task_skips_tool_validation(agent_type: str | None) -> bool:
     """Return True for task agents whose success must never depend on tool calls."""
     return task_policy.task_skips_tool_validation(agent_type)
 
+
+def _build_missing_tool_continuation_prompt(
+    *,
+    description: str,
+    prior_result: str,
+    missing_tools: list[str],
+    requires_operational_tool: bool,
+) -> str:
+    """Build a corrective continuation for a task that skipped required work."""
+    if missing_tools:
+        requirement = (
+            "You must call these required tool(s) before responding: "
+            f"{', '.join(missing_tools)}."
+        )
+    elif requires_operational_tool:
+        requirement = "You must perform the required operational tool call before responding."
+    else:
+        requirement = "Complete any remaining required tool work before responding."
+
+    return (
+        "Continue the task below. Your prior response is included for context; "
+        "do not repeat its investigation unless needed to finish the work.\n\n"
+        "The completion check found that required work was not performed. "
+        f"{requirement}\n"
+        "Do the missing work now using the available tools. Do not merely describe "
+        "the intended tool call. Then provide a concise completion note.\n\n"
+        f"Original task:\n{description}\n\n"
+        f"Prior response:\n{prior_result[:10000]}"
+    )
+
 # Database URL for direct key provisioning.
 # Prefers DAEMON_DATABASE_URL (restricted lucent_daemon role) over DATABASE_URL
 # (full-privilege server role). The restricted role can only manage api_keys.
@@ -3741,6 +3771,17 @@ class LucentDaemon(
             except TypeError:
                 return await RequestAPI.complete_task(task_id, result, **kwargs)
 
+        async def _needs_review_owned(task_id: str, error: str, result: str | None = None):
+            try:
+                return await RequestAPI.mark_task_needs_review(
+                    task_id,
+                    error,
+                    instance_id=self.instance_id,
+                    result=result,
+                )
+            except TypeError:
+                return await RequestAPI.mark_task_needs_review(task_id, error)
+
         # Ensure requests that reached review status have a review task queued.
         await self._ensure_request_review_tasks()
 
@@ -4373,6 +4414,114 @@ class LucentDaemon(
                 },
             )
 
+            requires_operational_tool = (
+                not _task_skips_tool_validation(agent_type)
+                and _task_requires_mcp_tool_usage(agent_type, title, description)
+            )
+            required_tools = (
+                set()
+                if _task_skips_tool_validation(agent_type)
+                else _required_task_tool_names(agent_type, title, description)
+            )
+            missing_required_tools = _missing_required_task_tools(
+                required_tools,
+                validation_tool_counts,
+                has_durable_output=bool(task.get("has_durable_output")),
+            )
+
+            # A model may finish a useful investigation yet omit an explicit final
+            # tool action. Give it one scoped continuation before escalating to a
+            # human rather than discarding the entire task attempt.
+            if (
+                (requires_operational_tool and not operational_tool_tracker)
+                or missing_required_tools
+            ):
+                continuation_name = f"{agent_type}-{task_id[:8]}-completion"
+                await RequestAPI.add_event(
+                    task_id,
+                    "tool_requirement_repair",
+                    "Required tool work was missed; starting corrective continuation.",
+                    {
+                        "missing_tools": missing_required_tools,
+                        "requires_operational_tool": requires_operational_tool,
+                    },
+                )
+                try:
+                    continuation_result = await self.run_session(
+                        continuation_name,
+                        system_message,
+                        _build_missing_tool_continuation_prompt(
+                            description=description,
+                            prior_result=result or "",
+                            missing_tools=missing_required_tools,
+                            requires_operational_tool=requires_operational_tool,
+                        ),
+                        model=selected_model,
+                        reasoning_effort=task_reasoning_effort,
+                        mcp_config_override=task_mcp_config,
+                        enable_config_discovery=task_enable_config_discovery,
+                        hooks=hooks,
+                        audit_context={
+                            "source": "daemon.task_completion_continuation",
+                            "organization_id": org_id,
+                            "user_id": requesting_user_id,
+                            "request_id": request_id,
+                            "task_id": task_id,
+                            "agent_definition_id": str(agent_data["id"]),
+                            "agent_type": agent_type,
+                            "model": selected_model,
+                            "reasoning_effort": task_reasoning_effort,
+                        },
+                    )
+                except ModelNotAvailableError as exc:
+                    continuation_result = None
+                    await RequestAPI.add_event(
+                        task_id,
+                        "tool_requirement_repair",
+                        f"Corrective continuation could not start: model '{exc.model}' is unavailable.",
+                    )
+
+                continuation_mcp_tracker = self._session_mcp_trackers.pop(
+                    continuation_name, []
+                )
+                continuation_tool_tracker = self._session_tool_trackers.pop(
+                    continuation_name, []
+                )
+                mcp_tracker.extend(continuation_mcp_tracker)
+                tool_tracker.extend(continuation_tool_tracker)
+                operational_tool_tracker = [
+                    entry for entry in tool_tracker if _is_operational_tool_call(entry)
+                ]
+                validation_tool_counts = {}
+                for entry in operational_tool_tracker:
+                    tool = _normalize_tool_name(entry.get("tool") or entry.get("raw_tool"))
+                    if tool:
+                        validation_tool_counts[tool] = validation_tool_counts.get(tool, 0) + 1
+                if continuation_mcp_tracker:
+                    await RequestAPI.add_event(
+                        task_id,
+                        "mcp_tool_usage",
+                        f"Corrective continuation: {_build_mcp_tool_summary(continuation_mcp_tracker)}",
+                        {
+                            "attempt": "completion_continuation",
+                            "calls": [
+                                {"tool": entry["tool"], "params": entry["params"]}
+                                for entry in continuation_mcp_tracker
+                            ],
+                        },
+                    )
+                if continuation_result:
+                    result = (
+                        f"{(result or '').rstrip()}\n\n"
+                        f"--- Completion continuation ---\n\n{continuation_result}"
+                    )
+
+                missing_required_tools = _missing_required_task_tools(
+                    required_tools,
+                    validation_tool_counts,
+                    has_durable_output=bool(task.get("has_durable_output")),
+                )
+
             # Process and destroy sandbox after task completes
             if sandbox_id:
                 try:
@@ -4422,11 +4571,7 @@ class LucentDaemon(
                 except Exception as e:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
 
-            if (
-                not _task_skips_tool_validation(agent_type)
-                and _task_requires_mcp_tool_usage(agent_type, title, description)
-                and not operational_tool_tracker
-            ):
+            if requires_operational_tool and not operational_tool_tracker:
                 reason = (
                     f"{agent_type} task completed without any operational tool calls. "
                     "Tool-dependent tasks must perform real tool operations, not "
@@ -4439,18 +4584,14 @@ class LucentDaemon(
                     reason,
                     {"agent_type": agent_type, "model": selected_model},
                 )
-                await _fail_owned(task_id, reason, result=result)
+                await _needs_review_owned(task_id, reason, result=result)
+                await RequestAPI.add_event(
+                    task_id,
+                    "manual_review_required",
+                    "Corrective continuation did not perform the required tool work.",
+                )
                 continue
 
-            if _task_skips_tool_validation(agent_type):
-                required_tools = set()
-            else:
-                required_tools = _required_task_tool_names(agent_type, title, description)
-            missing_required_tools = _missing_required_task_tools(
-                required_tools,
-                validation_tool_counts,
-                has_durable_output=bool(task.get("has_durable_output")),
-            )
             if missing_required_tools:
                 reason = (
                     "Task instructions required tool call(s) "
@@ -4470,7 +4611,13 @@ class LucentDaemon(
                         "tool_counts": validation_tool_counts,
                     },
                 )
-                await _fail_owned(task_id, reason, result=result)
+                await _needs_review_owned(task_id, reason, result=result)
+                await RequestAPI.add_event(
+                    task_id,
+                    "manual_review_required",
+                    "Corrective continuation did not satisfy the required tool call.",
+                    {"missing_tools": missing_required_tools},
+                )
                 continue
 
             # Validate

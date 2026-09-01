@@ -415,6 +415,27 @@ class TestTaskCompletionBody:
         assert resp.json()["status"] == "failed"
         assert resp.json()["error"] == "boom"
 
+    @pytest.mark.asyncio
+    async def test_task_can_be_marked_for_manual_review_and_retried(
+        self, wf_client, wf_repo, wf_org
+    ):
+        org = str(wf_org["id"])
+        req = await wf_repo.create_request(title="Body R4", org_id=org)
+        task = await _create_task(wf_repo, org, str(req["id"]))
+        await wf_repo.claim_task(str(task["id"]), "d1")
+
+        response = await wf_client.post(
+            f"/api/requests/tasks/{task['id']}/needs-review",
+            json={"error": "Required tool call was missed", "result": "Draft output"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "needs_review"
+        assert response.json()["result"] == "Draft output"
+
+        retry = await wf_client.post(f"/api/requests/tasks/{task['id']}/retry")
+        assert retry.status_code == 200
+        assert retry.json()["status"] == "pending"
+
 
 class TestModelValidation:
     @pytest.mark.asyncio
