@@ -1698,6 +1698,44 @@ class TestBuiltInScheduleEligibility:
         assert task_row["title"] == schedule_title
         assert task_row["request_title"] == f"[Scheduled] {schedule_title}"
 
+    async def test_cognitive_planning_reruns_while_prior_cycle_is_open(
+        self,
+        repo,
+        db_pool,
+        test_user,
+    ):
+        """Structured goal deduplication makes planning cycles independent."""
+        from lucent.api.deps import CurrentUser
+        from lucent.api.routers.schedules import trigger_now
+
+        org_id = str(test_user["organization_id"])
+        user_id = str(test_user["id"])
+        await _insert_positive_candidate(db_pool, "Cognitive Planning", org_id, user_id)
+        await _insert_agent_definition(db_pool, org_id, user_id, "planning")
+        sched = await repo.create_schedule(
+            title="Cognitive Planning",
+            org_id=org_id,
+            schedule_type="interval",
+            interval_seconds=3600,
+            description="test Cognitive Planning",
+            agent_type="planning",
+            created_by=user_id,
+            trigger_config={"allow_concurrent": True},
+        )
+        user = CurrentUser(
+            id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            role=test_user["role"],
+            email=test_user["email"],
+            display_name=test_user["display_name"],
+        )
+
+        first = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
+        second = await trigger_now(str(sched["id"]), user, force=True, pool=db_pool)
+
+        assert second.get("skipped") is not True
+        assert second["request"]["id"] != first["request"]["id"]
+
     async def test_owner_can_trigger_daemon_created_workflow_as_human_fallback(
         self,
         repo,

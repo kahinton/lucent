@@ -1884,6 +1884,11 @@ class LucentDaemon(
                         "schedule_type": sched["schedule_type"],
                         "timezone": "UTC",
                     }
+                    if sched["title"] == "Cognitive Planning":
+                        # Structured goal/milestone deduplication makes each
+                        # planning pass idempotent, so prior schedule wrapper
+                        # requests must not suppress the next cycle.
+                        trigger_config["allow_concurrent"] = True
                     if sched.get("interval_seconds"):
                         trigger_config["interval_seconds"] = sched["interval_seconds"]
                     if sched.get("cron_expression"):

@@ -1,5 +1,6 @@
 """Tests for daemon system schedule seeding."""
 
+import json
 import sys
 import types
 from uuid import UUID
@@ -122,6 +123,12 @@ async def test_seed_system_schedules_refreshes_existing_prompts(monkeypatch):
 
     learning_updates = [row for row in updates if row[2].startswith("Process recent work results")]
     assert len(learning_updates) == 1
+
+    cognitive_updates = [
+        row for row in updates if row[2].startswith("Autonomous planning cycle")
+    ]
+    assert len(cognitive_updates) == 1
+    assert json.loads(cognitive_updates[0][9])["allow_concurrent"] is True
 
     vitality_updates = [row for row in updates if row[2].startswith("Server-side memory vitality scorer")]
     assert vitality_updates == []
