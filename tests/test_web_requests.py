@@ -453,6 +453,30 @@ class TestRequestDetail:
         assert resp.status_code == 200
         assert "Web Test Task" in resp.text
 
+    async def test_live_refresh_preserves_completed_task_output_state(
+        self, client, db_pool, request_with_task
+    ):
+        req, task = request_with_task
+        repo = RequestRepository(db_pool)
+        await repo.claim_task(str(task["id"]), "inst-test")
+        await repo.complete_task(str(task["id"]), "# Result\n\n" + "Output " * 400)
+
+        resp = await client.get(
+            f"/requests/{req['id']}",
+            headers={"HX-Request": "true", "X-Live-Refresh": "true"},
+        )
+
+        assert resp.status_code == 200
+        assert f'id="task-{task["id"]}"' in resp.text
+        assert f'id="task-{task["id"]}-execution"' in resp.text
+        assert f'id="result-preview-{task["id"]}"' in resp.text
+        assert f'id="result-full-{task["id"]}"' in resp.text
+        assert 'data-live-revision="' in resp.text
+        assert "renderRequestMarkdown(root)" in resp.text
+        assert "captureRequestLiveState(target)" in resp.text
+        assert "isUnchangedRequestLiveResponse(target, event.detail.xhr.responseText)" in resp.text
+        assert "htmx:afterSettle" in resp.text
+
     async def test_detail_not_found(self, client):
         fake_id = str(uuid4())
         resp = await client.get(f"/activity/{fake_id}")

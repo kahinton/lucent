@@ -28,7 +28,7 @@
 {% endblock %}
 
 {% block content %}
-<div id="request-live-content" data-live-refresh
+<div id="request-live-content" data-live-refresh data-live-revision="{{ live_revision }}"
     hx-get="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}"
     hx-trigger="lucent:live-refresh"
     hx-headers='{"X-Live-Refresh": "true"}'
@@ -145,7 +145,7 @@
                     Approve
                 </button>
             </form>
-            <details class="rounded-lg border border-amber-200 bg-white/70">
+            <details id="request-reject-feedback" class="rounded-lg border border-amber-200 bg-white/70">
                 <summary class="cursor-pointer list-none px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100/60 rounded-lg">
                     Reject with feedback
                 </summary>
@@ -202,7 +202,7 @@
                     Approve
                 </button>
             </form>
-            <details class="rounded-lg border border-blue-200 bg-white/70">
+            <details id="request-review-rework" class="rounded-lg border border-blue-200 bg-white/70">
                 <summary class="cursor-pointer list-none rounded-lg px-3 py-2 text-sm font-medium text-blue-800 hover:bg-blue-100/60">
                     Return for rework
                 </summary>
@@ -244,7 +244,7 @@
 
 {% if req.description %}
 <div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
-    <details class="group" {% if req.description|length <= 900 %}open{% endif %}>
+    <details id="request-body-details" class="group" {% if req.description|length <= 900 %}open{% endif %}>
         <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 hover:bg-gray-50 rounded-xl">
             <div>
                 <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Request Body</h2>
@@ -365,7 +365,7 @@
         <h2 class="text-lg font-semibold text-gray-900">Task Breakdown</h2>
 
         {% macro render_task(task, depth=0) %}
-        <details class="bg-white rounded-lg border border-gray-200 group {% if depth > 0 %}ml-6 border-l-2 border-l-gray-300{% endif %}" {% if task.status in ('running', 'claimed', 'failed', 'needs_review') %}open{% endif %}>
+        <details id="task-{{ task.id }}" class="bg-white rounded-lg border border-gray-200 group {% if depth > 0 %}ml-6 border-l-2 border-l-gray-300{% endif %}" {% if task.status in ('running', 'claimed', 'failed', 'needs_review') %}open{% endif %}>
             <summary class="p-3 cursor-pointer list-none">
                 <div class="flex items-start justify-between gap-3">
                     <div class="flex-1 min-w-0">
@@ -518,7 +518,7 @@
                 {% endif %}
 
                 <!-- Execution Details: sandbox, model, validation, timing -->
-                <details class="bg-gray-50 rounded-lg border border-gray-200">
+                <details id="task-{{ task.id }}-execution" class="bg-gray-50 rounded-lg border border-gray-200">
                     <summary class="cursor-pointer px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:bg-gray-100 rounded-lg">
                         Execution Details
                     </summary>
@@ -940,7 +940,7 @@
                         <a href="/chat/{{ session.id }}" class="shrink-0 rounded-md bg-white px-2 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-100 border border-indigo-100">Open full session</a>
                     </div>
                     {% if session.messages %}
-                    <details class="mt-2 group">
+                    <details id="session-{{ session.id }}-transcript" class="mt-2 group">
                         <summary class="cursor-pointer select-none text-[11px] font-medium text-indigo-600 hover:text-indigo-700">Preview transcript</summary>
                         <div class="mt-2 max-h-64 overflow-y-auto space-y-2 pr-1">
                             {% for msg in session.messages %}
@@ -1197,27 +1197,107 @@ function renderMarkdown(text) {
     return html.join('');
 }
 
-document.querySelectorAll('.js-markdown-block').forEach(function(block) {
-    const source = block.querySelector('script[type="application/json"]');
-    let text = '';
-    if (source) {
-        try {
-            text = JSON.parse(source.textContent || '""');
-        } catch (_err) {
-            text = source.textContent || '';
+function renderRequestMarkdown(root) {
+    root.querySelectorAll('.js-markdown-block').forEach(function(block) {
+        const source = block.querySelector('script[type="application/json"]');
+        let text = '';
+        if (source) {
+            try {
+                text = JSON.parse(source.textContent || '""');
+            } catch (_err) {
+                text = source.textContent || '';
+            }
         }
-    }
-    block.innerHTML = renderMarkdown(text);
+        block.innerHTML = renderMarkdown(text);
+    });
+}
+
+function captureRequestLiveState(root) {
+    const details = {};
+    root.querySelectorAll('details[id]').forEach(function(detail) {
+        details[detail.id] = detail.open;
+    });
+
+    const expandedOutputs = [];
+    const scrollPositions = {};
+    root.querySelectorAll('[id]').forEach(function(element) {
+        if (element.scrollTop) scrollPositions[element.id] = element.scrollTop;
+        if (element.id.startsWith('result-full-') && element.style.display !== 'none') {
+            expandedOutputs.push(element.id);
+        }
+    });
+
+    return {
+        details: details,
+        expandedOutputs: expandedOutputs,
+        scrollPositions: scrollPositions,
+    };
+}
+
+function restoreRequestLiveState(root, state) {
+    if (!state) return;
+    Object.entries(state.details || {}).forEach(function(entry) {
+        const detail = document.getElementById(entry[0]);
+        if (detail) detail.open = entry[1];
+    });
+    (state.expandedOutputs || []).forEach(function(fullId) {
+        const full = document.getElementById(fullId);
+        const taskId = fullId.replace('result-full-', '');
+        const preview = document.getElementById('result-preview-' + taskId);
+        const button = root.querySelector('.toggle-full-output[data-task-id="' + taskId + '"]');
+        if (full) full.style.display = 'block';
+        if (preview) preview.style.display = 'none';
+        if (button) button.style.display = 'none';
+    });
+    Object.entries(state.scrollPositions || {}).forEach(function(entry) {
+        const element = document.getElementById(entry[0]);
+        if (element) element.scrollTop = entry[1];
+    });
+}
+
+function isUnchangedRequestLiveResponse(target, responseText) {
+    if (!target.dataset.liveRevision || !responseText) return false;
+    const response = new DOMParser().parseFromString(responseText, 'text/html');
+    const incoming = response.getElementById('request-live-content');
+    return incoming && target.dataset.liveRevision === incoming.dataset.liveRevision;
+}
+
+document.addEventListener('click', function(event) {
+    const button = event.target.closest('.toggle-full-output');
+    if (!button) return;
+    const taskId = button.getAttribute('data-task-id');
+    const preview = document.getElementById('result-preview-' + taskId);
+    const full = document.getElementById('result-full-' + taskId);
+    if (preview) preview.style.display = 'none';
+    if (full) full.style.display = 'block';
+    button.style.display = 'none';
 });
 
-document.querySelectorAll('.toggle-full-output').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-        var taskId = this.getAttribute('data-task-id');
-        document.getElementById('result-preview-' + taskId).style.display = 'none';
-        document.getElementById('result-full-' + taskId).style.display = 'block';
-        this.style.display = 'none';
-    });
+document.addEventListener('htmx:beforeSwap', function(event) {
+    const target = event.detail.target;
+    if (target && target.id === 'request-live-content') {
+        if (isUnchangedRequestLiveResponse(target, event.detail.xhr.responseText)) {
+            event.detail.shouldSwap = false;
+            return;
+        }
+        window.__lucentRequestLiveState = captureRequestLiveState(target);
+    }
 });
+
+document.addEventListener('htmx:afterSwap', function() {
+    const root = document.getElementById('request-live-content');
+    if (!root || !window.__lucentRequestLiveState) return;
+    renderRequestMarkdown(root);
+});
+
+document.addEventListener('htmx:afterSettle', function() {
+    const root = document.getElementById('request-live-content');
+    if (!root || !window.__lucentRequestLiveState) return;
+    restoreRequestLiveState(root, window.__lucentRequestLiveState);
+    window.__lucentRequestLiveState = null;
+});
+
+renderRequestMarkdown(document);
 
 const activityEvents = Array.from(document.querySelectorAll('.js-activity-event'));
 const activityButtons = Array.from(document.querySelectorAll('.js-activity-filter'));

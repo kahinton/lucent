@@ -1,5 +1,6 @@
 """Request tracking and activity routes."""
 
+from hashlib import sha256
 from math import ceil
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -30,6 +31,35 @@ def can_review_request(user, req: dict) -> bool:
         or role == Role.DAEMON
         or getattr(user, "is_daemon_service", False)
     )
+
+
+def _request_live_revision(req: dict, reviews: list[dict]) -> str:
+    """Return a revision token for request-detail data rendered in live updates."""
+    parts = [
+        str(req.get("id", "")),
+        str(req.get("status", "")),
+        str(req.get("approval_status", "")),
+        str(req.get("updated_at", "")),
+    ]
+    for task in req.get("tasks", []):
+        parts.extend(
+            (
+                str(task.get("id", "")),
+                str(task.get("status", "")),
+                str(task.get("updated_at", "")),
+            )
+        )
+        for event in task.get("events", []):
+            parts.extend((str(event.get("id", "")), str(event.get("created_at", ""))))
+    for review in reviews:
+        parts.extend(
+            (
+                str(review.get("id", "")),
+                str(review.get("status", "")),
+                str(review.get("updated_at", "")),
+            )
+        )
+    return sha256("\x1f".join(parts).encode()).hexdigest()[:16]
 
 
 async def _get_mutable_task_request(repo, task_id: str, user) -> tuple[dict, dict]:
@@ -490,6 +520,7 @@ async def request_detail(request: Request, request_id: str):
             "goal_info": goal_info,
             "origin_session": origin_session,
             "origin_sessions": origin_sessions,
+            "live_revision": _request_live_revision(req, reviews),
             "can_review_request": can_review_request(user, req),
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
