@@ -110,6 +110,22 @@ async def org_member(db_pool, org_org, org_prefix):
     )
 
 
+@pytest_asyncio.fixture
+async def org_hyperadmin(db_pool, org_org, org_prefix):
+    """Create an instance operator with the hyperadmin role."""
+    from lucent.db import UserRepository
+
+    user_repo = UserRepository(db_pool)
+    user = await user_repo.create(
+        external_id=f"{org_prefix}hyperadmin",
+        provider="local",
+        organization_id=org_org["id"],
+        email=f"{org_prefix}hyperadmin@test.com",
+        display_name=f"{org_prefix}Hyperadmin",
+    )
+    return await user_repo.update_role(user["id"], "hyperadmin")
+
+
 def _build_app_with_team_mode(user_dict, role="member"):
     """Create app with team mode enabled and auth overridden."""
     with patch("lucent.api.app.is_team_mode", return_value=True):
@@ -157,6 +173,16 @@ async def admin_client(db_pool, org_admin):
 async def member_client(db_pool, org_member):
     """AsyncClient authenticated as member."""
     app = _build_app_with_team_mode(org_member, role="member")
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def hyperadmin_client(db_pool, org_hyperadmin):
+    """AsyncClient authenticated as a hyperadmin."""
+    app = _build_app_with_team_mode(org_hyperadmin, role="hyperadmin")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -220,11 +246,6 @@ class TestGetCurrentOrganization:
 
 
 class TestUpdateCurrentOrganization:
-    @pytest.mark.xfail(
-        reason="Bug: organizations.py:89 passes organization_id= but "
-        "OrganizationRepository.update() expects org_id=",
-        strict=True,
-    )
     async def test_update_org_as_owner(self, owner_client, org_prefix):
         new_name = f"{org_prefix}updated"
         resp = await owner_client.patch(
@@ -283,8 +304,8 @@ class TestUpdateCurrentOrganization:
 
 
 class TestCreateOrganization:
-    async def test_create_org_as_owner(self, owner_client, org_prefix):
-        resp = await owner_client.post(
+    async def test_create_org_as_hyperadmin(self, hyperadmin_client, org_prefix):
+        resp = await hyperadmin_client.post(
             "/api/organizations",
             json={"name": f"{org_prefix}new_org"},
         )
@@ -294,14 +315,21 @@ class TestCreateOrganization:
         assert "id" in data
         assert "created_at" in data
 
-    async def test_create_org_duplicate_name(self, owner_client, org_org):
+    async def test_create_org_duplicate_name(self, hyperadmin_client, org_org):
         """Cannot create org with an existing name."""
-        resp = await owner_client.post(
+        resp = await hyperadmin_client.post(
             "/api/organizations",
             json={"name": org_org["name"]},
         )
         assert resp.status_code == 409
         assert "already exists" in resp.json()["detail"]
+
+    async def test_create_org_owner_forbidden(self, owner_client, org_prefix):
+        resp = await owner_client.post(
+            "/api/organizations",
+            json={"name": f"{org_prefix}owner_org"},
+        )
+        assert resp.status_code == 403
 
     async def test_create_org_admin_forbidden(self, admin_client, org_prefix):
         """Admins cannot create organizations (requires owner)."""
@@ -336,8 +364,17 @@ class TestGetOrganizationById:
         """Cannot view an organization you don't belong to."""
         fake_id = str(uuid4())
         resp = await owner_client.get(f"/api/organizations/{fake_id}")
-        assert resp.status_code == 403
-        assert "own organization" in resp.json()["detail"]
+        assert resp.status_code == 404
+
+    async def test_hyperadmin_can_view_other_org(
+        self, hyperadmin_client, db_pool, org_prefix
+    ):
+        from lucent.db import OrganizationRepository
+
+        other_org = await OrganizationRepository(db_pool).create(f"{org_prefix}visible")
+        resp = await hyperadmin_client.get(f"/api/organizations/{other_org['id']}")
+        assert resp.status_code == 200
+        assert resp.json()["id"] == str(other_org["id"])
 
     async def test_member_can_view_own_org(self, member_client, org_org):
         """Members can view their own organization."""
@@ -352,8 +389,8 @@ class TestGetOrganizationById:
 
 
 class TestListOrganizations:
-    async def test_list_orgs_as_owner(self, owner_client):
-        resp = await owner_client.get("/api/organizations")
+    async def test_list_orgs_as_hyperadmin(self, hyperadmin_client):
+        resp = await hyperadmin_client.get("/api/organizations")
         assert resp.status_code == 200
         data = resp.json()
         assert "organizations" in data
@@ -363,8 +400,8 @@ class TestListOrganizations:
         assert "has_more" in data
         assert data["total_count"] >= 1
 
-    async def test_list_orgs_pagination(self, owner_client):
-        resp = await owner_client.get(
+    async def test_list_orgs_pagination(self, hyperadmin_client):
+        resp = await hyperadmin_client.get(
             "/api/organizations",
             params={"offset": 0, "limit": 1},
         )
@@ -373,9 +410,82 @@ class TestListOrganizations:
         assert data["limit"] == 1
         assert len(data["organizations"]) <= 1
 
+    async def test_list_orgs_owner_forbidden(self, owner_client):
+        resp = await owner_client.get("/api/organizations")
+        assert resp.status_code == 403
+
     async def test_list_orgs_admin_forbidden(self, admin_client):
         """Admins cannot list all organizations (requires owner)."""
         resp = await admin_client.get("/api/organizations")
+        assert resp.status_code == 403
+
+
+class TestHyperadminOrganizationLifecycle:
+    async def test_update_other_org(self, hyperadmin_client, db_pool, org_prefix):
+        from lucent.db import OrganizationRepository
+
+        org = await OrganizationRepository(db_pool).create(f"{org_prefix}to_update")
+        new_name = f"{org_prefix}updated_by_hyperadmin"
+        resp = await hyperadmin_client.patch(
+            f"/api/organizations/{org['id']}", json={"name": new_name}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["name"] == new_name
+
+    async def test_owner_cannot_update_other_org(self, owner_client, org_org, org_prefix):
+        resp = await owner_client.patch(
+            f"/api/organizations/{org_org['id']}", json={"name": f"{org_prefix}denied"}
+        )
+        assert resp.status_code == 403
+
+    async def test_suspend_and_resume_org(self, hyperadmin_client, db_pool, org_prefix):
+        from lucent.auth_providers import BasicAuthProvider, organization_allows_access
+        from lucent.db import ApiKeyRepository, OrganizationRepository, UserRepository
+
+        org = await OrganizationRepository(db_pool).create(f"{org_prefix}lifecycle")
+        user_repo = UserRepository(db_pool)
+        member = await user_repo.create(
+            external_id=f"{org_prefix}suspended_member",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{org_prefix}suspended@test.com",
+            display_name=f"{org_prefix}Suspended Member",
+        )
+        from lucent.auth_providers import set_user_password
+
+        await set_user_password(db_pool, member["id"], "Valid-password-123")
+        _, raw_key = await ApiKeyRepository(db_pool).create(
+            member["id"], org["id"], f"{org_prefix}suspended-key"
+        )
+
+        suspended = await hyperadmin_client.post(f"/api/organizations/{org['id']}/suspend")
+        assert suspended.status_code == 200
+        assert suspended.json()["status"] == "suspended"
+        assert suspended.json()["suspended_at"] is not None
+        assert not await organization_allows_access(
+            db_pool, {"role": "member", "organization_id": org["id"]}
+        )
+        assert await organization_allows_access(
+            db_pool, {"role": "hyperadmin", "organization_id": org["id"]}
+        )
+        assert await BasicAuthProvider(db_pool).authenticate(
+            {"username": member["email"], "password": "Valid-password-123"}
+        ) is None
+
+        from lucent.auth_providers import ApiKeyAuthProvider
+
+        assert await ApiKeyAuthProvider(db_pool).authenticate({"api_key": raw_key}) is None
+
+        resumed = await hyperadmin_client.post(f"/api/organizations/{org['id']}/resume")
+        assert resumed.status_code == 200
+        assert resumed.json()["status"] == "active"
+        assert resumed.json()["suspended_at"] is None
+        assert await organization_allows_access(
+            db_pool, {"role": "member", "organization_id": org["id"]}
+        )
+
+    async def test_owner_cannot_suspend_org(self, owner_client, org_org):
+        resp = await owner_client.post(f"/api/organizations/{org_org['id']}/suspend")
         assert resp.status_code == 403
 
     async def test_list_orgs_member_forbidden(self, member_client):

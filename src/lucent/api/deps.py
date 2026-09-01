@@ -10,6 +10,7 @@ from lucent.access_control import AccessControlService
 from lucent.auth import (
     set_current_user,
 )
+from lucent.auth_providers import organization_allows_access
 from lucent.db import ApiKeyRepository, UserRepository, get_pool
 from lucent.log_context import set_user_id
 from lucent.rbac import Permission, Role, has_permission
@@ -151,6 +152,12 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     user = await user_repo.get_by_id(key_info["user_id"])
     if not user:
         return None
+
+    if not await organization_allows_access(pool, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization is suspended",
+        )
 
     # Thread memory scope from API key into the context dict
     user["memory_scope_user_id"] = key_info.get("memory_scope_user_id")
@@ -334,4 +341,5 @@ AuthenticatedUser = Annotated[CurrentUser, Depends(get_current_user)]
 OptionalUser = Annotated[CurrentUser | None, Depends(get_optional_user)]
 AdminUser = Annotated[CurrentUser, Depends(require_role(Role.ADMIN))]
 OwnerUser = Annotated[CurrentUser, Depends(require_role(Role.OWNER))]
+HyperadminUser = Annotated[CurrentUser, Depends(require_role(Role.HYPERADMIN))]
 DaemonTaskUser = Annotated[CurrentUser, Depends(require_scope_dep("daemon-tasks"))]

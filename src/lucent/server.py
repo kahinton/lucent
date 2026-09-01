@@ -16,6 +16,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lucent.auth import set_current_api_key_id, set_current_user
+from lucent.auth_providers import organization_allows_access
 from lucent.llm.context import clear_llm_context, set_llm_context
 from lucent.logging import configure_logging, get_logger
 from lucent.prompts.memory_usage import (
@@ -234,7 +235,7 @@ class MCPAuthMiddleware:
                             # Get full user record and set context
                             user_repo = UserRepository(pool)
                             user = await user_repo.get_by_id(key_info["user_id"])
-                            if user:
+                            if user and await organization_allows_access(pool, user):
                                 # Thread memory scope from API key into context dict
                                 user["memory_scope_user_id"] = key_info.get("memory_scope_user_id")
                                 user["memory_scope"] = key_info.get("memory_scope")

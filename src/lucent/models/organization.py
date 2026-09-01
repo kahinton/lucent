@@ -23,6 +23,8 @@ class Organization(BaseModel):
 
     id: UUID
     name: str
+    status: str
+    suspended_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -32,3 +34,4 @@ class OrganizationSummary(BaseModel):
 
     id: UUID
     name: str
+    status: str

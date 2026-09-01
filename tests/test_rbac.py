@@ -24,6 +24,7 @@ class TestRole:
         assert Role.from_string("member") == Role.MEMBER
         assert Role.from_string("admin") == Role.ADMIN
         assert Role.from_string("owner") == Role.OWNER
+        assert Role.from_string("hyperadmin") == Role.HYPERADMIN
 
     def test_from_string_case_insensitive(self):
         assert Role.from_string("ADMIN") == Role.ADMIN
@@ -34,6 +35,7 @@ class TestRole:
         assert Role.from_string("") == Role.MEMBER
 
     def test_hierarchy_ge(self):
+        assert Role.HYPERADMIN >= Role.OWNER
         assert Role.OWNER >= Role.OWNER
         assert Role.OWNER >= Role.ADMIN
         assert Role.OWNER >= Role.MEMBER
@@ -43,6 +45,7 @@ class TestRole:
         assert not (Role.MEMBER >= Role.ADMIN)
 
     def test_hierarchy_gt(self):
+        assert Role.HYPERADMIN > Role.OWNER
         assert Role.OWNER > Role.ADMIN
         assert Role.OWNER > Role.MEMBER
         assert Role.ADMIN > Role.MEMBER
@@ -98,6 +101,10 @@ class TestPermissions:
         assert has_permission(Role.OWNER, Permission.MEMORY_DELETE_ANY)
         assert has_permission(Role.OWNER, Permission.USERS_MANAGE)
 
+    def test_only_hyperadmin_has_instance_org_management(self):
+        assert has_permission(Role.HYPERADMIN, Permission.ORG_MANAGE_INSTANCE)
+        assert not has_permission(Role.OWNER, Permission.ORG_MANAGE_INSTANCE)
+
     def test_string_role_input(self):
         assert has_permission("admin", Permission.AUDIT_VIEW_ORG)
         assert not has_permission("member", Permission.AUDIT_VIEW_ORG)
@@ -126,6 +133,10 @@ class TestCanManageUser:
         assert can_manage_user("owner", "member")
         assert can_manage_user("owner", "admin")
 
+    def test_only_hyperadmin_can_manage_hyperadmin(self):
+        assert can_manage_user("hyperadmin", "hyperadmin")
+        assert not can_manage_user("owner", "hyperadmin")
+
     def test_admin_can_manage_members(self):
         assert can_manage_user("admin", "member")
 
@@ -146,6 +157,10 @@ class TestCanAssignRole:
         assert can_assign_role("owner", "member")
         assert can_assign_role("owner", "admin")
         assert can_assign_role("owner", "owner")
+
+    def test_only_hyperadmin_can_assign_hyperadmin(self):
+        assert can_assign_role("hyperadmin", "hyperadmin")
+        assert not can_assign_role("owner", "hyperadmin")
 
     def test_admin_can_assign_member_only(self):
         assert can_assign_role("admin", "member")

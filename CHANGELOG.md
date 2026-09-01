@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+#### Hosting Operations
+- Added the instance-level `hyperadmin` role and hyperadmin-only organization APIs for create, list, cross-tenant lookup/update, suspend, and resume. Organization suspension retains tenant data while blocking normal session and API-key authentication; hyperadmins retain recovery access. **Migration 107**.
+- Hardened tenant-bound authentication so REST, MCP, basic login, legacy API-key login, and OAuth identity reuse reject suspended organizations or mismatched organization context. User accounts remain single-organization; multi-organization memberships and tenant switching require a separate membership model.
+
 #### Chat, Handoffs, and Session Persistence
 - Persisted LLM session tracking for chat/task runs, including message lineage, request links, tool call audit records, and session lifecycle state. **Migrations 075 and 079**.
 - Proactive user Handoffs for daemon/workflow-to-human communication, with REST endpoints, web UI pages, MCP tools (`send_handoff`, `list_handoffs`, `get_handoff`, `resolve_handoff`), message threads, references, dedupe keys, attention counts, and response-required states. **Migration 084**.

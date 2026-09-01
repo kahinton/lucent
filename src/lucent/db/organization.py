@@ -40,7 +40,7 @@ class OrganizationRepository:
         query = """
             INSERT INTO organizations (name)
             VALUES ($1)
-            RETURNING id, name, created_at, updated_at
+            RETURNING id, name, status, suspended_at, created_at, updated_at
         """
 
         async with self.pool.acquire() as conn:
@@ -77,7 +77,7 @@ class OrganizationRepository:
             The organization record, or None if not found.
         """
         query = """
-            SELECT id, name, created_at, updated_at
+            SELECT id, name, status, suspended_at, created_at, updated_at
             FROM organizations
             WHERE id = $1
         """
@@ -100,7 +100,7 @@ class OrganizationRepository:
             The organization record, or None if not found.
         """
         query = """
-            SELECT id, name, created_at, updated_at
+            SELECT id, name, status, suspended_at, created_at, updated_at
             FROM organizations
             WHERE name = $1
         """
@@ -143,7 +143,7 @@ class OrganizationRepository:
             UPDATE organizations
             SET name = $1
             WHERE id = $2
-            RETURNING id, name, created_at, updated_at
+            RETURNING id, name, status, suspended_at, created_at, updated_at
         """
 
         async with self.pool.acquire() as conn:
@@ -153,6 +153,26 @@ class OrganizationRepository:
             return None
 
         return self._row_to_dict(row)
+
+    async def set_suspended(
+        self,
+        org_id: UUID,
+        *,
+        suspended: bool,
+    ) -> dict[str, Any] | None:
+        """Suspend or reactivate an organization without deleting tenant data."""
+        query = """
+            UPDATE organizations
+            SET status = $1,
+                suspended_at = CASE WHEN $1 = 'suspended' THEN NOW() ELSE NULL END
+            WHERE id = $2
+            RETURNING id, name, status, suspended_at, created_at, updated_at
+        """
+        new_status = "suspended" if suspended else "active"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, new_status, str(org_id))
+
+        return self._row_to_dict(row) if row else None
 
     async def delete(self, org_id: UUID) -> bool:
         """Permanently delete an organization.
@@ -194,7 +214,7 @@ class OrganizationRepository:
         """
         if organization_id:
             query = """
-                SELECT id, name, created_at, updated_at
+                SELECT id, name, status, suspended_at, created_at, updated_at
                 FROM organizations
                 WHERE id = $1
                 ORDER BY name ASC
@@ -204,7 +224,7 @@ class OrganizationRepository:
                 rows = await conn.fetch(query, str(organization_id), limit, offset)
         else:
             query = """
-                SELECT id, name, created_at, updated_at
+                SELECT id, name, status, suspended_at, created_at, updated_at
                 FROM organizations
                 ORDER BY name ASC
                 LIMIT $1 OFFSET $2
@@ -230,7 +250,7 @@ class OrganizationRepository:
         """
         count_query = "SELECT COUNT(*) as total FROM organizations"
         query = """
-            SELECT id, name, created_at, updated_at
+            SELECT id, name, status, suspended_at, created_at, updated_at
             FROM organizations
             ORDER BY name ASC
             LIMIT $1 OFFSET $2
@@ -254,6 +274,8 @@ class OrganizationRepository:
         return {
             "id": row["id"],
             "name": row["name"],
+            "status": row["status"],
+            "suspended_at": row["suspended_at"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

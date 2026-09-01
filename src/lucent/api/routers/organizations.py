@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from lucent.api.deps import AuthenticatedUser, OwnerUser
+from lucent.api.deps import AuthenticatedUser, HyperadminUser, OwnerUser
 from lucent.api.models import (
     ErrorResponse,
     OrganizationCreate,
@@ -29,6 +29,8 @@ def _org_to_response(org: dict[str, Any]) -> OrganizationResponse:
     return OrganizationResponse(
         id=org["id"],
         name=org["name"],
+        status=org["status"],
+        suspended_at=org["suspended_at"],
         created_at=org["created_at"],
         updated_at=org["updated_at"],
     )
@@ -87,7 +89,7 @@ async def update_current_organization(
     org_repo = OrganizationRepository(pool)
 
     result = await org_repo.update(
-        organization_id=user.organization_id,
+        org_id=user.organization_id,
         name=data.name,
     )
 
@@ -107,11 +109,11 @@ async def update_current_organization(
 )
 async def create_organization(
     data: OrganizationCreate,
-    user: OwnerUser,
+    user: HyperadminUser,
 ) -> OrganizationResponse:
     """Create a new organization.
 
-    Requires owner role.
+    Requires hyperadmin role.
     """
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
@@ -149,13 +151,13 @@ async def get_organization(
 ) -> OrganizationResponse:
     """Get an organization by ID.
 
-    Users can only view their own organization.
+    Hyperadmins can view any organization. Other users can only view their own.
     """
     # Only allow viewing own organization
-    if organization_id != user.organization_id:
+    if organization_id != user.organization_id and user.role.value != "hyperadmin":
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only view your own organization",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
         )
 
     pool = await get_pool()
@@ -176,43 +178,78 @@ async def get_organization(
     response_model=OrganizationListResponse,
 )
 async def list_organizations(
-    user: OwnerUser,
+    user: HyperadminUser,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> OrganizationListResponse:
-    """List organizations visible to the current user.
-
-    Requires owner role. Only returns the user's own organization.
-    """
-    if not user.organization_id:
-        return OrganizationListResponse(
-            organizations=[],
-            total_count=0,
-            offset=offset,
-            limit=limit,
-            has_more=False,
-        )
+    """List all organizations. Requires hyperadmin role."""
 
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
 
-    org = await org_repo.get_by_id(user.organization_id)
-    if org is None:
-        return OrganizationListResponse(
-            organizations=[],
-            total_count=0,
-            offset=offset,
-            limit=limit,
-            has_more=False,
-        )
-
+    result = await org_repo.list(offset=offset, limit=limit)
     return OrganizationListResponse(
-        organizations=[_org_to_response(org)],
-        total_count=1,
-        offset=0,
+        organizations=[_org_to_response(org) for org in result["organizations"]],
+        total_count=result["total_count"],
+        offset=offset,
         limit=limit,
-        has_more=False,
+        has_more=result["has_more"],
     )
+
+
+@router.patch(
+    "/{organization_id}",
+    response_model=OrganizationResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def update_organization(
+    organization_id: UUID,
+    data: OrganizationUpdate,
+    user: HyperadminUser,
+) -> OrganizationResponse:
+    """Update any organization. Requires hyperadmin role."""
+    pool = await get_pool()
+    result = await OrganizationRepository(pool).update(organization_id, data.name)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    logger.info("Organization updated: id=%s, by=%s", organization_id, user.id)
+    return _org_to_response(result)
+
+
+@router.post(
+    "/{organization_id}/suspend",
+    response_model=OrganizationResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def suspend_organization(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> OrganizationResponse:
+    """Suspend an organization without deleting its data."""
+    pool = await get_pool()
+    result = await OrganizationRepository(pool).set_suspended(organization_id, suspended=True)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    logger.info("Organization suspended: id=%s, by=%s", organization_id, user.id)
+    return _org_to_response(result)
+
+
+@router.post(
+    "/{organization_id}/resume",
+    response_model=OrganizationResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def resume_organization(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> OrganizationResponse:
+    """Reactivate a suspended organization. Requires hyperadmin role."""
+    pool = await get_pool()
+    result = await OrganizationRepository(pool).set_suspended(organization_id, suspended=False)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    logger.info("Organization resumed: id=%s, by=%s", organization_id, user.id)
+    return _org_to_response(result)
 
 
 @router.delete(

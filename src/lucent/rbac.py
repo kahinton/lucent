@@ -7,6 +7,7 @@ Roles (hierarchical):
 - daemon: Service account role — full memory access for consolidation, no user/org management
 - admin: Can manage org users, view org-wide audit/access logs
 - owner: Full control including org settings and deletion
+- hyperadmin: Instance operator with cross-organization lifecycle access
 
 Permission checking is designed to be:
 - Simple: 4 roles cover most use cases
@@ -25,6 +26,7 @@ class Role(str, Enum):
     DAEMON = "daemon"
     ADMIN = "admin"
     OWNER = "owner"
+    HYPERADMIN = "hyperadmin"
 
     @classmethod
     def from_string(cls, value: str) -> "Role":
@@ -38,28 +40,52 @@ class Role(str, Enum):
         """Check if this role has >= privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
+        order = {
+            Role.MEMBER: 0,
+            Role.DAEMON: 1,
+            Role.ADMIN: 2,
+            Role.OWNER: 3,
+            Role.HYPERADMIN: 4,
+        }
         return order[self] >= order[other]
 
     def __gt__(self, other: "Role") -> bool:
         """Check if this role has > privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
+        order = {
+            Role.MEMBER: 0,
+            Role.DAEMON: 1,
+            Role.ADMIN: 2,
+            Role.OWNER: 3,
+            Role.HYPERADMIN: 4,
+        }
         return order[self] > order[other]
 
     def __le__(self, other: "Role") -> bool:
         """Check if this role has <= privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
+        order = {
+            Role.MEMBER: 0,
+            Role.DAEMON: 1,
+            Role.ADMIN: 2,
+            Role.OWNER: 3,
+            Role.HYPERADMIN: 4,
+        }
         return order[self] <= order[other]
 
     def __lt__(self, other: "Role") -> bool:
         """Check if this role has < privileges than another."""
         if not isinstance(other, Role):
             return NotImplemented
-        order = {Role.MEMBER: 0, Role.DAEMON: 1, Role.ADMIN: 2, Role.OWNER: 3}
+        order = {
+            Role.MEMBER: 0,
+            Role.DAEMON: 1,
+            Role.ADMIN: 2,
+            Role.OWNER: 3,
+            Role.HYPERADMIN: 4,
+        }
         return order[self] < order[other]
 
 
@@ -92,6 +118,7 @@ class Permission(str, Enum):
     ORG_UPDATE = "org.update"
     ORG_DELETE = "org.delete"
     ORG_TRANSFER = "org.transfer"
+    ORG_MANAGE_INSTANCE = "org.manage.instance"
 
     # Integration permissions
     MANAGE_INTEGRATIONS = "integrations.manage"
@@ -185,6 +212,11 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         # Integrations
         Permission.MANAGE_INTEGRATIONS,
     },
+    Role.HYPERADMIN: set(),
+}
+
+ROLE_PERMISSIONS[Role.HYPERADMIN] = ROLE_PERMISSIONS[Role.OWNER] | {
+    Permission.ORG_MANAGE_INSTANCE,
 }
 
 
@@ -228,9 +260,12 @@ def can_manage_user(manager_role: Role | str, target_role: Role | str) -> bool:
     if not has_permission(manager_role, Permission.USERS_MANAGE):
         return False
 
-    # Owner can manage anyone
-    if manager_role == Role.OWNER:
+    if manager_role == Role.HYPERADMIN:
         return True
+
+    # Owners cannot create or manage instance operators.
+    if manager_role == Role.OWNER:
+        return target_role != Role.HYPERADMIN
 
     # Admin can only manage members
     if manager_role == Role.ADMIN:
@@ -263,9 +298,12 @@ def can_assign_role(assigner_role: Role | str, new_role: Role | str) -> bool:
     if not has_permission(assigner_role, Permission.USERS_MANAGE):
         return False
 
-    # Owner can assign any role
-    if assigner_role == Role.OWNER:
+    if assigner_role == Role.HYPERADMIN:
         return True
+
+    # Owners can assign tenant roles, but cannot mint instance operators.
+    if assigner_role == Role.OWNER:
+        return new_role != Role.HYPERADMIN
 
     # Admin can only assign member role (can't promote to admin/owner)
     if assigner_role == Role.ADMIN:

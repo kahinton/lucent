@@ -324,7 +324,7 @@ async def update_user_role(
         )
 
     # Validate role value
-    valid_roles = ["member", "admin", "owner"]
+    valid_roles = ["member", "admin", "owner", "hyperadmin"]
     if data.role not in valid_roles:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

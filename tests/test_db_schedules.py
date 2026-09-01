@@ -1804,21 +1804,16 @@ class TestBuiltInScheduleEligibility:
 
         org_id = str(test_user["organization_id"])
         user_id = str(test_user["id"])
-        daemon_id = "00000000-0000-0000-0000-0000000000db"
         await _insert_agent_definition(db_pool, org_id, user_id, "code")
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO users (
-                       id, organization_id, external_id, provider, email,
-                       display_name, role
-                   ) VALUES (
-                       $1::uuid, $2::uuid, 'daemon-service', 'local',
-                       'daemon@test.local', 'Lucent Daemon', 'daemon'
-                   )
-                   ON CONFLICT (id) DO NOTHING""",
-                daemon_id,
+            daemon_row = await conn.fetchrow(
+                """SELECT id, external_id, email, display_name
+                   FROM users
+                   WHERE organization_id = $1::uuid
+                     AND external_id = 'daemon-service:' || $1""",
                 org_id,
             )
+        assert daemon_row is not None
 
         sched = await repo.create_schedule(
             title="Owner-created scheduled workflow",
@@ -1838,12 +1833,12 @@ class TestBuiltInScheduleEligibility:
             ],
         )
         daemon = CurrentUser(
-            id=daemon_id,
+            id=daemon_row["id"],
             organization_id=test_user["organization_id"],
             role="daemon",
-            email="daemon@test.local",
-            display_name="Lucent Daemon",
-            external_id="daemon-service",
+            email=daemon_row["email"],
+            display_name=daemon_row["display_name"],
+            external_id=daemon_row["external_id"],
         )
 
         result = await trigger_now(str(sched["id"]), daemon, force=True, pool=db_pool)

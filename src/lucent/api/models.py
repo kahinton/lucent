@@ -256,7 +256,9 @@ class UserCreate(BaseModel):
     email: str | None = Field(default=None)
     display_name: str | None = Field(default=None)
     avatar_url: str | None = Field(default=None)
-    role: str = Field(default="member", description="Role: member, admin, owner")
+    role: str = Field(
+        default="member", description="Role: member, daemon, admin, owner, hyperadmin"
+    )
 
 
 class UserUpdate(BaseModel):
@@ -271,7 +273,7 @@ class UserUpdate(BaseModel):
 class UserRoleUpdate(BaseModel):
     """Request model for updating a user's role."""
 
-    role: str = Field(..., description="New role: member, admin, owner")
+    role: str = Field(..., description="New role: member, daemon, admin, owner, hyperadmin")
 
 
 class PasswordResetResponse(BaseModel):
@@ -362,13 +364,13 @@ class GroupMemberResponse(BaseModel):
 class OrganizationCreate(BaseModel):
     """Request model for creating an organization."""
 
-    name: str = Field(..., description="Organization name")
+    name: str = Field(..., min_length=1, max_length=255, description="Organization name")
 
 
 class OrganizationUpdate(BaseModel):
     """Request model for updating an organization."""
 
-    name: str = Field(..., description="New organization name")
+    name: str = Field(..., min_length=1, max_length=255, description="New organization name")
 
 
 class OrganizationResponse(BaseModel):
@@ -376,6 +378,8 @@ class OrganizationResponse(BaseModel):
 
     id: UUID
     name: str
+    status: str
+    suspended_at: datetime | None
     created_at: datetime
     updated_at: datetime
 

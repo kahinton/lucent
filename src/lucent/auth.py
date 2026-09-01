@@ -164,6 +164,9 @@ async def get_or_create_user_from_oauth(
         provider_metadata=provider_metadata,
     )
 
+    if user.get("organization_id") != organization_id:
+        raise ValueError("OAuth identity is already associated with another organization")
+
     if not created:
         # Update user info from provider on each login
         user = await user_repo.update(

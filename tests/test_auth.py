@@ -322,6 +322,29 @@ class TestGetOrCreateUserFromOAuth:
 
         assert user1["id"] == user2["id"]
 
+    async def test_rejects_existing_identity_from_another_org(
+        self, db_pool, test_organization, clean_test_data
+    ):
+        """OAuth identity reuse must not silently cross tenant boundaries."""
+        from lucent.db import OrganizationRepository
+
+        external_id = f"{clean_test_data}oauth_cross_org"
+        await get_or_create_user_from_oauth(
+            provider="github",
+            external_id=external_id,
+            organization_id=test_organization["id"],
+        )
+        other_org = await OrganizationRepository(db_pool).create(
+            name=f"{clean_test_data}oauth_other_org"
+        )
+
+        with pytest.raises(ValueError, match="another organization"):
+            await get_or_create_user_from_oauth(
+                provider="github",
+                external_id=external_id,
+                organization_id=other_org["id"],
+            )
+
     async def test_updates_user_info_on_login(self, db_pool, test_organization, clean_test_data):
         """Subsequent OAuth logins update user info from provider."""
         prefix = clean_test_data

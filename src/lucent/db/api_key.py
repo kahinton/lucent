@@ -143,6 +143,7 @@ class ApiKeyRepository:
               AND ak.is_active = true
               AND ak.revoked_at IS NULL
               AND u.is_active = true
+                            AND ak.organization_id = u.organization_id
         """
 
         async with self.pool.acquire() as conn:

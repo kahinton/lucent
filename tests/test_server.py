@@ -342,3 +342,36 @@ class TestMCPAuthMiddleware:
         # Should still get 401 (no auth header)
         inner.assert_not_awaited()
         assert responses[0]["status"] == 401
+
+    async def test_mcp_api_key_rejects_suspended_organization(
+        self, inner_app, db_pool, test_user
+    ):
+        """MCP API-key auth enforces the same suspension gate as REST auth."""
+        from lucent.db import ApiKeyRepository, OrganizationRepository
+        from lucent.server import MCPAuthMiddleware
+
+        _, plain_key = await ApiKeyRepository(db_pool).create(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            name="Suspended MCP Key",
+        )
+        org_repo = OrganizationRepository(db_pool)
+        await org_repo.set_suspended(test_user["organization_id"], suspended=True)
+        responses = []
+
+        async def mock_send(message):
+            responses.append(message)
+
+        try:
+            await MCPAuthMiddleware(inner_app)(
+                self._make_scope(
+                    headers={"authorization": f"Bearer {plain_key}"}
+                ),
+                AsyncMock(),
+                mock_send,
+            )
+        finally:
+            await org_repo.set_suspended(test_user["organization_id"], suspended=False)
+
+        assert inner_app._calls == []
+        assert responses[0]["status"] == 401

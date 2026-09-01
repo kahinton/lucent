@@ -220,6 +220,9 @@ class BasicAuthProvider(AuthProvider):
         if not bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
             return None
 
+        if not await organization_allows_access(self.pool, user):
+            return None
+
         # Update last login
         user_repo = UserRepository(self.pool)
         await user_repo.update_last_login(user["id"])
@@ -285,8 +288,10 @@ class ApiKeyAuthProvider(AuthProvider):
         user_repo = UserRepository(self.pool)
         user = await user_repo.get_by_id(key_info["user_id"])
 
-        if user:
-            await user_repo.update_last_login(user["id"])
+        if not user or not await organization_allows_access(self.pool, user):
+            return None
+
+        await user_repo.update_last_login(user["id"])
 
         return user
 
@@ -369,7 +374,27 @@ async def validate_session(pool: Pool, token: str) -> dict[str, Any] | None:
     if row is None:
         return None
 
-    return dict(row)
+    user = dict(row)
+    if not await organization_allows_access(pool, user):
+        return None
+    return user
+
+
+async def organization_allows_access(pool: Pool, user: dict[str, Any]) -> bool:
+    """Return whether the user's organization may authenticate requests."""
+    if user.get("role") == "hyperadmin":
+        return True
+
+    organization_id = user.get("organization_id")
+    if organization_id is None:
+        return True
+
+    async with pool.acquire() as conn:
+        status = await conn.fetchval(
+            "SELECT status FROM organizations WHERE id = $1",
+            str(organization_id),
+        )
+    return status == "active"
 
 
 async def destroy_session(pool: Pool, user_id: UUID) -> None:

@@ -110,6 +110,22 @@ async def usr_member(db_pool, usr_org, usr_prefix):
     )
 
 
+@pytest_asyncio.fixture
+async def usr_hyperadmin(db_pool, usr_org, usr_prefix):
+    """Create a test user with hyperadmin role."""
+    from lucent.db import UserRepository
+
+    user_repo = UserRepository(db_pool)
+    user = await user_repo.create(
+        external_id=f"{usr_prefix}hyperadmin",
+        provider="local",
+        organization_id=usr_org["id"],
+        email=f"{usr_prefix}hyperadmin@test.com",
+        display_name=f"{usr_prefix}Hyperadmin",
+    )
+    return await user_repo.update_role(user["id"], "hyperadmin")
+
+
 def _make_client(app, user_dict, role="member"):
     """Build a fake CurrentUser and override the dependency."""
     fake = CurrentUser(
@@ -150,6 +166,20 @@ async def owner_client(db_pool, usr_owner):
 
         app = create_app()
     _make_client(app, usr_owner, role="owner")
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def hyperadmin_client(db_pool, usr_hyperadmin):
+    """AsyncClient authenticated as hyperadmin."""
+    with patch("lucent.api.app.is_team_mode", return_value=True):
+        from lucent.api.app import create_app
+
+        app = create_app()
+    _make_client(app, usr_hyperadmin, role="hyperadmin")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -395,6 +425,23 @@ class TestUpdateUserRole:
             },
         )
         assert resp.status_code == 403
+
+    async def test_owner_cannot_promote_to_hyperadmin(self, owner_client, usr_member):
+        resp = await owner_client.patch(
+            f"/api/users/{usr_member['id']}/role",
+            json={"role": "hyperadmin"},
+        )
+        assert resp.status_code == 403
+
+    async def test_hyperadmin_can_promote_to_hyperadmin(
+        self, hyperadmin_client, usr_member
+    ):
+        resp = await hyperadmin_client.patch(
+            f"/api/users/{usr_member['id']}/role",
+            json={"role": "hyperadmin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "hyperadmin"
 
     async def test_update_role_not_found(self, admin_client):
         fake_id = str(uuid4())

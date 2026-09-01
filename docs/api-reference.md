@@ -1456,7 +1456,11 @@ Returns all members of a group.
 
 ## Team Mode Endpoints
 
-The following endpoints are only available when `LUCENT_MODE=team`. They require appropriate roles (admin or owner).
+The following endpoints are only available when `LUCENT_MODE=team`. Required roles vary by endpoint.
+
+Each user currently belongs to exactly one organization. Sessions, API keys, roles, groups, and
+resource access use that organization as the authenticated tenant context. A single identity cannot
+join or switch between multiple organizations without a separate membership model.
 
 ### Users
 
@@ -1470,7 +1474,7 @@ Base path: `/api/users`
 | `GET` | `/{user_id}` | member+ | Get a user by ID (same org only) |
 | `POST` | `/` | admin+ | Create a user in your organization |
 | `PATCH` | `/{user_id}` | admin+ | Update a user's profile or deactivate them |
-| `PATCH` | `/{user_id}/role` | admin+ | Change a user's role (`member`, `admin`, `owner`) |
+| `PATCH` | `/{user_id}/role` | admin+ | Change a user's role (`member`, `admin`, `owner`; only a hyperadmin can assign `hyperadmin`) |
 | `POST` | `/{user_id}/reset-password` | admin+ | Reset a user's password |
 | `DELETE` | `/{user_id}` | admin+ | Delete a user and all their memories |
 
@@ -1482,11 +1486,18 @@ Base path: `/api/organizations`
 |--------|------|------|-------------|
 | `GET` | `/current` | member+ | Get your organization |
 | `PATCH` | `/current` | owner | Update organization name |
-| `POST` | `/` | owner | Create a new organization |
-| `GET` | `/{organization_id}` | member+ | Get organization by ID (own org only) |
-| `GET` | `/` | owner | List all organizations |
+| `POST` | `/` | hyperadmin | Create and seed a new organization |
+| `GET` | `/{organization_id}` | member+ | Get own organization; hyperadmins can get any organization |
+| `GET` | `/` | hyperadmin | List all organizations |
+| `PATCH` | `/{organization_id}` | hyperadmin | Update any organization's name |
+| `POST` | `/{organization_id}/suspend` | hyperadmin | Suspend an organization without deleting its data |
+| `POST` | `/{organization_id}/resume` | hyperadmin | Reactivate a suspended organization |
 | `DELETE` | `/current` | owner | Delete organization (irreversible) |
 | `POST` | `/current/transfer` | owner | Transfer ownership to another user |
+
+Organization responses include `status` (`active` or `suspended`) and `suspended_at`.
+Suspended organizations cannot authenticate through sessions or API keys. Hyperadmins remain
+authorized so they can inspect and reactivate a suspended organization.
 
 ### Audit Logs
 

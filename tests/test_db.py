@@ -1133,6 +1133,22 @@ class TestApiKeyRepository:
         assert verified["id"] == key_record["id"]
         assert verified["user_id"] == test_user["id"]
 
+    async def test_verify_rejects_key_bound_to_different_org(
+        self, db_pool, test_user, clean_test_data
+    ):
+        """A key cannot select an organization different from its owning user."""
+        other_org = await OrganizationRepository(db_pool).create(
+            name=f"{clean_test_data}api_key_other_org"
+        )
+        repo = ApiKeyRepository(db_pool)
+        _, plain_key = await repo.create(
+            user_id=test_user["id"],
+            organization_id=other_org["id"],
+            name="Mismatched Organization Key",
+        )
+
+        assert await repo.verify(plain_key) is None
+
     async def test_verify_invalid_api_key(self, db_pool):
         """Test verifying an invalid API key."""
         repo = ApiKeyRepository(db_pool)
