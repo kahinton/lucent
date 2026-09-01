@@ -3504,8 +3504,8 @@ class RequestRepository:
         async with self.pool.acquire() as conn:
             # Case 1: in_progress requests where all tasks are done
             rows = await conn.fetch(
-                f"""SELECT r.id FROM requests r
-                   WHERE r.status IN ('in_progress', 'needs_rework') {org_filter}
+                     f"""SELECT r.id FROM requests r
+                         WHERE r.status = 'in_progress' {org_filter}
                    AND NOT EXISTS (
                        SELECT 1 FROM tasks t
                        WHERE t.request_id = r.id
@@ -3518,11 +3518,13 @@ class RequestRepository:
                 await self._check_request_completion(str(row["id"]))
                 fixed += 1
 
-            # Case 2: pending requests with active/completed tasks
+                 # Case 2: pending/planned requests with active/completed tasks.
+                 # Needs-rework waits for an explicit task claim, which already
+                 # moves the parent request back to in_progress.
             rows = await conn.fetch(
                 f"""SELECT DISTINCT r.id FROM requests r
                    JOIN tasks t ON t.request_id = r.id
-                   WHERE r.status IN ('pending', 'planned', 'needs_rework') {org_filter}
+                     WHERE r.status IN ('pending', 'planned') {org_filter}
                    AND t.status IN ('claimed', 'running', 'completed')""",
                 *params,
             )

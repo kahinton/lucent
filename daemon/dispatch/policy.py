@@ -22,6 +22,11 @@ class TaskValidationMixin:
 
         if not result:
             return False, "no output"
+        if task and self._is_request_review_task(task):
+            parsed = self._parse_review_decision(result)
+            if not parsed["recognized"]:
+                return False, "review output is missing an explicit review decision"
+            return True, "ok"
         if task:
             valid, reason = validate_consolidation_execution(
                 result_text=result,
@@ -127,6 +132,12 @@ def required_task_tool_names(
     )
     if any(signal in text for signal in durable_file_signals):
         required.add("store_user_file")
+    durable_output_signals = (
+        "record_task_output",
+        "record task output",
+    )
+    if any(signal in text for signal in durable_output_signals):
+        required.add("record_task_output")
     return required
 
 
@@ -139,7 +150,7 @@ def missing_required_task_tools(
     """Return required tools that were not satisfied by this task attempt."""
     missing: list[str] = []
     for required_tool in sorted(required_tools):
-        if required_tool == "store_user_file" and has_durable_output:
+        if required_tool in {"store_user_file", "record_task_output"} and has_durable_output:
             continue
         if not tool_counts.get(required_tool, 0):
             missing.append(required_tool)

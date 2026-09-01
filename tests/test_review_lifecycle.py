@@ -1121,8 +1121,7 @@ class TestParseReviewDecision:
     def _parse(text: str) -> dict:
         """Replicate the daemon's _parse_review_decision logic for testing."""
         raw = (text or "").strip()
-        upper = raw.upper()
-        decision = "APPROVED" if "NEEDS_REWORK" not in upper else "NEEDS_REWORK"
+        decision = None
         recognized = False
 
         m = re.search(
@@ -1132,12 +1131,6 @@ class TestParseReviewDecision:
         )
         if m:
             decision = m.group(1).upper()
-            recognized = True
-        elif "NEEDS_REWORK" in upper:
-            decision = "NEEDS_REWORK"
-            recognized = True
-        elif "APPROVED" in upper:
-            decision = "APPROVED"
             recognized = True
 
         task_ids: list[str] = []
@@ -1199,24 +1192,23 @@ class TestParseReviewDecision:
         assert result["decision"] == "APPROVED"
         assert result["recognized"] is True
 
-    def test_keyword_fallback_approved(self):
-        """If no explicit format, 'APPROVED' keyword is recognized."""
+    def test_keyword_fallback_approved_is_unrecognized(self):
+        """Narrative approval language cannot complete a request."""
         result = self._parse("The work looks good. APPROVED.")
-        assert result["decision"] == "APPROVED"
-        assert result["recognized"] is True
+        assert result["decision"] is None
+        assert result["recognized"] is False
 
-    def test_keyword_fallback_needs_rework(self):
-        """If no explicit format, 'NEEDS_REWORK' keyword is recognized."""
+    def test_keyword_fallback_needs_rework_is_unrecognized(self):
+        """Narrative rework language requires manual review."""
         result = self._parse("This NEEDS_REWORK because it's incomplete.")
-        assert result["decision"] == "NEEDS_REWORK"
-        assert result["recognized"] is True
+        assert result["decision"] is None
+        assert result["recognized"] is False
 
     def test_unrecognized_output(self):
-        """Output with no decision keywords is treated as unrecognized APPROVED default."""
+        """Output with no decision keyword is unrecognized without a default."""
         result = self._parse("Some random text without decision keywords")
         assert result["recognized"] is False
-        # Default when no NEEDS_REWORK found is APPROVED
-        assert result["decision"] == "APPROVED"
+        assert result["decision"] is None
 
     def test_empty_input(self):
         result = self._parse("")
@@ -1266,12 +1258,13 @@ class TestParseReviewDecision:
         # feedback falls back to raw text
         assert "REQUEST_REVIEW_DECISION" in result["feedback"]
 
-    def test_needs_rework_takes_precedence(self):
-        """When both APPROVED and NEEDS_REWORK appear, NEEDS_REWORK wins."""
+    def test_narrative_decisions_are_not_recognized(self):
+        """Conflicting prose must not select a decision by keyword matching."""
         result = self._parse(
             "We first thought it was APPROVED but actually NEEDS_REWORK"
         )
-        assert result["decision"] == "NEEDS_REWORK"
+        assert result["decision"] is None
+        assert result["recognized"] is False
 
 
 class TestIsRequestReviewTask:

@@ -4701,7 +4701,7 @@ class LucentDaemon(
                     self._tasks_completed_total.add(1, attributes={"status": "success", "agent_type": agent_type})
             else:
                 if self._is_request_review_task(task):
-                    await self._handle_review_task_failure(task, reason)
+                    await self._handle_review_task_failure(task, reason, result)
                     if self._tracer:
                         self._tasks_completed_total.add(
                             1, attributes={"status": "manual_review", "agent_type": agent_type}

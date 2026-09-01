@@ -356,6 +356,22 @@ class TestRequestStatusReconciliation:
         assert updated["status"] == "in_progress"
 
     @pytest.mark.asyncio
+    async def test_needs_rework_with_completed_task_remains_needs_rework(
+        self, wf_repo, wf_org
+    ):
+        org = str(wf_org["id"])
+        req = await wf_repo.create_request(title="Rework", org_id=org)
+        task = await _create_task(wf_repo, org, str(req["id"]), title="done")
+        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.complete_task(str(task["id"]), "ok")
+        await wf_repo.update_request_status(str(req["id"]), "needs_rework")
+
+        await wf_repo.reconcile_request_statuses(org_id=org)
+
+        updated = await wf_repo.get_request(str(req["id"]), org)
+        assert updated["status"] == "needs_rework"
+
+    @pytest.mark.asyncio
     async def test_mixed_completed_and_running_stays_in_progress(self, wf_repo, wf_org):
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="R4", org_id=org)

@@ -37,8 +37,10 @@ class RequestReviewMixin:
     async def _process_request_review_task(self, task: dict, review_result: str):
         return await _process_request_review_task(self, task, review_result)
 
-    async def _handle_review_task_failure(self, task: dict, reason: str):
-        return await _handle_review_task_failure(self, task, reason)
+    async def _handle_review_task_failure(
+        self, task: dict, reason: str, review_result: str | None = None
+    ):
+        return await _handle_review_task_failure(self, task, reason, review_result)
 
     async def _repair_structured_output(
         self,
@@ -76,18 +78,11 @@ def _parse_review_decision(daemon, text: str) -> dict:
         - MEMORIES_UPDATED: <id1>, <id2>, ... | none
         """
     raw = (text or '').strip()
-    upper = raw.upper()
-    decision = 'APPROVED' if 'NEEDS_REWORK' not in upper else 'NEEDS_REWORK'
+    decision = None
     recognized = False
     m = runtime.re.search('(?:REQUEST_REVIEW_DECISION|DECISION)\\s*:\\s*(APPROVED|NEEDS_REWORK)', raw, flags=runtime.re.IGNORECASE)
     if m:
         decision = m.group(1).upper()
-        recognized = True
-    elif 'NEEDS_REWORK' in upper:
-        decision = 'NEEDS_REWORK'
-        recognized = True
-    elif 'APPROVED' in upper:
-        decision = 'APPROVED'
         recognized = True
     task_ids: list[str] = []
     mt = runtime.re.search('TASK_IDS_TO_REWORK\\s*:\\s*(.+?)(?:\\n[A-Z_ ]+\\s*:|\\Z)', raw, flags=runtime.re.IGNORECASE | runtime.re.DOTALL)
@@ -153,6 +148,14 @@ async def _create_request_review_task(daemon, request_id: str, request_data: dic
     tasks = request_data.get('tasks', []) or []
     review_tasks = [t for t in tasks if daemon._is_request_review_task(t)]
     if any((t.get('status') in ('pending', 'planned', 'claimed', 'running') for t in review_tasks)):
+        return None
+    manual_review_tasks = [t for t in review_tasks if t.get('status') == 'needs_review']
+    if manual_review_tasks:
+        runtime.log(
+            f'Request {request_id[:8]} remains in `review` with '
+            f'{len(manual_review_tasks)} review task(s) awaiting a manual decision.',
+            'WARN',
+        )
         return None
     completed_reviews = [t for t in review_tasks if t.get('status') == 'completed']
     if completed_reviews:
@@ -280,9 +283,9 @@ async def _process_request_review_task(daemon, task: dict, review_result: str) -
     task_ids = parsed['task_ids']
     recognized = bool(parsed.get('recognized'))
     if not recognized:
-        runtime.log(f'Request review output for {request_id[:8]} not parseable; auto-completing', 'WARN')
-        await runtime.RequestAPI.add_event(str(task['id']), 'request_review_parse_error', 'Could not parse review decision; auto-completing request.', {'recommendation': 'UNPARSEABLE', 'feedback': feedback[:1000]})
-        await runtime.RequestAPI.update_request_status(request_id, 'completed')
+        runtime.log(f'Request review output for {request_id[:8]} not parseable; manual review required', 'WARN')
+        await runtime.RequestAPI.add_event(str(task['id']), 'request_review_parse_error', 'Could not parse review decision; manual review required.', {'recommendation': 'UNPARSEABLE', 'feedback': feedback[:1000]})
+        await runtime.RequestAPI.update_request_status(request_id, 'review')
         return
     if decision == 'APPROVED':
         linked_memories = await runtime.RequestAPI.get_request_memories(request_id)
@@ -304,19 +307,26 @@ async def _process_request_review_task(daemon, task: dict, review_result: str) -
     runtime.log(f'Request {request_id[:8]} internal review NEEDS_REWORK — sent back for revision')
 
 
-async def _handle_review_task_failure(daemon, task: dict, reason: str) -> None:
+async def _handle_review_task_failure(
+    daemon, task: dict, reason: str, review_result: str | None = None
+) -> None:
     """Do not hard-fail a request when the review task itself fails.
 
-        Complete the review task with a manual-review marker and leave the
-        request available for a human review decision.
+        Keep the review task in needs_review with its original result intact
+        and leave the request available for a human review decision.
         """
     task_id = str(task.get('id', ''))
     request_id = str(task.get('request_id', ''))
     note = f'Automatic request review failed; manual review required.\n\nReason: {reason}'
     try:
-        await runtime.RequestAPI.complete_task(task_id, note, instance_id=daemon.instance_id)
+        await runtime.RequestAPI.mark_task_needs_review(
+            task_id,
+            note,
+            instance_id=daemon.instance_id,
+            result=review_result,
+        )
     except TypeError:
-        await runtime.RequestAPI.complete_task(task_id, note)
+        await runtime.RequestAPI.mark_task_needs_review(task_id, note)
     if request_id:
         await runtime.RequestAPI.update_request_status(request_id, 'review')
     await runtime.RequestAPI.add_event(task_id, 'request_review_manual_required', note[:1500])

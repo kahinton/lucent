@@ -14,6 +14,7 @@ from daemon.daemon import (
     _load_request_owner_context,
     load_accessible_agent,
 )
+from daemon.dispatch.policy import missing_required_task_tools, required_task_tool_names
 from daemon.prompts.system import build_subagent_prompt
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.user import UserRepository
@@ -120,6 +121,43 @@ def test_validate_task_result_rejects_long_blocked_report():
 
     assert success is False
     assert reason == "output reports task is blocked or missing required tooling"
+
+
+def test_validate_request_review_requires_explicit_decision():
+    daemon = LucentDaemon()
+
+    success, reason = daemon._validate_task_result(
+        "The implementation tasks failed to record the required outputs.",
+        task={"title": "Post-completion review", "agent_type": "request-review"},
+    )
+
+    assert success is False
+    assert reason == "review output is missing an explicit review decision"
+
+
+def test_validate_request_review_accepts_explicit_short_decision():
+    daemon = LucentDaemon()
+
+    success, reason = daemon._validate_task_result(
+        "REQUEST_REVIEW_DECISION: NEEDS_REWORK\nFEEDBACK: No durable output.",
+        task={"title": "Post-completion review", "agent_type": "request-review"},
+    )
+
+    assert success is True
+    assert reason == "ok"
+
+
+def test_explicit_record_task_output_requires_the_tool_call():
+    required_tools = required_task_tool_names(
+        "code",
+        description="Persist the deliverable and use record_task_output for it.",
+    )
+
+    assert required_tools == {"record_task_output"}
+    assert missing_required_task_tools(required_tools, {}) == ["record_task_output"]
+    assert missing_required_task_tools(
+        required_tools, {"record_task_output": 1}
+    ) == []
 
 
 def test_prefixed_memory_server_tool_counts_as_memory_tool():
@@ -671,11 +709,11 @@ async def test_failed_request_review_waits_for_manual_review(monkeypatch):
     task_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
     request_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
     events: list[tuple[str, str, str | None, dict | None]] = []
-    completions: list[tuple[str, str, str | None]] = []
+    needs_review: list[tuple[str, str, str | None, str | None]] = []
     status_updates: list[tuple[str, str]] = []
 
-    async def _complete_task(tid, result, instance_id=None):
-        completions.append((tid, result, instance_id))
+    async def _mark_task_needs_review(tid, error, instance_id=None, result=None):
+        needs_review.append((tid, error, instance_id, result))
         return {"id": tid}
 
     async def _update_status(rid, status):
@@ -686,20 +724,30 @@ async def test_failed_request_review_waits_for_manual_review(monkeypatch):
         events.append((tid, event_type, detail, metadata))
         return {"id": tid}
 
-    monkeypatch.setattr("daemon.daemon.RequestAPI.complete_task", _complete_task)
+    monkeypatch.setattr(
+        "daemon.daemon.RequestAPI.mark_task_needs_review", _mark_task_needs_review
+    )
     monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _update_status)
     monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _add_event)
 
     await daemon._handle_review_task_failure(
         {"id": task_id, "request_id": request_id},
         "stream idle timeout",
+        "REQUEST_REVIEW_DECISION: NEEDS_REWORK\nFEEDBACK: failed to verify output",
     )
 
     expected_result = (
         "Automatic request review failed; manual review required.\n\n"
         "Reason: stream idle timeout"
     )
-    assert completions == [(task_id, expected_result, daemon.instance_id)]
+    assert needs_review == [
+        (
+            task_id,
+            expected_result,
+            daemon.instance_id,
+            "REQUEST_REVIEW_DECISION: NEEDS_REWORK\nFEEDBACK: failed to verify output",
+        )
+    ]
     assert status_updates == [(request_id, "review")]
     assert events[0][1] == "request_review_manual_required"
 
@@ -721,6 +769,30 @@ async def test_completed_review_task_does_not_auto_complete_manual_review(monkey
                 {
                     "title": "Post-completion review",
                     "status": "completed",
+                }
+            ]
+        },
+    )
+
+    assert review_task is None
+
+
+@pytest.mark.asyncio
+async def test_needs_review_task_does_not_create_another_automatic_review(monkeypatch):
+    daemon = LucentDaemon()
+
+    async def _forbidden(*_args, **_kwargs):
+        raise AssertionError("manual review must not be auto-re-dispatched")
+
+    monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _forbidden)
+
+    review_task = await daemon._create_request_review_task(
+        "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        {
+            "tasks": [
+                {
+                    "title": "Post-completion review",
+                    "status": "needs_review",
                 }
             ]
         },
