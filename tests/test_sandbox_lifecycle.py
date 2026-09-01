@@ -246,6 +246,19 @@ class TestDockerSandboxLifecycle:
         assert kwargs.get("nano_cpus") == int(1.0 * 1e9)
 
     @pytest.mark.asyncio
+    async def test_create_caps_resource_limits_to_docker_host_capacity(self):
+        """Oversized approved templates must remain runnable on smaller hosts."""
+        client = _make_docker_client()
+        client.info.return_value = {"NCPU": 2, "MemTotal": 2_000_000_000}
+        backend = self._backend_with_client(client)
+
+        await backend.create(SandboxConfig(memory_limit="4g", cpu_limit=4.0))
+
+        _, kwargs = client.containers.run.call_args
+        assert kwargs.get("mem_limit") == 2_000_000_000
+        assert kwargs.get("nano_cpus") == int(2.0 * 1e9)
+
+    @pytest.mark.asyncio
     async def test_create_injects_env_vars(self):
         """create() passes env_vars to the container."""
         client = _make_docker_client()

@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 import shlex
 import socket
 import time
@@ -31,6 +32,19 @@ logger = logging.getLogger(__name__)
 # Label prefix for identifying Lucent-managed containers
 LABEL_PREFIX = "io.lucent.sandbox"
 _GIT_ASKPASS_PATH = "/tmp/lucent-git-askpass.sh"
+_MEMORY_LIMIT_UNITS = {
+    "m": 1_000_000,
+    "g": 1_000_000_000,
+    "t": 1_000_000_000_000,
+}
+
+
+def _memory_limit_bytes(value: str) -> int | None:
+    """Convert Docker-style decimal memory limits to bytes when recognized."""
+    match = re.fullmatch(r"\s*(\d+)\s*([mgt])(?:b)?\s*", value.lower())
+    if not match:
+        return None
+    return int(match.group(1)) * _MEMORY_LIMIT_UNITS[match.group(2)]
 
 
 def _devcontainer_to_dict(dc: DevcontainerConfig) -> dict:
@@ -136,6 +150,47 @@ class DockerBackend(SandboxBackend):
         except docker.errors.NotFound:
             client.networks.create(self._network_name, driver="bridge", internal=internal)
             logger.info("Created sandbox network: %s (internal=%s)", self._network_name, internal)
+
+    def _effective_resource_limits(self, config: SandboxConfig) -> tuple[str | int, float]:
+        """Return requested limits capped by the Docker host's advertised capacity."""
+        memory_limit: str | int = config.memory_limit
+        cpu_limit = config.cpu_limit
+        try:
+            host_info = self._docker().info()
+        except Exception:
+            logger.debug("Unable to inspect Docker host resource capacity", exc_info=True)
+            return memory_limit, cpu_limit
+
+        if not isinstance(host_info, dict):
+            return memory_limit, cpu_limit
+
+        host_cpus = host_info.get("NCPU")
+        if isinstance(host_cpus, (int, float)) and not isinstance(host_cpus, bool):
+            if host_cpus > 0 and cpu_limit > float(host_cpus):
+                logger.warning(
+                    "Sandbox CPU limit %.2f exceeds Docker host capacity %.2f; capping request",
+                    cpu_limit,
+                    float(host_cpus),
+                )
+                cpu_limit = float(host_cpus)
+
+        requested_memory = _memory_limit_bytes(config.memory_limit)
+        host_memory = host_info.get("MemTotal")
+        if (
+            requested_memory is not None
+            and isinstance(host_memory, int)
+            and not isinstance(host_memory, bool)
+            and host_memory > 0
+            and requested_memory > host_memory
+        ):
+            logger.warning(
+                "Sandbox memory limit %s exceeds Docker host capacity %d bytes; capping request",
+                config.memory_limit,
+                host_memory,
+            )
+            memory_limit = host_memory
+
+        return memory_limit, cpu_limit
 
     async def create(self, config: SandboxConfig) -> SandboxInfo:
         sandbox_id = str(uuid.uuid4())
@@ -378,6 +433,7 @@ class DockerBackend(SandboxBackend):
         self, sandbox_id: str, name: str, config: SandboxConfig
     ) -> docker.models.containers.Container:
         client = self._docker()
+        memory_limit, cpu_limit = self._effective_resource_limits(config)
 
         # Pull image if needed
         try:
@@ -457,8 +513,8 @@ class DockerBackend(SandboxBackend):
             tty=False,
             working_dir=config.working_dir,
             environment=config.env_vars,
-            mem_limit=config.memory_limit,
-            nano_cpus=int(config.cpu_limit * 1e9),
+            mem_limit=memory_limit,
+            nano_cpus=int(cpu_limit * 1e9),
             network_mode=network_mode,
             # Docker SDK 7.x requires network= alongside networking_config=
             network=self._network_name if networking_config is not None else None,

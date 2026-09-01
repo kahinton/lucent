@@ -11,7 +11,7 @@ description: |
   Use this when the target repo is known to have (or might have) a
   devcontainer config — it gives the running agent the same environment a
   human contributor would get from VS Code's "Reopen in Container".
-image: mcr.microsoft.com/devcontainers/base:debian
+image: lucent-sandbox:base
 working_dir: /workspace
 network_mode: allowlist
 allowed_hosts:
@@ -29,7 +29,7 @@ allowed_hosts:
   - security.debian.org
 setup_commands: []
 env_vars: {}
-memory_limit: 4g
-cpu_limit: 4.0
-disk_limit: 20g
+memory_limit: 2g
+cpu_limit: 2.0
+disk_limit: 10g
 timeout_seconds: 3600
