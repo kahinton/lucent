@@ -347,10 +347,14 @@ class SandboxManager:
     # Idle timeout & credential expiry
     # ------------------------------------------------------------------
 
-    def _touch(self, sandbox_id: str) -> None:
-        """Update the last-activity timestamp for a sandbox."""
+    def touch(self, sandbox_id: str) -> None:
+        """Refresh a sandbox's idle-timeout activity timestamp."""
         if sandbox_id in self._last_activity:
             self._last_activity[sandbox_id] = time.monotonic()
+
+    def _touch(self, sandbox_id: str) -> None:
+        """Backward-compatible internal alias for touch()."""
+        self.touch(sandbox_id)
 
     def _ensure_idle_sweep(self) -> None:
         """Start the background idle-sweep task if it is not already running."""

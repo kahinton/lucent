@@ -249,6 +249,38 @@ REQUEST_REVIEW_FALLBACK_AGENT_TYPE = runtime_settings.request_review_fallback_ag
 REQUEST_REVIEW_MODEL = runtime_settings.request_review_model_id() or ""
 REQUEST_REVIEW_TASK_TITLE = "Post-completion review"
 
+_SANDBOX_TEMPLATE_OVERRIDE_KEYS = frozenset(
+    {
+        "repo_url",
+        "branch",
+        "timeout_seconds",
+        "output_mode",
+        "commit_approved",
+        "reuse_within_request",
+    }
+)
+
+
+def _apply_sandbox_template_overrides(
+    template_config: dict, task_config: dict | None
+) -> tuple[dict, set[str]]:
+    """Merge persisted, allowlisted task overrides onto a fresh template."""
+    overrides = (task_config or {}).get("_template_overrides")
+    if not isinstance(overrides, dict):
+        return dict(template_config), set()
+    rejected = set(overrides) - _SANDBOX_TEMPLATE_OVERRIDE_KEYS
+    return (
+        {
+            **template_config,
+            **{
+                key: value
+                for key, value in overrides.items()
+                if key in _SANDBOX_TEMPLATE_OVERRIDE_KEYS
+            },
+        },
+        rejected,
+    )
+
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read a positive integer environment value with a safe fallback."""
@@ -3940,16 +3972,28 @@ class LucentDaemon(
             sandbox_id = None
             task_sandbox_reused = False
             task_sandbox_runtime_config = None
+            sandbox_keepalive_task: asyncio.Task | None = None
 
             # Resolve a template fresh at dispatch. Task rows retain a config snapshot
             # for traceability, but retries must receive template corrections such as
             # a supported base image for an allowlisted network policy.
             if sandbox_template_id:
+                task_sandbox_config = sandbox_config
                 sandbox_config = await self._resolve_sandbox_template(
                     str(sandbox_template_id),
                     org_id=org_id,
                     requesting_user_id=requesting_user_id,
                 )
+                if sandbox_config:
+                    sandbox_config, rejected_overrides = _apply_sandbox_template_overrides(
+                        sandbox_config, task_sandbox_config
+                    )
+                    if rejected_overrides:
+                        log(
+                            f"Task {task_id[:8]} ignored unsupported sandbox template "
+                            f"overrides: {sorted(rejected_overrides)}",
+                            "WARN",
+                        )
             if sandbox_config and task_output_mode and not sandbox_config.get("output_mode"):
                 sandbox_config = dict(sandbox_config)
                 sandbox_config["output_mode"] = task_output_mode
@@ -4335,6 +4379,19 @@ class LucentDaemon(
                     dispatched += 1
                     continue
 
+            if (
+                sandbox_id
+                and task_sandbox_runtime_config
+                and task_sandbox_runtime_config.idle_timeout_seconds > 0
+            ):
+                sandbox_keepalive_task = asyncio.create_task(
+                    self._keep_task_sandbox_alive(
+                        sandbox_id,
+                        task_sandbox_runtime_config.idle_timeout_seconds,
+                    ),
+                    name=f"task-sandbox-keepalive-{task_id[:8]}",
+                )
+
             try:
                 result = await self.run_session(
                     f"{agent_type}-{task_id[:8]}",
@@ -4359,6 +4416,8 @@ class LucentDaemon(
                     },
                 )
             except ModelNotAvailableError as exc:
+                if sandbox_keepalive_task:
+                    sandbox_keepalive_task.cancel()
                 log(
                     f"Tracked task {task_id[:8]}: model '{exc.model}' is not available "
                     f"in the runtime — failing task",
@@ -4577,6 +4636,10 @@ class LucentDaemon(
                         )
                 except Exception as e:
                     log(f"Sandbox cleanup failed for {sandbox_id[:12]}: {e}", "WARN")
+            if sandbox_keepalive_task:
+                sandbox_keepalive_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sandbox_keepalive_task
 
             if requires_operational_tool and not operational_tool_tracker:
                 reason = (

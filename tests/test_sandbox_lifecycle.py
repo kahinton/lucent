@@ -29,6 +29,7 @@ from lucent.sandbox.models import (
     SandboxStatus,
 )
 from lucent.sandbox.output import SandboxOutputHandler
+from daemon.sandbox.lifecycle import _keep_task_sandbox_alive
 
 # ---------------------------------------------------------------------------
 # Shared test helpers
@@ -108,6 +109,26 @@ def _make_backend_mock(**kwargs) -> AsyncMock:
     for k, v in kwargs.items():
         setattr(backend, k, v)
     return backend
+
+
+@pytest.mark.asyncio
+async def test_task_sandbox_keepalive_refreshes_daemon_manager(monkeypatch):
+    """A running task keeps the manager instance that created it active."""
+    manager = MagicMock()
+    monkeypatch.setattr(
+        "lucent.sandbox.manager.get_sandbox_manager",
+        lambda: manager,
+    )
+
+    keepalive_task = asyncio.create_task(
+        _keep_task_sandbox_alive(None, "sb-task-keepalive", 300)
+    )
+    await asyncio.sleep(0)
+
+    manager.touch.assert_called_once_with("sb-task-keepalive")
+
+    keepalive_task.cancel()
+    await keepalive_task
 
 
 def _make_manager(backend: AsyncMock | None = None) -> SandboxManager:

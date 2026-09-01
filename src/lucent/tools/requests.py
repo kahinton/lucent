@@ -804,6 +804,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                     )
                 for k, v in sandbox_overrides.items():
                     sandbox_config[k] = v
+                sandbox_config["_template_overrides"] = dict(sandbox_overrides)
         elif sandbox_overrides:
             return json.dumps(
                 {

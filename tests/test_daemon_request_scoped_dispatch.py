@@ -9,6 +9,7 @@ import pytest
 
 from daemon.daemon import (
     LucentDaemon,
+    _apply_sandbox_template_overrides,
     _build_mcp_tool_summary,
     _is_operational_tool_call,
     _load_request_owner_context,
@@ -102,6 +103,36 @@ def test_validate_task_result_rejects_empty_consolidation_execution():
     )
     assert success is False
     assert reason == "Plan identified 3 operations but 0 were executed"
+
+
+def test_fresh_template_keeps_only_explicit_safe_task_overrides():
+    resolved, rejected = _apply_sandbox_template_overrides(
+        {
+            "image": "lucent-sandbox:base",
+            "repo_url": None,
+            "branch": None,
+            "network_mode": "allowlist",
+            "memory_limit": "2g",
+        },
+        {
+            "image": "stale-template-image",
+            "memory_limit": "4g",
+            "_template_overrides": {
+                "repo_url": "https://github.com/kahinton/lucent.git",
+                "branch": "v.12",
+                "commit_approved": True,
+                "network_mode": "none",
+            },
+        },
+    )
+
+    assert resolved["image"] == "lucent-sandbox:base"
+    assert resolved["memory_limit"] == "2g"
+    assert resolved["repo_url"] == "https://github.com/kahinton/lucent.git"
+    assert resolved["branch"] == "v.12"
+    assert resolved["commit_approved"] is True
+    assert resolved["network_mode"] == "allowlist"
+    assert rejected == {"network_mode"}
 
 
 def test_validate_task_result_rejects_long_blocked_report():

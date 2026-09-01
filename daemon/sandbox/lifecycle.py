@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
 from daemon.runtime.module_proxy import runtime
@@ -19,11 +20,32 @@ class SandboxLifecycleMixin:
     async def _destroy_task_sandbox(self, *args, **kwargs):
         return await _destroy_task_sandbox(self, *args, **kwargs)
 
+    async def _keep_task_sandbox_alive(self, *args, **kwargs):
+        return await _keep_task_sandbox_alive(self, *args, **kwargs)
+
     async def _get_technical_context_for_request(self, *args, **kwargs):
         return await _get_technical_context_for_request(self, *args, **kwargs)
 
     async def _resolve_sandbox_template(self, *args, **kwargs):
         return await _resolve_sandbox_template(self, *args, **kwargs)
+
+
+async def _keep_task_sandbox_alive(
+    self,
+    sandbox_id: str,
+    idle_timeout_seconds: int,
+) -> None:
+    """Keep a daemon-owned task sandbox alive while its agent session runs."""
+    from lucent.sandbox.manager import get_sandbox_manager
+
+    interval_seconds = max(1, min(60, idle_timeout_seconds // 2))
+    manager = get_sandbox_manager()
+    try:
+        while True:
+            manager.touch(sandbox_id)
+            await asyncio.sleep(interval_seconds)
+    except asyncio.CancelledError:
+        return
 
 
 async def _create_task_sandbox(
