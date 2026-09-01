@@ -214,6 +214,7 @@ class DefinitionRepository:
             ("output_schema", None),
             ("requirements", []),
             ("runtime_config", {}),
+            ("discovered_tools", None),
             ("env_vars", {}),
             ("auth_policy", {"mode": "agent_grant", "require_user_access": True}),
             ("network_policy", {"network_mode": "none", "allowed_hosts": []}),
@@ -1093,6 +1094,7 @@ class DefinitionRepository:
                      created_by, approved_by, approved_at, owner_approved_by, owner_approved_at,
                    owner_user_id, owner_group_id,
                    auth_policy, network_policy, resource_limits,
+                   discovered_tools, tools_discovered_at,
                    proposal_reason, proposal_evidence,
                    created_at, updated_at
             {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
@@ -1289,6 +1291,10 @@ class DefinitionRepository:
             resource_limits=kwargs.get("resource_limits", current.get("resource_limits", {})),
             timeout_seconds=kwargs.get("timeout_seconds", current.get("timeout_seconds", 300)),
         )
+        invalidate_discovery = bool({
+            "source_code", "entrypoint", "requirements", "runtime_config",
+            "env_vars", "network_policy", "resource_limits", "timeout_seconds",
+        }.intersection(kwargs))
         sets = []
         params: list[Any] = []
         for key in (
@@ -1308,6 +1314,8 @@ class DefinitionRepository:
         if "proposal_reason" in kwargs:
             params.append(kwargs["proposal_reason"])
             sets.append(f"proposal_reason = ${len(params)}")
+        if invalidate_discovery:
+            sets.extend(["discovered_tools = NULL", "tools_discovered_at = NULL"])
         if not sets:
             return current
         params.append(datetime.now(timezone.utc))
@@ -1329,6 +1337,51 @@ class DefinitionRepository:
                 notes=f"Updated managed tool '{tool_id}'",
             )
         return result
+
+    async def save_managed_mcp_proxy_tools(
+        self,
+        tool_id: str,
+        tools_list: list[dict],
+        org_id: str,
+    ) -> dict | None:
+        """Cache native tool descriptors discovered from a managed MCP proxy."""
+        query = """
+            UPDATE managed_tool_definitions
+            SET discovered_tools = $1::jsonb, tools_discovered_at = NOW(), updated_at = NOW()
+            WHERE id = $2 AND organization_id = $3
+            RETURNING *
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, json.dumps(tools_list), tool_id, org_id)
+        result = self._normalize_tool_row(row)
+        if result:
+            await self._audit(
+                DEFINITION_UPDATE, org_id, "managed_tool", tool_id,
+                context={"updated_fields": ["discovered_tools", "tools_discovered_at"],
+                         "tool_count": len(tools_list)},
+                notes=f"Saved {len(tools_list)} discovered tools for managed MCP proxy '{tool_id}'",
+            )
+        return result
+
+    async def get_managed_mcp_proxy_tools(
+        self,
+        tool_id: str,
+        org_id: str,
+    ) -> dict | None:
+        """Return cached native tool descriptors for a managed MCP proxy."""
+        query = """
+            SELECT discovered_tools, tools_discovered_at
+            FROM managed_tool_definitions
+            WHERE id = $1 AND organization_id = $2
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, tool_id, org_id)
+        if row is None:
+            return None
+        return {
+            "discovered_tools": self._decode_json(row["discovered_tools"], None),
+            "tools_discovered_at": row["tools_discovered_at"],
+        }
 
     async def approve_managed_tool(
         self,

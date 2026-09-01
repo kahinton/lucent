@@ -1335,6 +1335,51 @@ async def update_managed_tool_web(request: Request, tool_id: str):
     return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
 
 
+@router.post("/definitions/tools/{tool_id}/discover-tools")
+async def discover_managed_mcp_proxy_tools_web(request: Request, tool_id: str):
+    """Warm an active managed MCP proxy and cache its native tool descriptors."""
+    user = await get_user_context(request)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository
+    from lucent.services.managed_tools import (
+        ManagedToolBlockedError,
+        ManagedToolError,
+        ManagedToolExecutor,
+    )
+
+    org_id = str(user.organization_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    tool = await repo.get_managed_tool(
+        tool_id,
+        org_id,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
+    if not tool:
+        raise HTTPException(status_code=404, detail="Managed tool not found")
+    if tool.get("status") != "active":
+        raise HTTPException(status_code=409, detail="Managed tool must be active before discovery")
+
+    try:
+        tools = await ManagedToolExecutor(repo).discover_mcp_proxy_tools(
+            tool=tool,
+            org_id=org_id,
+            user_id=str(user.id),
+            user_role=role_value,
+            enforce_agent_grant=False,
+        )
+    except ManagedToolBlockedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ManagedToolError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    await repo.save_managed_mcp_proxy_tools(tool_id, tools, org_id)
+    return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
+
+
 @router.post("/definitions/hooks/{hook_id}/delete")
 async def delete_hook_web(request: Request, hook_id: str):
     """Delete a hook definition."""

@@ -31,8 +31,10 @@ _SKILLS_INTRO = (
 
 _MANAGED_TOOLS_INTRO = (
     "The following managed tools are granted to this agent. Use `run_managed_tool` "
-    "only for the tools listed here; Lucent enforces the grant and runs each call "
-    "in a sandbox."
+    "only for the tools listed here; call it with `tool` set to the listed tool name "
+    "and `arguments` set to an object matching that tool's input_schema. Lucent "
+    "enforces the grant and runs each call in a sandbox. When the user's request "
+    "requires a listed tool, invoke it rather than merely describing its availability."
 )
 
 
@@ -58,6 +60,13 @@ def render_managed_tools_section(tools: list[dict[str, Any]] | None) -> str:
 
     Returns an empty string when there are no tools.
     """
+    if not tools:
+        return ""
+    tools = [
+        tool
+        for tool in tools
+        if not (tool.get("runtime_config") or {}).get("mcp_proxy")
+    ]
     if not tools:
         return ""
     lines = [MANAGED_TOOLS_HEADER, _MANAGED_TOOLS_INTRO, ""]

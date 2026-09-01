@@ -1327,7 +1327,7 @@ async def chat_stream_v2(
     system_prompt_parts = []
     agent_name = None
     agent_skill_names: list[str] = []
-    agent_managed_tool_names: list[str] = []
+    agent_managed_tools: list[dict[str, Any]] = []
     # The agent actually composed for this turn (may be the lucent default even
     # when the user did not pick one). Used for hooks, managed-tool grants, and
     # tool allow-listing so the default persona has full parity.
@@ -1357,11 +1357,8 @@ async def chat_stream_v2(
             skills_section = render_skills_section(skills)
             if skills_section:
                 system_prompt_parts.append(skills_section)
-            managed_tools = await repo.get_agent_managed_tools(effective_agent_id)
-            agent_managed_tool_names = [
-                str(t["name"]) for t in managed_tools if t.get("name")
-            ]
-            tools_section = render_managed_tools_section(managed_tools)
+            agent_managed_tools = await repo.get_agent_managed_tools(effective_agent_id)
+            tools_section = render_managed_tools_section(agent_managed_tools)
             if tools_section:
                 system_prompt_parts.append(tools_section)
     except Exception:
@@ -1469,7 +1466,11 @@ async def chat_stream_v2(
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     allowed_tools = _chat_allowed_tools_for_agent(agent_name, agent_skill_names)
-    if agent_managed_tool_names:
+    ordinary_managed_tools = [
+        tool for tool in agent_managed_tools
+        if not (tool.get("runtime_config") or {}).get("mcp_proxy")
+    ]
+    if ordinary_managed_tools:
         for tool in ("list_tool_definitions", "get_tool_definition", "run_managed_tool"):
             if tool not in allowed_tools:
                 allowed_tools.append(tool)
@@ -1485,6 +1486,8 @@ async def chat_stream_v2(
         if session_token
         else {}
     )
+    if any((tool.get("runtime_config") or {}).get("mcp_proxy") for tool in agent_managed_tools):
+        mcp_config["memory-server"]["exclude_tools"] = ["run_managed_tool"]
     agent_mcp_servers = (
         await repo.get_agent_mcp_servers(effective_agent_id)
         if effective_agent_id
@@ -1641,6 +1644,7 @@ async def chat_stream_v2(
                 hooks=agent_hooks,
                 approve_permissions=False,
                 attachments=attachments,
+                managed_tools=agent_managed_tools if engine.name == "langchain" else None,
                 audit_context={
                     "source": "chat.stream_v2",
                     "organization_id": str(user["organization_id"]),
@@ -1653,6 +1657,7 @@ async def chat_stream_v2(
                     "engine": engine.name,
                     "agent_definition_id": effective_agent_id,
                     "skill_names": agent_skill_names,
+                    "user_role": str(user.get("role") or ""),
                 },
                 enable_config_discovery=enable_agent_provider_discovery,
             )

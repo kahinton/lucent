@@ -285,6 +285,7 @@ class LangChainEngine(LLMEngine):
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
+        managed_tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -301,6 +302,7 @@ class LangChainEngine(LLMEngine):
                 audit_context=audit_context,
                 attachments=attachments,
                 approve_permissions=approve_permissions,
+                managed_tools=managed_tools,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -324,6 +326,7 @@ class LangChainEngine(LLMEngine):
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
+        managed_tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -341,6 +344,7 @@ class LangChainEngine(LLMEngine):
                 audit_context=audit_context,
                 attachments=attachments,
                 approve_permissions=approve_permissions,
+                managed_tools=managed_tools,
             )
         except Exception as e:
             error_message = str(e) or type(e).__name__
@@ -364,6 +368,7 @@ class LangChainEngine(LLMEngine):
         audit_context: dict[str, Any] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         approve_permissions: bool = True,
+        managed_tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -406,6 +411,41 @@ class LangChainEngine(LLMEngine):
             )
         hook_manager = HookManager(hooks)
 
+        from lucent.services.managed_tools import normalize_discovered_mcp_tools
+
+        managed_tool_to_definition: dict[str, dict[str, Any]] = {}
+        for managed_tool in managed_tools or []:
+            if not (managed_tool.get("runtime_config") or {}).get("mcp_proxy"):
+                continue
+            try:
+                descriptors = normalize_discovered_mcp_tools(
+                    {"tools": managed_tool.get("discovered_tools") or []}
+                )
+            except Exception:
+                logger.warning(
+                    "Skipping invalid cached MCP tools for managed proxy %s",
+                    managed_tool.get("name", "unknown"),
+                    exc_info=True,
+                )
+                continue
+            for descriptor in descriptors:
+                name = descriptor["name"]
+                if name in tool_to_bridge or name in managed_tool_to_definition:
+                    logger.warning(
+                        "Skipping managed MCP proxy tool %s because its name is already in use",
+                        name,
+                    )
+                    continue
+                managed_tool_to_definition[name] = managed_tool
+                tool_schemas.append({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": descriptor["description"],
+                        "parameters": descriptor["input_schema"],
+                    },
+                })
+
         # Built-in tools (file/shell/web) give LangChain models parity with the
         # Copilot SDK's provider-native built-ins. Disabled for restricted web
         # chat (approve_permissions=False) so it uses only configured MCP tools.
@@ -416,7 +456,7 @@ class LangChainEngine(LLMEngine):
                 name = _schema_tool_name(schema)
                 if not name:
                     continue
-                if name in tool_to_bridge or name in builtin_names:
+                if name in tool_to_bridge or name in managed_tool_to_definition or name in builtin_names:
                     logger.warning(
                         "Built-in tool %s shadowed by an MCP tool; skipping built-in", name
                     )
@@ -429,6 +469,31 @@ class LangChainEngine(LLMEngine):
 
             Returns None when the named tool exists in neither source.
             """
+            managed_tool = managed_tool_to_definition.get(name)
+            if managed_tool is not None:
+                from lucent.db import DefinitionRepository, get_pool
+                from lucent.services.managed_tools import ManagedToolExecutor
+
+                context = audit_context or {}
+                org_id = str(context.get("organization_id") or "")
+                user_id = str(context.get("user_id") or "")
+                agent_id = str(context.get("agent_definition_id") or "")
+                if not org_id or not user_id or not agent_id:
+                    return json.dumps({"error": "Managed MCP proxy context is unavailable"})
+                try:
+                    executor = ManagedToolExecutor(DefinitionRepository(await get_pool()))
+                    result = await executor.execute(
+                        tool=managed_tool,
+                        arguments={"tool": name, "arguments": arguments},
+                        org_id=org_id,
+                        user_id=user_id,
+                        user_role=context.get("user_role"),
+                        agent_id=agent_id,
+                    )
+                    return json.dumps(result.to_dict(), default=str)
+                except Exception:
+                    logger.exception("Managed MCP proxy tool %s failed", name)
+                    return json.dumps({"error": "Managed MCP proxy execution failed"})
             if name in builtin_names and builtin_toolset is not None:
                 return await builtin_toolset.call_tool(name, arguments)
             bridge = tool_to_bridge.get(name)
@@ -566,7 +631,9 @@ class LangChainEngine(LLMEngine):
                         )
 
                 # Check for tool calls
-                if not ai_msg.tool_calls or (not tool_to_bridge and not builtin_names):
+                if not ai_msg.tool_calls or (
+                    not tool_to_bridge and not managed_tool_to_definition and not builtin_names
+                ):
                     # No tool calls, or no tools available at all — we're done
                     break
 
@@ -577,7 +644,11 @@ class LangChainEngine(LLMEngine):
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
                     tool_id = tool_call.get("id", "")
-                    if tool_name not in builtin_names and tool_name not in tool_to_bridge:
+                    if (
+                        tool_name not in builtin_names
+                        and tool_name not in tool_to_bridge
+                        and tool_name not in managed_tool_to_definition
+                    ):
                         result = f"Error calling tool {tool_name}: tool is not available"
                         messages.append(ToolMessage(content=result, tool_call_id=tool_id))
                         continue
@@ -687,6 +758,7 @@ class LangChainEngine(LLMEngine):
                         mcp_url=server_conf["url"],
                         headers=server_conf.get("headers"),
                         allowed_tools=server_conf.get("tools"),
+                        excluded_tools=server_conf.get("exclude_tools"),
                         skip_url_validation=bool(server_conf.get("internal")),
                         audit_context={**(audit_context or {}), "mcp_server": server_name},
                     )

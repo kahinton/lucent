@@ -509,6 +509,85 @@ class TestLangChainEngine:
         assert (tmp_path / "out.txt").read_text() == "hi"
 
     @pytest.mark.asyncio
+    async def test_managed_mcp_proxy_tools_are_bound_by_native_name(self, monkeypatch):
+        """Managed MCP proxies must not expose run_managed_tool to the model."""
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.langchain_engine import LangChainEngine
+        from lucent.services.managed_tools import ManagedToolExecutionResult
+
+        bound_names: set[str] = set()
+        executor_calls: list[dict] = []
+
+        class FakeChatModel:
+            def __init__(self):
+                self.call_count = 0
+
+            def bind_tools(self, schemas):
+                bound_names.update(schema["function"]["name"] for schema in schemas)
+                return self
+
+            async def ainvoke(self, _messages):
+                self.call_count += 1
+                if self.call_count == 1:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[{
+                            "name": "search_repositories",
+                            "args": {"query": "lucent"},
+                            "id": "call_1",
+                        }],
+                    )
+                return AIMessage(content="done")
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        async def fake_get_pool():
+            return object()
+
+        async def fake_execute(self, **kwargs):
+            executor_calls.append(kwargs)
+            return ManagedToolExecutionResult(ok=True, result={"content": "matched"})
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+        monkeypatch.setattr("lucent.db.get_pool", fake_get_pool)
+        monkeypatch.setattr(
+            "lucent.services.managed_tools.ManagedToolExecutor.execute", fake_execute
+        )
+
+        result = await LangChainEngine().run_session(
+            model="qwen3.6:latest",
+            system_message="sys",
+            prompt="search GitHub",
+            approve_permissions=False,
+            audit_context={
+                "organization_id": "org-1",
+                "user_id": "user-1",
+                "agent_definition_id": "agent-1",
+            },
+            managed_tools=[{
+                "id": "proxy-1",
+                "name": "github_mcp_proxy",
+                "runtime_config": {"mcp_proxy": True},
+                "discovered_tools": [{
+                    "name": "search_repositories",
+                    "description": "Search GitHub repositories.",
+                    "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                }],
+            }],
+        )
+
+        assert result == "done"
+        assert "search_repositories" in bound_names
+        assert "run_managed_tool" not in bound_names
+        assert executor_calls[0]["arguments"] == {
+            "tool": "search_repositories",
+            "arguments": {"query": "lucent"},
+        }
+
+    @pytest.mark.asyncio
     async def test_failed_mcp_bridge_does_not_abort_session(self, tmp_path, monkeypatch):
         """An SSRF-blocked/unreachable MCP server is skipped, not fatal.
 

@@ -72,8 +72,20 @@ class TestRenderManagedToolsSection:
         assert "fetch_weather" in out
         assert "Get a forecast" in out
         assert "run_managed_tool" in out
+        assert "tool` set to the listed tool name" in out
+        assert "arguments` set to an object" in out
         assert "input_schema" in out
         assert "city" in out
+
+    def test_omits_mcp_proxy_wrapper_details(self):
+        out = render_managed_tools_section([{
+            "name": "github_mcp_proxy",
+            "description": "Internal sandbox proxy",
+            "runtime_config": {"mcp_proxy": True},
+            "input_schema": {"type": "object", "properties": {"tool": {}}},
+        }])
+
+        assert out == ""
 
 
 class TestNameHelpers:

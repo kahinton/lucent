@@ -1024,6 +1024,48 @@ async def run_managed_tool_api(tool_id: str, body: RunManagedTool, user: Authent
     return result.to_dict()
 
 
+@router.post("/tools/{tool_id}/discover")
+async def discover_managed_mcp_proxy_tools(tool_id: str, user: AuthenticatedUser):
+    """Warm an active managed MCP proxy and cache its native tool descriptors."""
+    pool = await get_pool()
+    acl = AccessControlService(pool)
+    org_id = str(user.organization_id)
+    user_id = str(user.id)
+    if not await acl.can_access(user_id, "managed_tool", tool_id, org_id):
+        raise HTTPException(404, "Managed tool not found")
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    tool = await repo.get_managed_tool(
+        tool_id,
+        org_id,
+        requester_user_id=user_id,
+        requester_role=user.role.value,
+    )
+    if not tool or tool.get("status") != "active":
+        raise HTTPException(409, "Managed tool must be active before discovery")
+
+    from lucent.services.managed_tools import ManagedToolBlockedError, ManagedToolError, ManagedToolExecutor
+
+    try:
+        tools = await ManagedToolExecutor(repo).discover_mcp_proxy_tools(
+            tool=tool,
+            org_id=org_id,
+            user_id=user_id,
+            user_role=user.role.value,
+            enforce_agent_grant=False,
+        )
+    except ManagedToolBlockedError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ManagedToolError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    updated = await repo.save_managed_mcp_proxy_tools(tool_id, tools, org_id)
+    return {
+        "tools": tools,
+        "discovered_at": updated["tools_discovered_at"].isoformat() if updated else None,
+    }
+
+
 @router.post("/agents/{agent_id}/tools")
 async def grant_managed_tool_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
     pool = await get_pool()

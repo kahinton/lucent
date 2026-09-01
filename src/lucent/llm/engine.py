@@ -72,6 +72,7 @@ class LLMEngine(ABC):
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
+        managed_tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -97,6 +98,8 @@ class LLMEngine(ABC):
             attachments: Optional normalized multimodal attachments (images and
                 documents) for the current user turn. See
                 ``lucent.llm.attachments`` for the normalized shape.
+            managed_tools: Granted managed MCP proxy definitions with cached
+                native descriptors available to engines that support direct binding.
 
         Returns:
             The assistant's response text, or None on error.
@@ -121,6 +124,7 @@ class LLMEngine(ABC):
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
+        managed_tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run an LLM session with event streaming.
 

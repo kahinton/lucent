@@ -63,33 +63,19 @@ class TestApplyNetworkAllowlist:
 
     @staticmethod
     def _make_exec_factory(
-        dns_map: dict[str, str] | None = None,
         iptables_available: bool = True,
         rule_failure_substring: str | None = None,
     ):
         """Build a fake exec coroutine that simulates a running container.
 
-        - DNS lookups: return the IPv4 line for hosts in ``dns_map``, else empty.
         - ``command -v iptables`` returns success/failure based on ``iptables_available``.
         - Any iptables rule containing ``rule_failure_substring`` returns failure.
         """
-        dns_map = dns_map or {}
-
         async def fake_exec(sandbox_id, cmd, **kwargs):  # noqa: ARG001
-            if "command -v iptables" in cmd:
-                return _make_exec_ok() if iptables_available else _make_exec_fail()
-            if "apt-get install" in cmd or "apk add" in cmd or "yum install" in cmd:
-                # Install step — succeed (but only called when iptables missing)
-                return _make_exec_ok()
-            if "getent ahosts" in cmd or "getent hosts" in cmd:
-                # Extract the host being looked up from `getent ahosts 'host'`.
-                # Simple substring match against our dns_map keys is enough for tests.
-                for host, ip in dns_map.items():
-                    if host in cmd:
-                        return _make_exec_ok(stdout=ip + "\n")
-                return _make_exec_ok(stdout="")
             if rule_failure_substring and rule_failure_substring in cmd:
                 return _make_exec_fail("simulated rule failure")
+            if "command -v iptables" in cmd:
+                return _make_exec_ok() if iptables_available else _make_exec_fail()
             return _make_exec_ok()
 
         return fake_exec
@@ -112,8 +98,6 @@ class TestApplyNetworkAllowlist:
         backend.exec = fake_exec
         await backend._apply_network_allowlist("sb-test", config)
 
-        # Should never call getent for literal IPs.
-        assert not any("getent" in c for c in exec_calls)
         # Both IPs should appear as ACCEPT rules.
         assert any("1.2.3.4" in c for c in exec_calls)
         assert any("10.0.0.0/24" in c for c in exec_calls)
@@ -136,10 +120,11 @@ class TestApplyNetworkAllowlist:
             return _make_exec_ok()
 
         backend.exec = fake_exec
+        backend._resolve_ipv4_addresses = AsyncMock(return_value=[])
         # No IPv4 addresses would be resolved → must raise rather than emit a no-op policy.
         with pytest.raises(RuntimeError, match="no allowed_hosts could be resolved"):
             await backend._apply_network_allowlist("sb-test", config)
-        assert not any("PWNED" in c for c in exec_calls if "iptables -A OUTPUT -d" in c)
+        assert not any("PWNED" in c for c in exec_calls)
 
     @pytest.mark.asyncio
     async def test_dns_resolution_result_validated_before_iptables(self, backend):
@@ -156,13 +141,12 @@ class TestApplyNetworkAllowlist:
             return _make_exec_ok()
 
         backend.exec = fake_exec
+        backend._resolve_ipv4_addresses = AsyncMock(return_value=[])
         # The malformed line doesn't validate as an IPv4 address, so no addresses
         # resolve for the host → allowlist must refuse rather than silently no-op.
         with pytest.raises(RuntimeError, match="no allowed_hosts could be resolved"):
             await backend._apply_network_allowlist("sb-test", config)
-        assert not any(
-            "touch /tmp/pwned" in c for c in exec_calls if "iptables -A OUTPUT -d" in c
-        )
+        assert not any("touch /tmp/pwned" in c for c in exec_calls)
 
     @pytest.mark.asyncio
     async def test_hostname_resolved_via_getent(self, backend):
@@ -172,9 +156,8 @@ class TestApplyNetworkAllowlist:
             allowed_hosts=["api.lucent.local"],
         )
         exec_calls: list[str] = []
-        backend.exec = self._make_exec_factory(
-            dns_map={"api.lucent.local": "192.168.1.42"},
-        )
+        backend.exec = self._make_exec_factory()
+        backend._resolve_ipv4_addresses = AsyncMock(return_value=["192.168.1.42"])
 
         # Wrap to capture calls
         original = backend.exec
@@ -197,6 +180,7 @@ class TestApplyNetworkAllowlist:
             allowed_hosts=["nxdomain.example.invalid"],
         )
         backend.exec = self._make_exec_factory()
+        backend._resolve_ipv4_addresses = AsyncMock(return_value=[])
         with pytest.raises(RuntimeError, match="no allowed_hosts could be resolved"):
             await backend._apply_network_allowlist("sb-test", config)
 
@@ -240,33 +224,25 @@ class TestApplyNetworkAllowlist:
         backend.exec = self._make_exec_factory(
             rule_failure_substring="iptables -P OUTPUT DROP",
         )
-        with pytest.raises(RuntimeError, match="iptables rule"):
+        with pytest.raises(RuntimeError, match="allowlist policy failed"):
             await backend._apply_network_allowlist("sb-test", config)
 
     @pytest.mark.asyncio
-    async def test_missing_iptables_triggers_install_attempt(self, backend):
-        """When iptables is missing, the backend tries to install it via the
-        container's package manager. If install fails, the allowlist refuses."""
+    async def test_missing_iptables_fails_closed(self, backend):
+        """A missing iptables binary must fail the sandbox policy setup."""
         config = SandboxConfig(
             network_mode="allowlist",
             allowed_hosts=["1.2.3.4"],
         )
 
-        install_attempted = {"value": False}
-
         async def fake_exec(sandbox_id, cmd, **kwargs):  # noqa: ARG001
             if "command -v iptables" in cmd:
-                # Always missing — install step can't fix it either.
                 return _make_exec_fail()
-            if "apt-get install" in cmd or "apk add" in cmd or "yum install" in cmd:
-                install_attempted["value"] = True
-                return _make_exec_fail("no package manager")
             return _make_exec_ok()
 
         backend.exec = fake_exec
-        with pytest.raises(RuntimeError, match="iptables is unavailable"):
+        with pytest.raises(RuntimeError, match="allowlist policy failed"):
             await backend._apply_network_allowlist("sb-test", config)
-        assert install_attempted["value"], "backend must at least attempt to install iptables"
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +331,22 @@ class TestDiskQuota:
         _, kwargs = client.containers.run.call_args
         assert kwargs.get("cap_add") == ["NET_ADMIN"]
         backend._ensure_network.assert_called_once()
+
+    def test_allowlist_pins_hostname_to_approved_address(self):
+        """The container must use the same DNS address as its egress policy."""
+        config = SandboxConfig(network_mode="allowlist", allowed_hosts=["api.github.com"])
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        backend._allowlist_resolutions["sb-al"] = {"api.github.com": ["140.82.114.5"]}
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        client = self._make_docker_client(mock_container)
+        backend._client = client
+
+        backend._create_container("sb-al", "test-sb", config)
+
+        _, kwargs = client.containers.run.call_args
+        assert kwargs.get("extra_hosts") == {"api.github.com": "140.82.114.5"}
 
 
 # ---------------------------------------------------------------------------

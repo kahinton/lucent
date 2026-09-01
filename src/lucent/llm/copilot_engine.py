@@ -596,6 +596,7 @@ class CopilotEngine(LLMEngine):
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
+        managed_tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -679,6 +680,7 @@ class CopilotEngine(LLMEngine):
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
+        managed_tools: list[dict[str, Any]] | None = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 

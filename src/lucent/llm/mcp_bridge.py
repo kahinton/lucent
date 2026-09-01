@@ -6,11 +6,13 @@ and wraps each as a LangChain tool that the LLM can call.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from contextlib import AsyncExitStack
 from typing import Any
+from urllib.parse import urlsplit
 
 from lucent.url_validation import validate_url
 
@@ -32,6 +34,7 @@ MEMORY_TOOL_NAMES = frozenset({
     "get_tag_suggestions",
     "export_memories",
 })
+MCP_CONNECTION_TIMEOUT_SECONDS = 2
 
 
 class MCPToolBridge:
@@ -48,6 +51,7 @@ class MCPToolBridge:
         headers: dict[str, str] | None = None,
         *,
         allowed_tools: list[str] | None = None,
+        excluded_tools: list[str] | None = None,
         skip_url_validation: bool = False,
         audit_context: dict[str, Any] | None = None,
     ):
@@ -56,13 +60,17 @@ class MCPToolBridge:
         self._mcp_url = mcp_url
         self._headers = headers or {}
         self._allowed_tools = set(allowed_tools or ["*"])
+        self._excluded_tools = set(excluded_tools or [])
         self._audit_context = audit_context or {}
         self._tools: list[dict[str, Any]] = []
         self._exit_stack: AsyncExitStack | None = None
         self._session: Any | None = None
 
     def _is_tool_allowed(self, tool_name: str) -> bool:
-        return "*" in self._allowed_tools or tool_name in self._allowed_tools
+        return (
+            tool_name not in self._excluded_tools
+            and ("*" in self._allowed_tools or tool_name in self._allowed_tools)
+        )
 
     @staticmethod
     def _is_terminated_session_error(error: Exception) -> bool:
@@ -83,6 +91,7 @@ class MCPToolBridge:
         except ImportError as exc:
             raise RuntimeError("MCP client package is required for MCP tool bridge") from exc
 
+        await self._preflight_connection()
         stack = AsyncExitStack()
         try:
             http_client = await stack.enter_async_context(
@@ -100,6 +109,26 @@ class MCPToolBridge:
         self._exit_stack = stack
         self._session = session
         return session
+
+    async def _preflight_connection(self) -> None:
+        """Fail fast when an optional MCP endpoint cannot accept a TCP connection."""
+        parsed = urlsplit(self._mcp_url)
+        host = parsed.hostname
+        if not host:
+            raise RuntimeError("MCP server URL must include a hostname")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=MCP_CONNECTION_TIMEOUT_SECONDS,
+            )
+            writer.close()
+            await writer.wait_closed()
+        except (OSError, asyncio.TimeoutError) as exc:
+            raise RuntimeError(
+                f"MCP server is unreachable at {host}:{port}"
+            ) from exc
 
     async def discover_tools(self) -> list[dict[str, Any]]:
         """Discover available tools from the MCP server.

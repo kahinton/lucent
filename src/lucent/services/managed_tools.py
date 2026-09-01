@@ -19,6 +19,9 @@ from lucent.secrets import SecretRegistry, resolve_env_vars
 
 logger = get_logger("services.managed_tools")
 
+_MCP_PROXY_CONFIG_KEY = "mcp_proxy"
+_MCP_PROXY_DISCOVERY_PAYLOAD = {"_lucent_mcp_operation": "list_tools"}
+
 
 class ManagedToolError(Exception):
     """Base error for managed tool execution failures."""
@@ -83,6 +86,62 @@ class ManagedToolExecutor:
         agent_id: str | None = None,
         enforce_agent_grant: bool = True,
     ) -> ManagedToolExecutionResult:
+        """Execute a managed tool with arguments supplied by an agent or user."""
+        return await self._execute(
+            tool=tool,
+            arguments=arguments,
+            org_id=org_id,
+            user_id=user_id,
+            user_role=user_role,
+            agent_id=agent_id,
+            enforce_agent_grant=enforce_agent_grant,
+            validate_input=True,
+            validate_output=True,
+        )
+
+    async def discover_mcp_proxy_tools(
+        self,
+        *,
+        tool: dict[str, Any],
+        org_id: str,
+        user_id: str,
+        user_role: str | None = None,
+        agent_id: str | None = None,
+        enforce_agent_grant: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Warm a managed MCP proxy and return its native tool descriptors."""
+        runtime_config = tool.get("runtime_config") or {}
+        if not runtime_config.get(_MCP_PROXY_CONFIG_KEY):
+            raise ManagedToolBlockedError("Managed tool is not configured as an MCP proxy")
+
+        result = await self._execute(
+            tool=tool,
+            arguments=_MCP_PROXY_DISCOVERY_PAYLOAD,
+            org_id=org_id,
+            user_id=user_id,
+            user_role=user_role,
+            agent_id=agent_id,
+            enforce_agent_grant=enforce_agent_grant,
+            validate_input=False,
+            validate_output=False,
+        )
+        if not result.ok:
+            raise ManagedToolError(result.error or "MCP proxy tool discovery failed")
+        return normalize_discovered_mcp_tools(result.result)
+
+    async def _execute(
+        self,
+        *,
+        tool: dict[str, Any],
+        arguments: dict[str, Any] | None,
+        org_id: str,
+        user_id: str,
+        user_role: str | None = None,
+        agent_id: str | None = None,
+        enforce_agent_grant: bool = True,
+        validate_input: bool,
+        validate_output: bool,
+    ) -> ManagedToolExecutionResult:
         if tool.get("status") != "active":
             raise ManagedToolBlockedError("Managed tool is not active")
 
@@ -97,7 +156,8 @@ class ManagedToolExecutor:
                 raise ManagedToolBlockedError("Managed tool is not granted to this agent")
 
         payload = arguments or {}
-        self._validate_input(tool, payload)
+        if validate_input:
+            self._validate_input(tool, payload)
 
         run = await self.repo.create_managed_tool_run(
             tool_id=str(tool["id"]),
@@ -153,7 +213,8 @@ class ManagedToolExecutor:
                 )
 
             result_value = output.get("result")
-            self._validate_output(tool, result_value)
+            if validate_output:
+                self._validate_output(tool, result_value)
             await self.repo.complete_managed_tool_run(
                 run_id,
                 status="completed",
@@ -323,7 +384,6 @@ class ManagedToolExecutor:
             import inspect
             import io
             import json
-            import traceback
 
             ENTRYPOINT = {entrypoint!r}
 
@@ -357,8 +417,8 @@ class ManagedToolExecutor:
                 except Exception as exc:
                     output = {{
                         'ok': False,
-                        'error': str(exc),
-                        'traceback': traceback.format_exc(limit=20),
+                        'error': 'Managed tool execution failed',
+                        'error_type': type(exc).__name__,
                         'stdout': stdout.getvalue(),
                         'stderr': stderr.getvalue(),
                     }}
@@ -370,3 +430,34 @@ class ManagedToolExecutor:
             if __name__ == '__main__':
                 asyncio.run(_main())
             """).strip() + "\n"
+
+
+def normalize_discovered_mcp_tools(value: Any) -> list[dict[str, Any]]:
+    """Validate proxy discovery output before it becomes a model tool schema."""
+    if not isinstance(value, dict) or not isinstance(value.get("tools"), list):
+        raise ManagedToolError("MCP proxy discovery did not return a tools list")
+
+    normalized: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for item in value["tools"]:
+        if not isinstance(item, dict):
+            raise ManagedToolError("MCP proxy discovery returned an invalid tool descriptor")
+        name = item.get("name")
+        if not isinstance(name, str) or not name or len(name) > 128:
+            raise ManagedToolError("MCP proxy discovery returned a tool with an invalid name")
+        if name in seen_names:
+            raise ManagedToolError(f"MCP proxy discovery returned duplicate tool '{name}'")
+        seen_names.add(name)
+
+        description = item.get("description")
+        input_schema = item.get("input_schema") or item.get("inputSchema") or {
+            "type": "object", "properties": {},
+        }
+        if not isinstance(description, str) or not isinstance(input_schema, dict):
+            raise ManagedToolError(f"MCP proxy discovery returned an invalid descriptor for '{name}'")
+        normalized.append({
+            "name": name,
+            "description": description,
+            "input_schema": input_schema,
+        })
+    return normalized

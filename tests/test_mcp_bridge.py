@@ -78,6 +78,18 @@ def _fake_http_client(*_args, **_kwargs):
     return _FakeHttpClient()
 
 
+class _FakeWriter:
+    def close(self):
+        return None
+
+    async def wait_closed(self):
+        return None
+
+
+async def _fake_open_connection(*_args, **_kwargs):
+    return object(), _FakeWriter()
+
+
 @pytest.mark.asyncio
 async def test_bridge_uses_streamable_http_session(monkeypatch):
     import mcp
@@ -94,6 +106,7 @@ async def test_bridge_uses_streamable_http_session(monkeypatch):
         "create_mcp_http_client",
         _fake_http_client,
     )
+    monkeypatch.setattr("lucent.llm.mcp_bridge.asyncio.open_connection", _fake_open_connection)
 
     bridge = MCPToolBridge(
         "http://localhost:8766/mcp",
@@ -129,6 +142,40 @@ async def test_bridge_uses_streamable_http_session(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bridge_excludes_internal_tools_from_discovery(monkeypatch):
+    import mcp
+    import mcp.client.streamable_http
+
+    monkeypatch.setattr(mcp, "ClientSession", _FakeClientSession)
+    monkeypatch.setattr(
+        mcp.client.streamable_http,
+        "streamable_http_client",
+        _fake_streamable_client,
+    )
+    monkeypatch.setattr(
+        mcp.client.streamable_http,
+        "create_mcp_http_client",
+        _fake_http_client,
+    )
+    monkeypatch.setattr("lucent.llm.mcp_bridge.asyncio.open_connection", _fake_open_connection)
+
+    bridge = MCPToolBridge(
+        "http://localhost:8766/mcp",
+        allowed_tools=["*"],
+        excluded_tools=["search_memories"],
+        skip_url_validation=True,
+    )
+    try:
+        tools = await bridge.discover_tools()
+        result = await bridge.call_tool("search_memories", {"query": "project notes"})
+    finally:
+        await bridge.close()
+
+    assert [tool["function"]["name"] for tool in tools] == ["create_task"]
+    assert "tool is not allowed" in result
+
+
+@pytest.mark.asyncio
 async def test_bridge_reconnects_once_after_session_termination(monkeypatch):
     import mcp
     import mcp.client.streamable_http
@@ -152,6 +199,7 @@ async def test_bridge_reconnects_once_after_session_termination(monkeypatch):
         "create_mcp_http_client",
         _fake_http_client,
     )
+    monkeypatch.setattr("lucent.llm.mcp_bridge.asyncio.open_connection", _fake_open_connection)
 
     bridge = MCPToolBridge(
         "http://localhost:8766/mcp",
@@ -171,3 +219,16 @@ async def test_bridge_reconnects_once_after_session_termination(monkeypatch):
     assert _FakeClientSession.instances[1].calls == [
         ("search_memories", {"query": "project notes"})
     ]
+
+
+@pytest.mark.asyncio
+async def test_unreachable_server_is_skipped_without_opening_mcp_session(monkeypatch):
+    """An unavailable optional server must not block tool discovery indefinitely."""
+    async def refuse_connection(*_args, **_kwargs):
+        raise ConnectionRefusedError("connection refused")
+
+    bridge = MCPToolBridge("http://localhost:3100", skip_url_validation=True)
+    monkeypatch.setattr("lucent.llm.mcp_bridge.asyncio.open_connection", refuse_connection)
+
+    assert await bridge.discover_tools() == []
+    assert bridge._session is None

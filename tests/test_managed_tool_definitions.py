@@ -10,7 +10,11 @@ from mcp.server import MCPServer as FastMCP
 from lucent.auth import set_current_user
 from lucent.db.definitions import DefinitionRepository
 from lucent.llm.context import clear_llm_context, set_llm_context
-from lucent.services.managed_tools import ManagedToolExecutionResult
+from lucent.services.managed_tools import (
+    ManagedToolError,
+    ManagedToolExecutionResult,
+    ManagedToolExecutor,
+)
 from lucent.tools.definitions import register_definition_tools
 
 
@@ -72,6 +76,106 @@ TOOL_CODE = """
 def handler(args):
     return {"echo": args.get("value")}
 """.strip()
+
+
+def test_managed_tool_runner_redacts_unhandled_exception_details():
+    runner = ManagedToolExecutor._runner_script("handler")
+
+    assert "'error': 'Managed tool execution failed'" in runner
+    assert "'error_type': type(exc).__name__" in runner
+    assert runner.index("except Exception as exc:") < runner.index("'error_type': type(exc).__name__")
+    assert "traceback" not in runner
+    assert "str(exc)" not in runner
+
+
+@pytest.mark.asyncio
+async def test_mcp_proxy_discovery_normalizes_native_tool_descriptors(monkeypatch):
+    executor = ManagedToolExecutor(AsyncMock())
+    captured = {}
+
+    async def fake_execute(**kwargs):
+        captured.update(kwargs)
+        return ManagedToolExecutionResult(
+            ok=True,
+            result={
+                "tools": [
+                    {
+                        "name": "search_repositories",
+                        "description": "Search repositories.",
+                        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}},
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr(executor, "_execute", fake_execute)
+    tools = await executor.discover_mcp_proxy_tools(
+        tool={"runtime_config": {"mcp_proxy": True}},
+        org_id="org-1",
+        user_id="user-1",
+    )
+
+    assert tools == [
+        {
+            "name": "search_repositories",
+            "description": "Search repositories.",
+            "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        }
+    ]
+    assert captured["arguments"] == {"_lucent_mcp_operation": "list_tools"}
+    assert captured["validate_input"] is False
+    assert captured["validate_output"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_proxy_discovery_rejects_non_tool_output(monkeypatch):
+    executor = ManagedToolExecutor(AsyncMock())
+
+    async def fake_execute(**_kwargs):
+        return ManagedToolExecutionResult(ok=True, result={"unexpected": []})
+
+    monkeypatch.setattr(executor, "_execute", fake_execute)
+    with pytest.raises(ManagedToolError, match="tools list"):
+        await executor.discover_mcp_proxy_tools(
+            tool={"runtime_config": {"mcp_proxy": True}},
+            org_id="org-1",
+            user_id="user-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_repository_caches_and_invalidates_managed_mcp_proxy_tools(repo, auth_user):
+    org_id = str(auth_user["organization_id"])
+    user_id = str(auth_user["id"])
+    tool = await repo.create_managed_tool(
+        name="cached-mcp-proxy",
+        description="Caches native MCP tool descriptors",
+        source_code=TOOL_CODE,
+        input_schema={"type": "object", "properties": {}},
+        org_id=org_id,
+        created_by=user_id,
+        owner_user_id=user_id,
+        runtime_config={"mcp_proxy": True},
+    )
+    descriptors = [{
+        "name": "search_repositories",
+        "description": "Search repositories.",
+        "input_schema": {"type": "object", "properties": {}},
+    }]
+
+    saved = await repo.save_managed_mcp_proxy_tools(str(tool["id"]), descriptors, org_id)
+    assert saved["discovered_tools"] == descriptors
+    cached = await repo.get_managed_mcp_proxy_tools(str(tool["id"]), org_id)
+    assert cached["discovered_tools"] == descriptors
+    assert cached["tools_discovered_at"] is not None
+
+    updated = await repo.update_managed_tool(
+        str(tool["id"]),
+        org_id,
+        source_code=TOOL_CODE + "\n# changed",
+    )
+    assert updated["discovered_tools"] is None
+    assert updated["tools_discovered_at"] is None
 
 
 @pytest.mark.asyncio

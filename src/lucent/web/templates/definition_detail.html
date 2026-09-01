@@ -338,6 +338,32 @@
         </div>
     </div>
 </div>
+{% if definition.runtime_config and definition.runtime_config.mcp_proxy %}
+<div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
+    <div class="flex items-center justify-between gap-3 mb-3">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Native MCP Tools</h2>
+        {% if definition.status == 'active' %}
+        <form method="POST" action="/definitions/tools/{{ definition.id }}/discover-tools">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">{% if definition.discovered_tools %}Refresh{% else %}Discover Tools{% endif %}</button>
+        </form>
+        {% endif %}
+    </div>
+    {% if definition.discovered_tools %}
+    <div class="space-y-1.5 max-h-80 overflow-y-auto">
+        {% for tool in definition.discovered_tools %}
+        <div class="border border-gray-100 rounded-md px-3 py-2">
+            <div class="text-sm font-medium text-gray-800 font-mono">{{ tool.name }}</div>
+            {% if tool.description %}<p class="mt-0.5 text-xs text-gray-500">{{ tool.description }}</p>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% if definition.tools_discovered_at %}<p class="mt-3 text-xs text-gray-400">Updated {{ definition.tools_discovered_at.strftime('%b %d, %Y at %H:%M') }}</p>{% endif %}
+    {% else %}
+    <p class="text-sm text-gray-400">No native tools have been discovered.</p>
+    {% endif %}
+</div>
+{% endif %}
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
     <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Tool Contract &amp; Runtime</h2>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">

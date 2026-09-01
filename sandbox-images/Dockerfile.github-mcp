@@ -1,0 +1,9 @@
+ARG GITHUB_MCP_VERSION=v1.11.0
+FROM ghcr.io/github/github-mcp-server:${GITHUB_MCP_VERSION} AS github_mcp
+
+FROM lucent-sandbox:base
+
+COPY --from=github_mcp --chown=sandbox:sandbox \
+    /server/github-mcp-server /usr/local/bin/github-mcp-server
+
+USER sandbox

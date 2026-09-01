@@ -7,6 +7,7 @@ import ipaddress
 import logging
 import os
 import shlex
+import socket
 import time
 import uuid
 from datetime import datetime, timezone
@@ -61,6 +62,7 @@ class DockerBackend(SandboxBackend):
     def __init__(self, network_name: str = "lucent-sandbox-net"):
         self._client: docker.DockerClient | None = None
         self._network_name = network_name
+        self._allowlist_resolutions: dict[str, dict[str, list[str]]] = {}
 
     def _workspace_volume_name(self, sandbox_id: str) -> str:
         """Return the named volume used to persist /workspace across rebuilds."""
@@ -157,6 +159,10 @@ class DockerBackend(SandboxBackend):
         dc_config: DevcontainerConfig | None = None
 
         try:
+            if config.network_mode == "allowlist":
+                self._allowlist_resolutions[sandbox_id] = await self._resolve_allowlist_hosts(
+                    sandbox_id, config,
+                )
             container = await asyncio.to_thread(self._create_container, sandbox_id, name, config)
             info.container_id = container.id
 
@@ -196,29 +202,30 @@ class DockerBackend(SandboxBackend):
                     info.error = f"Git clone failed: {self._sanitize_git_output(clone_result.stderr, config)}"
                     return info
 
-            # Detect devcontainer.json in the workspace
-            dc_config = await self._detect_devcontainer(sandbox_id)
-            if dc_config:
-                info.devcontainer = _devcontainer_to_dict(dc_config)
+            # An empty managed-tool workspace cannot contain a devcontainer.
+            if config.repo_url:
+                dc_config = await self._detect_devcontainer(sandbox_id)
+                if dc_config:
+                    info.devcontainer = _devcontainer_to_dict(dc_config)
 
-                # Handle image override: rebuild with devcontainer image
-                if dc_config.image and dc_config.image != config.image:
-                    info = await self._rebuild_with_image(
-                        sandbox_id, name, config, dc_config.image, info
-                    )
-
-                # Handle Dockerfile build
-                if dc_config.build_dockerfile:
-                    await self._build_devcontainer_image(sandbox_id, config, dc_config)
-
-                # Run devcontainer lifecycle commands (before user setup)
-                for cmd in dc_config.all_setup_commands:
-                    result = await self.exec(sandbox_id, cmd, timeout=300)
-                    if result.exit_code != 0:
-                        logger.warning(
-                            "Devcontainer command failed in %s: %s (exit %d)",
-                            name, cmd, result.exit_code,
+                    # Handle image override: rebuild with devcontainer image
+                    if dc_config.image and dc_config.image != config.image:
+                        info = await self._rebuild_with_image(
+                            sandbox_id, name, config, dc_config.image, info
                         )
+
+                    # Handle Dockerfile build
+                    if dc_config.build_dockerfile:
+                        await self._build_devcontainer_image(sandbox_id, config, dc_config)
+
+                    # Run devcontainer lifecycle commands (before user setup)
+                    for cmd in dc_config.all_setup_commands:
+                        result = await self.exec(sandbox_id, cmd, timeout=300)
+                        if result.exit_code != 0:
+                            logger.warning(
+                                "Devcontainer command failed in %s: %s (exit %d)",
+                                name, cmd, result.exit_code,
+                            )
 
             # Run user setup commands (after devcontainer commands)
             for cmd in config.setup_commands:
@@ -244,7 +251,11 @@ class DockerBackend(SandboxBackend):
             # package installation can proceed freely beforehand.
             if config.network_mode == "allowlist":
                 try:
-                    await self._apply_network_allowlist(sandbox_id, config)
+                    await self._apply_network_allowlist(
+                        sandbox_id,
+                        config,
+                        allowed_ips=self._allowed_ips_for_sandbox(sandbox_id),
+                    )
                 except RuntimeError as exc:
                     info.status = SandboxStatus.FAILED
                     info.error = str(exc)
@@ -395,6 +406,7 @@ class DockerBackend(SandboxBackend):
         networking_config = None
         cap_add = []
         dns: list[str] = []
+        extra_hosts: dict[str, str] = {}
         if config.network_mode == "none":
             network_mode = "none"
         elif config.network_mode in ("bridge", "allowlist"):
@@ -411,6 +423,14 @@ class DockerBackend(SandboxBackend):
             if config.network_mode == "allowlist":
                 # NET_ADMIN needed to apply iptables rules post-create
                 cap_add = ["NET_ADMIN"]
+                # Pin DNS to the addresses approved by the trusted backend.
+                # This prevents CDN DNS rotation inside the container from
+                # resolving a destination that the egress policy cannot allow.
+                extra_hosts = {
+                    host: addresses[0]
+                    for host, addresses in self._allowlist_resolutions.get(sandbox_id, {}).items()
+                    if self._validate_iptables_destination(host) is None and addresses
+                }
         # For "allowlist" mode, we use bridge + iptables (handled post-create)
 
         # Disk quota via storage driver (overlay2 with quota support, btrfs, zfs).
@@ -450,6 +470,7 @@ class DockerBackend(SandboxBackend):
             network=self._network_name if networking_config is not None else None,
             networking_config=networking_config,
             dns=dns or None,
+            extra_hosts=extra_hosts or None,
             cap_add=cap_add or None,
             security_opt=["no-new-privileges"],
             read_only=False,  # Repos need write access
@@ -535,7 +556,11 @@ class DockerBackend(SandboxBackend):
         return False
 
     async def _apply_network_allowlist(
-        self, sandbox_id: str, config: SandboxConfig
+        self,
+        sandbox_id: str,
+        config: SandboxConfig,
+        *,
+        allowed_ips: list[str] | None = None,
     ) -> None:
         """Apply iptables egress rules inside the container for allowlist mode.
 
@@ -553,69 +578,16 @@ class DockerBackend(SandboxBackend):
             RuntimeError: If iptables cannot be installed or any rule fails.
                 The caller must mark the sandbox as failed.
         """
-        # Ensure iptables is available before anything else. If it's missing
-        # we MUST refuse to continue rather than silently leaving the sandbox
-        # with full network access.
-        check = await self.exec(sandbox_id, "command -v iptables", timeout=5)
-        if check.exit_code != 0:
-            await self.exec(
-                sandbox_id,
-                "( (command -v apt-get >/dev/null 2>&1 && apt-get update -qq && "
-                "apt-get install -y -qq iptables >/dev/null 2>&1) || "
-                "(command -v apk >/dev/null 2>&1 && apk add --no-cache iptables >/dev/null 2>&1) || "
-                "(command -v yum >/dev/null 2>&1 && yum install -y -q iptables >/dev/null 2>&1) )",
-                timeout=120,
-            )
-            recheck = await self.exec(sandbox_id, "command -v iptables", timeout=5)
-            if recheck.exit_code != 0:
-                raise RuntimeError(
-                    f"Network allowlist requested but iptables is unavailable in image "
-                    f"{config.image!r} and could not be installed. Use an image with "
-                    f"iptables pre-installed, or change network_mode to 'bridge' or 'none'."
-                )
-
-        # Resolve allowed hosts to IP addresses inside the container.
-        # Use getent ahosts (not just hosts) so we can filter to IPv4-only —
-        # iptables-legacy doesn't handle IPv6 addresses, and picking the first
-        # DNS result blindly often gives an IPv6 record we'd then skip,
-        # leaving the host effectively blocked.
-        allowed_ips: list[str] = []
-        unresolved: list[str] = []
-        for host in config.allowed_hosts:
-            literal_ip = self._validate_iptables_destination(host)
-            if literal_ip is not None:
-                allowed_ips.append(literal_ip)
-                continue
-
-            # Get all IPv4 addresses, not just the first DNS result
-            res = await self.exec(
-                sandbox_id,
-                # `getent ahosts` returns one row per address; STREAM keeps order.
-                # Filter to IPv4 (no colons) and take unique addresses.
-                f"getent ahosts {shlex.quote(host)} 2>/dev/null | "
-                f"awk '$1 !~ /:/ {{print $1}}' | sort -u",
-                timeout=10,
-            )
-            host_ips: list[str] = []
-            for line in res.stdout.strip().splitlines():
-                ip = self._validate_iptables_destination(line.strip())
-                if ip:
-                    host_ips.append(ip)
-            if host_ips:
-                allowed_ips.extend(host_ips)
-            else:
-                unresolved.append(host)
-                logger.warning(
-                    "Allowlist: no IPv4 addresses found for host %r in sandbox %s",
-                    host, sandbox_id[:12],
-                )
-
-        if not allowed_ips:
-            raise RuntimeError(
-                f"Network allowlist requested but no allowed_hosts could be resolved "
-                f"to IPv4 addresses (unresolved: {unresolved}). Refusing to apply "
-                f"a no-op allowlist that would leave egress wide open."
-            )
+        # Resolve allowed hosts before the policy is installed. This avoids one
+        # Docker exec per host while keeping address validation in the trusted
+        # backend process.
+        if allowed_ips is None:
+            host_resolutions = await self._resolve_allowlist_hosts(sandbox_id, config)
+            allowed_ips = [
+                address
+                for addresses in host_resolutions.values()
+                for address in addresses
+            ]
 
         # De-duplicate while preserving order (handles literal + resolved overlap)
         seen: set[str] = set()
@@ -635,20 +607,74 @@ class DockerBackend(SandboxBackend):
             rules.append(f"iptables -A OUTPUT -d {shlex.quote(ip)} -j ACCEPT")
         rules.append("iptables -P OUTPUT DROP")
 
-        for rule in rules:
-            res = await self.exec(sandbox_id, rule, timeout=10)
-            if res.exit_code != 0:
-                # Any rule failure is a hard failure — partial rules leave the
-                # sandbox in an undefined security state.
-                raise RuntimeError(
-                    f"Allowlist iptables rule {rule!r} failed: {res.stderr[:200]}. "
-                    "Sandbox security policy could not be applied."
-                )
+        policy = "\n".join([
+            "set -eu",
+            "command -v iptables >/dev/null",
+            *rules,
+        ])
+        res = await self.exec(sandbox_id, policy, timeout=10, user="root")
+        if res.exit_code != 0:
+            raise RuntimeError(
+                f"Network allowlist policy failed: {res.stderr[:200]}. "
+                "Sandbox security policy could not be applied."
+            )
 
         logger.info(
             "Applied network allowlist in sandbox %s (%d allowed IPs from %d hosts)",
             sandbox_id[:12], len(unique_ips), len(config.allowed_hosts),
         )
+
+    async def _resolve_allowlist_hosts(
+        self, sandbox_id: str, config: SandboxConfig,
+    ) -> dict[str, list[str]]:
+        """Resolve every allowed host once in the trusted backend process."""
+        resolutions: dict[str, list[str]] = {}
+        unresolved: list[str] = []
+        for host in config.allowed_hosts:
+            literal_ip = self._validate_iptables_destination(host)
+            if literal_ip is not None:
+                resolutions[host] = [literal_ip]
+                continue
+
+            addresses = await self._resolve_ipv4_addresses(host)
+            if addresses:
+                resolutions[host] = addresses
+            else:
+                unresolved.append(host)
+                logger.warning(
+                    "Allowlist: no IPv4 addresses found for host %r in sandbox %s",
+                    host, sandbox_id[:12],
+                )
+
+        if not resolutions:
+            raise RuntimeError(
+                f"Network allowlist requested but no allowed_hosts could be resolved "
+                f"to IPv4 addresses (unresolved: {unresolved}). Refusing to apply "
+                f"a no-op allowlist that would leave egress wide open."
+            )
+        return resolutions
+
+    def _allowed_ips_for_sandbox(self, sandbox_id: str) -> list[str]:
+        """Return the pre-container addresses used for DNS pinning and egress rules."""
+        return [
+            address
+            for addresses in self._allowlist_resolutions.get(sandbox_id, {}).values()
+            for address in addresses
+        ]
+
+    async def _resolve_ipv4_addresses(self, host: str) -> list[str]:
+        """Resolve and validate IPv4 addresses for an allowlisted host."""
+        try:
+            records = await asyncio.to_thread(socket.getaddrinfo, host, None, socket.AF_INET)
+        except OSError:
+            return []
+
+        addresses: list[str] = []
+        for record in records:
+            address = self._validate_iptables_destination(record[4][0])
+            if address:
+                addresses.append(address)
+        return list(dict.fromkeys(addresses))
 
     def _build_clone_command(self, config: SandboxConfig) -> str:
         url = self._sanitize_repo_url(config.repo_url)
@@ -725,6 +751,7 @@ class DockerBackend(SandboxBackend):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout: int = 300,
+        user: str | None = None,
     ) -> ExecResult:
         container = self._find_container(sandbox_id)
         if container is None:
@@ -737,7 +764,9 @@ class DockerBackend(SandboxBackend):
 
         start = time.monotonic()
         try:
-            result = await asyncio.to_thread(self._exec_sync, container, cmd, cwd, env, timeout)
+            result = await asyncio.to_thread(
+                self._exec_sync, container, cmd, cwd, env, timeout, user
+            )
             duration_ms = int((time.monotonic() - start) * 1000)
             return ExecResult(
                 exit_code=result[0],
@@ -763,12 +792,14 @@ class DockerBackend(SandboxBackend):
         cwd: str | None,
         env: dict[str, str] | None,
         timeout: int,
+        user: str | None,
     ) -> tuple[int, str, str]:
         exec_id = container.client.api.exec_create(
             container.id,
             cmd,
             workdir=cwd,
             environment=env,
+            user=user,
             stdout=True,
             stderr=True,
         )
@@ -919,30 +950,33 @@ class DockerBackend(SandboxBackend):
             logger.info("Stopped sandbox: %s", sandbox_id[:12])
 
     async def destroy(self, sandbox_id: str) -> None:
-        container = self._find_container(sandbox_id)
-        if container:
-            try:
-                await asyncio.to_thread(container.stop, timeout=5)
-            except Exception:
-                logger.debug(
-                    "Failed to stop container %s before removal",
-                    sandbox_id[:12],
-                    exc_info=True,
-                )
-            await asyncio.to_thread(container.remove, force=True)
-            logger.info("Destroyed sandbox: %s", sandbox_id[:12])
-
-        # Remove the named workspace volume so data doesn't persist indefinitely
-        volume_name = self._workspace_volume_name(sandbox_id)
         try:
-            client = self._docker()
-            volume = await asyncio.to_thread(client.volumes.get, volume_name)
-            await asyncio.to_thread(volume.remove)
-            logger.info("Removed workspace volume: %s", volume_name)
-        except docker.errors.NotFound:
-            pass
-        except Exception:
-            logger.debug("Failed to remove workspace volume %s", volume_name, exc_info=True)
+            container = self._find_container(sandbox_id)
+            if container:
+                try:
+                    await asyncio.to_thread(container.stop, timeout=5)
+                except Exception:
+                    logger.debug(
+                        "Failed to stop container %s before removal",
+                        sandbox_id[:12],
+                        exc_info=True,
+                    )
+                await asyncio.to_thread(container.remove, force=True)
+                logger.info("Destroyed sandbox: %s", sandbox_id[:12])
+
+            # Remove the named workspace volume so data doesn't persist indefinitely
+            volume_name = self._workspace_volume_name(sandbox_id)
+            try:
+                client = self._docker()
+                volume = await asyncio.to_thread(client.volumes.get, volume_name)
+                await asyncio.to_thread(volume.remove)
+                logger.info("Removed workspace volume: %s", volume_name)
+            except docker.errors.NotFound:
+                pass
+            except Exception:
+                logger.debug("Failed to remove workspace volume %s", volume_name, exc_info=True)
+        finally:
+            self._allowlist_resolutions.pop(sandbox_id, None)
 
     async def list_all(self) -> list[SandboxInfo]:
         client = self._docker()

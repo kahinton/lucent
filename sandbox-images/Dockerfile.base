@@ -3,6 +3,7 @@ FROM python:3.12-slim
 # System tools for general sandbox use
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    iptables \
     curl \
     wget \
     jq \
