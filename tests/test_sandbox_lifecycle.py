@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import pytest
 
+from daemon.sandbox.lifecycle import _create_task_sandbox, _keep_task_sandbox_alive
 from lucent.sandbox.docker_backend import DockerBackend
 from lucent.sandbox.manager import SandboxManager
 from lucent.sandbox.mcp_bridge import BridgeServer
@@ -29,7 +30,12 @@ from lucent.sandbox.models import (
     SandboxStatus,
 )
 from lucent.sandbox.output import SandboxOutputHandler
-from daemon.sandbox.lifecycle import _keep_task_sandbox_alive
+from lucent.settings import (
+    clear_runtime_setting_cache,
+    custom_tooling_enabled,
+    sandboxes_enabled,
+    set_runtime_setting_cache,
+)
 
 # ---------------------------------------------------------------------------
 # Shared test helpers
@@ -109,6 +115,42 @@ def _make_backend_mock(**kwargs) -> AsyncMock:
     for k, v in kwargs.items():
         setattr(backend, k, v)
     return backend
+
+
+@pytest.mark.asyncio
+async def test_org_sandbox_setting_defaults_on_and_blocks_before_allocation():
+    disabled_org = "disabled-org"
+    enabled_org = "enabled-org"
+    assert sandboxes_enabled(organization_id=disabled_org) is True
+    assert custom_tooling_enabled(organization_id=disabled_org) is True
+
+    set_runtime_setting_cache(disabled_org, "features.sandboxes_enabled", False)
+    try:
+        assert sandboxes_enabled(organization_id=disabled_org) is False
+        assert custom_tooling_enabled(organization_id=disabled_org) is False
+        assert sandboxes_enabled(organization_id=enabled_org) is True
+
+        sandbox_id, config, failure, reused = await _create_task_sandbox(
+            MagicMock(),
+            "task-12345678",
+            {},
+            requesting_user_id="user-1",
+            org_id=disabled_org,
+        )
+    finally:
+        clear_runtime_setting_cache(disabled_org)
+
+    assert sandbox_id is None
+    assert config is None
+    assert reused is False
+    assert failure == {
+        "stage": "sandbox_disabled",
+        "detail": (
+            "Sandboxes are disabled for this organization by the "
+            "features.sandboxes_enabled setting"
+        ),
+        "setting": "features.sandboxes_enabled",
+    }
 
 
 @pytest.mark.asyncio

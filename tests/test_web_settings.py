@@ -268,6 +268,34 @@ async def test_runtime_setting_update_persists_db_value(
 
 
 @pytest.mark.asyncio
+async def test_runtime_setting_disables_org_sandboxes_and_custom_tooling(
+    client,
+    db_pool,
+    web_user,
+):
+    user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    runtime_settings.clear_runtime_setting_cache()
+    assert runtime_settings.sandboxes_enabled(organization_id=org["id"]) is True
+
+    resp = await client.post(
+        "/settings/runtime/features.sandboxes_enabled",
+        data=_csrf_data(client, {"value": "false"}),
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 303
+    repo = RuntimeSettingsRepository(db_pool)
+    row = await repo.get_setting(org["id"], "features.sandboxes_enabled")
+    assert row is not None
+    assert row["value"] is False
+    assert row["updated_by"] == user["id"]
+    assert runtime_settings.sandboxes_enabled(organization_id=org["id"]) is False
+    assert runtime_settings.custom_tooling_enabled(organization_id=org["id"]) is False
+    runtime_settings.clear_runtime_setting_cache(str(org["id"]))
+
+
+@pytest.mark.asyncio
 async def test_runtime_default_model_drives_model_registry(
     client,
     db_pool,

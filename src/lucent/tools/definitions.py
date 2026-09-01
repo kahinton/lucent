@@ -518,6 +518,19 @@ Returns: JSON with the created proposed tool including its ID and status."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        from lucent.settings import custom_tooling_enabled
+
+        if not custom_tooling_enabled(organization_id=org_id):
+            return json.dumps(
+                {
+                    "error": (
+                        "Custom tooling is disabled for this organization because "
+                        "features.sandboxes_enabled is off"
+                    ),
+                    "code": 409,
+                    "custom_tooling_enabled": False,
+                }
+            )
         if not name or len(name) > 64:
             return json.dumps({"error": "name is required and must be <= 64 characters"})
         if not source_code:
@@ -1270,6 +1283,9 @@ Returns: JSON with items array, total_count, and pagination info."""
             requester_user_id=str(user_id) if user_id else None,
             requester_role=role,
         )
+        from lucent.settings import custom_tooling_enabled
+
+        result["custom_tooling_enabled"] = custom_tooling_enabled(organization_id=org_id)
         return json.dumps(result, default=_serialize)
 
     @mcp.tool(

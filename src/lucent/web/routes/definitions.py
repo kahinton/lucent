@@ -336,6 +336,9 @@ async def definitions_page(
         requester_user_id=str(user.id),
         requester_role=role_value,
     )
+    from lucent.settings import custom_tooling_enabled
+
+    org_custom_tooling_enabled = custom_tooling_enabled(organization_id=org_id)
     proposals = await repo.get_pending_proposals(
         org_id,
         requester_user_id=str(user.id),
@@ -411,6 +414,7 @@ async def definitions_page(
             "mcp_total": mcp_result["total_count"],
             "hooks_total": hooks_result["total_count"],
             "tools_total": tools_result["total_count"],
+            "custom_tooling_enabled": org_custom_tooling_enabled,
             "tab": tab,
             "page": page,
             "per_page": per_page,
@@ -1135,6 +1139,14 @@ async def create_managed_tool_web(request: Request):
     """Create a new managed tool definition."""
     user = await get_user_context(request)
     _require_admin_or_owner(user)
+    from lucent.settings import custom_tooling_enabled
+
+    if not custom_tooling_enabled(organization_id=user.organization_id):
+        raise HTTPException(
+            409,
+            "Custom tooling is disabled for this organization because "
+            "features.sandboxes_enabled is off",
+        )
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()

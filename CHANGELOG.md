@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 #### Model and Runtime Settings
 - Selectable model reasoning-effort metadata in the model registry, provider discovery, task/workflow creation, and LLM engine calls. **Migrations 073 and 074**.
+- Added the default-on, organization-scoped `features.sandboxes_enabled` runtime setting. Disabling it blocks new and queued sandbox-backed tasks, direct sandbox launches, sandbox templates, schedules/workflows that request sandboxes, and Lucent-hosted custom managed-tool authoring/execution. Existing tasks, templates, sandboxes, and tool definitions remain visible for audit and cleanup, and task/tool/template APIs report the effective capability state.
 - User, group, and organization-wide model audiences, visible and editable in Settings → Models and enforced across chat, request tasks, workflows, admin APIs, and authenticated MCP model discovery. Existing unowned catalog models remain organization-visible. **Migration 093**.
 - DB-backed Runtime Settings catalog and Settings UI for runtime-safe configuration, with environment/default fallback and locked/hidden visibility for bootstrap and credential settings. **Migration 086**.
 - System-managed secret storage for values such as the signing secret, avoiding a hard requirement to persist sensitive runtime secrets in env vars for local compose. **Migration 085**.

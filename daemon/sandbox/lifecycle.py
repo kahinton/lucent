@@ -58,10 +58,23 @@ async def _create_task_sandbox(
     org_id: str,
     sequence_order: int = 0,
     sandbox_template_id: str | None = None,
-) -> tuple[str | None, "SandboxConfig | None", dict | None, bool]:
+) -> tuple[str | None, object | None, dict | None, bool]:
     """Create or reuse a sandbox for a task."""
     from lucent.sandbox.manager import get_sandbox_manager
     from lucent.sandbox.models import SandboxConfig
+    from lucent.settings import sandboxes_enabled
+
+    if not sandboxes_enabled(organization_id=org_id):
+        detail = (
+            "Sandboxes are disabled for this organization by the "
+            "features.sandboxes_enabled setting"
+        )
+        runtime.log(f"Sandbox blocked for task {task_id[:8]}: {detail}", "WARN")
+        return None, None, {
+            "stage": "sandbox_disabled",
+            "detail": detail,
+            "setting": "features.sandboxes_enabled",
+        }, False
 
     provider = await runtime.get_secret_provider()
     runtime.set_current_user({"id": requesting_user_id, "organization_id": org_id})

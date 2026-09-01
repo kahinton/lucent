@@ -17,14 +17,15 @@ from lucent.db.audit import AuditRepository
 from lucent.db.definitions import BuiltInProtectionError
 from lucent.rbac import Role
 from lucent.security import scan_content_for_injection
-from lucent.settings import (
-    hook_admin_approval_required,
-    managed_tool_admin_approval_required,
-)
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
     discover_mcp_tools,
     get_tools_cached,
+)
+from lucent.settings import (
+    custom_tooling_enabled,
+    hook_admin_approval_required,
+    managed_tool_admin_approval_required,
 )
 from lucent.url_validation import SSRFError, validate_url
 
@@ -859,7 +860,7 @@ async def list_managed_tools(
 ):
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    return await repo.list_managed_tools(
+    result = await repo.list_managed_tools(
         str(user.organization_id),
         status=status,
         limit=min(limit, 200),
@@ -867,10 +868,20 @@ async def list_managed_tools(
         requester_user_id=str(user.id),
         requester_role=user.role.value,
     )
+    result["custom_tooling_enabled"] = custom_tooling_enabled(
+        organization_id=user.organization_id
+    )
+    return result
 
 
 @router.post("/tools", status_code=201)
 async def create_managed_tool(body: CreateManagedTool, user: AuthenticatedUser):
+    if not custom_tooling_enabled(organization_id=user.organization_id):
+        raise HTTPException(
+            409,
+            "Custom tooling is disabled for this organization because "
+            "features.sandboxes_enabled is off",
+        )
     _validate_user_definition_create(body.status, body.scope)
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
@@ -1044,7 +1055,11 @@ async def discover_managed_mcp_proxy_tools(tool_id: str, user: AuthenticatedUser
     if not tool or tool.get("status") != "active":
         raise HTTPException(409, "Managed tool must be active before discovery")
 
-    from lucent.services.managed_tools import ManagedToolBlockedError, ManagedToolError, ManagedToolExecutor
+    from lucent.services.managed_tools import (
+        ManagedToolBlockedError,
+        ManagedToolError,
+        ManagedToolExecutor,
+    )
 
     try:
         tools = await ManagedToolExecutor(repo).discover_mcp_proxy_tools(

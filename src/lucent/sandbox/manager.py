@@ -23,6 +23,7 @@ from lucent.sandbox.models import (
     SandboxStatus,
 )
 from lucent.sandbox.output import OutputResult, SandboxOutputHandler
+from lucent.settings import sandboxes_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,13 @@ class SandboxManager:
 
     async def create(self, config: SandboxConfig) -> SandboxInfo:
         """Create a new sandbox, persist to DB, and start the container."""
+        if config.organization_id and not sandboxes_enabled(
+            organization_id=config.organization_id
+        ):
+            raise RuntimeError(
+                "Sandboxes are disabled for this organization by the "
+                "features.sandboxes_enabled setting"
+            )
         key_id: UUID | None = None
         effective_config = SandboxConfig(**asdict(config))
 

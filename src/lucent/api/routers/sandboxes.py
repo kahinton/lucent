@@ -14,6 +14,7 @@ from lucent.logging import get_logger
 from lucent.sandbox.manager import get_sandbox_manager
 from lucent.sandbox.models import SandboxConfig, SandboxStatus
 from lucent.secrets import SecretRegistry, resolve_env_vars
+from lucent.settings import custom_tooling_enabled, sandboxes_enabled
 
 logger = get_logger("api.sandboxes")
 
@@ -22,6 +23,15 @@ router = APIRouter()
 # Allowed values for input validation
 _MEMORY_RE = re.compile(r"^[1-9]\d{0,4}[mgt]$")
 _IMAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,254}$")
+
+
+def _require_sandboxes_enabled(user: AuthenticatedUser) -> None:
+    if not sandboxes_enabled(organization_id=user.organization_id):
+        raise HTTPException(
+            409,
+            "Sandboxes are disabled for this organization by the "
+            "features.sandboxes_enabled setting",
+        )
 
 
 # --- Request/Response Models ---
@@ -178,6 +188,7 @@ async def create_sandbox(
     user: AuthenticatedUser,
 ) -> SandboxResponse:
     """Create a new sandbox environment."""
+    _require_sandboxes_enabled(user)
     provider = SecretRegistry.get()
     resolved_env_vars = await resolve_env_vars(body.env_vars, provider)
     config = SandboxConfig(
@@ -217,6 +228,10 @@ async def list_sandboxes(user: AuthenticatedUser):
     manager = get_sandbox_manager()
     result = await manager.list_all(str(user.organization_id))
     result["items"] = [_to_response(s) for s in result["items"]]
+    result["sandboxes_enabled"] = sandboxes_enabled(organization_id=user.organization_id)
+    result["custom_tooling_enabled"] = custom_tooling_enabled(
+        organization_id=user.organization_id
+    )
     return result
 
 
@@ -368,6 +383,7 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
     """Create a reusable sandbox template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
+    _require_sandboxes_enabled(user)
     if body.docker_bind_mounts and user.role.value not in ("admin", "owner"):
         raise HTTPException(403, "Only administrators can configure Docker bind mounts")
     pool = await get_pool()
@@ -400,11 +416,16 @@ async def list_templates(user: AuthenticatedUser):
 
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
-    return await repo.list_accessible_by(
+    result = await repo.list_accessible_by(
         str(user.id),
         str(user.organization_id),
         user_role=user.role.value,
     )
+    result["sandboxes_enabled"] = sandboxes_enabled(organization_id=user.organization_id)
+    result["custom_tooling_enabled"] = custom_tooling_enabled(
+        organization_id=user.organization_id
+    )
+    return result
 
 
 @router.get("/templates/{template_id}")
@@ -477,6 +498,7 @@ async def launch_from_template(
     """Launch a sandbox instance from a template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
+    _require_sandboxes_enabled(user)
     pool = await get_pool()
     tpl_repo = SandboxTemplateRepository(pool)
     tpl = await tpl_repo.get_accessible(

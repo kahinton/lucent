@@ -15,6 +15,7 @@ from mcp.server import MCPServer as FastMCP
 from lucent.auth import set_current_user
 from lucent.db import UserRepository
 from lucent.db.requests import RequestRepository
+from lucent.settings import clear_runtime_setting_cache, set_runtime_setting_cache
 from lucent.tools.requests import register_request_tools
 
 # ============================================================================
@@ -226,6 +227,32 @@ class TestCreateTask:
         assert result["title"] == "Test Task"
         assert result["agent_type"] == "code"
         assert result["status"] == "pending"
+        assert result["sandboxes_enabled"] is True
+        assert result["custom_tooling_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_sandbox_task_reports_org_capability_disabled(
+        self, mcp, auth_user, request_id
+    ):
+        org_id = str(auth_user["organization_id"])
+        set_runtime_setting_cache(org_id, "features.sandboxes_enabled", False)
+        try:
+            result = await _call(
+                mcp,
+                "create_task",
+                {
+                    "request_id": request_id,
+                    "title": "Disabled Sandbox Task",
+                    "sandbox_template_id": str(uuid4()),
+                },
+            )
+        finally:
+            clear_runtime_setting_cache(org_id)
+
+        assert result["code"] == 409
+        assert result["sandboxes_enabled"] is False
+        assert result["custom_tooling_enabled"] is False
+        assert "features.sandboxes_enabled" in result["error"]
 
     @pytest.mark.asyncio
     async def test_invalid_agent_type(self, mcp, auth_user, request_id):

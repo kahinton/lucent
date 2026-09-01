@@ -49,6 +49,19 @@ class RuntimeSettingDefinition:
 
 _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
     RuntimeSettingDefinition(
+        key="features.sandboxes_enabled",
+        env_var="LUCENT_SANDBOXES_ENABLED",
+        value_type="boolean",
+        default=True,
+        title="Sandboxes and custom tooling",
+        section="Features",
+        description="Allow sandbox-backed tasks and custom managed tools in this organization.",
+        help_text=(
+            "Disabling sandboxes also disables custom managed-tool execution. "
+            "Existing definitions and queued tasks are preserved but cannot run."
+        ),
+    ),
+    RuntimeSettingDefinition(
         key="memory.shadow_forget_enabled",
         env_var="LUCENT_SHADOW_FORGET_ENABLED",
         value_type="boolean",
@@ -1524,6 +1537,21 @@ def managed_tool_admin_approval_required(*, organization_id: Any | None = None) 
             organization_id=organization_id,
         )
     )
+
+
+def sandboxes_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether this organization may provision task or managed-tool sandboxes."""
+    return bool(
+        get_runtime_setting(
+            "features.sandboxes_enabled",
+            organization_id=organization_id,
+        )
+    )
+
+
+def custom_tooling_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether sandbox-backed custom managed tools may execute in this organization."""
+    return sandboxes_enabled(organization_id=organization_id)
 
 
 def hook_admin_approval_required(*, organization_id: Any | None = None) -> bool:

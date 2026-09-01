@@ -16,6 +16,7 @@ from lucent.logging import get_logger
 from lucent.sandbox.manager import get_sandbox_manager
 from lucent.sandbox.models import SandboxConfig, SandboxStatus
 from lucent.secrets import SecretRegistry, resolve_env_vars
+from lucent.settings import custom_tooling_enabled
 
 logger = get_logger("services.managed_tools")
 
@@ -142,6 +143,11 @@ class ManagedToolExecutor:
         validate_input: bool,
         validate_output: bool,
     ) -> ManagedToolExecutionResult:
+        if not custom_tooling_enabled(organization_id=org_id):
+            raise ManagedToolBlockedError(
+                "Custom tooling is disabled for this organization because "
+                "features.sandboxes_enabled is off"
+            )
         if tool.get("status") != "active":
             raise ManagedToolBlockedError("Managed tool is not active")
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_PATTERN
 from lucent.rbac import Role
+from lucent.settings import custom_tooling_enabled, sandboxes_enabled
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -634,6 +635,13 @@ async def create_task(
     from lucent.db.requests import RequestRepository
 
     org_id = str(user.organization_id)
+    org_sandboxes_enabled = sandboxes_enabled(organization_id=org_id)
+    if (body.sandbox_template_id or body.sandbox_config) and not org_sandboxes_enabled:
+        raise HTTPException(
+            409,
+            "Sandboxes are disabled for this organization by the "
+            "features.sandboxes_enabled setting",
+        )
     repo = RequestRepository(pool)
     req = await _get_visible_request(repo, str(request_id), user)
     if not req:
@@ -715,7 +723,7 @@ async def create_task(
         }
 
     try:
-        return await repo.create_task(
+        task = await repo.create_task(
             request_id=str(request_id),
             title=body.title,
             org_id=org_id,
@@ -732,6 +740,9 @@ async def create_task(
             requesting_user_id=requesting_user_id,
             output_contract=output_contract,
         )
+        task["sandboxes_enabled"] = org_sandboxes_enabled
+        task["custom_tooling_enabled"] = custom_tooling_enabled(organization_id=org_id)
+        return task
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -746,7 +757,15 @@ async def list_tasks(
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_tasks(str(request_id), status=status, org_id=str(user.organization_id))
+    org_id = str(user.organization_id)
+    tasks = await repo.list_tasks(str(request_id), status=status, org_id=org_id)
+    capabilities = {
+        "sandboxes_enabled": sandboxes_enabled(organization_id=org_id),
+        "custom_tooling_enabled": custom_tooling_enabled(organization_id=org_id),
+    }
+    for task in tasks:
+        task.update(capabilities)
+    return tasks
 
 
 @router.post("/tasks/{task_id}/claim")

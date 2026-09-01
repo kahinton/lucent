@@ -11,10 +11,12 @@ from lucent.auth import set_current_user
 from lucent.db.definitions import DefinitionRepository
 from lucent.llm.context import clear_llm_context, set_llm_context
 from lucent.services.managed_tools import (
+    ManagedToolBlockedError,
     ManagedToolError,
     ManagedToolExecutionResult,
     ManagedToolExecutor,
 )
+from lucent.settings import clear_runtime_setting_cache, set_runtime_setting_cache
 from lucent.tools.definitions import register_definition_tools
 
 
@@ -86,6 +88,27 @@ def test_managed_tool_runner_redacts_unhandled_exception_details():
     assert runner.index("except Exception as exc:") < runner.index("'error_type': type(exc).__name__")
     assert "traceback" not in runner
     assert "str(exc)" not in runner
+
+
+@pytest.mark.asyncio
+async def test_managed_tool_execution_is_blocked_when_org_sandboxes_are_disabled():
+    repo = AsyncMock()
+    executor = ManagedToolExecutor(repo)
+    org_id = "disabled-org"
+    set_runtime_setting_cache(org_id, "features.sandboxes_enabled", False)
+    try:
+        with pytest.raises(ManagedToolBlockedError, match="Custom tooling is disabled"):
+            await executor.execute(
+                tool={"id": "tool-1", "status": "active"},
+                arguments={},
+                org_id=org_id,
+                user_id="user-1",
+                enforce_agent_grant=False,
+            )
+    finally:
+        clear_runtime_setting_cache(org_id)
+
+    repo.create_managed_tool_run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

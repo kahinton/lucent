@@ -750,6 +750,22 @@ async def create_schedule(
 ):
     from lucent.db.schedules import ScheduleRepository, webhook_secret_hash
     from lucent.model_registry import validate_model, validate_reasoning_effort
+    from lucent.settings import sandboxes_enabled
+
+    sandbox_requested = bool(
+        body.sandbox_template_id
+        or body.sandbox_config
+        or any(
+            action.get("sandbox_template_id") or action.get("sandbox_config")
+            for action in (body.actions or [])
+        )
+    )
+    if sandbox_requested and not sandboxes_enabled(organization_id=user.organization_id):
+        raise HTTPException(
+            409,
+            "Sandboxes are disabled for this organization by the "
+            "features.sandboxes_enabled setting",
+        )
 
     if body.model:
         model_error = validate_model(body.model, require_tools=True)
@@ -1011,6 +1027,17 @@ async def create_workflow(
             raise HTTPException(422, "interval_seconds is required for interval workflows")
 
     actions = [action.model_dump(exclude_none=True) for action in body.actions]
+    from lucent.settings import sandboxes_enabled
+
+    if any(
+        action.get("sandbox_template_id") or action.get("sandbox_config")
+        for action in actions
+    ) and not sandboxes_enabled(organization_id=user.organization_id):
+        raise HTTPException(
+            409,
+            "Sandboxes are disabled for this organization by the "
+            "features.sandboxes_enabled setting",
+        )
     for action in actions:
         if action.get("action_type", "task") != "task":
             continue

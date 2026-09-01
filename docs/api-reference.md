@@ -1539,6 +1539,13 @@ Base path: `/api/sandboxes`
 
 All instance endpoints verify the caller's organization matches the sandbox. Sandbox IDs from other organizations return `404`.
 
+Sandbox availability is controlled per organization by the default-on Runtime Setting
+`features.sandboxes_enabled` (`LUCENT_SANDBOXES_ENABLED` is the environment fallback).
+When disabled, allocation endpoints return `409`; existing sandboxes remain listable and
+deletable. Sandbox and task list/create responses include `sandboxes_enabled` and
+`custom_tooling_enabled` so clients and planners can avoid requesting unavailable capacity.
+Custom tooling uses the same setting because managed tools execute in Lucent sandboxes.
+
 ### Sandbox Templates
 
 Base path: `/api/sandboxes/templates`
@@ -1553,6 +1560,10 @@ Base path: `/api/sandboxes/templates`
 | `POST` | `/{template_id}/launch` | any | Launch a sandbox instance from a template |
 
 Templates define reusable environment configurations (image, setup commands, resource limits, etc.) that can be referenced by tasks and schedules via `sandbox_template_id`.
+
+Creating or launching templates returns `409` while `features.sandboxes_enabled` is off.
+Template lists remain available and include the effective `sandboxes_enabled` and
+`custom_tooling_enabled` values.
 
 ---
 

@@ -396,7 +396,11 @@
         <p class="text-sm text-gray-500">{{ tools_total + mcp_total }} total: {{ tools_total }} custom, {{ mcp_total }} external provider{{ 's' if mcp_total != 1 }}</p>
     </div>
     <div class="flex w-full gap-2 sm:w-auto">
+        {% if custom_tooling_enabled %}
         <button id="open-create-tool-modal" type="button" class="flex-1 px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium sm:flex-none">+ New Custom Tool</button>
+        {% else %}
+        <button type="button" disabled class="flex-1 px-4 py-2 text-sm bg-gray-100 text-gray-400 rounded-md font-medium cursor-not-allowed sm:flex-none" title="Sandboxes and custom tooling are disabled for this organization">+ New Custom Tool</button>
+        {% endif %}
         <button id="open-create-mcp-modal" type="button" class="flex-1 px-4 py-2 text-sm bg-purple-50 text-purple-700 border border-purple-200 rounded-md hover:bg-purple-100 font-medium sm:flex-none">+ Connect Tool Provider</button>
     </div>
 </div>

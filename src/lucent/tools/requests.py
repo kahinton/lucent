@@ -687,6 +687,22 @@ if the agent type is not approved or the sandbox template is invalid."""
         if not user_id:
             return json.dumps({"error": "No user context"})
 
+        from lucent.settings import custom_tooling_enabled, sandboxes_enabled
+
+        org_sandboxes_enabled = sandboxes_enabled(organization_id=org_id)
+        if (sandbox_template_id or sandbox_overrides) and not org_sandboxes_enabled:
+            return json.dumps(
+                {
+                    "error": (
+                        "Sandboxes are disabled for this organization by the "
+                        "features.sandboxes_enabled setting"
+                    ),
+                    "code": 409,
+                    "sandboxes_enabled": False,
+                    "custom_tooling_enabled": False,
+                }
+            )
+
         if sequence_order < 0:
             return json.dumps({"error": "sequence_order must be >= 0"})
 
@@ -872,6 +888,8 @@ if the agent type is not approved or the sandbox template is invalid."""
                     if task.get("sandbox_template_id")
                     else None
                 ),
+                "sandboxes_enabled": org_sandboxes_enabled,
+                "custom_tooling_enabled": custom_tooling_enabled(organization_id=org_id),
             }
         )
 
@@ -890,6 +908,22 @@ fall back to inline sandbox_config (it's no longer accepted)."""
         _, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        from lucent.settings import custom_tooling_enabled, sandboxes_enabled
+
+        if not sandboxes_enabled(organization_id=org_id):
+            return json.dumps(
+                {
+                    "approved": [],
+                    "proposed_pending_review": [],
+                    "sandboxes_enabled": False,
+                    "custom_tooling_enabled": False,
+                    "hint": (
+                        "Sandboxes are disabled for this organization by the "
+                        "features.sandboxes_enabled setting. Create tasks without a "
+                        "sandbox template."
+                    ),
+                }
+            )
         from lucent.db import get_pool
         from lucent.db.sandbox_template import SandboxTemplateRepository
 
@@ -916,6 +950,8 @@ fall back to inline sandbox_config (it's no longer accepted)."""
             {
                 "approved": [_summary(t) for t in approved],
                 "proposed_pending_review": [_summary(t) for t in proposed],
+                "sandboxes_enabled": True,
+                "custom_tooling_enabled": custom_tooling_enabled(organization_id=org_id),
                 "hint": (
                     "Reference one of the approved templates by id via "
                     "create_task(sandbox_template_id=...). If none fit the "
@@ -972,6 +1008,18 @@ Returns: JSON with the proposed template id and status."""
         user_id, org_id, _, _, _ = await _get_current_user_context()
         if not user_id or not org_id:
             return json.dumps({"error": "Authentication required"})
+        from lucent.settings import sandboxes_enabled
+
+        if not sandboxes_enabled(organization_id=org_id):
+            return json.dumps(
+                {
+                    "error": (
+                        "Sandboxes are disabled for this organization by the "
+                        "features.sandboxes_enabled setting"
+                    ),
+                    "code": 409,
+                }
+            )
 
         if network_mode not in {"none", "bridge", "allowlist"}:
             return json.dumps({"error": "network_mode must be 'none', 'bridge', or 'allowlist'"})
