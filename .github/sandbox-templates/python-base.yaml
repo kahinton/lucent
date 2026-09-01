@@ -1,11 +1,11 @@
 name: python-base
 description: |
   General-purpose Python sandbox for tasks that need to clone a repo, run
-  Python code, and read/write files. Includes git via the standard
-  python:3.12-slim base image. Use this for code analysis, knowledge scans,
+  Python code, and read/write files. Includes Python, git, and the network
+  policy tooling needed for allowlisted execution. Use this for code analysis, knowledge scans,
   documentation generation, and any task that doesn't require system-level
   packages or non-Python tooling.
-image: python:3.12-slim
+image: lucent-sandbox:base
 working_dir: /workspace
 network_mode: allowlist
 allowed_hosts:

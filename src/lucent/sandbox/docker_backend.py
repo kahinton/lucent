@@ -180,12 +180,10 @@ class DockerBackend(SandboxBackend):
                     timeout=120,
                 )
                 if install_git_result.exit_code != 0:
-                    info.status = SandboxStatus.FAILED
-                    info.error = (
+                    raise RuntimeError(
                         "Git not available in sandbox image and auto-install failed. "
                         "Use an image with git pre-installed, or set setup_commands to install it."
                     )
-                    return info
 
                 clone_env = None
                 if config.git_credentials and config.repo_url.startswith("https://"):
@@ -198,9 +196,9 @@ class DockerBackend(SandboxBackend):
                     timeout=120,
                 )
                 if clone_result.exit_code != 0:
-                    info.status = SandboxStatus.FAILED
-                    info.error = f"Git clone failed: {self._sanitize_git_output(clone_result.stderr, config)}"
-                    return info
+                    raise RuntimeError(
+                        f"Git clone failed: {self._sanitize_git_output(clone_result.stderr, config)}"
+                    )
 
             # An empty managed-tool workspace cannot contain a devcontainer.
             if config.repo_url:
@@ -243,9 +241,7 @@ class DockerBackend(SandboxBackend):
             if config.env_vars.get("LUCENT_SANDBOX_MCP_API_KEY"):
                 bridge_started = await self._start_mcp_bridge(sandbox_id, config)
                 if not bridge_started:
-                    info.status = SandboxStatus.FAILED
-                    info.error = "Failed to start sandbox MCP bridge"
-                    return info
+                    raise RuntimeError("Failed to start sandbox MCP bridge")
 
             # Apply network allowlist after all setup is complete so clone and
             # package installation can proceed freely beforehand.
@@ -257,9 +253,7 @@ class DockerBackend(SandboxBackend):
                         allowed_ips=self._allowed_ips_for_sandbox(sandbox_id),
                     )
                 except RuntimeError as exc:
-                    info.status = SandboxStatus.FAILED
-                    info.error = str(exc)
-                    return info
+                    raise RuntimeError(str(exc)) from exc
 
             info.status = SandboxStatus.READY
             info.ready_at = datetime.now(timezone.utc)

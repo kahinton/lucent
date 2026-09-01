@@ -3936,8 +3936,10 @@ class LucentDaemon(
             task_sandbox_reused = False
             task_sandbox_runtime_config = None
 
-            # Resolve sandbox_template_id → sandbox_config
-            if sandbox_template_id and not sandbox_config:
+            # Resolve a template fresh at dispatch. Task rows retain a config snapshot
+            # for traceability, but retries must receive template corrections such as
+            # a supported base image for an allowlisted network policy.
+            if sandbox_template_id:
                 sandbox_config = await self._resolve_sandbox_template(
                     str(sandbox_template_id),
                     org_id=org_id,

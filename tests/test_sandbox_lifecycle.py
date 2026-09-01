@@ -214,6 +214,26 @@ class TestDockerSandboxLifecycle:
         assert kwargs.get("image") == "my-custom-image:latest"
 
     @pytest.mark.asyncio
+    async def test_create_removes_partial_container_after_allowlist_failure(self):
+        """A failed allowlist policy must not leave its started container behind."""
+        backend = DockerBackend()
+        container = _make_mock_container("partial-container")
+        backend._create_container = MagicMock(return_value=container)
+        backend._resolve_allowlist_hosts = AsyncMock(return_value={"example.com": ["1.2.3.4"]})
+        backend._apply_network_allowlist = AsyncMock(
+            side_effect=RuntimeError("Network allowlist policy failed")
+        )
+        backend._force_remove_container = MagicMock()
+
+        info = await backend.create(
+            SandboxConfig(network_mode="allowlist", allowed_hosts=["example.com"])
+        )
+
+        assert info.status == SandboxStatus.FAILED
+        assert info.error == "Network allowlist policy failed"
+        backend._force_remove_container.assert_called_once_with("partial-container")
+
+    @pytest.mark.asyncio
     async def test_create_sets_resource_limits(self):
         """create() passes memory and CPU limits to Docker."""
         client = _make_docker_client()
@@ -1124,6 +1144,7 @@ class TestSandboxSecurity:
             return _make_exec_ok()
 
         backend.exec = fake_exec
+        backend._resolve_ipv4_addresses = AsyncMock(return_value=["1.2.3.4"])
         config = SandboxConfig(
             network_mode="allowlist",
             allowed_hosts=["api.lucent.local"],
