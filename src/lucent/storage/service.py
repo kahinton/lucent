@@ -8,7 +8,7 @@ import os
 import re
 from pathlib import PurePath
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from asyncpg import Pool
 
@@ -156,7 +156,7 @@ class UserFileService:
     ) -> dict[str, Any]:
         if len(content) > self.max_file_bytes:
             raise ValueError(f"File exceeds the {self.max_file_bytes}-byte limit")
-        current = await self.repository.get_owned(file_id, org_id, user_id)
+        current = await self._resolve_owned_file(file_id, org_id, user_id)
         if not current:
             raise ValueError("File not found")
         await self._validate_session_owner(session_id, org_id, user_id)
@@ -166,12 +166,13 @@ class UserFileService:
             org_id=org_id,
             user_id=user_id,
         )
-        storage_key = f"{org_id}/{user_id}/{file_id}/revisions/{uuid4()}"
+        resolved_file_id = str(current["id"])
+        storage_key = f"{org_id}/{user_id}/{resolved_file_id}/revisions/{uuid4()}"
         provider = self.registry.get(current["provider"])
         await provider.put(storage_key, content)
         try:
             revision = await self.repository.append_revision(
-                file_id=file_id,
+                file_id=resolved_file_id,
                 org_id=org_id,
                 user_id=user_id,
                 edited_by=edited_by,
@@ -192,7 +193,7 @@ class UserFileService:
         if not revision:
             await provider.delete(storage_key)
             raise ValueError("File not found")
-        item = await self.repository.get_owned(file_id, org_id, user_id)
+        item = await self.repository.get_owned(resolved_file_id, org_id, user_id)
         if not item:
             raise ValueError("File not found")
         item["revision"] = revision
@@ -254,8 +255,37 @@ class UserFileService:
                     raise ValueError("Request not found")
         return request_id
 
-    async def get_owned(self, file_id: str, org_id: str, user_id: str) -> dict[str, Any] | None:
-        return await self.repository.get_owned(file_id, org_id, user_id)
+    async def _resolve_owned_file(
+        self, file_reference: str, org_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        """Resolve an owned file ID or an exact filename without guessing."""
+        try:
+            file_id = str(UUID(file_reference))
+        except (TypeError, ValueError):
+            file_id = None
+        if file_id:
+            item = await self.repository.get_owned(file_id, org_id, user_id)
+            if item:
+                return item
+
+        try:
+            filename = _safe_filename(file_reference)
+        except ValueError:
+            return None
+        matches = await self.repository.find_owned_by_filename(
+            filename, org_id, user_id
+        )
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple owned files are named {filename!r}. "
+                "Call list_user_files and use the returned file ID."
+            )
+        return matches[0] if matches else None
+
+    async def get_owned(
+        self, file_reference: str, org_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        return await self._resolve_owned_file(file_reference, org_id, user_id)
 
     async def read_owned(
         self, file_id: str, org_id: str, user_id: str
@@ -276,8 +306,11 @@ class UserFileService:
         org_id: str,
         user_id: str,
     ) -> tuple[dict[str, Any], bytes] | None:
+        item = await self._resolve_owned_file(file_id, org_id, user_id)
+        if not item:
+            return None
         revision = await self.repository.get_revision_owned(
-            file_id, revision_number, org_id, user_id
+            str(item["id"]), revision_number, org_id, user_id
         )
         if not revision:
             return None
@@ -290,10 +323,14 @@ class UserFileService:
         return revision, content
 
     async def delete_owned(self, file_id: str, org_id: str, user_id: str) -> bool:
-        storage_keys = await self.repository.list_storage_keys_owned(file_id, org_id, user_id)
-        item = await self.repository.soft_delete(file_id, org_id, user_id)
+        item = await self._resolve_owned_file(file_id, org_id, user_id)
         if not item:
             return False
+        resolved_file_id = str(item["id"])
+        storage_keys = await self.repository.list_storage_keys_owned(
+            resolved_file_id, org_id, user_id
+        )
+        item = await self.repository.soft_delete(resolved_file_id, org_id, user_id)
         for provider_name, storage_key in storage_keys:
             await self.registry.get(provider_name).delete(storage_key)
         return True

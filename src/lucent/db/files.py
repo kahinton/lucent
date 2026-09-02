@@ -97,6 +97,23 @@ class UserFileRepository:
             )
         return self._to_dict(row) if row else None
 
+    async def find_owned_by_filename(
+        self, filename: str, org_id: str, user_id: str
+    ) -> list[dict[str, Any]]:
+        """Find current files by an exact owner-scoped filename."""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM user_files
+                   WHERE filename = $1 AND organization_id = $2::uuid
+                     AND user_id = $3::uuid AND deleted_at IS NULL
+                   ORDER BY updated_at DESC
+                   LIMIT 2""",
+                filename,
+                org_id,
+                user_id,
+            )
+        return [self._to_dict(row) for row in rows]
+
     async def append_revision(self, **values: Any) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
             async with conn.transaction():

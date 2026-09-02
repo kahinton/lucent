@@ -1471,11 +1471,15 @@ and task context so the user can trace why the file changed. Previous content
 remains in revision history.
 
 Args:
-    file_id: ID returned by store_user_file or list_user_files
+    file_id: File ID returned by store_user_file or list_user_files. An exact
+        filename is also accepted when it identifies one owned active file;
+        use the ID when filenames are duplicated.
     content: Complete replacement UTF-8 content
     change_summary: Short explanation of what changed
 
-Returns: Updated file metadata and the new revision."""
+Returns: Updated file metadata and the new revision. Store and retain the
+returned ID for later revisions; call list_user_files before editing when the
+file reference is unknown."""
     )
     async def edit_user_file(
         file_id: str,
@@ -1531,8 +1535,15 @@ Only files owned by the effective user are returned."""
         annotations=READ_ONLY,
         description="""Read a durable text file owned by the current user.
 
+Args:
+    file_id: File ID returned by store_user_file or list_user_files. An exact
+        filename is also accepted when it identifies one owned active file;
+        use the ID when filenames are duplicated.
+
 Returns file metadata and UTF-8 content. Binary files remain available through
-their authenticated content URL but are not injected into agent context."""
+their authenticated content URL but are not injected into agent context. Store
+and retain the returned ID for later revisions; call list_user_files before
+reading when the file reference is unknown."""
     )
     async def read_user_file(file_id: str) -> str:
         user_id, org_id, _, _, _ = await _get_current_user_context()
@@ -1540,15 +1551,17 @@ their authenticated content URL but are not injected into agent context."""
             return json.dumps({"error": "Authentication required"})
         from lucent.storage import UserFileService
 
-        result = await UserFileService(await _get_pool()).read_owned(
-            file_id, str(org_id), str(user_id)
-        )
+        service = UserFileService(await _get_pool())
+        try:
+            result = await service.read_owned(file_id, str(org_id), str(user_id))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         if not result:
             return json.dumps({"error": "File not found"})
         item, content = result
-        item["revisions"] = await UserFileService(
-            await _get_pool()
-        ).repository.list_revisions_owned(file_id, str(org_id), str(user_id))
+        item["revisions"] = await service.repository.list_revisions_owned(
+            str(item["id"]), str(org_id), str(user_id)
+        )
         if not item["mime_type"].startswith("text/") and item["mime_type"] not in {
             "application/json",
             "application/xml",

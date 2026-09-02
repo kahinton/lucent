@@ -37,6 +37,20 @@ def _owner_id(user: AuthenticatedUser) -> str:
     return str(user.effective_memory_user_id)
 
 
+async def _get_owned_file_or_error(
+    service: UserFileService, file_reference: str, user: AuthenticatedUser
+) -> dict:
+    try:
+        item = await service.get_owned(
+            file_reference, str(user.organization_id), _owner_id(user)
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not item:
+        raise HTTPException(404, "File not found")
+    return item
+
+
 def _decode_content(content: str, encoding: str) -> bytes:
     try:
         return (
@@ -89,18 +103,13 @@ async def list_files(
 
 
 @router.get("/{file_id}")
-async def get_file(file_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
-    item = await UserFileService(pool).get_owned(
-        str(file_id), str(user.organization_id), _owner_id(user)
-    )
-    if not item:
-        raise HTTPException(404, "File not found")
-    return item
+async def get_file(file_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
+    return await _get_owned_file_or_error(UserFileService(pool), file_id, user)
 
 
 @router.patch("/{file_id}")
 async def update_file(
-    file_id: UUID,
+    file_id: str,
     body: UserFileUpdate,
     user: AuthenticatedUser,
     pool=Depends(get_pool),
@@ -117,15 +126,19 @@ async def update_file(
     except ValueError as exc:
         if str(exc) == "File not found":
             raise HTTPException(404, "File not found") from exc
+        if str(exc).startswith("Multiple owned files"):
+            raise HTTPException(409, str(exc)) from exc
         raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/{file_id}/revisions")
 async def list_file_revisions(
-    file_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)
+    file_id: str, user: AuthenticatedUser, pool=Depends(get_pool)
 ):
-    revisions = await UserFileService(pool).repository.list_revisions_owned(
-        str(file_id), str(user.organization_id), _owner_id(user)
+    service = UserFileService(pool)
+    item = await _get_owned_file_or_error(service, file_id, user)
+    revisions = await service.repository.list_revisions_owned(
+        str(item["id"]), str(user.organization_id), _owner_id(user)
     )
     if not revisions:
         raise HTTPException(404, "File not found")
@@ -134,14 +147,18 @@ async def list_file_revisions(
 
 @router.get("/{file_id}/revisions/{revision_number}/content")
 async def get_file_revision_content(
-    file_id: UUID,
+    file_id: str,
     revision_number: int,
     user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
-    result = await UserFileService(pool).read_revision_owned(
-        str(file_id), revision_number, str(user.organization_id), _owner_id(user)
-    )
+    service = UserFileService(pool)
+    try:
+        result = await service.read_revision_owned(
+            file_id, revision_number, str(user.organization_id), _owner_id(user)
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if not result:
         raise HTTPException(404, "File revision not found")
     revision, content = result
@@ -160,16 +177,20 @@ async def get_file_revision_content(
 
 @router.get("/{file_id}/content")
 async def get_file_content(
-    file_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)
+    file_id: str, user: AuthenticatedUser, pool=Depends(get_pool)
 ):
-    result = await UserFileService(pool).read_owned(
-        str(file_id), str(user.organization_id), _owner_id(user)
-    )
+    service = UserFileService(pool)
+    try:
+        result = await service.read_owned(
+            file_id, str(user.organization_id), _owner_id(user)
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if not result:
         raise HTTPException(404, "File not found")
     item, content = result
-    await UserFileService(pool).repository.mark_current_revision_viewed_owned(
-        str(file_id), str(user.organization_id), _owner_id(user)
+    await service.repository.mark_current_revision_viewed_owned(
+        str(item["id"]), str(user.organization_id), _owner_id(user)
     )
     active_content = item["mime_type"] in {
         "text/html",
@@ -192,10 +213,13 @@ async def get_file_content(
 
 
 @router.delete("/{file_id}", status_code=204)
-async def delete_file(file_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
-    deleted = await UserFileService(pool).delete_owned(
-        str(file_id), str(user.organization_id), _owner_id(user)
-    )
+async def delete_file(file_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
+    try:
+        deleted = await UserFileService(pool).delete_owned(
+            file_id, str(user.organization_id), _owner_id(user)
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if not deleted:
         raise HTTPException(404, "File not found")
     return Response(status_code=204)

@@ -206,6 +206,59 @@ async def test_file_revisions_keep_content_and_chat_provenance(
 
 
 @pytest.mark.asyncio
+async def test_user_file_operations_accept_an_exact_owned_filename(
+    db_pool, test_user, test_organization, tmp_path
+):
+    service = _service(db_pool, tmp_path)
+    created = await service.create(
+        org_id=str(test_organization["id"]),
+        user_id=str(test_user["id"]),
+        created_by=str(test_user["id"]),
+        filename="named-report.md",
+        content=b"# Initial\n",
+    )
+
+    updated = await service.update(
+        file_id="named-report.md",
+        org_id=str(test_organization["id"]),
+        user_id=str(test_user["id"]),
+        edited_by=str(test_user["id"]),
+        content=b"# Revised\n",
+    )
+    read = await service.read_owned(
+        "named-report.md", str(test_organization["id"]), str(test_user["id"])
+    )
+    revision = await service.read_revision_owned(
+        "named-report.md", 1, str(test_organization["id"]), str(test_user["id"])
+    )
+
+    assert updated["id"] == created["id"]
+    assert updated["current_revision"] == 2
+    assert read and read[1] == b"# Revised\n"
+    assert revision and revision[1] == b"# Initial\n"
+
+
+@pytest.mark.asyncio
+async def test_user_file_filename_reference_rejects_ambiguity(
+    db_pool, test_user, test_organization, tmp_path
+):
+    service = _service(db_pool, tmp_path)
+    for content in (b"# First\n", b"# Second\n"):
+        await service.create(
+            org_id=str(test_organization["id"]),
+            user_id=str(test_user["id"]),
+            created_by=str(test_user["id"]),
+            filename="duplicate.md",
+            content=content,
+        )
+
+    with pytest.raises(ValueError, match="Multiple owned files"):
+        await service.read_owned(
+            "duplicate.md", str(test_organization["id"]), str(test_user["id"])
+        )
+
+
+@pytest.mark.asyncio
 async def test_unseen_file_count_tracks_only_the_owner_latest_revision(
     db_pool, test_user, test_organization, clean_test_data, tmp_path
 ):
@@ -311,8 +364,12 @@ async def test_file_api_returns_404_to_another_user(
         assert content.text == "# API file\n"
         assert content.headers["content-security-policy"] == "sandbox; default-src 'none'"
 
+        filename_content = await client.get("/api/files/api.md/content")
+        assert filename_content.status_code == 200
+        assert filename_content.text == "# API file\n"
+
         update = await client.patch(
-            f"/api/files/{file_id}",
+            "/api/files/api.md",
             json={
                 "content": "# Updated API file\n",
                 "change_summary": "Updated through the API",
@@ -320,12 +377,24 @@ async def test_file_api_returns_404_to_another_user(
         )
         assert update.status_code == 200
         assert update.json()["current_revision"] == 2
-        history = await client.get(f"/api/files/{file_id}/revisions")
+        history = await client.get("/api/files/api.md/revisions")
         assert history.status_code == 200
         assert [item["revision_number"] for item in history.json()["items"]] == [2, 1]
-        original = await client.get(f"/api/files/{file_id}/revisions/1/content")
+        original = await client.get("/api/files/api.md/revisions/1/content")
         assert original.status_code == 200
         assert original.content == b"# API file\n"
+
+        duplicate = await client.post(
+            "/api/files",
+            json={"filename": "api.md", "content": "# Another API file\n"},
+        )
+        assert duplicate.status_code == 200
+        ambiguous = await client.patch(
+            "/api/files/api.md",
+            json={"content": "# Should not update\n"},
+        )
+        assert ambiguous.status_code == 409
+        assert "Multiple owned files" in ambiguous.json()["detail"]
 
         app.dependency_overrides[get_current_user] = lambda: current(other_user)
         assert (await client.get(f"/api/files/{file_id}")).status_code == 404
@@ -372,13 +441,13 @@ async def test_file_mcp_tools_store_edit_and_recall(
             mcp,
             "edit_user_file",
             {
-                "file_id": created["id"],
+                "file_id": "mcp.md",
                 "content": "# Revised MCP file\n",
                 "change_summary": "Expanded the report",
             },
         )
         listed = await _call(mcp, "list_user_files")
-        recalled = await _call(mcp, "read_user_file", {"file_id": created["id"]})
+        recalled = await _call(mcp, "read_user_file", {"file_id": "mcp.md"})
     finally:
         clear_llm_context()
         set_current_user(None)
