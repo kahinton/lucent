@@ -1832,6 +1832,9 @@ class RequestRepository:
         output_contract: dict | None = None,
     ) -> dict:
         _validate_output_contract(output_contract)
+        from lucent.secrets.utils import validate_sandbox_config_references
+
+        validate_sandbox_config_references(sandbox_config)
 
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(

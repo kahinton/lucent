@@ -294,6 +294,24 @@ async def test_create_template_with_all_fields(client, db_pool, web_user):
 
 
 @pytest.mark.asyncio
+async def test_create_template_rejects_plaintext_sensitive_environment_value(client):
+    resp = await client.post(
+        "/sandboxes/templates/create",
+        data=_csrf_data(
+            client,
+            {
+                "name": "plaintext-secret-template",
+                "image": "python:3.12-slim",
+                "env_vars": "API_TOKEN=ui-test-value",
+            },
+        ),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=Environment%20variable" in resp.headers["location"]
+
+
+@pytest.mark.asyncio
 async def test_create_template_without_csrf_fails(client):
     resp = await client.post(
         "/sandboxes/templates/create",
@@ -383,6 +401,34 @@ async def test_update_template_clears_branch_without_repository(
     updated = await repo.get(str(tpl["id"]))
     assert updated["repo_url"] is None
     assert updated["branch"] is None
+
+
+@pytest.mark.asyncio
+async def test_update_template_rejects_plaintext_sensitive_environment_value(
+    client, db_pool, web_user, web_prefix,
+):
+    user, org, _token = web_user
+    repo = SandboxTemplateRepository(db_pool)
+    template = await repo.create(
+        name=f"{web_prefix}secret_update",
+        organization_id=str(org["id"]),
+        image="python:3.12-slim",
+        created_by=str(user["id"]),
+    )
+
+    response = await client.post(
+        f"/sandboxes/templates/{template['id']}/edit",
+        data=_csrf_data(
+            client,
+            {"name": template["name"], "env_vars": "API_TOKEN=ui-test-value"},
+        ),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith(
+        f"/sandboxes/templates/{template['id']}/edit?error=Environment%20variable"
+    )
 
 
 @pytest.mark.asyncio

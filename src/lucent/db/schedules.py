@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 from asyncpg import Pool
 
+from lucent.secrets.utils import validate_sandbox_config_references
+
 ALLOWED_SCHEDULE_COLUMNS = frozenset(
     {
         "title",
@@ -536,6 +538,10 @@ class ScheduleRepository:
         review_instructions: str = "",
         webhook_secret_hash: str | None = None,
     ) -> dict:
+        validate_sandbox_config_references(sandbox_config)
+        for action in actions or []:
+            if isinstance(action, dict):
+                validate_sandbox_config_references(action.get("sandbox_config"))
         if schedule_type not in WORKFLOW_SCHEDULE_TYPES:
             raise ValueError(
                 f"Invalid schedule_type '{schedule_type}'. Must be one of: "
@@ -775,6 +781,13 @@ class ScheduleRepository:
         await self._check_system_schedule_protection(schedule_id, org_id, requester_role)
         if not fields:
             return await self.get_schedule(schedule_id, org_id)
+
+        if "sandbox_config" in fields:
+            validate_sandbox_config_references(fields["sandbox_config"])
+        if "actions" in fields:
+            for action in fields["actions"] or []:
+                if isinstance(action, dict):
+                    validate_sandbox_config_references(action.get("sandbox_config"))
 
         sets = []
         params: list[Any] = []

@@ -278,6 +278,9 @@ class DefinitionRepository:
         ):
             if value is not None and not isinstance(value, dict):
                 raise ValueError(f"{name} must be a JSON object")
+        from lucent.secrets.utils import validate_env_var_references
+
+        validate_env_var_references(env_vars)
         network_mode = (network_policy or {}).get("network_mode", "none")
         if network_mode not in {"none", "bridge", "allowlist"}:
             raise ValueError("network_policy.network_mode must be none, bridge, or allowlist")

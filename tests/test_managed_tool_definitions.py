@@ -10,6 +10,7 @@ from mcp.server import MCPServer as FastMCP
 from lucent.auth import set_current_user
 from lucent.db.definitions import DefinitionRepository
 from lucent.llm.context import clear_llm_context, set_llm_context
+from lucent.secrets.utils import validate_env_var_references
 from lucent.services.managed_tools import (
     ManagedToolBlockedError,
     ManagedToolError,
@@ -88,6 +89,45 @@ def test_managed_tool_runner_redacts_unhandled_exception_details():
     assert runner.index("except Exception as exc:") < runner.index("'error_type': type(exc).__name__")
     assert "traceback" not in runner
     assert "str(exc)" not in runner
+
+
+def test_sensitive_environment_values_require_just_in_time_references():
+    validate_env_var_references({"NODE_ENV": "production", "API_TOKEN": "secret://api.token"})
+    validate_env_var_references({"GITHUB_TOKEN": "credential://github/access_token"})
+
+    with pytest.raises(ValueError, match="API_TOKEN.*secret:// or credential://"):
+        validate_env_var_references({"API_TOKEN": "plaintext-token"})
+
+
+@pytest.mark.asyncio
+async def test_repository_rejects_plaintext_managed_tool_secret(repo, auth_user):
+    with pytest.raises(ValueError, match="GITHUB_TOKEN.*secret:// or credential://"):
+        await repo.create_managed_tool(
+            name="plaintext-managed-tool-secret",
+            description="Must reject plaintext credentials",
+            source_code=TOOL_CODE,
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            env_vars={"GITHUB_TOKEN": "plaintext-token"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_repository_update_rejects_plaintext_managed_tool_secret(repo, auth_user):
+    tool = await repo.create_managed_tool(
+        name="reference-managed-tool-secret",
+        description="Allows a secret reference",
+        source_code=TOOL_CODE,
+        org_id=str(auth_user["organization_id"]),
+        created_by=str(auth_user["id"]),
+        env_vars={"GITHUB_TOKEN": "credential://github/access_token"},
+    )
+    with pytest.raises(ValueError, match="GITHUB_TOKEN.*secret:// or credential://"):
+        await repo.update_managed_tool(
+            str(tool["id"]),
+            str(auth_user["organization_id"]),
+            env_vars={"GITHUB_TOKEN": "plaintext-token"},
+        )
 
 
 @pytest.mark.asyncio

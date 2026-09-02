@@ -405,9 +405,14 @@ export AZURE_CLIENT_SECRET=your-client-secret
 
 ## Migrating from Plaintext Environment Variables
 
-Lucent provides an admin-only API endpoint that automatically migrates plaintext
-credentials in MCP server configs, sandbox templates, and integrations to
-`secret://` references.
+Lucent requires sensitive environment variables in sandbox templates, managed
+tools, tasks, and schedules to use `secret://` or `credential://` references.
+It never persists resolved sandbox environment values or Git credentials.
+
+For older records, Lucent provides an admin-only endpoint that migrates
+plaintext credentials in MCP server configs, sandbox templates, managed tools,
+and integrations to `secret://` references. It also redacts legacy runtime
+sandbox configuration records.
 
 ### Automatic Migration
 
@@ -434,7 +439,11 @@ The endpoint scans all configurations in your organization and:
    a `secret://<secret-name>` reference in the configuration.
 
 4. **Skips already-migrated values** — Values that already start with `secret://`
-   are left untouched.
+  or `credential://` are left untouched.
+
+5. **Redacts runtime metadata** — Existing sandbox records have all environment
+  values replaced with `***` and `git_credentials` removed. Runtime metadata is
+  not a recoverable configuration source.
 
 **Response:**
 
@@ -442,7 +451,9 @@ The endpoint scans all configurations in your organization and:
 {
   "migrated_mcp_env_vars": 3,
   "migrated_sandbox_env_vars": 1,
-  "migrated_integration_values": 2
+  "migrated_managed_tool_env_vars": 1,
+  "migrated_integration_values": 2,
+  "redacted_sandbox_runtime_configs": 4
 }
 ```
 

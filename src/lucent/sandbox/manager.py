@@ -110,10 +110,11 @@ class SandboxManager:
         try:
             repo = await self._repo()
             config_dict = asdict(effective_config)
+            config_dict.pop("git_credentials", None)
             if "env_vars" in config_dict and isinstance(config_dict["env_vars"], dict):
-                config_dict["env_vars"] = dict(config_dict["env_vars"])
-                if "LUCENT_SANDBOX_MCP_API_KEY" in config_dict["env_vars"]:
-                    config_dict["env_vars"]["LUCENT_SANDBOX_MCP_API_KEY"] = "***"
+                config_dict["env_vars"] = {
+                    key: "***" for key in config_dict["env_vars"]
+                }
             await repo.create(
                 id=info.id,
                 name=info.name,

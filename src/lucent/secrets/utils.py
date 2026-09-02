@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
@@ -11,6 +12,53 @@ from lucent.secrets.base import SecretProvider, SecretScope
 
 SECRET_REF_PREFIX = "secret://"
 CREDENTIAL_REF_PREFIX = "credential://"
+
+_SENSITIVE_ENV_KEY_TOKENS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "private_key",
+    "access_key",
+    "auth",
+)
+
+
+def is_sensitive_env_key(key: str) -> bool:
+    """Return whether an environment variable name conventionally carries a secret."""
+    normalized = key.lower()
+    return any(token in normalized for token in _SENSITIVE_ENV_KEY_TOKENS)
+
+
+def validate_env_var_references(env_vars: dict[str, str] | None) -> None:
+    """Require sensitive environment values to use a just-in-time reference."""
+    for key, value in (env_vars or {}).items():
+        if not is_sensitive_env_key(str(key)):
+            continue
+        if is_secret_reference(value) or is_credential_reference(value):
+            continue
+        raise ValueError(
+            f"Environment variable '{key}' is sensitive and must use a "
+            "secret:// or credential:// reference."
+        )
+
+
+def validate_sandbox_config_references(config: dict | str | None) -> None:
+    """Validate secret references in a sandbox configuration's environment."""
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except (TypeError, ValueError):
+            return
+    if not isinstance(config, dict) or "env_vars" not in config:
+        return
+    env_vars = config["env_vars"]
+    if not isinstance(env_vars, dict):
+        raise ValueError("sandbox_config.env_vars must be a JSON object")
+    validate_env_var_references(env_vars)
 
 
 def is_secret_reference(value: str) -> bool:
@@ -162,10 +210,8 @@ async def resolve_credential_reference(
 
 
 async def resolve_env_vars(env_vars: dict[str, str], secret_provider: SecretProvider) -> dict[str, str]:
-    """Resolve runtime references in env vars using current user context.
-
-    Plaintext values are passed through unchanged for backward compatibility.
-    """
+    """Resolve runtime references in env vars using current user context."""
+    validate_env_var_references(env_vars)
     resolved: dict[str, str] = {}
     for key, value in env_vars.items():
         if is_secret_reference(value):

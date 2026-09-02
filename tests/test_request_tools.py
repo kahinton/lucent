@@ -424,6 +424,22 @@ class TestCreateTask:
         assert row is not None
         assert row["requesting_user_id"] == auth_user["id"]
 
+    @pytest.mark.asyncio
+    async def test_repository_rejects_plaintext_task_sandbox_secret(
+        self, repo, test_organization,
+    ):
+        request = await repo.create_request(
+            title="Reject plaintext task secret",
+            org_id=str(test_organization["id"]),
+        )
+        with pytest.raises(ValueError, match="API_TOKEN.*secret:// or credential://"):
+            await repo.create_task(
+                request_id=str(request["id"]),
+                title="Unsafe sandbox task",
+                org_id=str(test_organization["id"]),
+                sandbox_config={"env_vars": {"API_TOKEN": "plaintext-token"}},
+            )
+
 
 # ============================================================================
 # log_task_event

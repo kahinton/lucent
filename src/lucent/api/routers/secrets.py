@@ -19,7 +19,11 @@ from lucent.db.audit import AuditRepository
 from lucent.integrations.encryption import BackendCredentialEncryptor, EncryptionError
 from lucent.rbac import Role
 from lucent.secrets import SecretRegistry, SecretScope
-from lucent.secrets.utils import SECRET_REF_PREFIX
+from lucent.secrets.utils import (
+    CREDENTIAL_REF_PREFIX,
+    SECRET_REF_PREFIX,
+    is_sensitive_env_key,
+)
 
 router = APIRouter(prefix="/secrets", tags=["secrets"])
 
@@ -63,7 +67,9 @@ class SecretValueResponse(BaseModel):
 class MigrationResult(BaseModel):
     migrated_mcp_env_vars: int = 0
     migrated_sandbox_env_vars: int = 0
+    migrated_managed_tool_env_vars: int = 0
     migrated_integration_values: int = 0
+    redacted_sandbox_runtime_configs: int = 0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -156,23 +162,6 @@ async def _check_group_secret_scope(
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-def _is_sensitive_env_key(key: str) -> bool:
-    token = key.lower()
-    sensitive_tokens = (
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "api_key",
-        "apikey",
-        "client_secret",
-        "private_key",
-        "access_key",
-        "auth",
-    )
-    return any(t in token for t in sensitive_tokens)
-
-
 def _scope_from_row(row: dict) -> SecretScope:
     return SecretScope(
         organization_id=str(row["organization_id"]),
@@ -256,7 +245,9 @@ async def migrate_plaintext_configs(user: AdminUser):
     provider = SecretRegistry.get()
     migrated_mcp = 0
     migrated_sandbox = 0
+    migrated_managed_tools = 0
     migrated_integrations = 0
+    redacted_sandbox_runtime_configs = 0
 
     async with pool.acquire() as conn:
         mcp_rows = await conn.fetch(
@@ -277,9 +268,11 @@ async def migrate_plaintext_configs(user: AdminUser):
             changed = False
             scope = _scope_from_row(dict(row))
             for key, value in env_vars.items():
-                if not isinstance(value, str) or value.startswith(SECRET_REF_PREFIX):
+                if not isinstance(value, str) or value.startswith(
+                    (SECRET_REF_PREFIX, CREDENTIAL_REF_PREFIX)
+                ):
                     continue
-                if not _is_sensitive_env_key(key):
+                if not is_sensitive_env_key(key):
                     continue
                 secret_name = f"mcp.{row['id']}.{key.lower()}"
                 await provider.set(secret_name, value, scope)
@@ -313,9 +306,11 @@ async def migrate_plaintext_configs(user: AdminUser):
             changed = False
             scope = _scope_from_row(dict(row))
             for key, value in env_vars.items():
-                if not isinstance(value, str) or value.startswith(SECRET_REF_PREFIX):
+                if not isinstance(value, str) or value.startswith(
+                    (SECRET_REF_PREFIX, CREDENTIAL_REF_PREFIX)
+                ):
                     continue
-                if not _is_sensitive_env_key(key):
+                if not is_sensitive_env_key(key):
                     continue
                 secret_name = f"sandbox.{row['id']}.{key.lower()}"
                 await provider.set(secret_name, value, scope)
@@ -330,6 +325,100 @@ async def migrate_plaintext_configs(user: AdminUser):
                     row["id"],
                     __import__("json").dumps(updated),
                 )
+
+        managed_tool_rows = await conn.fetch(
+            """
+            SELECT id, organization_id, owner_user_id, owner_group_id, env_vars
+            FROM managed_tool_definitions
+            WHERE organization_id = $1
+            """,
+            user.organization_id,
+        )
+        for row in managed_tool_rows:
+            env_vars = row["env_vars"] or {}
+            if isinstance(env_vars, str):
+                import json
+
+                env_vars = json.loads(env_vars)
+            updated = dict(env_vars)
+            changed = False
+            scope = _scope_from_row(dict(row))
+            for key, value in env_vars.items():
+                if not isinstance(value, str) or value.startswith(
+                    (SECRET_REF_PREFIX, CREDENTIAL_REF_PREFIX)
+                ):
+                    continue
+                if not is_sensitive_env_key(key):
+                    continue
+                secret_name = f"managed-tool.{row['id']}.{key.lower()}"
+                await provider.set(secret_name, value, scope)
+                updated[key] = f"{SECRET_REF_PREFIX}{secret_name}"
+                changed = True
+                migrated_managed_tools += 1
+            if changed:
+                await conn.execute(
+                    """UPDATE managed_tool_definitions
+                       SET env_vars = $2::jsonb, updated_at = NOW()
+                       WHERE id = $1""",
+                    row["id"],
+                    __import__("json").dumps(updated),
+                )
+
+        redaction_result = await conn.execute(
+            """
+            WITH normalized_configs AS (
+                SELECT
+                    id,
+                    CASE
+                        WHEN jsonb_typeof(config) = 'string'
+                        THEN (config #>> '{}')::jsonb
+                        ELSE config
+                    END AS config
+                FROM sandboxes
+                WHERE organization_id = $1
+                  AND (
+                      jsonb_typeof(config) = 'object'
+                      OR (
+                          jsonb_typeof(config) = 'string'
+                          AND config #>> '{}' LIKE '{%'
+                      )
+                  )
+            )
+            UPDATE sandboxes AS sandbox
+            SET config = CASE
+                    WHEN jsonb_typeof(normalized.config->'env_vars') = 'object' THEN jsonb_set(
+                        normalized.config - 'git_credentials',
+                        '{env_vars}',
+                        COALESCE(
+                            (
+                                SELECT jsonb_object_agg(key, to_jsonb('***'::text))
+                                FROM jsonb_each(normalized.config->'env_vars') AS entry(key, value)
+                            ),
+                            '{}'::jsonb
+                        ),
+                        true
+                    )
+                    ELSE normalized.config - 'git_credentials'
+                END,
+                updated_at = NOW()
+            FROM normalized_configs AS normalized
+            WHERE sandbox.id = normalized.id
+              AND jsonb_typeof(normalized.config) = 'object'
+              AND (
+                  normalized.config ? 'git_credentials'
+                  OR (
+                      jsonb_typeof(normalized.config->'env_vars') = 'object'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM jsonb_each_text(normalized.config->'env_vars') AS entry(key, value)
+                          WHERE value <> '***'
+                      )
+                  )
+              )
+            """,
+            user.organization_id,
+        )
+        redacted_sandbox_runtime_configs = int(redaction_result.rsplit(" ", 1)[-1])
 
         integration_rows = await conn.fetch(
             """
@@ -357,9 +446,11 @@ async def migrate_plaintext_configs(user: AdminUser):
                     owner_user_id=str(row["created_by"]),
                 )
                 for key, value in config.items():
-                    if not isinstance(value, str) or value.startswith(SECRET_REF_PREFIX):
+                    if not isinstance(value, str) or value.startswith(
+                        (SECRET_REF_PREFIX, CREDENTIAL_REF_PREFIX)
+                    ):
                         continue
-                    if not _is_sensitive_env_key(key):
+                    if not is_sensitive_env_key(key):
                         continue
                     secret_name = f"integration.{row['id']}.{key.lower()}"
                     await provider.set(secret_name, value, scope)
@@ -378,5 +469,7 @@ async def migrate_plaintext_configs(user: AdminUser):
     return MigrationResult(
         migrated_mcp_env_vars=migrated_mcp,
         migrated_sandbox_env_vars=migrated_sandbox,
+        migrated_managed_tool_env_vars=migrated_managed_tools,
         migrated_integration_values=migrated_integrations,
+        redacted_sandbox_runtime_configs=redacted_sandbox_runtime_configs,
     )

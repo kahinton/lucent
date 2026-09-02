@@ -10,6 +10,12 @@
         <span class="text-xs text-gray-500">{{ 'Kubernetes' if sandbox_backend == 'kubernetes' else 'Docker' }}</span>
     </div>
 
+    {% if request.query_params.get('error') %}
+    <div class="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+        {{ request.query_params.get('error') }}
+    </div>
+    {% endif %}
+
     <div class="bg-white rounded-lg border border-gray-200 p-6">
         {% if template.scope != 'built-in' %}
         <div class="mb-4">

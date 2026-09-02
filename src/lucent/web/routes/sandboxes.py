@@ -3,6 +3,7 @@
 import os
 import re
 from math import ceil
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
@@ -264,27 +265,30 @@ async def create_template_web(
         pool,
     )
 
-    await repo.create(
-        name=name.strip(),
-        organization_id=str(user.organization_id),
-        description=description.strip(),
-        image=image,
-        repo_url=repo_url.strip() or None,
-        branch=(branch.strip() or None) if repo_url.strip() else None,
-        setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
-        env_vars=_parse_env_vars(env_vars),
-        docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
-        working_dir=working_dir.strip() or "/workspace",
-        memory_limit=memory_limit,
-        cpu_limit=cpu_limit,
-        disk_limit=disk_limit,
-        network_mode=network_mode,
-        allowed_hosts=[host.strip() for host in allowed_hosts.splitlines() if host.strip()],
-        timeout_seconds=timeout_seconds,
-        created_by=str(user.id),
-        owner_user_id=owner_user_id,
-        owner_group_id=owner_group_id,
-    )
+    try:
+        await repo.create(
+            name=name.strip(),
+            organization_id=str(user.organization_id),
+            description=description.strip(),
+            image=image,
+            repo_url=repo_url.strip() or None,
+            branch=(branch.strip() or None) if repo_url.strip() else None,
+            setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
+            env_vars=_parse_env_vars(env_vars),
+            docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
+            working_dir=working_dir.strip() or "/workspace",
+            memory_limit=memory_limit,
+            cpu_limit=cpu_limit,
+            disk_limit=disk_limit,
+            network_mode=network_mode,
+            allowed_hosts=[host.strip() for host in allowed_hosts.splitlines() if host.strip()],
+            timeout_seconds=timeout_seconds,
+            created_by=str(user.id),
+            owner_user_id=owner_user_id,
+            owner_group_id=owner_group_id,
+        )
+    except ValueError as exc:
+        return RedirectResponse(f"/sandboxes?error={quote(str(exc))}", status_code=303)
     return RedirectResponse("/sandboxes", status_code=303)
 
 
@@ -358,27 +362,33 @@ async def update_template_web(
         pool,
     )
 
-    await repo.update(
-        template_id,
-        str(user.organization_id),
-        name=name.strip(),
-        description=description.strip(),
-        image=image,
-        repo_url=repo_url.strip() or None,
-        branch=(branch.strip() or None) if repo_url.strip() else None,
-        setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
-        env_vars=_parse_env_vars(env_vars),
-        docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
-        working_dir=working_dir.strip() or "/workspace",
-        memory_limit=memory_limit,
-        cpu_limit=cpu_limit,
-        disk_limit=disk_limit,
-        network_mode=network_mode,
-        allowed_hosts=[host.strip() for host in allowed_hosts.splitlines() if host.strip()],
-        timeout_seconds=timeout_seconds,
-        owner_user_id=owner_user_id,
-        owner_group_id=owner_group_id,
-    )
+    try:
+        await repo.update(
+            template_id,
+            str(user.organization_id),
+            name=name.strip(),
+            description=description.strip(),
+            image=image,
+            repo_url=repo_url.strip() or None,
+            branch=(branch.strip() or None) if repo_url.strip() else None,
+            setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
+            env_vars=_parse_env_vars(env_vars),
+            docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
+            working_dir=working_dir.strip() or "/workspace",
+            memory_limit=memory_limit,
+            cpu_limit=cpu_limit,
+            disk_limit=disk_limit,
+            network_mode=network_mode,
+            allowed_hosts=[host.strip() for host in allowed_hosts.splitlines() if host.strip()],
+            timeout_seconds=timeout_seconds,
+            owner_user_id=owner_user_id,
+            owner_group_id=owner_group_id,
+        )
+    except ValueError as exc:
+        return RedirectResponse(
+            f"/sandboxes/templates/{template_id}/edit?error={quote(str(exc))}",
+            status_code=303,
+        )
     return RedirectResponse("/sandboxes", status_code=303)
 
 

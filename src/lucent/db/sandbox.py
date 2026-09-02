@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -11,6 +10,16 @@ from uuid import UUID
 import asyncpg
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_runtime_config(config: dict | None) -> dict:
+    """Return a database-safe copy of runtime sandbox configuration."""
+    sanitized = dict(config or {})
+    sanitized.pop("git_credentials", None)
+    env_vars = sanitized.get("env_vars")
+    if isinstance(env_vars, dict):
+        sanitized["env_vars"] = {key: "***" for key in env_vars}
+    return sanitized
 
 
 class SandboxRepository:
@@ -42,7 +51,7 @@ class SandboxRepository:
                 INSERT INTO sandboxes
                     (id, name, status, image, repo_url, branch, config,
                      container_id, task_id, request_id, organization_id, created_by)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
                 RETURNING *
                 """,
                 UUID(id),
@@ -51,7 +60,7 @@ class SandboxRepository:
                 image,
                 repo_url,
                 branch,
-                json.dumps(config or {}),
+                _sanitize_runtime_config(config),
                 container_id,
                 UUID(task_id) if task_id else None,
                 UUID(request_id) if request_id else None,

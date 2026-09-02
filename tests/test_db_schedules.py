@@ -535,6 +535,15 @@ class TestCreateSchedule:
         assert s["max_runs"] == 10
 
     @pytest.mark.asyncio
+    async def test_create_rejects_plaintext_sandbox_secret(self, repo, test_organization):
+        with pytest.raises(ValueError, match="API_TOKEN.*secret:// or credential://"):
+            await repo.create_schedule(
+                title="Unsafe sandbox schedule",
+                org_id=str(test_organization["id"]),
+                sandbox_config={"env_vars": {"API_TOKEN": "plaintext-token"}},
+            )
+
+    @pytest.mark.asyncio
     async def test_create_with_explicit_next_run(self, repo, test_organization):
         future = datetime.now(timezone.utc) + timedelta(hours=5)
         s = await repo.create_schedule(
@@ -665,6 +674,17 @@ class TestUpdateSchedule:
             task_template={"new_key": "new_val"},
         )
         assert updated is not None
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_plaintext_sandbox_secret(
+        self, repo, schedule, test_organization,
+    ):
+        with pytest.raises(ValueError, match="API_TOKEN.*secret:// or credential://"):
+            await repo.update_schedule(
+                str(schedule["id"]),
+                str(test_organization["id"]),
+                sandbox_config={"env_vars": {"API_TOKEN": "plaintext-token"}},
+            )
 
     @pytest.mark.asyncio
     async def test_update_no_fields(self, repo, schedule, test_organization):

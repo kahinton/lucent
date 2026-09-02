@@ -8,6 +8,8 @@ from uuid import UUID
 
 import asyncpg
 
+from lucent.secrets.utils import validate_env_var_references
+
 
 class SandboxTemplateRepository:
     """CRUD for sandbox environment templates."""
@@ -54,6 +56,7 @@ class SandboxTemplateRepository:
         proposed_by: str | None = None,
         proposal_reason: str | None = None,
     ) -> dict:
+        validate_env_var_references(env_vars)
         # Default owner to creator when no explicit ownership is provided.
         # Built-in templates are owned by the system and don't require a user owner.
         if (
@@ -181,6 +184,8 @@ class SandboxTemplateRepository:
 
     async def update(self, template_id: str, organization_id: str, **kwargs) -> dict | None:
         """Update template fields. Only non-None kwargs are applied."""
+        if "env_vars" in kwargs and kwargs["env_vars"] is not None:
+            validate_env_var_references(kwargs["env_vars"])
         sets = ["updated_at = NOW()"]
         params: list[Any] = [UUID(template_id), UUID(organization_id)]
         idx = 3
@@ -406,6 +411,7 @@ class SandboxTemplateRepository:
                 allowed_hosts=spec.get("allowed_hosts") or [],
                 timeout_seconds=int(spec.get("timeout_seconds", 1800)),
             )
+            validate_env_var_references(payload["env_vars"])
 
             if existing:
                 # Refresh fields and ensure built-in/approved status.

@@ -62,6 +62,7 @@ async def _create_task_sandbox(
     """Create or reuse a sandbox for a task."""
     from lucent.sandbox.manager import get_sandbox_manager
     from lucent.sandbox.models import SandboxConfig
+    from lucent.secrets.utils import validate_env_var_references
     from lucent.settings import sandboxes_enabled
 
     if not sandboxes_enabled(organization_id=org_id):
@@ -76,6 +77,7 @@ async def _create_task_sandbox(
             "setting": "features.sandboxes_enabled",
         }, False
 
+    validate_env_var_references(sandbox_config.get("env_vars"))
     provider = await runtime.get_secret_provider()
     runtime.set_current_user({"id": requesting_user_id, "organization_id": org_id})
     try:

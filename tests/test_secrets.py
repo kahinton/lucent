@@ -10,6 +10,7 @@ Covers:
 - Audit logging for secret access
 """
 
+import json
 import os
 from uuid import uuid4
 
@@ -514,3 +515,145 @@ class TestSecretsAPI:
             )
         assert row is not None
         assert str(row["user_id"]) == str(org_and_users["user_a"]["id"])
+
+    @pytest.mark.asyncio
+    async def test_migrate_plaintext_configs_migrates_tools_and_redacts_runtime_records(
+        self, registered_provider, org_and_users, db_pool, secret_prefix,
+    ):
+        org_id = org_and_users["org"]["id"]
+        admin_id = org_and_users["admin"]["id"]
+        template_id = tool_id = sandbox_id = None
+        try:
+            async with db_pool.acquire() as conn:
+                template = await conn.fetchrow(
+                    """INSERT INTO sandbox_templates
+                       (name, organization_id, created_by, owner_user_id, env_vars)
+                       VALUES ($1, $2, $3, $3, $4::jsonb) RETURNING id""",
+                    f"{secret_prefix}sandbox",
+                    org_id,
+                    admin_id,
+                    {"API_TOKEN": "legacy-fixture-token"},
+                )
+                tool = await conn.fetchrow(
+                    """INSERT INTO managed_tool_definitions
+                       (name, organization_id, created_by, owner_user_id, env_vars)
+                       VALUES ($1, $2, $3, $3, $4::jsonb) RETURNING id""",
+                    f"{secret_prefix}tool",
+                    org_id,
+                    admin_id,
+                    {"API_TOKEN": "legacy-fixture-token"},
+                )
+                sandbox = await conn.fetchrow(
+                    """INSERT INTO sandboxes (name, organization_id, config)
+                       VALUES ($1, $2, $3::jsonb) RETURNING id""",
+                    f"{secret_prefix}runtime",
+                    org_id,
+                    {
+                        "env_vars": {
+                            "NODE_ENV": "test",
+                            "API_TOKEN": "legacy-fixture-token",
+                        },
+                        "git_credentials": "legacy-git-token",
+                    },
+                )
+                template_id, tool_id, sandbox_id = (
+                    template["id"], tool["id"], sandbox["id"]
+                )
+
+            app = create_app()
+            async with _make_client(app, org_and_users["admin"]) as client:
+                response = await client.post("/api/secrets/migrate-plaintext-configs")
+
+            assert response.status_code == 200
+            result = response.json()
+            assert result["migrated_sandbox_env_vars"] == 1
+            assert result["migrated_managed_tool_env_vars"] == 1
+            assert result["redacted_sandbox_runtime_configs"] == 1
+
+            async with db_pool.acquire() as conn:
+                template_env = await conn.fetchval(
+                    "SELECT env_vars FROM sandbox_templates WHERE id = $1", template_id,
+                )
+                tool_env = await conn.fetchval(
+                    "SELECT env_vars FROM managed_tool_definitions WHERE id = $1", tool_id,
+                )
+                runtime_config = await conn.fetchval(
+                    "SELECT config FROM sandboxes WHERE id = $1", sandbox_id,
+                )
+            if isinstance(template_env, str):
+                template_env = json.loads(template_env)
+            if isinstance(tool_env, str):
+                tool_env = json.loads(tool_env)
+            if isinstance(runtime_config, str):
+                runtime_config = json.loads(runtime_config)
+            assert template_env["API_TOKEN"].startswith("secret://sandbox.")
+            assert tool_env["API_TOKEN"].startswith("secret://managed-tool.")
+            assert runtime_config["env_vars"] == {"NODE_ENV": "***", "API_TOKEN": "***"}
+            assert "git_credentials" not in runtime_config
+        finally:
+            async with db_pool.acquire() as conn:
+                if sandbox_id:
+                    await conn.execute("DELETE FROM sandboxes WHERE id = $1", sandbox_id)
+                if tool_id:
+                    await conn.execute(
+                        "DELETE FROM managed_tool_definitions WHERE id = $1", tool_id,
+                    )
+                if template_id:
+                    await conn.execute(
+                        "DELETE FROM sandbox_templates WHERE id = $1", template_id,
+                    )
+                await conn.execute(
+                    "DELETE FROM secrets WHERE organization_id = $1 "
+                    "AND key LIKE ANY($2::text[])",
+                    org_id,
+                    ["sandbox.%", "managed-tool.%"],
+                )
+
+    @pytest.mark.asyncio
+    async def test_migrate_plaintext_configs_scrubs_legacy_string_runtime_config(
+        self, registered_provider, org_and_users, db_pool, secret_prefix,
+    ):
+        org_id = org_and_users["org"]["id"]
+        sandbox_id = None
+        try:
+            async with db_pool.acquire() as conn:
+                sandbox = await conn.fetchrow(
+                    """INSERT INTO sandboxes (name, organization_id, config)
+                       VALUES ($1, $2, $3::jsonb) RETURNING id""",
+                    f"{secret_prefix}legacy-runtime",
+                    org_id,
+                    json.dumps(
+                        {
+                            "env_vars": {"API_TOKEN": "legacy-fixture-token"},
+                            "git_credentials": "legacy-git-token",
+                        }
+                    ),
+                )
+                sandbox_id = sandbox["id"]
+                config_type_before = await conn.fetchval(
+                    "SELECT jsonb_typeof(config) FROM sandboxes WHERE id = $1", sandbox_id,
+                )
+            assert config_type_before == "string"
+
+            app = create_app()
+            async with _make_client(app, org_and_users["admin"]) as client:
+                response = await client.post("/api/secrets/migrate-plaintext-configs")
+
+            assert response.status_code == 200
+            assert response.json()["redacted_sandbox_runtime_configs"] == 1
+
+            async with db_pool.acquire() as conn:
+                config_type_after = await conn.fetchval(
+                    "SELECT jsonb_typeof(config) FROM sandboxes WHERE id = $1", sandbox_id,
+                )
+                persisted_config = await conn.fetchval(
+                    "SELECT config::text FROM sandboxes WHERE id = $1", sandbox_id,
+                )
+            assert config_type_after == "object"
+            assert '"API_TOKEN": "***"' in persisted_config
+            assert "git_credentials" not in persisted_config
+            assert "legacy-fixture-token" not in persisted_config
+        finally:
+            if sandbox_id:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("DELETE FROM sandboxes WHERE id = $1", sandbox_id)

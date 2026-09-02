@@ -16,6 +16,12 @@
         </div>
     </div>
 
+    {% if request.query_params.get('error') %}
+    <div class="border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800" role="alert">
+        {{ request.query_params.get('error') }}
+    </div>
+    {% endif %}
+
     <!-- Tab navigation -->
     <div class="flex gap-1 border-b border-gray-200">
         <a href="/sandboxes" class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors {% if tab == 'templates' %}-mb-px border-primary-600 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Templates</a>

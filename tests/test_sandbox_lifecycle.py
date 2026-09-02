@@ -20,6 +20,8 @@ from uuid import uuid4
 import pytest
 
 from daemon.sandbox.lifecycle import _create_task_sandbox, _keep_task_sandbox_alive
+from lucent.auth import set_current_user
+from lucent.db.sandbox import SandboxRepository, _sanitize_runtime_config
 from lucent.sandbox.docker_backend import DockerBackend
 from lucent.sandbox.manager import SandboxManager
 from lucent.sandbox.mcp_bridge import BridgeServer
@@ -30,6 +32,8 @@ from lucent.sandbox.models import (
     SandboxStatus,
 )
 from lucent.sandbox.output import SandboxOutputHandler
+from lucent.secrets import SecretScope, resolve_env_vars
+from lucent.secrets.builtin import BuiltinSecretProvider
 from lucent.settings import (
     clear_runtime_setting_cache,
     custom_tooling_enabled,
@@ -185,6 +189,73 @@ def _make_manager(backend: AsyncMock | None = None) -> SandboxManager:
     manager._repo.return_value = repo
     manager._create_task_scoped_api_key = AsyncMock(return_value=(None, "test-bridge-key"))
     return manager
+
+
+def test_runtime_sandbox_config_is_sanitized_at_repository_boundary():
+    config = _sanitize_runtime_config(
+        {
+            "env_vars": {"NODE_ENV": "test", "API_TOKEN": "runtime-secret"},
+            "git_credentials": "git-token",
+            "image": "python:3.12",
+        }
+    )
+
+    assert config["env_vars"] == {"NODE_ENV": "***", "API_TOKEN": "***"}
+    assert "git_credentials" not in config
+    assert config["image"] == "python:3.12"
+
+
+@pytest.mark.asyncio
+async def test_secret_reference_is_injected_only_in_memory_and_redacted_in_database(
+    db_pool, test_organization, test_user,
+):
+    secret_key = f"sandbox-lifecycle-{uuid4()}"
+    resolved_value = "injected-test-value"
+    org_id = str(test_organization["id"])
+    user_id = str(test_user["id"])
+    scope = SecretScope(organization_id=org_id, owner_user_id=user_id)
+    provider = BuiltinSecretProvider(db_pool, secret_key="sandbox-lifecycle-test-key")
+    await provider.set(secret_key, resolved_value, scope)
+
+    sandbox_id = str(uuid4())
+    backend = _make_backend_mock(info=_ready_info(sandbox_id))
+    manager = SandboxManager(backend=backend)
+    manager._repo = AsyncMock(return_value=SandboxRepository(db_pool))
+
+    set_current_user({"id": user_id, "organization_id": org_id})
+    try:
+        resolved_env_vars = await resolve_env_vars(
+            {"API_TOKEN": f"secret://{secret_key}"}, provider,
+        )
+    finally:
+        set_current_user(None)
+
+    try:
+        await manager.create(
+            SandboxConfig(
+                name="secret-reference-runtime-test",
+                env_vars=resolved_env_vars,
+                organization_id=org_id,
+                timeout_seconds=0,
+            )
+        )
+        backend_config = backend.create.call_args.args[0]
+        assert backend_config.env_vars["API_TOKEN"] == resolved_value
+
+        async with db_pool.acquire() as conn:
+            config_type = await conn.fetchval(
+                "SELECT jsonb_typeof(config) FROM sandboxes WHERE id = $1::uuid", sandbox_id,
+            )
+            persisted_config = await conn.fetchval(
+                "SELECT config::text FROM sandboxes WHERE id = $1::uuid", sandbox_id,
+            )
+        assert config_type == "object"
+        assert '"API_TOKEN": "***"' in persisted_config
+        assert resolved_value not in persisted_config
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM sandboxes WHERE id = $1::uuid", sandbox_id)
+        await provider.delete(secret_key, scope)
 
 
 # ===========================================================================
@@ -548,11 +619,21 @@ class TestDockerSandboxLifecycle:
         backend = _make_backend_mock()
         manager = _make_manager(backend)
 
-        await manager.create(SandboxConfig(task_id=str(uuid4()), timeout_seconds=0))
+        await manager.create(
+            SandboxConfig(
+                task_id=str(uuid4()),
+                env_vars={"NODE_ENV": "test", "API_TOKEN": "resolved-secret"},
+                git_credentials="git-token",
+                timeout_seconds=0,
+            )
+        )
 
         repo = await manager._repo()
         persisted_config = repo.create.call_args.kwargs["config"]
         assert persisted_config["env_vars"]["LUCENT_SANDBOX_MCP_API_KEY"] == "***"
+        assert persisted_config["env_vars"]["NODE_ENV"] == "***"
+        assert persisted_config["env_vars"]["API_TOKEN"] == "***"
+        assert "git_credentials" not in persisted_config
 
     @pytest.mark.asyncio
     async def test_task_bridge_key_is_memory_scoped_to_requesting_user(

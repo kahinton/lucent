@@ -516,6 +516,47 @@ class TestSandboxTemplateOwnership:
         assert tmpl["owner_group_id"] is None
 
     @pytest.mark.asyncio
+    async def test_create_rejects_plaintext_sensitive_environment_value(
+        self, tmpl_repo, test_organization, test_user, clean_test_data,
+    ):
+        with pytest.raises(ValueError, match="API_TOKEN.*secret:// or credential://"):
+            await tmpl_repo.create(
+                name=f"{clean_test_data}plaintext_secret",
+                organization_id=str(test_organization["id"]),
+                created_by=str(test_user["id"]),
+                env_vars={"API_TOKEN": "plaintext-token"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_plaintext_sensitive_environment_value(
+        self, tmpl_repo, test_organization, test_user, clean_test_data,
+    ):
+        template = await tmpl_repo.create(
+            name=f"{clean_test_data}reference_secret",
+            organization_id=str(test_organization["id"]),
+            created_by=str(test_user["id"]),
+            env_vars={"API_TOKEN": "secret://api.token"},
+        )
+        with pytest.raises(ValueError, match="API_TOKEN.*secret:// or credential://"):
+            await tmpl_repo.update(
+                str(template["id"]),
+                str(test_organization["id"]),
+                env_vars={"API_TOKEN": "plaintext-token"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_builtin_sync_rejects_plaintext_sensitive_environment_value(
+        self, tmpl_repo, test_organization, tmp_path,
+    ):
+        (tmp_path / "unsafe.yaml").write_text(
+            "name: unsafe-built-in\nenv_vars:\n  API_TOKEN: plaintext-token\n"
+        )
+        with pytest.raises(ValueError, match="API_TOKEN.*secret:// or credential://"):
+            await tmpl_repo.sync_built_in_templates(
+                str(test_organization["id"]), str(tmp_path),
+            )
+
+    @pytest.mark.asyncio
     async def test_update_ownership(
         self, tmpl_repo, group_repo, test_organization, test_user, clean_test_data,
     ):

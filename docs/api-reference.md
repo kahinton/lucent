@@ -1154,7 +1154,7 @@ Deletes a secret. Requires ACL modify permission on the secret.
 POST /api/secrets/migrate-plaintext-configs
 ```
 
-Scans MCP server configs, sandbox templates, and integrations for plaintext sensitive values (tokens, passwords, API keys) and migrates them to encrypted secret storage. Original values are replaced with `secret://` references.
+Scans MCP server configs, sandbox templates, managed tools, and integrations for plaintext sensitive values (tokens, passwords, API keys) and migrates them to encrypted secret storage. Original values are replaced with `secret://` references. It also removes `git_credentials` and redacts all environment values in historical sandbox runtime records.
 
 **Requires:** admin role or higher.
 
@@ -1164,7 +1164,9 @@ Scans MCP server configs, sandbox templates, and integrations for plaintext sens
 {
   "migrated_mcp_env_vars": 3,
   "migrated_sandbox_env_vars": 1,
-  "migrated_integration_values": 2
+  "migrated_managed_tool_env_vars": 1,
+  "migrated_integration_values": 2,
+  "redacted_sandbox_runtime_configs": 4
 }
 ```
 
