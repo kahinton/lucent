@@ -969,7 +969,15 @@ Returns:
             # Validate metadata if provided
             validated_metadata = metadata
             if metadata is not None:
-                validated_metadata = validate_metadata(old_memory["type"], metadata)
+                metadata_for_validation = metadata
+                if old_memory["type"] == "goal":
+                    metadata_for_validation = {
+                        **(old_memory.get("metadata") or {}),
+                        **metadata,
+                    }
+                validated_metadata = validate_metadata(
+                    old_memory["type"], metadata_for_validation
+                )
                 validated_metadata = repo.normalize_metadata_for_storage(
                     old_memory["type"], validated_metadata
                 )
@@ -1041,10 +1049,10 @@ Returns:
                 old_values["importance"] = old_memory["importance"]
                 new_values["importance"] = importance
 
-            if metadata is not None and old_memory["metadata"] != metadata:
+            if metadata is not None and old_memory["metadata"] != validated_metadata:
                 changed_fields.append("metadata")
                 old_values["metadata"] = old_memory["metadata"]
-                new_values["metadata"] = metadata
+                new_values["metadata"] = validated_metadata
 
             if related_memory_ids is not None:
                 old_related = [str(uid) for uid in old_memory["related_memory_ids"]]

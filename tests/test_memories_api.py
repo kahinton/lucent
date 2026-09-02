@@ -526,6 +526,33 @@ class TestUpdateMemory:
         assert resp.status_code == 200
         assert resp.json()["importance"] == 9
 
+    async def test_partial_goal_metadata_update_preserves_milestones(
+        self, mem_client, mem_prefix
+    ):
+        create_resp = await _create_memory(
+            mem_client,
+            mem_prefix,
+            type="goal",
+            metadata={
+                "status": "active",
+                "milestones": [
+                    {"description": "Preserved milestone", "status": "active"},
+                ],
+            },
+        )
+        memory_id = create_resp.json()["id"]
+
+        response = await mem_client.patch(
+            f"/api/memories/{memory_id}",
+            json={"metadata": {"status": "completed"}},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["metadata"]["status"] == "completed"
+        assert response.json()["metadata"]["milestones"] == [
+            {"description": "Preserved milestone", "status": "active"}
+        ]
+
     async def test_update_not_found(self, mem_client):
         fake_id = str(uuid4())
         resp = await mem_client.patch(

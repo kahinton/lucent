@@ -194,9 +194,9 @@ The technical memories for that repo and paths are automatically loaded into tas
 
 ### Post-Creation Lifecycle
 
-5. **When creating tasks for a goal request** (after user approval), include the goal memory ID in the task description so the agent has context about what goal it's serving. You do NOT need to instruct the task agent to update the goal — the post-completion review task handles that automatically.
+5. **When creating tasks for a goal request** (after user approval), include the goal memory ID in the task description so the agent has context about what goal it's serving. Do NOT instruct task or review agents to update the goal metadata — the request repository automatically completes the target milestone after approval.
 
-6. **Memory updates happen at review time** — when a request completes, the post-completion review task receives all linked memories and is responsible for updating them (adding progress_notes, completing milestones, or marking goals as done when appropriate). A single request may only complete one milestone of a larger goal — that's fine. Goals are long-term items.
+6. **Memory updates happen at review time** — when a request completes, the post-completion review task may update linked non-goal memories. Goal links are read-only review context: the request repository owns target-milestone completion and goal lifecycle transitions. A single request may only complete one milestone of a larger goal — that's fine. Goals are long-term items.
 
 ### Daemon-Service User Compatibility
 

@@ -428,8 +428,16 @@ async def update_memory(
     # Validate metadata if provided
     validated_metadata = data.metadata
     if data.metadata is not None:
+        metadata_for_validation = data.metadata
+        if existing["type"] == "goal":
+            metadata_for_validation = {
+                **(existing.get("metadata") or {}),
+                **data.metadata,
+            }
         try:
-            validated_metadata = validate_metadata(existing["type"], data.metadata)
+            validated_metadata = validate_metadata(
+                existing["type"], metadata_for_validation
+            )
         except ValueError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -510,10 +518,10 @@ async def update_memory(
         old_values["importance"] = existing["importance"]
         new_values["importance"] = data.importance
 
-    if data.metadata is not None and existing["metadata"] != data.metadata:
+    if data.metadata is not None and existing["metadata"] != validated_metadata:
         changed_fields.append("metadata")
         old_values["metadata"] = existing["metadata"]
-        new_values["metadata"] = data.metadata
+        new_values["metadata"] = validated_metadata
 
     if changed_fields:
         await audit_repo.log(

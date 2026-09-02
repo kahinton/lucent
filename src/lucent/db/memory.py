@@ -918,6 +918,11 @@ class MemoryRepository:
         Raises:
             VersionConflictError: If expected_version is provided and doesn't match.
         """
+        if metadata is not None:
+            metadata_param = metadata
+        else:
+            metadata_param = None
+
         # Build dynamic update query
         updates = []
         params = []
@@ -944,8 +949,11 @@ class MemoryRepository:
             param_idx += 1
 
         if metadata is not None:
-            updates.append(f"metadata = ${param_idx}")
-            params.append(metadata)
+            updates.append(
+                f"metadata = CASE WHEN type = 'goal' "
+                f"THEN metadata || ${param_idx}::jsonb ELSE ${param_idx}::jsonb END"
+            )
+            params.append(metadata_param)
             param_idx += 1
 
         # Auto-sync lifecycle_stage for goal-type memories when

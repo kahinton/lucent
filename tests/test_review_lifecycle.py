@@ -19,6 +19,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
+from daemon.review.lifecycle import _review_updatable_memories
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
 from lucent.constants import (
@@ -66,6 +67,19 @@ async def _fail_task_flow(repo, task, error="Something broke"):
     tid = str(task["id"])
     await repo.claim_task(tid, "test-inst")
     return await repo.fail_task(tid, error)
+
+
+def test_review_updatable_memories_excludes_goals():
+    goal_memory = {"memory_id": "goal-id", "memory_type": "goal", "relation": "goal"}
+    context_memory = {
+        "memory_id": "context-id",
+        "memory_type": "technical",
+        "relation": "context",
+    }
+
+    assert _review_updatable_memories([goal_memory, context_memory]) == [
+        context_memory
+    ]
 
 
 # ---------------------------------------------------------------------------

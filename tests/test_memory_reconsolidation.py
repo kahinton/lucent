@@ -239,3 +239,32 @@ class TestReconsolidationGoalSyncCoexistence:
         )
         assert result is not None
         assert await _read_stage(db_pool, goal["id"]) == "archived"
+
+    async def test_partial_goal_metadata_update_preserves_milestones(
+        self, db_pool, test_user, clean_test_data
+    ):
+        mem_repo = MemoryRepository(db_pool)
+        goal = await mem_repo.create(
+            username=f"{clean_test_data}user",
+            type="goal",
+            content=f"{clean_test_data} preserve goal milestones",
+            metadata={
+                "status": "active",
+                "milestones": [
+                    {"description": "First milestone", "status": "active"},
+                    {"description": "Second milestone", "status": "active"},
+                ],
+            },
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        result = await mem_repo.update(
+            memory_id=goal["id"], metadata={"status": "completed"}
+        )
+
+        assert result is not None
+        assert result["metadata"]["status"] == "completed"
+        assert [
+            milestone["description"] for milestone in result["metadata"]["milestones"]
+        ] == ["First milestone", "Second milestone"]

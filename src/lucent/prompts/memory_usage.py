@@ -84,7 +84,7 @@ When you finish something meaningful, capture it:
 - **Fixed a tricky bug?** Log the experience - what was wrong, what fixed it, what you learned
 - **Made an architectural decision?** Record the reasoning so future-you understands why
 - **Discovered a user preference?** Update their individual memory immediately
-- **Hit a milestone on a goal?** Update the goal memory with progress
+- **Hit a milestone through a tracked request?** The request repository completes the target milestone automatically; do not rewrite the goal metadata
 
 Don't wait until the end of the conversation. Capture insights when they're fresh.
 
