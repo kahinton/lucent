@@ -303,8 +303,27 @@ async def _process_request_review_task(daemon, task: dict, review_result: str) -
         runtime.log(f'Request {request_id[:8]} internal review APPROVED — completed')
         return
     await runtime.RequestAPI.add_event(str(task['id']), 'request_review_needs_rework', 'Internal review: NEEDS_REWORK. Sending back for revision.', {'recommendation': decision, 'feedback': feedback[:1500], 'task_ids_to_rework': task_ids})
+    requeued_ids: list[str] = []
+    for task_id in task_ids:
+        if task_id == str(task.get('id')):
+            continue
+        requeued = await runtime.RequestAPI.requeue_completed_task_for_rework(
+            task_id, feedback
+        )
+        if requeued:
+            requeued_ids.append(task_id)
+    if requeued_ids:
+        runtime.log(
+            f'Request {request_id[:8]} internal review NEEDS_REWORK — '
+            f'requeued {len(requeued_ids)} task(s) for revision'
+        )
+        return
     await runtime.RequestAPI.update_request_status(request_id, 'needs_rework')
-    runtime.log(f'Request {request_id[:8]} internal review NEEDS_REWORK — sent back for revision')
+    runtime.log(
+        f'Request {request_id[:8]} internal review NEEDS_REWORK but no '
+        'completed task could be requeued',
+        'WARN',
+    )
 
 
 async def _handle_review_task_failure(

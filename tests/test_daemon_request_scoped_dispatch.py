@@ -691,6 +691,7 @@ async def test_request_review_needs_rework_auto_transitions(monkeypatch):
     target_task_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
     events: list[tuple[str, str, str | None, dict | None]] = []
     status_updates: list[tuple[str, str]] = []
+    requeued: list[tuple[str, str]] = []
 
     async def _get_request(_request_id):
         return {"id": request_id, "status": "review", "tasks": []}
@@ -706,12 +707,20 @@ async def test_request_review_needs_rework_auto_transitions(monkeypatch):
     async def _forbidden(*_args, **_kwargs):
         raise AssertionError("should not be called in auto-rework review flow")
 
+    async def _requeue_completed_task_for_rework(tid, feedback):
+        requeued.append((tid, feedback))
+        return {"id": tid, "status": "pending"}
+
     monkeypatch.setattr("daemon.daemon.RequestAPI.get_request", _get_request)
     monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _add_event)
     monkeypatch.setattr("daemon.daemon.RequestAPI.create_review", _forbidden)
     monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _update_status)
     monkeypatch.setattr("daemon.daemon.RequestAPI.retry_task", _forbidden)
     monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _forbidden)
+    monkeypatch.setattr(
+        "daemon.daemon.RequestAPI.requeue_completed_task_for_rework",
+        _requeue_completed_task_for_rework,
+    )
 
     await daemon._process_request_review_task(
         {"id": task_id, "request_id": request_id},
@@ -729,9 +738,8 @@ async def test_request_review_needs_rework_auto_transitions(monkeypatch):
     assert "NEEDS_REWORK" in (detail or "")
     assert metadata and metadata.get("recommendation") == "NEEDS_REWORK"
     assert metadata.get("task_ids_to_rework") == [target_task_id]
-    # Verify request was auto-transitioned to needs_rework
-    assert len(status_updates) == 1
-    assert status_updates[0] == (request_id, "needs_rework")
+    assert requeued == [(target_task_id, "Add tests.")]
+    assert status_updates == []
 
 
 @pytest.mark.asyncio

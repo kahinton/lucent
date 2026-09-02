@@ -3064,6 +3064,76 @@ class RequestRepository:
         refreshed = await self.get_task(task_id, org_id=org_id)
         return refreshed
 
+    async def requeue_completed_task_for_rework(
+        self, task_id: str, feedback: str, org_id: str | None = None
+    ) -> dict | None:
+        """Reopen a completed task that a request review explicitly rejected."""
+        now = datetime.now(timezone.utc)
+        if org_id:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
+                       completed_at = NULL, result = NULL, result_structured = NULL,
+                       result_summary = NULL, validation_status = 'not_applicable',
+                       validation_errors = NULL, error = NULL, updated_at = $2
+                       WHERE id = $1 AND status = 'completed'
+                       AND organization_id = $3 RETURNING *""",
+                    UUID(task_id),
+                    now,
+                    UUID(org_id),
+                )
+        else:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """UPDATE tasks SET status = 'pending', claimed_by = NULL,
+                       claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
+                       completed_at = NULL, result = NULL, result_structured = NULL,
+                       result_summary = NULL, validation_status = 'not_applicable',
+                       validation_errors = NULL, error = NULL, updated_at = $2
+                       WHERE id = $1 AND status = 'completed' RETURNING *""",
+                    UUID(task_id),
+                    now,
+                )
+        if not row:
+            return None
+
+        task = dict(row)
+        request_id = str(task["request_id"])
+        async with self.pool.acquire() as conn:
+            if org_id:
+                await conn.execute(
+                    """UPDATE requests SET status = $2,
+                           review_feedback = $3,
+                           review_count = review_count + 1,
+                           updated_at = $4
+                       WHERE id = $1 AND organization_id = $5""",
+                    UUID(request_id),
+                    REQUEST_STATUS_IN_PROGRESS,
+                    feedback,
+                    now,
+                    UUID(org_id),
+                )
+            else:
+                await conn.execute(
+                    """UPDATE requests SET status = $2,
+                           review_feedback = $3,
+                           review_count = review_count + 1,
+                           updated_at = $4
+                       WHERE id = $1""",
+                    UUID(request_id),
+                    REQUEST_STATUS_IN_PROGRESS,
+                    feedback,
+                    now,
+                )
+        await self.add_task_event(
+            task_id,
+            "rework_queued",
+            "Task reopened after request review",
+            metadata={"feedback": feedback},
+        )
+        return await self.get_task(task_id, org_id=org_id)
+
     async def release_stale_tasks(
         self,
         stale_minutes: int = 30,

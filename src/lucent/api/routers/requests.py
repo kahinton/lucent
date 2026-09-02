@@ -1170,6 +1170,26 @@ async def retry_task_with_feedback(
     return task
 
 
+@router.post("/tasks/{task_id}/rework")
+async def requeue_completed_task_for_rework(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: ReviewRejectBody = Body(...),
+    pool=Depends(get_pool),
+):
+    """Reopen a completed task after a request-level review rejects it."""
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
+    task = await repo.requeue_completed_task_for_rework(
+        str(task_id), body.feedback, org_id=str(user.organization_id)
+    )
+    if not task:
+        raise HTTPException(409, "Task not in completed state")
+    return task
+
+
 @router.get("/tasks/{task_id}/events")
 async def task_events(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.requests import RequestRepository

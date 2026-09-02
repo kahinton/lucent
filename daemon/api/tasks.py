@@ -50,6 +50,16 @@ class TaskAPI:
         )
 
     @staticmethod
+    async def requeue_completed_task_for_rework(
+        task_id: str, feedback: str
+    ) -> dict | None:
+        return await TaskAPI._post(
+            f"/requests/tasks/{task_id}/rework",
+            {"feedback": feedback[:10000]},
+            "requeue_completed_task_for_rework",
+        )
+
+    @staticmethod
     async def start_task(task_id: str, instance_id: str | None = None) -> dict | None:
         return await TaskAPI._post(
             f"/requests/tasks/{task_id}/start",
