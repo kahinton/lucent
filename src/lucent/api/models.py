@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from lucent.models.memory import GoalStatus
+
 # =============================================================================
 # Memory Models
 # =============================================================================
@@ -34,6 +36,17 @@ class MemoryUpdate(BaseModel):
     importance: int | None = Field(default=None, ge=1, le=10, description="New importance")
     related_memory_ids: list[UUID] | None = Field(default=None, description="New related memories")
     metadata: dict[str, Any] | None = Field(default=None, description="New metadata")
+
+
+class GoalMilestoneUpdate(BaseModel):
+    """Bounded update for one existing goal milestone."""
+
+    status: GoalStatus = Field(..., description="New status for this milestone")
+    expected_version: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional current memory version for optimistic locking",
+    )
 
 
 class MemoryResponse(BaseModel):

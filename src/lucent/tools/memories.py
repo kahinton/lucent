@@ -925,9 +925,10 @@ Returns:
             tags: Optional new list of tags (replaces existing tags).
             importance: Optional new importance rating (1-10).
             related_memory_ids: Optional new list of related memory UUIDs (replaces existing).
-            metadata: Optional new metadata (replaces existing).
-                Must match the memory's type schema.
-                      See create_memory for the metadata schema for each memory type.
+            metadata: Optional new metadata for non-goal memories. Goal metadata
+                is protected; use update_goal_milestone for goal milestones.
+                Must match the memory's type schema. See create_memory for the
+                metadata schema for each memory type.
             expected_version: Optional optimistic lock. If provided, the update only succeeds
                 if the memory's current version matches this value. Use this to prevent
                 concurrent updates from overwriting each other. Get the current version
@@ -965,6 +966,12 @@ Returns:
             )
             if old_memory.get("user_id") != user_id and not can_maintain_daemon_memory:
                 return _error_response("Permission denied: only the owner can update this memory")
+
+            if old_memory["type"] == "goal" and metadata is not None:
+                return _error_response(
+                    "Goal metadata cannot be updated through update_memory. Use "
+                    "update_goal_milestone to update one goal milestone."
+                )
 
             # Validate metadata if provided
             validated_metadata = metadata
@@ -1096,6 +1103,71 @@ Returns:
         except Exception as e:
             logger.error("update_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to update memory: {str(e)}")
+
+    @mcp.tool(annotations=MUTATING)
+    async def update_goal_milestone(
+        memory_id: str,
+        milestone_index: int,
+        status: str,
+        expected_version: int | None = None,
+    ) -> str:
+        """Update one goal milestone without replacing the goal's metadata.
+
+        Use this bounded operation for deliberate milestone transitions. It
+        preserves all other milestones and goal fields, records a completion
+        timestamp for `completed`, and derives terminal goal status safely.
+        """
+        try:
+            uuid_id = UUID(memory_id)
+            repo = await _get_repository()
+            user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
+            if user_id is None:
+                return _error_response("Authentication required to update memories")
+
+            old_memory = await repo.get_accessible(
+                uuid_id, user_id, org_id, memory_scope=memory_scope
+            )
+            if old_memory is None:
+                return _error_response(f"Memory not found or not accessible: {memory_id}")
+            can_maintain_daemon_memory = user_role == "daemon" or (
+                user_role in {"admin", "owner"}
+                and memory_scope is None
+                and await repo.is_daemon_authored(old_memory)
+            )
+            if old_memory.get("user_id") != user_id and not can_maintain_daemon_memory:
+                return _error_response("Permission denied: only the owner can update this memory")
+
+            result = await repo.update_goal_milestone(
+                uuid_id, milestone_index, status, expected_version
+            )
+            if result is None:
+                return _error_response(f"Memory not found: {memory_id}")
+
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=uuid_id,
+                action_type="update",
+                user_id=user_id,
+                organization_id=org_id,
+                changed_fields=["metadata"],
+                old_values={"metadata": old_memory["metadata"]},
+                new_values={"metadata": result["metadata"]},
+                context=_get_audit_context(),
+                notes=f"Bounded goal milestone update: {milestone_index} → {status}",
+                version=result["version"],
+                snapshot=_build_snapshot(result),
+            )
+            return json.dumps(_serialize_memory(result), indent=2)
+        except VersionConflictError as exc:
+            return _error_response(
+                f"Version conflict: expected version {exc.expected_version}, "
+                f"current version {exc.actual_version}. Re-read and retry."
+            )
+        except ValueError as exc:
+            return _error_response(f"Invalid input: {str(exc)}")
+        except Exception as exc:
+            logger.error("update_goal_milestone failed: id=%s", memory_id, exc_info=exc)
+            return _error_response(f"Failed to update goal milestone: {str(exc)}")
 
     async def _toggle_pin(memory_id: str, *, pin: bool) -> str:
         """Shared implementation for pin_memory / unpin_memory.

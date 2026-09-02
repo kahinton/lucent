@@ -73,14 +73,13 @@ daemon will reject the decision and re-queue the review as NEEDS_REWORK
 regardless of what verdict you wrote. You do not get to skip this step.
 
 **For goal memories (relation: "goal"):**
-- Call `update_memory(memory_id=..., metadata={...})` on the goal's memory ID.
-- Append a `progress_notes` entry describing what was accomplished, with
-  today's date.
-- If a specific milestone was achieved, set that milestone's `status` to
-  `"completed"` and `completed_at` to today's date.
-- Set the overall goal `status` to `"completed"` ONLY if every milestone
-  is done. Goals are usually long-term — a single request typically only
-  advances one milestone. Default to leaving the goal `"active"`.
+- Treat the goal as read-only context during review. Do not call
+  `update_memory` on its metadata and do not list it in `MEMORIES_UPDATED`.
+- The request repository automatically completes the request's declared
+  goal milestone after approval. Do not duplicate that transition.
+- If a deliberate non-review milestone correction is explicitly required,
+  use the bounded `update_goal_milestone(memory_id, milestone_index, status,
+  expected_version)` tool. Never rewrite a goal's milestone list.
 
 **For other linked memories:**
 - Update with any relevant new information from the task results.
@@ -195,9 +194,9 @@ MEMORIES_UPDATED: <comma-separated memory UUIDs, or "none">
 HANDOFF_SENT: <handoff URL/id if you called send_handoff, or "none">
 ```
 
-Note: even when sending back for rework, you should still update linked
-goal memories with `progress_notes` describing what was attempted and
-why it didn't pass — that history is valuable for the rework cycle.
+Note: when sending work back for rework, leave linked goals unchanged. The
+goal remains active until a later approved request transitions its declared
+milestone.
 
 ### 7. Record Review Outcome
 

@@ -912,6 +912,51 @@ class TestUpdateMemory:
         assert sorted(result["tags"]) == ["mcp-test", "updated"]
         assert result["importance"] == 9
 
+    async def test_update_goal_milestone_is_bounded(
+        self, mcp_tools, auth_user, db_pool, clean_test_data
+    ):
+        goal = await MemoryRepository(db_pool).create(
+            username=f"{clean_test_data}user",
+            type="goal",
+            content=f"{clean_test_data} bounded goal update",
+            metadata={
+                "status": "active",
+                "milestones": [
+                    {"description": "First milestone", "status": "active"},
+                    {"description": "Second milestone", "status": "active"},
+                ],
+            },
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+
+        generic_result = await _call(
+            mcp_tools,
+            "update_memory",
+            {"memory_id": str(goal["id"]), "metadata": {"status": "completed"}},
+        )
+        assert "error" in generic_result
+        assert "update_goal_milestone" in generic_result["error"]
+
+        result = await _call(
+            mcp_tools,
+            "update_goal_milestone",
+            {
+                "memory_id": str(goal["id"]),
+                "milestone_index": 1,
+                "status": "completed",
+                "expected_version": goal["version"],
+            },
+        )
+
+        assert result["metadata"]["status"] == "active"
+        assert result["metadata"]["milestones"][0]["status"] == "completed"
+        assert result["metadata"]["milestones"][0]["completed_at"]
+        assert result["metadata"]["milestones"][1] == {
+            "description": "Second milestone",
+            "status": "active",
+        }
+
     async def test_update_nonexistent_memory(self, mcp_tools, auth_user):
         """Test updating a memory that doesn't exist."""
         result = await _call(

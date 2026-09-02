@@ -116,6 +116,8 @@ PATCH /api/memories/{memory_id}
 ```
 
 Only the memory owner can update. All fields are optional — only provided fields are changed.
+Goal metadata is protected from this generic endpoint; use the bounded milestone
+endpoint below to change goal progress.
 
 ```json
 {
@@ -127,6 +129,27 @@ Only the memory owner can update. All fields are optional — only provided fiel
 ```
 
 All changes are versioned automatically.
+
+### Update Goal Milestone
+
+```
+PATCH /api/memories/{memory_id}/milestones/{milestone_index}
+```
+
+Updates exactly one existing goal milestone. `milestone_index` is 1-based; all
+other milestones and goal metadata are preserved. A `completed` transition adds
+the completion timestamp and marks the overall goal completed only when every
+milestone is completed or abandoned.
+
+```json
+{
+  "status": "completed",
+  "expected_version": 4
+}
+```
+
+`expected_version` is optional but recommended to prevent overwriting a newer
+goal state. The endpoint returns `409` when that version is stale.
 
 ### Delete Memory (Soft Delete)
 

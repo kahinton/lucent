@@ -1042,6 +1042,86 @@ class MemoryRepository:
 
         return self._row_to_dict(row)
 
+    async def update_goal_milestone(
+        self,
+        memory_id: UUID,
+        milestone_index: int,
+        status: str,
+        expected_version: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Update one indexed goal milestone without replacing goal metadata."""
+        if milestone_index < 1:
+            raise ValueError("milestone_index must be 1-based and >= 1")
+        if status not in {"active", "paused", "completed", "abandoned"}:
+            raise ValueError(f"Invalid goal milestone status: {status}")
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    f"""SELECT {self._FULL_COLUMNS}
+                        FROM memories
+                        WHERE id = $1 AND deleted_at IS NULL
+                        FOR UPDATE""",
+                    str(memory_id),
+                )
+                if row is None:
+                    return None
+
+                current = self._row_to_dict(row)
+                if expected_version is not None and current["version"] != expected_version:
+                    raise VersionConflictError(
+                        memory_id, expected_version, current["version"]
+                    )
+                if current["type"] != "goal":
+                    raise ValueError("Milestones can only be updated on goal memories")
+
+                metadata = dict(current.get("metadata") or {})
+                milestones = metadata.get("milestones")
+                if not isinstance(milestones, list):
+                    raise ValueError("Goal metadata does not contain a milestone list")
+                if milestone_index > len(milestones):
+                    raise ValueError(
+                        f"milestone_index={milestone_index} is out of range for "
+                        f"this goal's {len(milestones)} milestones"
+                    )
+
+                milestone = milestones[milestone_index - 1]
+                if not isinstance(milestone, dict):
+                    raise ValueError("Goal milestone must be an object")
+                updated_milestone = dict(milestone)
+                updated_milestone["status"] = status
+                if status == "completed":
+                    updated_milestone["completed_at"] = datetime.now(UTC).isoformat()
+                else:
+                    updated_milestone.pop("completed_at", None)
+                milestones[milestone_index - 1] = updated_milestone
+                metadata["milestones"] = milestones
+
+                if all(
+                    isinstance(item, dict)
+                    and item.get("status") in {"completed", "abandoned"}
+                    for item in milestones
+                ):
+                    metadata["status"] = "completed"
+                elif metadata.get("status") == "completed":
+                    metadata["status"] = "active"
+
+                lifecycle_stage = self._resolve_goal_lifecycle_stage("goal", metadata)
+                updated = await conn.fetchrow(
+                    f"""UPDATE memories
+                        SET metadata = $2::jsonb,
+                            lifecycle_stage = $3,
+                            updated_at = NOW(),
+                            version = version + 1
+                        WHERE id = $1
+                        RETURNING {self._FULL_COLUMNS}""",
+                    str(memory_id),
+                    metadata,
+                    lifecycle_stage,
+                )
+
+        return self._row_to_dict(updated)
+
     async def claim_task(
         self,
         memory_id: UUID,

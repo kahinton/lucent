@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 from lucent.api.deps import AuthenticatedUser
 from lucent.api.models import (
     ErrorResponse,
+    GoalMilestoneUpdate,
     MemoryAccessGrantCreate,
     MemoryAccessGrantListResponse,
     MemoryAccessGrantResponse,
@@ -27,6 +28,7 @@ from lucent.db import (
     DuplicateTechnicalMemoryError,
     MemoryRepository,
     UserRepository,
+    VersionConflictError,
     get_pool,
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
@@ -425,6 +427,16 @@ async def update_memory(
             detail="You cannot update this memory",
         )
 
+    if existing["type"] == "goal" and data.metadata is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Goal metadata cannot be updated through update_memory. "
+                "Use PATCH /api/memories/{memory_id}/milestones/{milestone_index} "
+                "to update one goal milestone."
+            ),
+        )
+
     # Validate metadata if provided
     validated_metadata = data.metadata
     if data.metadata is not None:
@@ -535,6 +547,93 @@ async def update_memory(
             context=user.get_audit_context(),
         )
 
+    return _memory_to_response(result)
+
+
+@router.patch(
+    "/{memory_id}/milestones/{milestone_index}",
+    response_model=MemoryResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def update_goal_milestone(
+    memory_id: UUID,
+    milestone_index: int,
+    data: GoalMilestoneUpdate,
+    user: AuthenticatedUser,
+) -> MemoryResponse:
+    """Update one goal milestone while preserving all other goal metadata."""
+    user.require_permission(Permission.MEMORY_UPDATE_OWN)
+
+    pool = await get_pool()
+    repo = MemoryRepository(pool)
+    memory_access = MemoryAccessService(
+        repo,
+        GitHubRepoAccessService(pool),
+        is_admin=_memory_admin_override(user),
+    )
+    audit_repo = AuditRepository(pool)
+    effective_user_id = _effective_memory_user_id(user)
+    existing = await memory_access.get_accessible(
+        memory_id=memory_id,
+        user_id=effective_user_id,
+        organization_id=user.organization_id,
+        memory_scope=user.memory_scope,
+        is_admin=_memory_admin_override(user),
+    )
+    if existing is None or existing.get("_access_denied"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+    can_edit_daemon_memory = (
+        _memory_admin_override(user) and await repo.is_daemon_authored(existing)
+    )
+    if existing.get("user_id") != effective_user_id and not can_edit_daemon_memory:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot update this memory",
+        )
+
+    try:
+        result = await repo.update_goal_milestone(
+            memory_id,
+            milestone_index,
+            data.status.value,
+            data.expected_version,
+        )
+    except VersionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
+
+    await audit_repo.log(
+        memory_id=memory_id,
+        action_type="update",
+        user_id=effective_user_id,
+        organization_id=user.organization_id,
+        changed_fields=["metadata"],
+        old_values={"metadata": existing["metadata"]},
+        new_values={"metadata": result["metadata"]},
+        context=user.get_audit_context(),
+        notes=f"Bounded goal milestone update: {milestone_index} → {data.status.value}",
+        version=result["version"],
+        snapshot={
+            "content": result["content"],
+            "tags": result["tags"],
+            "importance": result["importance"],
+            "metadata": result["metadata"],
+            "related_memory_ids": [
+                str(uid) for uid in result.get("related_memory_ids", [])
+            ],
+            "shared": result.get("shared", False),
+        },
+    )
     return _memory_to_response(result)
 
 
