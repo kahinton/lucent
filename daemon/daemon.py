@@ -402,6 +402,89 @@ def _select_model_for_task(
     )
 
 
+class ModelAccessDeniedError(PermissionError):
+    """Raised when daemon work would use a model unavailable to its owner."""
+
+
+async def _accessible_models_for_user(
+    user_id: str,
+    org_id: str,
+) -> list[Any]:
+    """Return enabled, tool-capable models the task owner can use."""
+    from lucent.db import ModelRepository, UserRepository, get_pool
+    from lucent.model_registry import list_models
+
+    pool = await get_pool()
+    user = await UserRepository(pool).get_by_id(user_id)
+    if (
+        not user
+        or str(user.get("organization_id")) != str(org_id)
+        or not user.get("is_active", False)
+    ):
+        raise ModelAccessDeniedError("Task owner is not an active user in this organization")
+
+    accessible = await ModelRepository(pool).list_models_accessible_by(
+        user_id,
+        org_id,
+        requester_role=str(user.get("role") or "member"),
+        enabled_only=True,
+        limit=500,
+    )
+    accessible_ids = {model["id"] for model in accessible["items"]}
+    return [
+        model
+        for model in list_models()
+        if model.id in accessible_ids and model.supports_tools
+    ]
+
+
+async def _select_model_for_user(
+    *,
+    user_id: str,
+    org_id: str,
+    agent_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    explicit_model: str | None = None,
+) -> tuple[str, str]:
+    """Select a tool-capable model strictly from the owner's ACL-visible catalog."""
+    from lucent.model_registry import select_model_for_task
+
+    accessible_models = await _accessible_models_for_user(user_id, org_id)
+    if not accessible_models:
+        raise ModelAccessDeniedError("No enabled tool-capable model is available to this user")
+    if explicit_model and not any(model.id == explicit_model for model in accessible_models):
+        raise ModelAccessDeniedError(
+            f"Model '{explicit_model}' is not available to this user"
+        )
+    if not explicit_model and MODEL and any(
+        model.id == MODEL for model in accessible_models
+    ):
+        return MODEL, "configured daemon model is available to the task owner"
+
+    selection = select_model_for_task(
+        agent_type=agent_type,
+        title=title,
+        description=description,
+        explicit_model=explicit_model,
+        preferred_default=MODEL or None,
+        models=accessible_models,
+        require_tools=True,
+    )
+    return selection.model_id, selection.reason
+
+
+async def _assert_model_accessible_by_user(
+    user_id: str,
+    org_id: str,
+    model_id: str,
+) -> None:
+    """Fail closed when a model grant changed after dispatch selection."""
+    accessible_models = await _accessible_models_for_user(user_id, org_id)
+    if not any(model.id == model_id for model in accessible_models):
+        raise ModelAccessDeniedError(f"Model '{model_id}' is not available to this user")
+
+
 def _task_requires_mcp_tool_usage(
     agent_type: str | None,
     title: str | None = None,
@@ -2212,6 +2295,13 @@ class LucentDaemon(
                         "X-Lucent-Request-Id": request_id,
                     },
                 )
+                user_model, _model_reason = await _select_model_for_user(
+                    user_id=user_id,
+                    org_id=org_id,
+                    agent_type=agent_type,
+                    title=schedule_title,
+                    description=description,
+                )
                 result = await self.run_session(
                     f"{schedule_title.lower().replace(' ', '-')}-{user_id[:8]}",
                     system_message,
@@ -2221,7 +2311,7 @@ class LucentDaemon(
                         "discover or modify memories owned by anyone else.\n\n"
                         f"{description}"
                     ),
-                    model=model,
+                    model=user_model,
                     reasoning_effort=reasoning_effort,
                     mcp_config_override=scoped_mcp,
                     enable_config_discovery=enable_config_discovery,
@@ -2554,13 +2644,22 @@ class LucentDaemon(
             tools=["*"],
         )
 
-        model, _reason = _select_model_for_task(agent_type="planning")
+        model, _reason = await _select_model_for_user(
+            user_id=user_id,
+            org_id=org_id,
+            agent_type="planning",
+        )
         await self.run_session(
             f"rejections-{user_id[:8]}",
             system_message,
             prompt,
             model=model,
             mcp_config_override=scoped_mcp,
+            audit_context={
+                "source": "daemon.rejection_processing",
+                "organization_id": org_id,
+                "user_id": user_id,
+            },
         )
         return len(rows)
 
@@ -3055,7 +3154,9 @@ class LucentDaemon(
                     )
 
                     prompt = self._build_decomposition_prompt(req)
-                    decomposition_model, decomposition_model_reason = _select_model_for_task(
+                    decomposition_model, decomposition_model_reason = await _select_model_for_user(
+                        user_id=str(owner_user_id),
+                        org_id=str(org_id),
                         agent_type="planning",
                         title=req.get("title"),
                         description=req.get("description"),
@@ -3073,6 +3174,12 @@ class LucentDaemon(
                         prompt,
                         model=decomposition_model,
                         mcp_config_override=scoped_mcp,
+                        audit_context={
+                            "source": "daemon.request_decomposition",
+                            "organization_id": str(org_id),
+                            "user_id": str(owner_user_id),
+                            "request_id": str(request_id),
+                        },
                     )
                     if not session_result:
                         errors.append("session produced no output")
@@ -3257,6 +3364,38 @@ class LucentDaemon(
 
     # --- Session Management ---
 
+    async def _resolve_session_audit_context(
+        self,
+        audit_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Supply the daemon-service identity only for system-owned sessions."""
+        from lucent.db import get_pool
+
+        context = dict(audit_context or {})
+        organization_id = str(context.get("organization_id") or "")
+        if not organization_id:
+            organization_id = str(await self._get_daemon_org_id() or "")
+            if organization_id:
+                context["organization_id"] = organization_id
+        if not organization_id:
+            raise ModelAccessDeniedError(
+                "Refusing to run a daemon session without an organization scope"
+            )
+
+        if context.get("user_id"):
+            return context
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            daemon_user = await _ensure_daemon_service_user(conn, organization_id)
+        if not daemon_user or not daemon_user.get("id"):
+            raise ModelAccessDeniedError(
+                "Refusing to run a daemon session without a daemon service identity"
+            )
+        context["user_id"] = str(daemon_user["id"])
+        context.setdefault("source", "daemon.system")
+        return context
+
     async def run_session(
         self,
         name: str,
@@ -3283,20 +3422,17 @@ class LucentDaemon(
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
             return None
 
-        # Ensure the daemon's bound organization is available to the engine so
-        # it can resolve org-scoped model-provider credentials (e.g. the Copilot
-        # github_token). Container daemons whose Copilot CLI is not interactively
-        # logged in rely on this stored token; without an organization_id the
-        # engine cannot load it and the session fails with "Session was not
-        # created with authentication info or custom provider". Only fill it in
-        # when a caller (e.g. a per-task session) has not already supplied org
-        # context, so we never override an explicit scope.
-        if audit_context is None or not audit_context.get("organization_id"):
-            bound_org_id = await self._get_daemon_org_id()
-            if bound_org_id:
-                audit_context = {**(audit_context or {}), "organization_id": bound_org_id}
-
-        selected_model = _resolve_default_model(model)
+        audit_context = await self._resolve_session_audit_context(audit_context)
+        organization_id = str(audit_context["organization_id"])
+        user_id = str(audit_context["user_id"])
+        if model is None:
+            selected_model, _model_reason = await _select_model_for_user(
+                user_id=user_id,
+                org_id=organization_id,
+            )
+        else:
+            selected_model = _resolve_default_model(model)
+        await _assert_model_accessible_by_user(user_id, organization_id, selected_model)
         effort_label = f", reasoning_effort: {reasoning_effort}" if reasoning_effort else ""
         log(f"Starting session: {name} (model: {selected_model}{effort_label})")
         start_time = time.time()
@@ -3866,12 +4002,36 @@ class LucentDaemon(
             task_reasoning_effort = task.get("reasoning_effort")
             title = task.get("title", "")
             description = task.get("description", title)
-            selected_model, model_reason = _select_model_for_task(
-                agent_type=agent_type,
-                title=title,
-                description=description,
-                explicit_model=task_model,
-            )
+            # Fetch parent request context and completed sibling results
+            request_id = str(task.get("request_id", ""))
+            org_id = str(task.get("organization_id", ""))
+            requesting_user_id = task.get("requesting_user_id")
+            if requesting_user_id is None and request_id and org_id:
+                req_row = await RequestAPI.get_request(request_id)
+                if req_row:
+                    requesting_user_id = req_row.get("created_by")
+            if not requesting_user_id:
+                reason = "Task missing requesting_user_id and parent request creator"
+                await _fail_owned(task_id, reason)
+                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                continue
+            requesting_user_id = str(requesting_user_id)
+            try:
+                selected_model, model_reason = await _select_model_for_user(
+                    user_id=requesting_user_id,
+                    org_id=org_id,
+                    agent_type=agent_type,
+                    title=title,
+                    description=description,
+                    explicit_model=task_model,
+                )
+            except ModelAccessDeniedError as exc:
+                reason = f"Model dispatch denied: {exc}"
+                log(f"Task {task_id[:8]} {reason}", "WARN")
+                await _fail_owned(task_id, reason)
+                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                continue
+
             if task_reasoning_effort:
                 try:
                     from lucent.model_registry import validate_reasoning_effort
@@ -3910,31 +4070,13 @@ class LucentDaemon(
                 f"Dispatching tracked task {task_id[:8]} to {agent_type} "
                 f"model={selected_model}{effort_label}: {title[:80]}...",
                 request_id=task_id,
-                user_id=str(task.get("requesting_user_id")) if task.get("requesting_user_id") else None,
+                user_id=requesting_user_id,
             )
             if not task_model:
                 log(f"Task {task_id[:8]} model selection: {model_reason}", "DEBUG")
             if self._tracer:
                 self._tasks_dispatched_total.add(1, attributes={"agent_type": agent_type})
 
-            # Fetch parent request context and completed sibling results
-            request_id = str(task.get("request_id", ""))
-            org_id = str(task.get("organization_id", ""))
-            requesting_user_id = task.get("requesting_user_id")
-            if requesting_user_id is None and request_id and org_id:
-                req_row = await RequestAPI.get_request(request_id)
-                if req_row:
-                    requesting_user_id = req_row.get("created_by")
-            if not requesting_user_id:
-                reason = "Task missing requesting_user_id and parent request creator"
-                await _fail_owned(task_id, reason)
-                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
-                continue
-            requesting_user_id = str(requesting_user_id)
-            # Note: We trust the requesting_user_id from the request record.
-            # The user was authenticated when they created the request.
-            # Re-validating here would require user-read API permissions
-            # that the daemon API key doesn't have.
             task_context = ""
             if request_id:
                 req_desc, sibling_results = await RequestAPI.get_request_context(request_id)
@@ -4737,6 +4879,8 @@ class LucentDaemon(
                             result,
                             output_contract,
                             selected_model,
+                            org_id,
+                            requesting_user_id,
                         )
                         if repair_text:
                             repair_result = process_task_output(repair_text, output_contract)

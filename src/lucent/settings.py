@@ -261,8 +261,10 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         title="Daemon model",
         section="Models & LLM",
         description="Preferred default model for daemon sessions and autonomous work.",
-        help_text="Leave blank to use the workspace default model.",
-        requires_restart=True,
+        help_text=(
+            "Leave blank to let each task select an authorized model. "
+            "Changes apply to active daemon workers automatically."
+        ),
         control="model",
         option_source="models",
         allow_empty=True,

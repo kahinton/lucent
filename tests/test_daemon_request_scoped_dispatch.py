@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+import daemon.daemon as daemon_module
 from daemon.daemon import (
     LucentDaemon,
     _apply_sandbox_template_overrides,
@@ -21,6 +22,7 @@ from lucent.db.definitions import DefinitionRepository
 from lucent.db.user import UserRepository
 from lucent.log_context import clear_log_context
 from lucent.logging import JSONFormatter
+from lucent.model_registry import ModelInfo
 
 
 @pytest.mark.asyncio
@@ -89,6 +91,73 @@ async def test_request_owner_context_lookup_does_not_cross_users(monkeypatch):
         ("request-owner", "owner-org"),
     ]
     assert "Only the request owner's preference." in context
+
+
+@pytest.mark.asyncio
+async def test_model_selection_rejects_a_private_model_unavailable_to_task_owner(monkeypatch):
+    async def _accessible_models(_user_id, _org_id):
+        return [
+            ModelInfo(
+                id="member-model",
+                provider="test",
+                name="Member model",
+                category="general",
+            ),
+            ModelInfo(
+                id="reasoning-model",
+                provider="test",
+                name="Reasoning model",
+                category="reasoning",
+            ),
+        ]
+
+    monkeypatch.setattr(daemon_module, "_accessible_models_for_user", _accessible_models)
+    monkeypatch.setattr(daemon_module, "MODEL", "member-model")
+
+    selected_model, _reason = await daemon_module._select_model_for_user(
+        user_id="member-user",
+        org_id="test-org",
+        agent_type="planning",
+        title="Complex architecture review",
+    )
+
+    assert selected_model == "member-model"
+    with pytest.raises(daemon_module.ModelAccessDeniedError, match="private-model"):
+        await daemon_module._select_model_for_user(
+            user_id="member-user",
+            org_id="test-org",
+            agent_type="code",
+            explicit_model="private-model",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_session_denies_model_after_access_is_revoked(monkeypatch):
+    daemon = LucentDaemon()
+    entered_engine = False
+
+    async def _deny_access(_user_id, _org_id, _model_id):
+        raise daemon_module.ModelAccessDeniedError("Model 'private-model' is not available to this user")
+
+    async def _run_engine(*_args, **_kwargs):
+        nonlocal entered_engine
+        entered_engine = True
+        return "unexpected"
+
+    monkeypatch.setattr(daemon_module, "_resolve_default_model", lambda _model: "private-model")
+    monkeypatch.setattr(daemon_module, "_assert_model_accessible_by_user", _deny_access)
+    monkeypatch.setattr(daemon, "_run_session_inner", _run_engine)
+
+    with pytest.raises(daemon_module.ModelAccessDeniedError, match="private-model"):
+        await daemon.run_session(
+            "access-check",
+            "system",
+            "prompt",
+            model="private-model",
+            audit_context={"organization_id": "test-org", "user_id": "test-user"},
+        )
+
+    assert entered_engine is False
 
 
 def test_validate_task_result_rejects_empty_consolidation_execution():
@@ -424,6 +493,9 @@ async def test_dispatch_fails_gracefully_when_no_accessible_agent(monkeypatch):
     async def _no_agent(**_kwargs):
         return None
 
+    async def _model_for_owner(**_kwargs):
+        return "member-model", "test model"
+
     monkeypatch.setattr("daemon.daemon.RequestAPI.get_pending_tasks", _pending)
     monkeypatch.setattr("daemon.daemon.RequestAPI.claim_task", _claim)
     monkeypatch.setattr("daemon.daemon.RequestAPI.update_task_model", _update_model)
@@ -433,6 +505,7 @@ async def test_dispatch_fails_gracefully_when_no_accessible_agent(monkeypatch):
     monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _event)
     monkeypatch.setattr("daemon.daemon.RequestAPI.start_task", _start)
     monkeypatch.setattr("daemon.daemon.load_accessible_agent", _no_agent)
+    monkeypatch.setattr("daemon.daemon._select_model_for_user", _model_for_owner)
 
     await daemon._dispatch_tracked_tasks(max_tasks=1)
 
@@ -507,6 +580,9 @@ async def test_dispatch_memory_server_config_carries_user_scope_headers(monkeypa
         captured_mcp.update(kwargs["mcp_config_override"])
         return "completed task output"
 
+    async def _model_for_owner(**_kwargs):
+        return "member-model", "test model"
+
     monkeypatch.setattr(daemon, "_ensure_request_review_tasks", _noop_ensure_reviews)
     monkeypatch.setattr(daemon, "_get_technical_context_for_request", _ctx)
     monkeypatch.setattr(daemon, "_validate_task_result", lambda *_args, **_kwargs: (True, ""))
@@ -526,6 +602,7 @@ async def test_dispatch_memory_server_config_carries_user_scope_headers(monkeypa
     monkeypatch.setattr("daemon.daemon.load_accessible_managed_tools_for_agent", _empty)
     monkeypatch.setattr("daemon.daemon.build_subagent_prompt", _prompt)
     monkeypatch.setattr("daemon.daemon._mint_scoped_api_key", _mint)
+    monkeypatch.setattr("daemon.daemon._select_model_for_user", _model_for_owner)
     daemon_module.MCP_CONFIG = {
         "memory-server": {
             "type": "http",
@@ -609,6 +686,9 @@ async def test_dispatch_log_line_includes_task_request_and_user_context(monkeypa
     async def _no_agent(**_kwargs):
         return None
 
+    async def _model_for_owner(**_kwargs):
+        return "member-model", "test model"
+
     monkeypatch.setattr(daemon, "_ensure_request_review_tasks", _noop_ensure_reviews)
     monkeypatch.setattr("daemon.daemon.RequestAPI.get_pending_tasks", _pending)
     monkeypatch.setattr("daemon.daemon.RequestAPI.claim_task", _claim)
@@ -618,6 +698,7 @@ async def test_dispatch_log_line_includes_task_request_and_user_context(monkeypa
     monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _event)
     monkeypatch.setattr("daemon.daemon.RequestAPI.start_task", _start)
     monkeypatch.setattr("daemon.daemon.load_accessible_agent", _no_agent)
+    monkeypatch.setattr("daemon.daemon._select_model_for_user", _model_for_owner)
 
     try:
         await daemon._dispatch_tracked_tasks(max_tasks=1)

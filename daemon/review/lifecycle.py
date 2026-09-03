@@ -48,9 +48,17 @@ class RequestReviewMixin:
         original_result: str,
         output_contract: dict | None,
         model: str,
+        organization_id: str,
+        user_id: str,
     ):
         return await _repair_structured_output(
-            self, task_id, original_result, output_contract, model
+            self,
+            task_id,
+            original_result,
+            output_contract,
+            model,
+            organization_id,
+            user_id,
         )
 
 
@@ -257,7 +265,21 @@ Memories and review prose do not satisfy this requirement. If the research outco
             mem_lines.append(f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, type: {mem.get('memory_type', 'unknown')}\n  Content: {mem.get('content', '')[:200]}\n  Status: {mem.get('status', 'unknown')}")
         memory_section += '\n\nLinked Memories (MANDATORY UPDATE TARGETS):\n' + '\n'.join(mem_lines) + "\n\n=== MANDATORY MEMORY UPDATE STEP — DO NOT SKIP ===\nBefore you emit REQUEST_REVIEW_DECISION below, you MUST call `update_memory` on EVERY memory listed above. This is a hard precondition for emitting any decision — not a suggestion, not a best practice, not 'if relevant'. The memory update IS part of the review work. A review that skips it is incomplete and will be rejected by the daemon.\n\nRequired calls (one per linked memory):\n" + '\n'.join((f'  - update_memory(memory_id="{mid}", ...)' for mid in mem_id_list)) + '\n\nFor other memory types: update with any relevant new information from the task results, or call update_memory with a no-op note explaining why no substantive change was needed.\n\nAfter calling update_memory for each linked memory, also call `link_task_memory` to attach any NEW memories created by tasks back to this request.\n\nIn the FEEDBACK section of your decision block below, you MUST include a line of the form:\n  MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on>\nIf this line is missing or doesn\'t list every required memory ID, the daemon will treat the review as incomplete and re-queue it.\n=== END MANDATORY STEP ===\n'
     review_description = f"""Perform post-completion request review.\n\nYou are validating whether the request outcomes satisfy the original request goals AND propagating those outcomes into linked memories.\n\nOriginal request title: {request_data.get('title', '')}\nOriginal request description:\n{request_data.get('description', '')}\n\n{target_section}\n\nTask outcomes:\n{chr(10).join(task_summaries)}{incomplete_note}{memory_section}\n\n=== OUTPUT ARTIFACT REVIEW ===\nEach task may include a 'recorded outputs' list. These are the user-visible deliverables shown in the Activity UI: GitHub PRs/issues, emails, docs, files, deployments, memories, or generic artifacts.\nDurable persistence is mandatory for external artifacts: if the request asked for repository documentation/files or named a target_repo, narrative markdown in the task result is insufficient. Require concrete changed file paths and a commit/URL (or an explicit BLOCKED result explaining missing write capability).\nBefore approving, verify that every deliverable mentioned in task output has a corresponding recorded output. Plain URLs in task results are auto-extracted by Lucent, but non-URL deliverables such as sent emails, created documents identified only by provider ID, or files stored in an external system may require an explicit `record_task_output` call.\nIf a deliverable is missing and you have enough task_id/title/url or external_id/provider information, call `record_task_output` before approving. If you cannot identify the missing deliverable precisely, return NEEDS_REWORK and ask the task agent to record the output.\n=== END OUTPUT ARTIFACT REVIEW ===\n\n=== SETUP/CONFIGURATION BLOCKER HANDOFFS ===\nBefore deciding APPROVED or NEEDS_REWORK, check whether task output reports a legitimate environment, setup, credential, permission, dependency, or configuration blocker that prevented useful completion. Examples include missing API keys, inaccessible services, invalid local configuration, unavailable MCP servers, sandbox provisioning failures, missing repo permissions, or dependency installation failures that the task agent could not reasonably fix.\nWhen a task was blocked by a user- or environment-actionable issue and reported what was attempted clearly, call `send_handoff` before emitting REQUEST_REVIEW_DECISION. The handoff must explain what was attempted, what blocked progress, why Lucent could not resolve it autonomously, and exactly what the user may need to configure or verify next. Include request/task references when IDs are available, set `requires_response=true` only if Lucent needs an answer before continuing, and use a stable `dedupe_key` like `review-blocker:<request-id>:<task-id-or-topic>`. A narrative-only handoff section in your final output is not enough; you must call `send_handoff` so the user sees a Handoffs item.\nApprove with a blocker handoff only when the blocker is external and the task's report is clear enough for the user to act on. Return NEEDS_REWORK when the task merely blames setup/configuration without evidence, attempted actions, or actionable remediation detail.\n=== END SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n\nReturn your decision in this exact machine-readable shape (emit it ONLY after completing all mandatory memory updates above):\nREQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\nTASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\nFEEDBACK: <actionable rationale and correction guidance>\nMEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; use "none" only when no Linked Memories section was provided>\nHANDOFF_SENT: <handoff URL/id if you called send_handoff, or "none">"""
-    review_model, review_model_reason = runtime._select_model_for_task(agent_type=agent_type, title=runtime.REQUEST_REVIEW_TASK_TITLE, description=review_description, explicit_model=runtime.REQUEST_REVIEW_MODEL or None)
+    try:
+        review_model, review_model_reason = await runtime._select_model_for_user(
+            user_id=requesting_user_id,
+            org_id=org_id,
+            agent_type=agent_type,
+            title=runtime.REQUEST_REVIEW_TASK_TITLE,
+            description=review_description,
+            explicit_model=runtime.REQUEST_REVIEW_MODEL or None,
+        )
+    except runtime.ModelAccessDeniedError as exc:
+        runtime.log(
+            f"Request {request_id[:8]} review model dispatch denied: {exc}",
+            "WARN",
+        )
+        return None
     review_task = await runtime.RequestAPI.create_task(request_id=request_id, title=runtime.REQUEST_REVIEW_TASK_TITLE, agent_type=agent_type, description=review_description, priority=request_data.get('priority', 'medium'), sequence_order=10000000, model=review_model, requesting_user_id=requesting_user_id)
     if review_task:
         runtime.log(f"Request {request_id[:8]} moved to review; created review task {str(review_task.get('id', ''))[:8]} agent={agent_type} mode={mode} model={review_model} ({review_model_reason})")
@@ -377,7 +399,15 @@ async def _handle_review_task_failure(
     runtime.log(f'Review task {task_id[:8]} failed non-fatally; request {request_id[:8]} awaiting manual review', 'WARN')
 
 
-async def _repair_structured_output(daemon, task_id: str, original_result: str, output_contract: dict | None, model: str) -> str | None:
+async def _repair_structured_output(
+    daemon,
+    task_id: str,
+    original_result: str,
+    output_contract: dict | None,
+    model: str,
+    organization_id: str,
+    user_id: str,
+) -> str | None:
     """Ask a model to reformat output to match the task's JSON Schema contract."""
     if not output_contract:
         return None
@@ -385,7 +415,18 @@ async def _repair_structured_output(daemon, task_id: str, original_result: str, 
     schema_str = runtime.json.dumps(schema, indent=2)
     repair_prompt = f"The following agent response was supposed to include structured output matching a JSON Schema, but validation failed.\n\nSchema:\n```json\n{schema_str}\n```\n\nOriginal response (first 10000 chars):\n{(original_result or '')[:10000]}\n\nExtract relevant data from the response and produce a valid JSON object matching the schema. Wrap it in <task_output> tags.\n\n<task_output>\n{{...your JSON here...}}\n</task_output>"
     try:
-        return await daemon.run_session(f'repair-{task_id[:8]}', 'You are a data extraction assistant. Extract structured data from text and format it as JSON matching the given schema. Output ONLY the <task_output> block.', repair_prompt, model=model)
+        return await daemon.run_session(
+            f'repair-{task_id[:8]}',
+            'You are a data extraction assistant. Extract structured data from text and format it as JSON matching the given schema. Output ONLY the <task_output> block.',
+            repair_prompt,
+            model=model,
+            audit_context={
+                "source": "daemon.output_repair",
+                "organization_id": organization_id,
+                "user_id": user_id,
+                "task_id": task_id,
+            },
+        )
     except Exception as exc:
         runtime.log(f'Repair session failed for {task_id[:8]}: {exc}', 'WARN')
         return None
