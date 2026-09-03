@@ -178,6 +178,7 @@ async def _create_task_sandbox(
                 "cpu_limit",
                 "network_mode",
                 "allowed_hosts",
+                "extra_hosts",
             )
         }
         reuse_key = "config-" + hashlib.sha256(
@@ -194,6 +195,7 @@ async def _create_task_sandbox(
         env_vars=env_vars,
         working_dir=sandbox_config.get("working_dir", "/workspace"),
         docker_bind_mounts=sandbox_config.get("docker_bind_mounts", []),
+        extra_hosts=sandbox_config.get("extra_hosts") or {},
         memory_limit=sandbox_config.get("memory_limit", "2g"),
         cpu_limit=sandbox_config.get("cpu_limit", 2.0),
         disk_limit=sandbox_config.get("disk_limit", "10g"),
@@ -377,6 +379,11 @@ async def _resolve_sandbox_template(
             )
             return None
         config = repository.to_sandbox_config(template)
+        if template.get("extra_hosts"):
+            # Templates may carry --add-host entries (name -> IP or
+            # "host-gateway"); to_sandbox_config only includes the key when
+            # the template row has it, so inject defensively for older rows.
+            config["extra_hosts"] = dict(template["extra_hosts"] or {})
         await repository.mark_used(template_id)
         runtime.log(
             f"Resolved sandbox template '{template.get('name', template_id[:8])}' "

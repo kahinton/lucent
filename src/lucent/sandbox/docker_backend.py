@@ -385,6 +385,7 @@ class DockerBackend(SandboxBackend):
                 disk_limit=config.disk_limit,
                 network_mode=config.network_mode,
                 allowed_hosts=config.allowed_hosts,
+                extra_hosts=config.extra_hosts,
                 timeout_seconds=config.timeout_seconds,
                 idle_timeout_seconds=config.idle_timeout_seconds,
                 mcp_bridge_port=config.mcp_bridge_port,
@@ -456,7 +457,7 @@ class DockerBackend(SandboxBackend):
         networking_config = None
         cap_add = []
         dns: list[str] = []
-        extra_hosts: dict[str, str] = {}
+        extra_hosts = dict(config.extra_hosts)
         if config.network_mode == "none":
             network_mode = "none"
         elif config.network_mode in ("bridge", "allowlist"):
@@ -476,11 +477,11 @@ class DockerBackend(SandboxBackend):
                 # Pin DNS to the addresses approved by the trusted backend.
                 # This prevents CDN DNS rotation inside the container from
                 # resolving a destination that the egress policy cannot allow.
-                extra_hosts = {
+                extra_hosts.update({
                     host: addresses[0]
                     for host, addresses in self._allowlist_resolutions.get(sandbox_id, {}).items()
                     if self._validate_iptables_destination(host) is None and addresses
-                }
+                })
         # For "allowlist" mode, we use bridge + iptables (handled post-create)
 
         # Disk quota via storage driver (overlay2 with quota support, btrfs, zfs).

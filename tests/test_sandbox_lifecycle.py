@@ -1284,6 +1284,54 @@ class TestSandboxSecurity:
         cap_add = kwargs.get("cap_add") or []
         assert "NET_ADMIN" not in cap_add
 
+    def test_extra_hosts_are_passed_to_docker(self):
+        """Configured Docker host aliases are available inside bridge sandboxes."""
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        client = _make_docker_client()
+        backend._client = client
+
+        backend._create_container(
+            "sb-extra-hosts",
+            "test-sb",
+            SandboxConfig(
+                network_mode="bridge",
+                extra_hosts={
+                    "host.docker.internal": "host-gateway",
+                    "lucent.local": "172.17.0.1",
+                },
+            ),
+        )
+
+        _, kwargs = client.containers.run.call_args
+        assert kwargs["extra_hosts"] == {
+            "host.docker.internal": "host-gateway",
+            "lucent.local": "172.17.0.1",
+        }
+
+    def test_extra_hosts_reject_invalid_destinations(self):
+        with pytest.raises(ValueError, match="IP address or host-gateway"):
+            SandboxConfig(extra_hosts={"lucent.local": "not-an-ip"})
+
+    def test_allowlist_resolutions_override_matching_extra_hosts(self):
+        """Allowlist DNS pins cannot be replaced by caller-provided aliases."""
+        backend = DockerBackend()
+        backend._ensure_network = MagicMock()
+        client = _make_docker_client()
+        backend._client = client
+        backend._allowlist_resolutions["sb-pinned-host"] = {"api.example.com": ["1.2.3.4"]}
+
+        backend._create_container(
+            "sb-pinned-host",
+            "test-sb",
+            SandboxConfig(
+                network_mode="allowlist",
+                extra_hosts={"api.example.com": "host-gateway"},
+            ),
+        )
+
+        assert client.containers.run.call_args.kwargs["extra_hosts"]["api.example.com"] == "1.2.3.4"
+
     @pytest.mark.asyncio
     async def test_allowlist_applies_iptables_rules(self):
         """allowlist mode calls _apply_network_allowlist after container starts."""

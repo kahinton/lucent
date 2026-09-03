@@ -297,6 +297,7 @@ async def test_create_template_with_all_fields(client, db_pool, web_user):
                 "setup_commands": "npm install\nnpm run build",
                 "env_vars": "NODE_ENV=test\nCI=true",
                 "docker_bind_mounts": "/host/cache:/cache\nshared:/etc/shared:ro",
+                "extra_hosts": "host.docker.internal=host-gateway\nlucent.local=172.17.0.1",
                 "memory_limit": "4g",
                 "cpu_limit": "4.0",
                 "disk_limit": "20g",
@@ -316,6 +317,10 @@ async def test_create_template_with_all_fields(client, db_pool, web_user):
         {"source": "/host/cache", "target": "/cache", "read_only": False},
         {"source": "shared", "target": "/etc/shared", "read_only": True},
     ]
+    assert result["extra_hosts"] == {
+        "host.docker.internal": "host-gateway",
+        "lucent.local": "172.17.0.1",
+    }
 
 
 @pytest.mark.asyncio

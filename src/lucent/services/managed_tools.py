@@ -317,6 +317,7 @@ class ManagedToolExecutor:
             disk_limit=str(resource_limits.get("disk_limit") or "1g"),
             network_mode=str(network_policy.get("network_mode") or "none"),
             allowed_hosts=list(network_policy.get("allowed_hosts") or []),
+            extra_hosts=dict(network_policy.get("extra_hosts") or {}),
             timeout_seconds=max(timeout_seconds + 60, 120),
             idle_timeout_seconds=60,
             organization_id=org_id,

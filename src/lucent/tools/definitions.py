@@ -490,7 +490,7 @@ Args:
     entrypoint: Python function name to call; receives one dict argument
     requirements: JSON array/list of pip requirements
     env_vars: JSON object of environment variables or credential references
-    network_policy: JSON object, default {"network_mode":"none","allowed_hosts":[]}
+    network_policy: JSON object, default {"network_mode":"none","allowed_hosts":[],"extra_hosts":{}}
     resource_limits: JSON object for memory/cpu/disk limits
     timeout_seconds: Per-call execution timeout
 

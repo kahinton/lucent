@@ -13,6 +13,7 @@ from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.logging import get_logger
 from lucent.secrets import SecretRegistry, resolve_env_vars
+from lucent.sandbox.models import validate_extra_hosts
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
@@ -45,6 +46,22 @@ def _parse_docker_bind_mounts(value: str) -> list[dict[str, str | bool]]:
             raise HTTPException(422, "Volume mounts cannot replace the managed /workspace volume")
         mounts.append({"source": source, "target": target, "read_only": read_only})
     return mounts
+
+
+def _parse_extra_hosts(value: str) -> dict[str, str]:
+    hosts: dict[str, str] = {}
+    for line in value.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            raise HTTPException(422, "Extra hosts must use hostname=IP or hostname=host-gateway format")
+        hostname, destination = (part.strip() for part in line.split("=", 1))
+        hosts[hostname] = destination
+    try:
+        return validate_extra_hosts(hosts)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
@@ -254,6 +271,7 @@ async def create_template_web(
     setup_commands: str = Form(default=""),
     env_vars: str = Form(default=""),
     docker_bind_mounts: str = Form(default=""),
+    extra_hosts: str = Form(default=""),
     working_dir: str = Form(default="/workspace"),
     memory_limit: str = Form(default="2g"),
     cpu_limit: float = Form(default=2.0),
@@ -289,6 +307,7 @@ async def create_template_web(
             setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
             env_vars=_parse_env_vars(env_vars),
             docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
+            extra_hosts=_parse_extra_hosts(extra_hosts),
             working_dir=working_dir.strip() or "/workspace",
             memory_limit=memory_limit,
             cpu_limit=cpu_limit,
@@ -351,6 +370,7 @@ async def update_template_web(
     setup_commands: str = Form(default=""),
     env_vars: str = Form(default=""),
     docker_bind_mounts: str = Form(default=""),
+    extra_hosts: str = Form(default=""),
     working_dir: str = Form(default="/workspace"),
     memory_limit: str = Form(default="2g"),
     cpu_limit: float = Form(default=2.0),
@@ -387,6 +407,7 @@ async def update_template_web(
             setup_commands=[c.strip() for c in setup_commands.splitlines() if c.strip()],
             env_vars=_parse_env_vars(env_vars),
             docker_bind_mounts=_parse_docker_bind_mounts(docker_bind_mounts),
+            extra_hosts=_parse_extra_hosts(extra_hosts),
             working_dir=working_dir.strip() or "/workspace",
             memory_limit=memory_limit,
             cpu_limit=cpu_limit,
@@ -517,6 +538,7 @@ async def launch_sandbox_web(
         env_vars=resolved_env_vars,
         working_dir=tpl.get("working_dir", "/workspace"),
         docker_bind_mounts=tpl.get("docker_bind_mounts") or [],
+        extra_hosts=tpl.get("extra_hosts") or {},
         memory_limit=tpl.get("memory_limit", "2g"),
         cpu_limit=float(tpl.get("cpu_limit", 2.0)),
         disk_limit=tpl.get("disk_limit", "10g"),

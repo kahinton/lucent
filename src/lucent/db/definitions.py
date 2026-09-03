@@ -287,6 +287,12 @@ class DefinitionRepository:
         allowed_hosts = (network_policy or {}).get("allowed_hosts", [])
         if allowed_hosts is not None and not isinstance(allowed_hosts, list):
             raise ValueError("network_policy.allowed_hosts must be a JSON array")
+        from lucent.sandbox.models import validate_extra_hosts
+
+        try:
+            validate_extra_hosts((network_policy or {}).get("extra_hosts") or {})
+        except ValueError as exc:
+            raise ValueError(f"network_policy.{exc}") from exc
         if timeout_seconds < 1 or timeout_seconds > 3600:
             raise ValueError("timeout_seconds must be between 1 and 3600")
 

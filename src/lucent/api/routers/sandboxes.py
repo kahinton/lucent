@@ -6,13 +6,13 @@ import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from lucent.api.deps import AuthenticatedUser
 from lucent.db.pool import get_pool
 from lucent.logging import get_logger
 from lucent.sandbox.manager import get_sandbox_manager
-from lucent.sandbox.models import SandboxConfig, SandboxStatus
+from lucent.sandbox.models import SandboxConfig, SandboxStatus, validate_extra_hosts
 from lucent.secrets import SecretRegistry, resolve_env_vars
 from lucent.settings import custom_tooling_enabled, sandboxes_enabled
 
@@ -350,12 +350,15 @@ class TemplateCreateRequest(BaseModel):
     env_vars: dict[str, str] = Field(default_factory=dict)
     working_dir: str = "/workspace"
     docker_bind_mounts: list[dict[str, str | bool]] = Field(default_factory=list, max_length=20)
+    extra_hosts: dict[str, str] = Field(default_factory=dict, max_length=20)
     memory_limit: str = Field(default="2g", pattern=r"^[1-9]\d{0,4}[mgt]$")
     cpu_limit: float = Field(default=2.0, gt=0, le=16)
     disk_limit: str = Field(default="10g", pattern=r"^[1-9]\d{0,4}[mgt]$")
     network_mode: Literal["none", "bridge", "allowlist"] = "none"
     allowed_hosts: list[str] = Field(default_factory=list, max_length=50)
     timeout_seconds: int = Field(default=1800, ge=60, le=86400)
+
+    _validate_extra_hosts = field_validator("extra_hosts")(validate_extra_hosts)
 
 
 class TemplateUpdateRequest(BaseModel):
@@ -370,12 +373,15 @@ class TemplateUpdateRequest(BaseModel):
     env_vars: dict[str, str] | None = None
     working_dir: str | None = None
     docker_bind_mounts: list[dict[str, str | bool]] | None = None
+    extra_hosts: dict[str, str] | None = Field(default=None, max_length=20)
     memory_limit: str | None = None
     cpu_limit: float | None = None
     disk_limit: str | None = None
     network_mode: str | None = None
     allowed_hosts: list[str] | None = None
     timeout_seconds: int | None = None
+
+    _validate_extra_hosts = field_validator("extra_hosts")(validate_extra_hosts)
 
 
 @router.post("/templates", status_code=status.HTTP_201_CREATED)
@@ -386,6 +392,8 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
     _require_sandboxes_enabled(user)
     if body.docker_bind_mounts and user.role.value not in ("admin", "owner"):
         raise HTTPException(403, "Only administrators can configure Docker bind mounts")
+    if body.extra_hosts and user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Only administrators can configure Docker host mappings")
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
     return await repo.create(
@@ -399,6 +407,7 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
         env_vars=body.env_vars,
         working_dir=body.working_dir,
         docker_bind_mounts=body.docker_bind_mounts,
+        extra_hosts=body.extra_hosts,
         memory_limit=body.memory_limit,
         cpu_limit=body.cpu_limit,
         disk_limit=body.disk_limit,
@@ -454,6 +463,8 @@ async def update_template(template_id: str, body: TemplateUpdateRequest, user: A
 
     if body.docker_bind_mounts and user.role.value not in ("admin", "owner"):
         raise HTTPException(403, "Only administrators can configure Docker bind mounts")
+    if body.extra_hosts and user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Only administrators can configure Docker host mappings")
     pool = await get_pool()
     acl = AccessControlService(pool)
     if not await acl.can_modify(
@@ -573,6 +584,7 @@ async def launch_from_template(
         env_vars=resolved_env_vars,
         working_dir=tpl.get("working_dir", "/workspace"),
         docker_bind_mounts=tpl.get("docker_bind_mounts") or [],
+        extra_hosts=tpl.get("extra_hosts") or {},
         memory_limit=tpl.get("memory_limit", "2g"),
         cpu_limit=float(tpl.get("cpu_limit", 2.0)),
         disk_limit=tpl.get("disk_limit", "10g"),

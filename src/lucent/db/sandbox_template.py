@@ -9,12 +9,19 @@ from uuid import UUID
 import asyncpg
 
 from lucent.secrets.utils import validate_env_var_references
+from lucent.sandbox.models import validate_extra_hosts
 
 
 class SandboxTemplateRepository:
     """CRUD for sandbox environment templates."""
 
-    _json_fields = {"setup_commands", "env_vars", "allowed_hosts", "docker_bind_mounts"}
+    _json_fields = {
+        "setup_commands",
+        "env_vars",
+        "allowed_hosts",
+        "docker_bind_mounts",
+        "extra_hosts",
+    }
 
     def __init__(self, pool: asyncpg.Pool):
         self.pool = pool
@@ -42,6 +49,7 @@ class SandboxTemplateRepository:
         env_vars: dict[str, str] | None = None,
         working_dir: str = "/workspace",
         docker_bind_mounts: list[dict[str, str | bool]] | None = None,
+        extra_hosts: dict[str, str] | None = None,
         memory_limit: str = "2g",
         cpu_limit: float = 2.0,
         disk_limit: str = "10g",
@@ -57,6 +65,7 @@ class SandboxTemplateRepository:
         proposal_reason: str | None = None,
     ) -> dict:
         validate_env_var_references(env_vars)
+        extra_hosts = validate_extra_hosts(extra_hosts or {})
         # Default owner to creator when no explicit ownership is provided.
         # Built-in templates are owned by the system and don't require a user owner.
         if (
@@ -71,13 +80,14 @@ class SandboxTemplateRepository:
                 """INSERT INTO sandbox_templates
                    (name, organization_id, description, image, repo_url, branch,
                           setup_commands, env_vars, working_dir, docker_bind_mounts,
+                          extra_hosts,
                           memory_limit, cpu_limit, disk_limit, network_mode, allowed_hosts,
                           timeout_seconds, created_by,
                     owner_user_id, owner_group_id, scope, status,
                     proposed_by, proposal_reason)
                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9,
-                              $10::jsonb, $11, $12, $13, $14, $15::jsonb, $16, $17,
-                              $18, $19, $20, $21, $22, $23)
+                              $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16::jsonb,
+                              $17, $18, $19, $20, $21, $22, $23, $24)
                    RETURNING *""",
                 name,
                 UUID(organization_id),
@@ -89,6 +99,7 @@ class SandboxTemplateRepository:
                 json.dumps(env_vars or {}),
                 working_dir,
                 json.dumps(docker_bind_mounts or []),
+                json.dumps(extra_hosts or {}),
                 memory_limit,
                 cpu_limit,
                 disk_limit,
@@ -186,6 +197,8 @@ class SandboxTemplateRepository:
         """Update template fields. Only non-None kwargs are applied."""
         if "env_vars" in kwargs and kwargs["env_vars"] is not None:
             validate_env_var_references(kwargs["env_vars"])
+        if "extra_hosts" in kwargs and kwargs["extra_hosts"] is not None:
+            kwargs["extra_hosts"] = validate_extra_hosts(kwargs["extra_hosts"])
         sets = ["updated_at = NOW()"]
         params: list[Any] = [UUID(template_id), UUID(organization_id)]
         idx = 3
@@ -203,7 +216,13 @@ class SandboxTemplateRepository:
             "network_mode": "network_mode",
             "timeout_seconds": "timeout_seconds",
         }
-        json_fields = {"setup_commands", "env_vars", "allowed_hosts", "docker_bind_mounts"}
+        json_fields = {
+            "setup_commands",
+            "env_vars",
+            "allowed_hosts",
+            "docker_bind_mounts",
+            "extra_hosts",
+        }
         nullable_fields = {"repo_url", "branch"}
         # Ownership fields allow None values (to clear ownership)
         ownership_fields = {"owner_user_id", "owner_group_id"}
@@ -258,6 +277,7 @@ class SandboxTemplateRepository:
             "env_vars": template.get("env_vars") or {},
             "working_dir": template.get("working_dir", "/workspace"),
             "docker_bind_mounts": template.get("docker_bind_mounts") or [],
+            "extra_hosts": template.get("extra_hosts") or {},
             "memory_limit": template.get("memory_limit", "2g"),
             "cpu_limit": float(template.get("cpu_limit", 2.0)),
             "disk_limit": template.get("disk_limit", "10g"),

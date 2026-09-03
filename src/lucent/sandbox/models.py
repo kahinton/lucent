@@ -3,9 +3,42 @@
 from __future__ import annotations
 
 import enum
+import ipaddress
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
+
+
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
+
+
+def validate_extra_hosts(extra_hosts: dict[str, str]) -> dict[str, str]:
+    """Validate Docker ``--add-host`` entries and return a normalized copy."""
+    if not isinstance(extra_hosts, dict):
+        raise ValueError("Extra hosts must be a hostname-to-address mapping")
+    if len(extra_hosts) > 20:
+        raise ValueError("At most 20 extra host mappings are allowed")
+
+    validated: dict[str, str] = {}
+    for hostname, destination in extra_hosts.items():
+        if not isinstance(hostname, str) or not _HOSTNAME_RE.fullmatch(hostname):
+            raise ValueError(f"Invalid extra host name: {hostname!r}")
+        if not isinstance(destination, str):
+            raise ValueError(f"Invalid destination for extra host {hostname!r}")
+        destination = destination.strip()
+        if destination != "host-gateway":
+            try:
+                ipaddress.ip_address(destination)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Extra host {hostname!r} must map to an IP address or host-gateway"
+                ) from exc
+        validated[hostname] = destination
+    return validated
 
 
 class SandboxStatus(str, enum.Enum):
@@ -49,6 +82,7 @@ class SandboxConfig:
     # Network
     network_mode: str = "none"  # none, allowlist, bridge
     allowed_hosts: list[str] = field(default_factory=list)  # For allowlist mode
+    extra_hosts: dict[str, str] = field(default_factory=dict)  # Docker --add-host entries
 
     # Lifecycle
     timeout_seconds: int = 1800  # Max lifetime (30 min default)
@@ -67,6 +101,9 @@ class SandboxConfig:
     request_id: str | None = None
     organization_id: str | None = None
     requesting_user_id: str | None = None
+
+    def __post_init__(self) -> None:
+        self.extra_hosts = validate_extra_hosts(self.extra_hosts)
 
 
 @dataclass

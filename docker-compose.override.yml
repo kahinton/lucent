@@ -15,3 +15,11 @@ services:
   openbao:
     ports:
       - "127.0.0.1:8200:8200"
+
+  docker-socket-proxy:
+    ports:
+      - "127.0.0.1:2375:2375"
+
+  postgres:
+    volumes:
+      - ./backups:/backups

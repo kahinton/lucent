@@ -4510,6 +4510,8 @@ class LucentDaemon(
                                 "repo_url": sandbox_config.get("repo_url"),
                                 "branch": sandbox_config.get("branch"),
                                 "network_mode": sandbox_config.get("network_mode"),
+                                "extra_hosts": sandbox_config.get("extra_hosts") or {},
+                                "docker_bind_mounts": sandbox_config.get("docker_bind_mounts") or [],
                             },
                         )
                 except Exception as e:
