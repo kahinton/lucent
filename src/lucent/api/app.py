@@ -567,10 +567,12 @@ def create_app() -> FastAPI:
     # Include request tracking router
     from lucent.api.routers import files as files_router
     from lucent.api.routers import requests as requests_router
+    from lucent.api.routers import usage as usage_router
     from lucent.api.routers import user_interactions as user_interactions_router
 
     app.include_router(requests_router.router, prefix="/api", tags=["Requests"])
     app.include_router(files_router.router, prefix="/api", tags=["Files"])
+    app.include_router(usage_router.router, prefix="/api", tags=["Usage"])
     app.include_router(
         user_interactions_router.router,
         prefix="/api",

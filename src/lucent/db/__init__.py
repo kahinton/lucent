@@ -35,6 +35,7 @@ from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
 from lucent.db.reviews import ReviewRepository
 from lucent.db.runtime_settings import RuntimeSettingsRepository
+from lucent.db.token_usage import TokenUsageRepository
 from lucent.db.tool_audit import ToolAuditRepository
 
 # TypedDict definitions for repository return values
@@ -67,6 +68,7 @@ __all__ = [
     "close_db",
     # Repositories
     "MemoryRepository",
+    "TokenUsageRepository",
     "DuplicateTechnicalMemoryError",
     "VersionConflictError",
     "DefinitionRepository",

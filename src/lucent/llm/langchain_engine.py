@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
 from lucent.llm.hooks import HookManager, append_hook_context
+from lucent.llm.token_usage import normalize_token_usage
 from lucent.logging import get_logger
 
 logger = get_logger("llm.langchain")
@@ -598,6 +599,10 @@ class LangChainEngine(LLMEngine):
                         model_with_tools.ainvoke(messages),
                         timeout=timeout,
                     )
+
+                usage = normalize_token_usage(getattr(ai_msg, "usage_metadata", None))
+                if usage and on_event:
+                    on_event(SessionEvent(type=SessionEventType.USAGE, usage=usage))
 
                 # Extract text content
                 text = ai_msg.content if isinstance(ai_msg.content, str) else ""

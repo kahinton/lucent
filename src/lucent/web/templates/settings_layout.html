@@ -45,6 +45,7 @@
                     ('account',    '/settings/account',    'Profile & Security'),
                     ('api-keys',   '/settings/api-keys',   'API Keys'),
                     ('api-access', '/settings/api-access', 'API Access'),
+                    ('usage',      '/settings/usage',      'Usage'),
                 ] %}
                 {% for key, href, label in _items %}
                 <a href="{{ href }}" class="flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors {% if settings_section == key %}bg-primary-50 text-primary-700 font-medium{% else %}text-gray-700 hover:bg-gray-50{% endif %}">

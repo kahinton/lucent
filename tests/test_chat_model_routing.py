@@ -20,6 +20,9 @@ class _FakeEngine:
     async def run_session(self, **kwargs):
         return f"routed:{kwargs['model']}"
 
+    async def run_session_streaming(self, **kwargs):
+        return f"routed:{kwargs['model']}"
+
 
 class _FakeStreamingEngine:
     name = "langchain"
@@ -390,7 +393,10 @@ def test_chat_history_supports_soft_deleting_sessions():
     assert "document.getElementById('archive-session-confirm').disabled = false;" in template
     assert "finally {\n        this.disabled = false;" in template
     assert "function updateSessionStatus()" in template
-    assert "state.sessions = state.sessions.filter(session => session.id !== sessionId);\n    updateSessionStatus();" in template
+    assert (
+        "state.sessions = state.sessions.filter(session => session.id !== sessionId);\n"
+        "    updateSessionStatus();" in template
+    )
     assert "Related files, requests, and provenance will remain available." in template
 
 

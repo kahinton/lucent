@@ -318,6 +318,7 @@ def _event_raw(event) -> dict[str, Any]:
         "tool_name": event.tool_name,
         "tool_input": event.tool_input,
         "tool_output": event.tool_output,
+        "usage": event.usage,
     }
 
 
@@ -1047,7 +1048,10 @@ async def chat_stream(
     """Stream a chat response. Model defaults to CHAT_MODEL but can be overridden per-request."""
     user, pool = await _get_session_user(request)
 
+    import asyncio
+
     from lucent.llm import get_engine_for_model
+    from lucent.llm.engine import SessionEvent, SessionEventType
     from lucent.model_registry import validate_model, validate_reasoning_effort
 
     session_defaults = await _chat_session_defaults(
@@ -1127,15 +1131,41 @@ async def chat_stream(
         selected_model,
         "present" if session_token else "MISSING",
     )
+    usage_persist_tasks: list[asyncio.Task] = []
+
+    def persist_usage(event: SessionEvent) -> None:
+        if event.type != SessionEventType.USAGE or not event.usage:
+            return
+
+        async def record_usage() -> None:
+            try:
+                from lucent.db.token_usage import TokenUsageRepository
+
+                await TokenUsageRepository(pool).record(
+                    organization_id=str(user["organization_id"]),
+                    user_id=str(user["id"]),
+                    session_id=chat_session.session_id,
+                    turn_id=chat_session.turn_id,
+                    message_id=chat_session.user_message_id,
+                    model=selected_model,
+                    engine=engine.name,
+                    usage=event.usage,
+                )
+            except Exception:
+                logger.debug("Failed to record chat token usage", exc_info=True)
+
+        usage_persist_tasks.append(asyncio.create_task(record_usage()))
 
     # Run the LLM session via the engine abstraction
     try:
-        result_text = await engine.run_session(
+        result_text = await engine.run_session_streaming(
             model=selected_model,
             system_message=system_prompt,
             prompt=prompt,
             mcp_config=mcp_config,
+            on_event=persist_usage,
             timeout=chat_timeout_seconds(),
+            idle_timeout=chat_timeout_seconds(),
             reasoning_effort=reasoning_effort,
             provider_session_id=chat_session.provider_session_id,
             resume=resume_provider,
@@ -1176,6 +1206,8 @@ async def chat_stream(
         logger.error("Chat session failed: %s", e)
         result_text = None
         error = str(e)
+    if usage_persist_tasks:
+        await asyncio.gather(*usage_persist_tasks, return_exceptions=True)
 
     # Return SSE response
     async def generate():
@@ -1527,8 +1559,22 @@ async def chat_stream_v2(
                 tool_output=event.tool_output or payload.get("output"),
                 detail=payload.get("text") or payload.get("error"),
                 raw=_event_raw(event),
-                visible=payload.get("type") not in {"text_delta"},
+                visible=payload.get("type") not in {"text_delta", "usage"},
             )
+            if event.type == SessionEventType.USAGE and event.usage:
+                from lucent.db.token_usage import TokenUsageRepository
+
+                await TokenUsageRepository(pool).record(
+                    organization_id=str(user["organization_id"]),
+                    user_id=str(user["id"]),
+                    session_id=chat_session.session_id,
+                    turn_id=chat_session.turn_id,
+                    message_id=chat_session.user_message_id,
+                    model=selected_model,
+                    engine=engine.name,
+                    usage=event.usage,
+                )
+                return
             if engine.name == "langchain" or payload.get("type") != "tool_result":
                 return
             try:
@@ -1605,6 +1651,8 @@ async def chat_stream_v2(
             }
             event_queue.put_nowait(payload)
             persist_event(payload, event)
+        elif event.type == SessionEventType.USAGE:
+            persist_event({"type": "usage"}, event)
         elif event.type == SessionEventType.ERROR:
             payload = {
                 "type": "error",

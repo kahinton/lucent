@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, SessionEventType
+from lucent.llm.token_usage import normalize_token_usage
 from lucent.logging import get_logger
 
 logger = get_logger("llm.copilot")
@@ -810,6 +811,15 @@ class CopilotEngine(LLMEngine):
                         type=SessionEventType.TOOL_RESULT,
                         tool_name=tool_name,
                         tool_output=tool_output,
+                        raw=event,
+                    )
+                elif etype == "assistant.usage":
+                    usage = normalize_token_usage(event.data)
+                    if not usage:
+                        return
+                    normalized = SessionEvent(
+                        type=SessionEventType.USAGE,
+                        usage=usage,
                         raw=event,
                     )
                 elif etype in ("assistant.reasoning", "assistant.reasoning_delta"):

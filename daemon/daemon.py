@@ -3549,6 +3549,30 @@ class LucentDaemon(
                 except Exception:
                     log("Failed to audit daemon tool event", "DEBUG")
 
+            async def record_stream_usage(event: SessionEvent) -> None:
+                context = audit_context or {}
+                organization_id = context.get("organization_id")
+                user_id = context.get("user_id")
+                if not organization_id or not user_id or not event.usage:
+                    return
+                try:
+                    from lucent.db import init_db
+                    from lucent.db.token_usage import TokenUsageRepository
+
+                    pool = await init_db()
+                    await TokenUsageRepository(pool).record(
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        session_id=context.get("session_id"),
+                        turn_id=context.get("turn_id"),
+                        message_id=context.get("message_id"),
+                        model=model,
+                        engine=getattr(engine, "name", "unknown"),
+                        usage=event.usage,
+                    )
+                except Exception:
+                    log("Failed to record daemon token usage", "DEBUG")
+
             def on_event(event: SessionEvent) -> None:
                 etype = event.type.value
                 if event.type == SessionEventType.MESSAGE:
@@ -3597,6 +3621,8 @@ class LucentDaemon(
                         raise AuthFailureDetectedError(
                             f"MCP auth failure on tool '{event.tool_name}' in session '{name}'"
                         )
+                elif event.type == SessionEventType.USAGE:
+                    audit_tasks.append(asyncio.create_task(record_stream_usage(event)))
                 elif event.type != SessionEventType.MESSAGE_DELTA:
                     log(f"  [{name}] event: {etype}", "STREAM")
 

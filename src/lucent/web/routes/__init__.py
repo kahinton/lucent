@@ -24,6 +24,7 @@ from . import (
     schedules,
     secrets,
     settings,
+    usage,
     user_interactions,
 )
 
@@ -44,6 +45,7 @@ router.include_router(memories.router)
 router.include_router(sandboxes.router)
 router.include_router(settings.router)
 router.include_router(user_interactions.router)
+router.include_router(usage.router)
 router.include_router(requests_routes.router)
 router.include_router(schedules.router)
 

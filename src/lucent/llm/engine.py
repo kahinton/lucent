@@ -18,6 +18,7 @@ class SessionEventType(enum.Enum):
     MESSAGE_DELTA = "assistant.message_delta"
     TOOL_CALL = "tool.call"
     TOOL_RESULT = "tool.result"
+    USAGE = "usage"
     SESSION_IDLE = "session.idle"
     ERROR = "error"
     OTHER = "other"
@@ -32,6 +33,7 @@ class SessionEvent:
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None  # Tool arguments/parameters
     tool_output: str | None = None
+    usage: dict[str, Any] | None = None
     raw: Any = None  # Original event object from the backend
 
 

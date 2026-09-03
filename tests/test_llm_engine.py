@@ -20,8 +20,78 @@ class TestSessionEvent:
     def test_event_types(self):
         assert SessionEventType.MESSAGE.value == "assistant.message"
         assert SessionEventType.TOOL_CALL.value == "tool.call"
+        assert SessionEventType.USAGE.value == "usage"
         assert SessionEventType.SESSION_IDLE.value == "session.idle"
         assert SessionEventType.ERROR.value == "error"
+
+
+class TestTokenUsageNormalization:
+    def test_normalizes_copilot_style_usage(self):
+        from lucent.llm.token_usage import normalize_token_usage
+
+        usage = normalize_token_usage(
+            SimpleNamespace(
+                input_tokens=101,
+                output_tokens=29,
+                cache_read_tokens=17,
+                cache_write_tokens=3,
+                reasoning_tokens=11,
+                provider_call_id="call-1",
+                model="provider-model",
+            )
+        )
+
+        assert usage == {
+            "input_tokens": 101,
+            "output_tokens": 29,
+            "cache_read_tokens": 17,
+            "cache_write_tokens": 3,
+            "reasoning_tokens": 11,
+            "provider_call_id": "call-1",
+            "provider_metadata": {"provider_model": "provider-model"},
+        }
+
+    def test_normalizes_langchain_usage_metadata(self):
+        from lucent.llm.token_usage import normalize_token_usage
+
+        usage = normalize_token_usage(
+            {
+                "input_tokens": 101,
+                "output_tokens": 29,
+                "input_token_details": {"cache_read": 17, "cache_creation": 3},
+                "output_token_details": {"reasoning": 11},
+            }
+        )
+
+        assert usage == {
+            "input_tokens": 101,
+            "output_tokens": 29,
+            "cache_read_tokens": 17,
+            "cache_write_tokens": 3,
+            "reasoning_tokens": 11,
+            "provider_call_id": None,
+            "provider_metadata": {},
+        }
+
+    def test_normalizes_common_provider_cache_aliases(self):
+        from lucent.llm.token_usage import normalize_token_usage
+
+        usage = normalize_token_usage(
+            {
+                "input_tokens": 101,
+                "output_tokens": 29,
+                "cache_read_input_tokens": 17,
+                "cache_creation_input_tokens": 3,
+            }
+        )
+
+        assert usage["cache_read_tokens"] == 17
+        assert usage["cache_write_tokens"] == 3
+
+    def test_ignores_unreported_usage(self):
+        from lucent.llm.token_usage import normalize_token_usage
+
+        assert normalize_token_usage({}) is None
 
 
 class TestEngineFactory:
@@ -209,6 +279,72 @@ class TestCopilotEngine:
             (SessionEventType.MESSAGE, "I have access to Lucent tools."),
             (SessionEventType.SESSION_IDLE, None),
         ]
+
+    @pytest.mark.asyncio
+    async def test_streaming_emits_provider_reported_usage(self, monkeypatch):
+        from lucent.llm import copilot_engine
+
+        callback = None
+
+        class FakeSession:
+            def on(self, handler):
+                nonlocal callback
+                callback = handler
+
+            async def send(self, _prompt, **_kwargs):
+                callback(
+                    SimpleNamespace(
+                        type=SimpleNamespace(value="assistant.usage"),
+                        data=SimpleNamespace(
+                            input_tokens=101,
+                            output_tokens=29,
+                            cache_read_tokens=17,
+                            cache_write_tokens=3,
+                            reasoning_tokens=11,
+                            provider_call_id="call-1",
+                            model="provider-model",
+                        ),
+                    )
+                )
+                callback(
+                    SimpleNamespace(
+                        type=SimpleNamespace(value="session.idle"),
+                        data=SimpleNamespace(),
+                    )
+                )
+
+            async def disconnect(self):
+                return None
+
+        class FakeClient:
+            async def start(self):
+                return None
+
+            async def create_session(self, **_kwargs):
+                return FakeSession()
+
+            async def stop(self):
+                return None
+
+        async def fake_provider_github_token(_context=None):
+            return None
+
+        engine = copilot_engine.CopilotEngine()
+        monkeypatch.setattr(copilot_engine, "_sdk_available", True)
+        monkeypatch.setattr(engine, "_make_client", lambda _token=None: FakeClient())
+        monkeypatch.setattr(engine, "_provider_github_token", fake_provider_github_token)
+
+        events = []
+        await engine.run_session_streaming(
+            model="test-model",
+            system_message="system",
+            prompt="prompt",
+            on_event=events.append,
+        )
+
+        assert events[0].type == SessionEventType.USAGE
+        assert events[0].usage and events[0].usage["input_tokens"] == 101
+        assert events[0].usage["provider_call_id"] == "call-1"
 
     def test_mutable_mcp_permission_uses_legacy_compat(self):
         from lucent.llm.copilot_engine import _should_use_legacy_permission_response
@@ -620,7 +756,11 @@ class TestLangChainEngine:
                     return AIMessage(
                         content="",
                         tool_calls=[
-                            {"name": "create_file", "args": {"path": "z.txt", "content": "ok"}, "id": "c1"}
+                            {
+                                "name": "create_file",
+                                "args": {"path": "z.txt", "content": "ok"},
+                                "id": "c1",
+                            }
                         ],
                     )
                 return AIMessage(content="done")

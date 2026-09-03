@@ -731,6 +731,28 @@ optional `change_summary`, and preserves previous content in revision history.
 In task context, `store_user_file` defaults to the current task. Its returned ID
 can be attached to a handoff with `reference_type: "user_file"`.
 
+### Token Usage
+
+```
+GET /api/usage/tokens
+```
+
+Returns usage recorded directly from the model provider, grouped by model and
+engine. Lucent does not estimate tokens from stored prompts or responses.
+
+| Query parameter | Type | Description |
+|-----------------|------|-------------|
+| `starts_at` | ISO 8601 datetime | Optional inclusive lower bound for recorded usage |
+| `ends_at` | ISO 8601 datetime | Optional exclusive upper bound; must be after `starts_at` |
+| `organization_wide` | boolean | `false` by default; requires `admin`, `owner`, or `hyperadmin` when `true` |
+
+The default response is scoped to the authenticated user. Authorized
+organization-wide requests additionally include rows grouped by user, model,
+and engine. Responses include input, provider-reported uncached input,
+cached-read, cached-write, output, and reasoning token categories plus
+provider-call counts; no prompt, response, or raw provider event content is
+returned.
+
 ### Task Memory Links
 
 ```
