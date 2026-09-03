@@ -361,6 +361,7 @@ def create_app() -> FastAPI:
         request.state.pending_approval_count = 0
         request.state.user_interaction_count = 0
         request.state.definition_proposal_count = 0
+        request.state.sandbox_proposal_count = 0
         request.state.user_file_unseen_count = 0
 
         # Only needed for web page rendering, not API/static/other methods.
@@ -402,6 +403,12 @@ def create_app() -> FastAPI:
                         )
                         request.state.pending_approval_count = count
                         request.state.definition_proposal_count = definition_count or 0
+                        if role_value in {"admin", "owner"}:
+                            from lucent.db.sandbox_template import SandboxTemplateRepository
+
+                            request.state.sandbox_proposal_count = await SandboxTemplateRepository(
+                                pool
+                            ).count_proposed(str(org_id))
                         from lucent.db.files import UserFileRepository
 
                         request.state.user_file_unseen_count = (

@@ -11,6 +11,7 @@ Tests:
 - POST /sandboxes/{id}/destroy                    (destroy sandbox)
 """
 
+import re
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -143,6 +144,30 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 async def test_sandboxes_page_returns_200(client):
     resp = await client.get("/sandboxes", follow_redirects=True)
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_proposed_template_appears_in_sidebar_badge(client, db_pool, web_user, web_prefix):
+    user, org, _token = web_user
+    await SandboxTemplateRepository(db_pool).create(
+        name=f"{web_prefix}sidebar_proposal",
+        organization_id=str(org["id"]),
+        image="python:3.12-slim",
+        created_by=str(user["id"]),
+        status="proposed",
+    )
+
+    response = await client.get("/activity")
+    assert response.status_code == 200
+    badge = re.search(
+        r'id="sandbox-proposal-sidebar-badge"[^>]*>\s*(\d+)\s*<',
+        response.text,
+    )
+    assert badge is not None
+    assert badge.group(1) == "1"
+
+    live_status = await client.get("/ui/live-status")
+    assert live_status.json()["badges"]["sandboxes"] == 1
 
 
 @pytest.mark.asyncio
@@ -339,6 +364,69 @@ async def test_edit_template_page_returns_200(client, db_pool, web_user, web_pre
     )
     resp = await client.get(f"/sandboxes/templates/{tpl['id']}/edit", follow_redirects=True)
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_proposed_template_shows_approval_controls_and_can_be_approved(
+    client, db_pool, web_user, web_prefix
+):
+    user, org, _token = web_user
+    repo = SandboxTemplateRepository(db_pool)
+    template = await repo.create(
+        name=f"{web_prefix}proposed_template",
+        organization_id=str(org["id"]),
+        image="python:3.12-slim",
+        created_by=str(user["id"]),
+        proposed_by=str(user["id"]),
+        proposal_reason="Requires approval before use.",
+        status="proposed",
+    )
+
+    page = await client.get(f"/sandboxes/templates/{template['id']}/edit")
+
+    assert page.status_code == 200
+    assert "Approval required before this template can launch" in page.text
+    assert f"/sandboxes/templates/{template['id']}/approve" in page.text
+    assert f"/sandboxes/templates/{template['id']}/reject" in page.text
+
+    response = await client.post(
+        f"/sandboxes/templates/{template['id']}/approve",
+        data=_csrf_data(client),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    updated = await repo.get(str(template["id"]), str(org["id"]))
+    assert updated["status"] == "approved"
+    assert str(updated["reviewed_by"]) == str(user["id"])
+
+    repeat_response = await client.post(
+        f"/sandboxes/templates/{template['id']}/approve",
+        data=_csrf_data(client),
+        follow_redirects=False,
+    )
+    assert repeat_response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_proposed_template_cannot_launch(client, db_pool, web_user, web_prefix):
+    user, org, _token = web_user
+    template = await SandboxTemplateRepository(db_pool).create(
+        name=f"{web_prefix}pending_launch",
+        organization_id=str(org["id"]),
+        image="python:3.12-slim",
+        created_by=str(user["id"]),
+        status="proposed",
+    )
+
+    response = await client.post(
+        "/sandboxes/launch",
+        data=_csrf_data(client, {"template_id": str(template["id"])}),
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 409
+    assert "must be approved" in response.text
 
 
 @pytest.mark.asyncio

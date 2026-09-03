@@ -15,8 +15,39 @@
         {{ request.query_params.get('error') }}
     </div>
     {% endif %}
+    {% if request.query_params.get('success') %}
+    <div class="border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800" role="status">
+        {{ request.query_params.get('success') }}
+    </div>
+    {% endif %}
 
     <div class="bg-white rounded-lg border border-gray-200 p-6">
+        <div class="flex items-center justify-between gap-3 mb-4">
+            <span class="px-2.5 py-1 rounded text-sm font-medium {% if template.status == 'approved' %}bg-green-100 text-green-700{% elif template.status == 'proposed' %}bg-amber-100 text-amber-700{% elif template.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ template.status }}</span>
+            {% if template.status == 'proposed' and user.role.value in ('admin', 'owner') %}
+            <div class="flex gap-2">
+                <form method="POST" action="/sandboxes/templates/{{ template.id }}/approve">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1.5 text-sm bg-green-600 text-white rounded-md hover:bg-green-700 font-medium">Approve</button>
+                </form>
+                <form method="POST" action="/sandboxes/templates/{{ template.id }}/reject">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100 font-medium">Reject</button>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+        {% if template.status == 'proposed' %}
+        <div class="mb-4 border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <p class="font-medium">Approval required before this template can launch or be assigned to a task.</p>
+            {% if template.proposal_reason %}<p class="mt-1 text-amber-800">{{ template.proposal_reason }}</p>{% endif %}
+        </div>
+        {% elif template.status == 'rejected' %}
+        <div class="mb-4 border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">This template is rejected and cannot launch or be assigned to a task.</div>
+        {% endif %}
+        {% if template.reviewed_at %}
+        <p class="mb-4 text-xs text-gray-400">Reviewed{% if template.reviewed_by_name %} by {{ template.reviewed_by_name }}{% endif %} {{ template.reviewed_at.strftime('%b %d, %Y at %H:%M') }}</p>
+        {% endif %}
         {% if template.scope != 'built-in' %}
         <div class="mb-4">
             {% if template.owner_user_name %}

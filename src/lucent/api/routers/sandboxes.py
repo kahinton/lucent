@@ -489,6 +489,56 @@ async def delete_template(template_id: str, user: AuthenticatedUser):
     return {"id": template_id, "deleted": True}
 
 
+@router.post("/templates/{template_id}/approve")
+async def approve_template(template_id: str, user: AuthenticatedUser):
+    """Approve a proposed sandbox template for use in tasks and launches."""
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+
+    if user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Only administrators can approve sandbox templates")
+    pool = await get_pool()
+    repo = SandboxTemplateRepository(pool)
+    existing = await repo.get(template_id, str(user.organization_id))
+    if not existing:
+        raise HTTPException(404, "Template not found")
+    if existing.get("status") != "proposed":
+        raise HTTPException(409, "Only proposed sandbox templates can be approved")
+    template = await repo.set_status(
+        template_id,
+        str(user.organization_id),
+        "approved",
+        reviewed_by=str(user.id),
+    )
+    if not template:
+        raise HTTPException(404, "Template not found")
+    return template
+
+
+@router.post("/templates/{template_id}/reject")
+async def reject_template(template_id: str, user: AuthenticatedUser):
+    """Reject a sandbox template so it cannot be used for work."""
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+
+    if user.role.value not in ("admin", "owner"):
+        raise HTTPException(403, "Only administrators can reject sandbox templates")
+    pool = await get_pool()
+    repo = SandboxTemplateRepository(pool)
+    existing = await repo.get(template_id, str(user.organization_id))
+    if not existing:
+        raise HTTPException(404, "Template not found")
+    if existing.get("status") != "proposed":
+        raise HTTPException(409, "Only proposed sandbox templates can be rejected")
+    template = await repo.set_status(
+        template_id,
+        str(user.organization_id),
+        "rejected",
+        reviewed_by=str(user.id),
+    )
+    if not template:
+        raise HTTPException(404, "Template not found")
+    return template
+
+
 @router.post("/templates/{template_id}/launch")
 async def launch_from_template(
     template_id: str,
@@ -509,6 +559,8 @@ async def launch_from_template(
     )
     if not tpl:
         raise HTTPException(404, "Template not found")
+    if tpl.get("status") != "approved":
+        raise HTTPException(409, "Sandbox template must be approved before launch")
 
     provider = SecretRegistry.get()
     resolved_env_vars = await resolve_env_vars(tpl.get("env_vars") or {}, provider)

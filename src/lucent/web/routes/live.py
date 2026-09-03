@@ -56,6 +56,7 @@ async def live_status(request: Request) -> JSONResponse:
     from lucent.db.definitions import DefinitionRepository
     from lucent.db.files import UserFileRepository
     from lucent.db.requests import RequestRepository
+    from lucent.db.sandbox_template import SandboxTemplateRepository
     from lucent.db.user_interactions import UserInteractionRepository
 
     request_repo = RequestRepository(pool)
@@ -76,6 +77,11 @@ async def live_status(request: Request) -> JSONResponse:
         "handoffs": await UserInteractionRepository(pool).count_attention_needed(
             org_id=org_id,
             user_id=user_id,
+        ),
+        "sandboxes": (
+            await SandboxTemplateRepository(pool).count_proposed(org_id)
+            if role in {"admin", "owner"}
+            else 0
         ),
     }
     return JSONResponse({"badges": counts}, headers={"Cache-Control": "no-store"})

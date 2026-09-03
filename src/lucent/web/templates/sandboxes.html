@@ -46,6 +46,7 @@
                         <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">Owner: {{ tpl.owner_group_name }}</span>
                         {% endif %}
                     {% endif %}
+                    <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs font-medium {% if tpl.status == 'approved' %}bg-green-100 text-green-700{% elif tpl.status == 'proposed' %}bg-amber-100 text-amber-700{% elif tpl.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ tpl.status }}</span>
                     {% if tpl.description %}
                     <p class="text-xs text-gray-500 mt-0.5 line-clamp-2">{{ tpl.description }}</p>
                     {% endif %}
@@ -87,12 +88,28 @@
                     <span>{{ (tpl.timeout_seconds / 60) | int }}m timeout</span>
                 </div>
             </div>
+            {% if tpl.status == 'proposed' %}
+            <div class="mt-3 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                Approval required before use.
+            </div>
+            {% endif %}
             <div class="mt-4 pt-3 border-t border-gray-100 flex gap-2">
+                {% if tpl.status == 'approved' %}
                 <form method="POST" action="/sandboxes/launch" class="flex-1">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <input type="hidden" name="template_id" value="{{ tpl.id }}">
                     <button type="submit" class="w-full px-3 py-1.5 text-xs bg-gray-800 text-white rounded hover:bg-gray-700 font-medium">Launch</button>
                 </form>
+                {% elif tpl.status == 'proposed' and user.role.value in ('admin', 'owner') %}
+                <form method="POST" action="/sandboxes/templates/{{ tpl.id }}/approve" class="flex-1">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="w-full px-3 py-1.5 text-xs bg-green-600 text-white rounded hover:bg-green-700 font-medium">Approve</button>
+                </form>
+                <form method="POST" action="/sandboxes/templates/{{ tpl.id }}/reject" class="flex-1">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="w-full px-3 py-1.5 text-xs bg-red-50 text-red-700 rounded hover:bg-red-100 font-medium">Reject</button>
+                </form>
+                {% endif %}
             </div>
         </div>
         {% endfor %}

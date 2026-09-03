@@ -330,6 +330,15 @@ class SandboxTemplateRepository:
             )
         return [self._parse_row(r) for r in rows]
 
+    async def count_proposed(self, organization_id: str) -> int:
+        """Return the number of templates awaiting human approval."""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(
+                """SELECT COUNT(*) FROM sandbox_templates
+                   WHERE organization_id = $1 AND status = 'proposed'""",
+                UUID(organization_id),
+            )
+
     async def set_status(
         self,
         template_id: str,

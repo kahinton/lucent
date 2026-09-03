@@ -55,7 +55,16 @@ async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
 
 
 async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
-    user_ids = {str(item.get("owner_user_id")) for item in items if item.get("owner_user_id")}
+    user_ids = {
+        str(user_id)
+        for item in items
+        for user_id in (
+            item.get("owner_user_id"),
+            item.get("proposed_by"),
+            item.get("reviewed_by"),
+        )
+        if user_id
+    }
     group_ids = {str(item.get("owner_group_id")) for item in items if item.get("owner_group_id")}
     user_map: dict[str, str] = {}
     group_map: dict[str, str] = {}
@@ -92,6 +101,10 @@ def _attach_owner_names(
         owner_group_id = str(d.get("owner_group_id")) if d.get("owner_group_id") else None
         d["owner_user_name"] = user_map.get(owner_user_id) if owner_user_id else None
         d["owner_group_name"] = group_map.get(owner_group_id) if owner_group_id else None
+        proposed_by = str(d.get("proposed_by")) if d.get("proposed_by") else None
+        reviewed_by = str(d.get("reviewed_by")) if d.get("reviewed_by") else None
+        d["proposed_by_name"] = user_map.get(proposed_by) if proposed_by else None
+        d["reviewed_by_name"] = user_map.get(reviewed_by) if reviewed_by else None
         enriched.append(d)
     return enriched
 
@@ -406,6 +419,64 @@ async def delete_template_web(request: Request, template_id: str):
     return RedirectResponse("/sandboxes", status_code=303)
 
 
+@router.post("/sandboxes/templates/{template_id}/approve")
+async def approve_template_web(request: Request, template_id: str):
+    """Approve a proposed sandbox template for task and instance use."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+
+    repo = SandboxTemplateRepository(pool)
+    existing = await repo.get(template_id, str(user.organization_id))
+    if not existing:
+        raise HTTPException(404, "Template not found")
+    if existing.get("status") != "proposed":
+        raise HTTPException(409, "Only proposed sandbox templates can be approved")
+    template = await repo.set_status(
+        template_id,
+        str(user.organization_id),
+        "approved",
+        reviewed_by=str(user.id),
+    )
+    if not template:
+        raise HTTPException(404, "Template not found")
+    return RedirectResponse(
+        f"/sandboxes/templates/{template_id}/edit?success={quote('Template approved.')}",
+        status_code=303,
+    )
+
+
+@router.post("/sandboxes/templates/{template_id}/reject")
+async def reject_template_web(request: Request, template_id: str):
+    """Reject a proposed sandbox template so it cannot be dispatched."""
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.sandbox_template import SandboxTemplateRepository
+
+    repo = SandboxTemplateRepository(pool)
+    existing = await repo.get(template_id, str(user.organization_id))
+    if not existing:
+        raise HTTPException(404, "Template not found")
+    if existing.get("status") != "proposed":
+        raise HTTPException(409, "Only proposed sandbox templates can be rejected")
+    template = await repo.set_status(
+        template_id,
+        str(user.organization_id),
+        "rejected",
+        reviewed_by=str(user.id),
+    )
+    if not template:
+        raise HTTPException(404, "Template not found")
+    return RedirectResponse(
+        f"/sandboxes/templates/{template_id}/edit?success={quote('Template rejected.')}",
+        status_code=303,
+    )
+
+
 @router.post("/sandboxes/launch")
 async def launch_sandbox_web(
     request: Request,
@@ -432,6 +503,8 @@ async def launch_sandbox_web(
     )
     if not tpl:
         raise HTTPException(404, "Template not found")
+    if tpl.get("status") != "approved":
+        raise HTTPException(409, "Sandbox template must be approved before launch")
 
     provider = SecretRegistry.get()
     resolved_env_vars = await resolve_env_vars(tpl.get("env_vars") or {}, provider)
