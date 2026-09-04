@@ -68,6 +68,14 @@ class TaskAPI:
         )
 
     @staticmethod
+    async def release_task(task_id: str, instance_id: str | None = None) -> dict | None:
+        return await TaskAPI._post(
+            f"/requests/tasks/{task_id}/release",
+            {"instance_id": instance_id} if instance_id else {},
+            "release_task",
+        )
+
+    @staticmethod
     async def complete_task(
         task_id: str,
         result: str,

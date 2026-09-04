@@ -378,6 +378,20 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         requires_restart=True,
     ),
     RuntimeSettingDefinition(
+        key="daemon.source_reload_enabled",
+        env_var="LUCENT_DAEMON_SOURCE_RELOAD",
+        value_type="boolean",
+        default=False,
+        title="Daemon source reload",
+        section="Daemon",
+        description="Restart daemon workers automatically when watched source files change.",
+        help_text=(
+            "Leave disabled for durable task execution. Enable only during local "
+            "development when automatic source reload is required."
+        ),
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
         key="daemon.mcp_url",
         env_var="LUCENT_MCP_URL",
         value_type="string",
@@ -1334,6 +1348,11 @@ def daemon_interval_minutes(*, organization_id: Any | None = None) -> int:
 
 def daemon_roles(*, organization_id: Any | None = None) -> str:
     return _setting_string("daemon.roles", organization_id=organization_id)
+
+
+def daemon_source_reload_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether the daemon should restart itself when watched source files change."""
+    return _setting_bool("daemon.source_reload_enabled", organization_id=organization_id)
 
 
 def daemon_mcp_url(*, organization_id: Any | None = None) -> str:

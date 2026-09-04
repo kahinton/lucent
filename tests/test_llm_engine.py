@@ -281,6 +281,60 @@ class TestCopilotEngine:
         ]
 
     @pytest.mark.asyncio
+    async def test_streaming_partial_response_without_completion_emits_error(self, monkeypatch):
+        from lucent.llm import copilot_engine
+
+        callback = None
+
+        class FakeSession:
+            def on(self, handler):
+                nonlocal callback
+                callback = handler
+
+            async def send(self, _prompt, **_kwargs):
+                callback(
+                    SimpleNamespace(
+                        type=SimpleNamespace(value="assistant.message"),
+                        data=SimpleNamespace(content="partial response"),
+                    )
+                )
+
+            async def disconnect(self):
+                return None
+
+        class FakeClient:
+            async def start(self):
+                return None
+
+            async def create_session(self, **_kwargs):
+                return FakeSession()
+
+            async def stop(self):
+                return None
+
+        async def fake_provider_github_token(_context=None):
+            return None
+
+        engine = copilot_engine.CopilotEngine()
+        monkeypatch.setattr(copilot_engine, "_sdk_available", True)
+        monkeypatch.setattr(engine, "_make_client", lambda _token=None: FakeClient())
+        monkeypatch.setattr(engine, "_provider_github_token", fake_provider_github_token)
+
+        events = []
+        result = await engine.run_session_streaming(
+            model="test-model",
+            system_message="system",
+            prompt="prompt",
+            idle_timeout=0,
+            on_event=events.append,
+        )
+
+        assert result == "partial response"
+        assert events[-1].type == SessionEventType.ERROR
+        assert "idle timeout" in (events[-1].content or "")
+        assert all(event.type != SessionEventType.SESSION_IDLE for event in events)
+
+    @pytest.mark.asyncio
     async def test_streaming_emits_provider_reported_usage(self, monkeypatch):
         from lucent.llm import copilot_engine
 
@@ -550,6 +604,7 @@ class TestLangChainEngine:
             for event in events
             if event.type == SessionEventType.MESSAGE_DELTA
         ] == ["hello ", "locally"]
+        assert events[-1].type == SessionEventType.SESSION_IDLE
 
     @pytest.mark.asyncio
     async def test_streaming_reports_idle_timeout(self, monkeypatch):

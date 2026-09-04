@@ -696,6 +696,15 @@ class CopilotEngine(LLMEngine):
             )
 
         client = None
+        terminal_state = {"completed": False, "error": None}
+
+        def report_terminal_error(message: str) -> None:
+            if terminal_state["error"] is not None:
+                return
+            terminal_state["error"] = message
+            if on_event:
+                on_event(SessionEvent(type=SessionEventType.ERROR, content=message))
+
         try:
             github_token = await self._provider_github_token(audit_context)
             client = self._make_client(github_token)
@@ -834,15 +843,21 @@ class CopilotEngine(LLMEngine):
                     )
                 elif etype == "session.idle":
                     done.set()
+                    if terminal_state["error"] is None:
+                        terminal_state["completed"] = True
                     normalized = SessionEvent(
                         type=SessionEventType.SESSION_IDLE,
                         raw=event,
                     )
                 elif "error" in etype.lower():
                     done.set()
+                    terminal_state["error"] = (
+                        getattr(event.data, "message", str(event.data)[:200])
+                        or "Provider session emitted an error event"
+                    )
                     normalized = SessionEvent(
                         type=SessionEventType.ERROR,
-                        content=getattr(event.data, "message", str(event.data)[:200]),
+                        content=terminal_state["error"],
                         raw=event,
                     )
                 else:
@@ -870,20 +885,20 @@ class CopilotEngine(LLMEngine):
             while not done.is_set():
                 elapsed = time.monotonic() - start_time
                 if elapsed >= timeout:
-                    logger.warning(
-                        "Copilot streaming session hit hard timeout after %ds", int(elapsed)
-                    )
+                    message = f"Copilot streaming session hard timeout after {int(elapsed)}s"
+                    logger.warning(message)
+                    report_terminal_error(message)
                     break
 
                 idle_elapsed = time.monotonic() - last_activity
                 wait_time = min(idle_timeout - idle_elapsed, timeout - elapsed, 10.0)
                 if wait_time <= 0:
-                    logger.warning(
-                        "Copilot streaming session idle timeout after %ds of inactivity "
-                        "(total elapsed: %ds)",
-                        idle_timeout,
-                        int(elapsed),
+                    message = (
+                        f"Copilot streaming session idle timeout after {idle_timeout}s "
+                        f"of inactivity (total elapsed: {int(elapsed)}s)"
                     )
+                    logger.warning(message)
+                    report_terminal_error(message)
                     break
 
                 try:
@@ -892,12 +907,12 @@ class CopilotEngine(LLMEngine):
                     # Check if we got activity during the wait
                     idle_elapsed = time.monotonic() - last_activity
                     if idle_elapsed >= idle_timeout:
-                        logger.warning(
-                            "Copilot streaming session idle timeout after %ds of inactivity "
-                            "(total elapsed: %ds)",
-                            idle_timeout,
-                            int(time.monotonic() - start_time),
+                        message = (
+                            f"Copilot streaming session idle timeout after {idle_timeout}s "
+                            f"of inactivity (total elapsed: {int(time.monotonic() - start_time)}s)"
                         )
+                        logger.warning(message)
+                        report_terminal_error(message)
                         break
                     # Activity happened — keep going
                     continue
@@ -908,6 +923,8 @@ class CopilotEngine(LLMEngine):
             except Exception:
                 logger.debug("Failed to destroy Copilot streaming session", exc_info=True)
 
+            if not terminal_state["completed"] and not terminal_state["error"]:
+                report_terminal_error("Provider stream ended without a completion response")
             return "\n".join(response_parts) if response_parts else None
 
         except Exception as e:
@@ -927,6 +944,7 @@ class CopilotEngine(LLMEngine):
                 )
                 raise ModelNotAvailableError(failed_model, e) from e
             logger.error("Copilot streaming session failed: %s", e)
+            report_terminal_error(f"Copilot streaming session failed: {error_msg}")
             return None
         finally:
             await self._cleanup_client(client)

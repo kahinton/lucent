@@ -236,6 +236,18 @@ async def test_runtime_settings_page_shows_env_fallback(
     assert 'data-runtime-toggle' in resp.text
 
 
+def test_daemon_source_reload_is_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("LUCENT_DAEMON_SOURCE_RELOAD", raising=False)
+    runtime_settings.clear_runtime_setting_cache()
+
+    assert runtime_settings.daemon_source_reload_enabled() is False
+    definition = runtime_settings.get_runtime_setting_definition(
+        "daemon.source_reload_enabled"
+    )
+    assert definition is not None
+    assert definition.requires_restart is True
+
+
 @pytest.mark.asyncio
 async def test_runtime_setting_update_persists_db_value(
     client,

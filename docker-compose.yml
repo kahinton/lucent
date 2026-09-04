@@ -282,6 +282,7 @@ services:
       LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      LUCENT_DAEMON_SOURCE_RELOAD: ${LUCENT_DAEMON_SOURCE_RELOAD:-false}
       # A daemon is single-tenant. Leave unset to auto-bind to the single real
       # org (the default for local / docker-compose). Set to an org id or name
       # to pin the daemon when multiple organizations exist.
@@ -343,6 +344,7 @@ services:
       LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
+      LUCENT_DAEMON_SOURCE_RELOAD: ${LUCENT_DAEMON_SOURCE_RELOAD:-false}
       # A daemon is single-tenant. Leave unset to auto-bind to the single real
       # org (the default for local / docker-compose). Set to an org id or name
       # to pin the daemon when multiple organizations exist.

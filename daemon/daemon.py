@@ -224,6 +224,8 @@ MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
 # can split work across instances (e.g. one cognitive, N dispatchers).
 # Roles: dispatcher, cognitive, scheduler, autonomic (or 'all')
 DAEMON_ROLES_STR = runtime_settings.daemon_roles()
+# Source reload is useful for local development but can interrupt durable work.
+DAEMON_SOURCE_RELOAD_ENABLED = runtime_settings.daemon_source_reload_enabled()
 # Dispatch loop: how often to poll if PG LISTEN misses a signal
 DISPATCH_POLL_SECONDS = runtime_settings.daemon_dispatch_poll_seconds()
 # Scheduler loop: how often to check for due schedules
@@ -340,7 +342,8 @@ def _refresh_config_from_runtime_settings() -> None:
     global MAX_CONCURRENT_SESSIONS, DAEMON_INTERVAL_MINUTES, MODEL
     global STALE_HEARTBEAT_MINUTES, SESSION_TOTAL_TIMEOUT, SESSION_IDLE_TIMEOUT
     global WATCHDOG_TIMEOUT, AUTONOMIC_INTERVAL, LEARNING_INTERVAL
-    global MAX_RESULT_LENGTH, DAEMON_ROLES_STR, DISPATCH_POLL_SECONDS
+    global MAX_RESULT_LENGTH, DAEMON_ROLES_STR, DAEMON_SOURCE_RELOAD_ENABLED
+    global DISPATCH_POLL_SECONDS
     global SCHEDULER_CHECK_SECONDS, AUTONOMIC_MINUTES, LEARNING_MINUTES
     global VITALITY_SCORING_MINUTES, SHADOW_FORGET_SCORING_MINUTES
     global SHADOW_FORGET_OFFSET_MINUTES, COMPRESSION_MINUTES
@@ -359,6 +362,7 @@ def _refresh_config_from_runtime_settings() -> None:
     LEARNING_INTERVAL = runtime_settings.daemon_learning_interval_cycles()
     MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
     DAEMON_ROLES_STR = runtime_settings.daemon_roles()
+    DAEMON_SOURCE_RELOAD_ENABLED = runtime_settings.daemon_source_reload_enabled()
     DISPATCH_POLL_SECONDS = runtime_settings.daemon_dispatch_poll_seconds()
     SCHEDULER_CHECK_SECONDS = runtime_settings.daemon_scheduler_check_seconds()
     AUTONOMIC_MINUTES = runtime_settings.daemon_autonomic_minutes()
@@ -1652,6 +1656,8 @@ class LucentDaemon(
 
     def __init__(self):
         self.active_sessions: list = []
+        self._claim_operations = 0
+        self._session_terminal_outcomes: dict[str, dict[str, str | bool | None]] = {}
         self.running = False
         self.draining = False  # True = stop new work, wait for in-flight sessions
         self.cycle_count = 0
@@ -3415,11 +3421,25 @@ class LucentDaemon(
             model: Override the default model. If None, uses MODEL config.
         Returns the assistant's final message text, or None on error.
         """
+        def record_terminal_outcome(*, completed: bool, error: str | None = None) -> None:
+            self._session_terminal_outcomes[name] = {
+                "completed": completed,
+                "error": error,
+            }
+
         if self.draining:
             log(f"Skipping '{name}' — daemon is draining for restart", "WARN")
+            record_terminal_outcome(
+                completed=False,
+                error="Daemon is draining for source reload",
+            )
             return None
         if len(self.active_sessions) >= MAX_CONCURRENT_SESSIONS:
             log(f"Skipping '{name}' — at session limit ({MAX_CONCURRENT_SESSIONS})", "WARN")
+            record_terminal_outcome(
+                completed=False,
+                error="Daemon session capacity is exhausted",
+            )
             return None
 
         audit_context = await self._resolve_session_audit_context(audit_context)
@@ -3484,6 +3504,10 @@ class LucentDaemon(
                     if not result:
                         if retried_after_empty_response:
                             status = "error"
+                            record_terminal_outcome(
+                                completed=False,
+                                error="Provider returned no response after retry",
+                            )
                             log(
                                 f"Session '{name}' returned no response after retry",
                                 "ERROR",
@@ -3499,6 +3523,8 @@ class LucentDaemon(
                         continue
                     if span:
                         span.set_attribute("daemon.session.output_length", len(result) if result else 0)
+                    if name not in self._session_terminal_outcomes:
+                        record_terminal_outcome(completed=True)
                     return result
                 except AuthFailureDetectedError as e:
                     if retried_after_auth_failure:
@@ -3522,6 +3548,10 @@ class LucentDaemon(
                         )
                         if not refreshed:
                             status = "error"
+                            record_terminal_outcome(
+                                completed=False,
+                                error="Could not refresh scoped memory-server credentials",
+                            )
                             log(
                                 f"Session '{name}' could not refresh scoped memory-server credentials",
                                 "ERROR",
@@ -3536,6 +3566,10 @@ class LucentDaemon(
                         recovered = await _handle_auth_failure(self.instance_id)
                         if not recovered:
                             status = "error"
+                            record_terminal_outcome(
+                                completed=False,
+                                error="Could not recover MCP credentials",
+                            )
                             log(f"Session '{name}' could not recover MCP credentials", "ERROR")
                             if span:
                                 span.set_attribute("daemon.session.error", "auth_recovery_failed")
@@ -3544,6 +3578,10 @@ class LucentDaemon(
                     continue
                 except asyncio.TimeoutError:
                     status = "timeout"
+                    record_terminal_outcome(
+                        completed=False,
+                        error=f"Session hard timeout after {SESSION_TOTAL_TIMEOUT}s",
+                    )
                     log(
                         f"Session '{name}' HARD TIMEOUT after {SESSION_TOTAL_TIMEOUT}s — "
                         "session lifecycle hung (likely during client.start or create_session)",
@@ -3557,6 +3595,7 @@ class LucentDaemon(
                     raise  # Let the caller handle model-not-available specifically
                 except Exception as e:
                     status = "error"
+                    record_terminal_outcome(completed=False, error=f"Session failed: {e}")
                     log(f"Session '{name}' failed: {e}", "ERROR")
                     if span:
                         span.set_attribute("daemon.session.error", str(e)[:200])
@@ -3649,6 +3688,11 @@ class LucentDaemon(
         engine = get_engine_for_model(model) if _LLM_ENGINE_AVAILABLE else get_engine()
         session_id = f"engine-session-{name}"
         self.active_sessions.append(session_id)
+        terminal_outcome: dict[str, str | bool | None] = {
+            "completed": False,
+            "error": None,
+        }
+        self._session_terminal_outcomes[name] = terminal_outcome
 
         # Initialize MCP memory-tool tracker for this session
         tracker: list[dict] = []
@@ -3715,6 +3759,7 @@ class LucentDaemon(
                     if event.content:
                         log(f"  [{name}] message: {event.content[:200]}...", "STREAM")
                 elif event.type == SessionEventType.ERROR:
+                    terminal_outcome["error"] = event.content or "Provider session error"
                     log(f"  [{name}] error: {event.content}", "ERROR")
                     if self._is_mcp_auth_failure_message(event.content):
                         raise AuthFailureDetectedError(
@@ -3759,6 +3804,10 @@ class LucentDaemon(
                         )
                 elif event.type == SessionEventType.USAGE:
                     audit_tasks.append(asyncio.create_task(record_stream_usage(event)))
+                elif event.type == SessionEventType.SESSION_IDLE:
+                    if terminal_outcome["error"] is None:
+                        terminal_outcome["completed"] = True
+                    log(f"  [{name}] event: {etype}", "STREAM")
                 elif event.type != SessionEventType.MESSAGE_DELTA:
                     log(f"  [{name}] event: {etype}", "STREAM")
 
@@ -3782,12 +3831,21 @@ class LucentDaemon(
                 enable_config_discovery=enable_config_discovery,
             )
 
+            if not terminal_outcome["completed"] and not terminal_outcome["error"]:
+                terminal_outcome["error"] = "Provider stream ended without a completion response"
+
             if result:
                 log(f"Session '{name}' completed ({len(result)} chars)")
                 log(f"--- {name} full output ---\n{result}\n--- end {name} ---", "THOUGHT")
             else:
                 log(f"Session '{name}' completed (no response)")
             return result
+        except asyncio.CancelledError:
+            terminal_outcome["error"] = "Provider session was cancelled"
+            raise
+        except Exception as error:
+            terminal_outcome["error"] = f"Provider session failed: {error}"
+            raise
         finally:
             if audit_tasks:
                 await asyncio.gather(*audit_tasks, return_exceptions=True)
@@ -3806,6 +3864,11 @@ class LucentDaemon(
     ) -> str | None:
         """Legacy fallback: run session using CopilotClient directly."""
         client = None
+        terminal_outcome: dict[str, str | bool | None] = {
+            "completed": False,
+            "error": None,
+        }
+        self._session_terminal_outcomes[name] = terminal_outcome
 
         try:
             # Honor COPILOT_CLI_PATH / auto-detect the user's installed CLI
@@ -3847,9 +3910,12 @@ class LucentDaemon(
                     elif etype == "assistant.message_delta":
                         pass
                     elif etype == "session.idle":
+                        if terminal_outcome["error"] is None:
+                            terminal_outcome["completed"] = True
                         done.set()
                     elif "error" in etype.lower():
                         error_message = getattr(event.data, "message", str(event.data)[:200])
+                        terminal_outcome["error"] = error_message or "Provider session error"
                         log(
                             f"  [{name}] error event: {etype} - {error_message}",
                             "ERROR",
@@ -3889,19 +3955,30 @@ class LucentDaemon(
                 while not done.is_set():
                     elapsed = time.time() - start_time
                     if elapsed >= SESSION_TOTAL_TIMEOUT:
-                        log(f"Session '{name}' hard timeout after {int(elapsed)}s", "WARN")
+                        terminal_outcome["error"] = (
+                            f"Session hard timeout after {int(elapsed)}s"
+                        )
+                        log(f"Session '{name}' {terminal_outcome['error']}", "WARN")
                         break
                     idle_elapsed = time.time() - last_activity
                     wait_time = min(SESSION_IDLE_TIMEOUT - idle_elapsed, SESSION_TOTAL_TIMEOUT - elapsed, 10.0)
                     if wait_time <= 0:
-                        log(f"Session '{name}' idle timeout after {SESSION_IDLE_TIMEOUT}s of inactivity (total: {int(elapsed)}s)", "WARN")
+                        terminal_outcome["error"] = (
+                            f"Session idle timeout after {SESSION_IDLE_TIMEOUT}s of inactivity "
+                            f"(total: {int(elapsed)}s)"
+                        )
+                        log(f"Session '{name}' {terminal_outcome['error']}", "WARN")
                         break
                     try:
                         await asyncio.wait_for(done.wait(), timeout=max(wait_time, 0.1))
                     except asyncio.TimeoutError:
                         idle_elapsed = time.time() - last_activity
                         if idle_elapsed >= SESSION_IDLE_TIMEOUT:
-                            log(f"Session '{name}' idle timeout after {SESSION_IDLE_TIMEOUT}s of inactivity (total: {int(time.time() - start_time)}s)", "WARN")
+                            terminal_outcome["error"] = (
+                                f"Session idle timeout after {SESSION_IDLE_TIMEOUT}s of inactivity "
+                                f"(total: {int(time.time() - start_time)}s)"
+                            )
+                            log(f"Session '{name}' {terminal_outcome['error']}", "WARN")
                             break
                         continue
 
@@ -3914,6 +3991,8 @@ class LucentDaemon(
                     self.active_sessions.remove(session)
 
             result = "\n".join(response_parts) if response_parts else None
+            if not terminal_outcome["completed"] and not terminal_outcome["error"]:
+                terminal_outcome["error"] = "Provider stream ended without a completion response"
             if result:
                 log(f"Session '{name}' completed ({len(result)} chars)")
                 log(f"--- {name} full output ---\n{result}\n--- end {name} ---", "THOUGHT")
@@ -3921,7 +4000,11 @@ class LucentDaemon(
                 log(f"Session '{name}' completed (no response)")
             return result
 
+        except asyncio.CancelledError:
+            terminal_outcome["error"] = "Provider session was cancelled"
+            raise
         except Exception as e:
+            terminal_outcome["error"] = f"Provider session failed: {e}"
             log(f"Session '{name}' failed: {e}", "ERROR")
             return None
         finally:
@@ -3980,6 +4063,12 @@ class LucentDaemon(
                 )
             except TypeError:
                 return await RequestAPI.mark_task_needs_review(task_id, error)
+
+        async def _release_owned(task_id: str):
+            try:
+                return await RequestAPI.release_task(task_id, instance_id=self.instance_id)
+            except TypeError:
+                return await RequestAPI.release_task(task_id)
 
         # Ensure requests that reached review status have a review task queued.
         await self._ensure_request_review_tasks()
@@ -4052,7 +4141,14 @@ class LucentDaemon(
                     task_reasoning_effort = None
 
             # Claim it atomically
-            claimed = await RequestAPI.claim_task(task_id, self.instance_id)
+            if self.draining:
+                log("Dispatch is draining for source reload; leaving remaining tasks pending")
+                break
+            self._claim_operations += 1
+            try:
+                claimed = await RequestAPI.claim_task(task_id, self.instance_id)
+            finally:
+                self._claim_operations -= 1
             if not claimed:
                 continue
 
@@ -4562,9 +4658,10 @@ class LucentDaemon(
                     name=f"task-sandbox-keepalive-{task_id[:8]}",
                 )
 
+            session_name = f"{agent_type}-{task_id[:8]}"
             try:
                 result = await self.run_session(
-                    f"{agent_type}-{task_id[:8]}",
+                    session_name,
                     system_message,
                     f"Execute this task:\n\n{description}",
                     model=selected_model,
@@ -4586,6 +4683,7 @@ class LucentDaemon(
                     },
                 )
             except ModelNotAvailableError as exc:
+                self._session_terminal_outcomes.pop(session_name, None)
                 if sandbox_keepalive_task:
                     sandbox_keepalive_task.cancel()
                 log(
@@ -4609,7 +4707,6 @@ class LucentDaemon(
             dispatched += 1
 
             # Log MCP memory-tool usage summary as a queryable task event
-            session_name = f"{agent_type}-{task_id[:8]}"
             mcp_tracker = self._session_mcp_trackers.pop(session_name, [])
             tool_tracker = self._session_tool_trackers.pop(session_name, [])
             operational_tool_tracker = [
@@ -4811,6 +4908,41 @@ class LucentDaemon(
                 with contextlib.suppress(asyncio.CancelledError):
                     await sandbox_keepalive_task
 
+            terminal_outcome = self._session_terminal_outcomes.pop(session_name, None)
+            interruption_reason = None
+            if not terminal_outcome or not terminal_outcome.get("completed"):
+                interruption_reason = str(
+                    (terminal_outcome or {}).get("error")
+                    or "Provider did not report session completion"
+                )
+            if interruption_reason:
+                attempt = int(claimed.get("claim_version") or task.get("claim_version") or 1)
+                await RequestAPI.add_event(
+                    task_id,
+                    "session_interrupted",
+                    f"Provider session ended without a completion response: {interruption_reason}",
+                    {
+                        "attempt": attempt,
+                        "model": selected_model,
+                        "reason": interruption_reason,
+                    },
+                )
+                if attempt == 1:
+                    released = await _release_owned(task_id)
+                    if released:
+                        await RequestAPI.add_event(
+                            task_id,
+                            "session_requeued",
+                            "Interrupted first attempt requeued for automatic resume.",
+                            {"attempt": attempt, "reason": interruption_reason},
+                        )
+                    else:
+                        await _needs_review_owned(task_id, interruption_reason, result=result)
+                else:
+                    await _needs_review_owned(task_id, interruption_reason, result=result)
+                dispatched += 1
+                continue
+
             if requires_operational_tool and not operational_tool_tracker:
                 reason = (
                     f"{agent_type} task completed without any operational tool calls. "
@@ -4973,7 +5105,8 @@ class LucentDaemon(
         dispatcher like any other task.
         """
         await self.start()
-        self._source_mtimes = self._snapshot_source_files()
+        if DAEMON_SOURCE_RELOAD_ENABLED:
+            self._source_mtimes = self._snapshot_source_files()
 
         log(f"Daemon roles enabled: {', '.join(sorted(self.roles))}")
 
@@ -4992,8 +5125,12 @@ class LucentDaemon(
                     )
                 )
 
-            # File watcher for auto-reload (always runs)
-            loops.append(asyncio.create_task(self._reload_watcher(), name="reload-watcher"))
+            if DAEMON_SOURCE_RELOAD_ENABLED:
+                loops.append(
+                    asyncio.create_task(self._reload_watcher(), name="reload-watcher")
+                )
+            else:
+                log("Daemon source reload disabled by runtime setting")
 
             if len(loops) <= 1:
                 log("No roles enabled — nothing to do", "ERROR")

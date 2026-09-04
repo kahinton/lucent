@@ -129,6 +129,7 @@ levels only for complex analysis where extra latency/cost is justified.
 | `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
 | `LUCENT_DAEMON_MODEL` | *(model registry default)* | Optional override for daemon sessions |
 | `LUCENT_DAEMON_ROLES` | `all` | Enable specific loops: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated, or `all`) |
+| `LUCENT_DAEMON_SOURCE_RELOAD` | `false` | Restart the daemon after watched source changes; enable only for local development, then restart the daemon |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP server URL for memory access |
 | `LUCENT_MCP_API_KEY` | — | API key for MCP authentication |
 | `LUCENT_STALE_HEARTBEAT_MINUTES` | `30` | Minutes before a daemon heartbeat is considered stale |

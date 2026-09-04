@@ -244,6 +244,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | `LUCENT_DAEMON_INTERVAL` | `15` | Minutes between cognitive cycles |
 | `LUCENT_DAEMON_MODEL` | *(model registry default)* | Optional override for daemon sessions |
 | `LUCENT_DAEMON_ROLES` | `all` | Loops to enable: `cognitive`, `dispatcher`, `scheduler`, `autonomic` (comma-separated) |
+| `LUCENT_DAEMON_SOURCE_RELOAD` | `false` | Restart daemon workers after watched source changes; use only during local development and restart the daemon after changing it |
 | `LUCENT_MCP_URL` | `http://localhost:8766/mcp` | MCP endpoint URL |
 | `LUCENT_MCP_API_KEY` | — | API key for daemon MCP access |
 | `GITHUB_TOKEN` | — | GitHub token for Copilot SDK access |

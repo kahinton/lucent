@@ -14,6 +14,30 @@ from pathlib import Path
 class RuntimeLoopsMixin:
     """Coordinates event-driven dispatch, scheduling, and process reloads."""
 
+    async def _has_owned_active_tasks(self) -> int:
+        """Return claimed or running tasks owned by this daemon instance."""
+        import asyncpg
+
+        from daemon.runtime.module_proxy import runtime
+
+        connection = None
+        try:
+            connection = await asyncpg.connect(runtime.DATABASE_URL)
+            return int(
+                await connection.fetchval(
+                    """SELECT COUNT(*) FROM tasks
+                       WHERE claimed_by = $1 AND status IN ('claimed', 'running')""",
+                    self.instance_id,
+                )
+                or 0
+            )
+        except Exception as error:
+            runtime.log(f"Reload task-state check failed; deferring restart: {error}", "WARN")
+            return 1
+        finally:
+            if connection:
+                await connection.close()
+
     async def _setup_listen(self):
         """Establish the persistent PostgreSQL LISTEN connection."""
         import asyncpg
@@ -290,14 +314,21 @@ class RuntimeLoopsMixin:
                     pending_reload = True
                     self._source_mtimes = self._snapshot_source_files()
                 if pending_reload:
-                    if self.active_sessions:
+                    # Stop new claims before checking the durable task state.
+                    # A task can be claimed while its model session is still being set up.
+                    self.draining = True
+                    active_tasks = await self._has_owned_active_tasks()
+                    if self.active_sessions or self._claim_operations or active_tasks:
                         runtime.log(
-                            f"Reload deferred — {len(self.active_sessions)} session(s) active. "
+                            "Reload deferred — "
+                            f"{len(self.active_sessions)} session(s), "
+                            f"{self._claim_operations} claim operation(s), and "
+                            f"{active_tasks} owned task(s) active. "
                             "Will restart when sessions complete.",
                             "DEBUG",
                         )
                     else:
-                        runtime.log("No active sessions — proceeding with deferred reload")
+                        runtime.log("No active task work — proceeding with deferred reload")
                         await self._graceful_restart()
                         return
             except asyncio.CancelledError:
