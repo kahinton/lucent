@@ -152,6 +152,7 @@ levels only for complex analysis where extra latency/cost is justified.
 |----------|---------|-------------|
 | `LUCENT_SESSION_TIMEOUT` | `3600` | Overall session timeout in seconds (1 hour) |
 | `LUCENT_SESSION_IDLE_TIMEOUT` | `300` | Idle session timeout in seconds (5 minutes) |
+| `LUCENT_LANGCHAIN_MAX_TOOL_ROUNDS` | `0` | Maximum consecutive LangChain tool-call rounds per session. `0` is unlimited; a positive value from `1–1000` interrupts and requeues the task on exhaustion rather than marking it complete. |
 | `LUCENT_WATCHDOG_TIMEOUT` | `900` | Watchdog timeout for stuck sessions (15 minutes) |
 | `LUCENT_MAX_RESULT_LENGTH` | `8000` | Maximum characters stored from sub-agent results |
 

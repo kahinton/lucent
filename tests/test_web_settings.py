@@ -248,6 +248,20 @@ def test_daemon_source_reload_is_disabled_by_default(monkeypatch):
     assert definition.requires_restart is True
 
 
+def test_langchain_tool_round_limit_defaults_to_unlimited_and_accepts_env_override(monkeypatch):
+    monkeypatch.delenv("LUCENT_LANGCHAIN_MAX_TOOL_ROUNDS", raising=False)
+    runtime_settings.clear_runtime_setting_cache()
+
+    assert runtime_settings.langchain_max_tool_rounds() == 0
+
+    monkeypatch.setenv("LUCENT_LANGCHAIN_MAX_TOOL_ROUNDS", "250")
+    assert runtime_settings.langchain_max_tool_rounds() == 250
+    definition = runtime_settings.get_runtime_setting_definition("langchain.max_tool_rounds")
+    assert definition is not None
+    assert definition.min_value == 0
+    assert definition.max_value == 1000
+
+
 @pytest.mark.asyncio
 async def test_runtime_setting_update_persists_db_value(
     client,

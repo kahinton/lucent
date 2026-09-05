@@ -692,7 +692,7 @@ async def test_dispatch_requeues_interrupted_provider_session_without_completing
     async def _run_session(session_name, *_args, **_kwargs):
         daemon._session_terminal_outcomes[session_name] = {
             "completed": False,
-            "error": "Copilot streaming session idle timeout after 300s",
+            "error": "LangChain tool round limit (25) reached before a final response",
         }
         return "partial provider output"
 
@@ -728,7 +728,7 @@ async def test_dispatch_requeues_interrupted_provider_session_without_completing
     assert ("session_interrupted", {
         "attempt": 1,
         "model": "member-model",
-        "reason": "Copilot streaming session idle timeout after 300s",
+        "reason": "LangChain tool round limit (25) reached before a final response",
     }) in events
     assert any(event_type == "session_requeued" for event_type, _ in events)
 

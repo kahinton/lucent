@@ -476,6 +476,21 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         requires_restart=True,
     ),
     RuntimeSettingDefinition(
+        key="langchain.max_tool_rounds",
+        env_var="LUCENT_LANGCHAIN_MAX_TOOL_ROUNDS",
+        value_type="integer",
+        default=0,
+        title="LangChain maximum tool rounds",
+        section="Models",
+        description="Maximum consecutive LangChain tool-call rounds before the session is interrupted; 0 is unlimited.",
+        help_text=(
+            "Leave at 0 for unlimited tool workflows. Set a positive limit to interrupt "
+            "looping models; exhaustion is recorded as a session interruption."
+        ),
+        min_value=0,
+        max_value=1000,
+    ),
+    RuntimeSettingDefinition(
         key="daemon.max_result_length",
         env_var="LUCENT_MAX_RESULT_LENGTH",
         value_type="integer",
@@ -1373,6 +1388,11 @@ def daemon_session_timeout_seconds(*, organization_id: Any | None = None) -> int
 
 def daemon_session_idle_timeout_seconds(*, organization_id: Any | None = None) -> int:
     return _setting_int("daemon.session_idle_timeout_seconds", organization_id=organization_id)
+
+
+def langchain_max_tool_rounds(*, organization_id: Any | None = None) -> int:
+    """Tool-call cap for one LangChain session; zero means unlimited."""
+    return _setting_int("langchain.max_tool_rounds", organization_id=organization_id)
 
 
 def daemon_max_result_length(*, organization_id: Any | None = None) -> int:

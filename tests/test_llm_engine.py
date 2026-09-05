@@ -645,6 +645,81 @@ class TestLangChainEngine:
         assert errors == ["LangChain stream idle timeout after 0.01s of inactivity"]
 
     @pytest.mark.asyncio
+    async def test_tool_round_limit_is_not_reported_as_success(self, monkeypatch):
+        """A model still requesting tools at the round cap has not completed."""
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        class FakeChatModel:
+            def __init__(self):
+                self.calls = 0
+
+            def bind_tools(self, _schemas):
+                return self
+
+            async def astream(self, _messages):
+                self.calls += 1
+                yield AIMessage(
+                    content=f"Still working in round {self.calls}: ",
+                    tool_calls=[{
+                        "name": "work",
+                        "args": {},
+                        "id": f"call-{self.calls}",
+                    }],
+                )
+
+        class FakeBridge:
+            async def call_tool(self, _name, _arguments):
+                return "ok"
+
+            async def close(self):
+                return None
+
+        chat_model = FakeChatModel()
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return chat_model
+
+        async def fake_create_bridges(*_args, **_kwargs):
+            return (
+                [FakeBridge()],
+                {"work": FakeBridge()},
+                None,
+                [{
+                    "type": "function",
+                    "function": {
+                        "name": "work",
+                        "description": "Perform work.",
+                        "parameters": {"type": "object"},
+                    },
+                }],
+            )
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+        monkeypatch.setenv("LUCENT_LANGCHAIN_MAX_TOOL_ROUNDS", "3")
+        engine = LangChainEngine()
+        monkeypatch.setattr(engine, "_create_bridges", fake_create_bridges)
+
+        events = []
+        result = await engine.run_session_streaming(
+            model="test-model",
+            system_message="system",
+            prompt="keep working",
+            mcp_config={"test": {"url": "http://test.invalid"}},
+            approve_permissions=False,
+            on_event=events.append,
+        )
+
+        assert chat_model.calls == 3
+        assert result is None
+        assert all(event.type != SessionEventType.SESSION_IDLE for event in events)
+        assert [event.content for event in events if event.type == SessionEventType.ERROR] == [
+            "LangChain tool round limit (3) reached before a final response"
+        ]
+
+    @pytest.mark.asyncio
     async def test_builtin_tools_are_bound_and_executed(self, tmp_path, monkeypatch):
         """LangChain engine binds built-in tools and runs them with no MCP config."""
         from langchain_core.messages import AIMessage

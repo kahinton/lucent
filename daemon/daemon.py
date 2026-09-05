@@ -3501,13 +3501,29 @@ class LucentDaemon(
                         ),
                         timeout=SESSION_TOTAL_TIMEOUT,
                     )
+                    terminal_outcome = self._session_terminal_outcomes.get(name)
+                    if result and not (terminal_outcome or {}).get("completed"):
+                        status = "error"
+                        record_terminal_outcome(
+                            completed=False,
+                            error=(terminal_outcome or {}).get("error")
+                            or "Provider returned a response without an explicit completion event",
+                        )
+                        log(
+                            f"Session '{name}' returned text without a completion event",
+                            "ERROR",
+                        )
+                        if span:
+                            span.set_attribute("daemon.session.error", "missing_completion_event")
+                        return None
                     if not result:
                         if retried_after_empty_response:
                             status = "error"
-                            record_terminal_outcome(
-                                completed=False,
-                                error="Provider returned no response after retry",
-                            )
+                            if not (terminal_outcome or {}).get("error"):
+                                record_terminal_outcome(
+                                    completed=False,
+                                    error="Provider returned no response after retry",
+                                )
                             log(
                                 f"Session '{name}' returned no response after retry",
                                 "ERROR",
@@ -3523,8 +3539,6 @@ class LucentDaemon(
                         continue
                     if span:
                         span.set_attribute("daemon.session.output_length", len(result) if result else 0)
-                    if name not in self._session_terminal_outcomes:
-                        record_terminal_outcome(completed=True)
                     return result
                 except AuthFailureDetectedError as e:
                     if retried_after_auth_failure:

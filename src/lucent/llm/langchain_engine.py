@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from itertools import count
 from typing import Any, Callable
 
+from lucent import settings as runtime_settings
 from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
 from lucent.llm.hooks import HookManager, append_hook_context
 from lucent.llm.token_usage import normalize_token_usage
@@ -23,6 +25,10 @@ logger = get_logger("llm.langchain")
 
 
 class _StreamIdleTimeout(Exception):
+    pass
+
+
+class _ToolRoundLimitExceeded(RuntimeError):
     pass
 
 
@@ -263,8 +269,6 @@ class LangChainEngine(LLMEngine):
     MCPToolBridge for MCP tool integration. Supports streaming via
     the standard LangChain stream() interface.
     """
-
-    MAX_TOOL_ROUNDS = 25  # Safety limit on tool-calling loops
 
     @property
     def name(self) -> str:
@@ -528,7 +532,12 @@ class LangChainEngine(LLMEngine):
 
             # Tool-calling loop
             full_response_parts: list[str] = []
-            for _round in range(self.MAX_TOOL_ROUNDS):
+            organization_id = (audit_context or {}).get("organization_id")
+            max_tool_rounds = runtime_settings.langchain_max_tool_rounds(
+                organization_id=organization_id
+            )
+            tool_rounds = range(max_tool_rounds) if max_tool_rounds else count()
+            for _round in tool_rounds:
                 before_model = await hook_manager.before_model_call(
                     messages=_messages_for_hooks(messages),
                 )
@@ -726,6 +735,11 @@ class LangChainEngine(LLMEngine):
                             tool_call_id=tool_id,
                         )
                     )
+            else:
+                raise _ToolRoundLimitExceeded(
+                    "LangChain tool round limit "
+                    f"({max_tool_rounds}) reached before a final response"
+                )
 
             if on_event:
                 on_event(SessionEvent(type=SessionEventType.SESSION_IDLE))

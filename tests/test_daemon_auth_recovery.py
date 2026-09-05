@@ -209,7 +209,7 @@ async def test_run_session_remints_scoped_memory_key_after_auth_failure(monkeypa
     seen_headers: list[str] = []
     seen_scope_headers: list[dict[str, str]] = []
 
-    async def _inner(_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
+    async def _inner(session_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
         call_count["n"] += 1
         if mcp_config_override and mcp_config_override.get("memory-server"):
             headers = mcp_config_override["memory-server"]["headers"]
@@ -223,6 +223,10 @@ async def test_run_session_remints_scoped_memory_key_after_auth_failure(monkeypa
             )
         if call_count["n"] == 1:
             raise AuthFailureDetectedError("Unauthorized: Invalid or expired credentials")
+        daemon._session_terminal_outcomes[session_name] = {
+            "completed": True,
+            "error": None,
+        }
         return "ok"
 
     recover_calls = {"n": 0}
@@ -356,16 +360,60 @@ async def test_run_session_retries_once_after_empty_response(monkeypatch):
     daemon = LucentDaemon()
     attempts = {"count": 0}
 
-    async def _inner(*_args, **_kwargs):
+    async def _inner(session_name, *_args, **_kwargs):
         attempts["count"] += 1
-        return None if attempts["count"] == 1 else "review decision"
+        if attempts["count"] == 1:
+            return None
+        daemon._session_terminal_outcomes[session_name] = {
+            "completed": True,
+            "error": None,
+        }
+        return "review decision"
+
+    async def _allow_model(*_args, **_kwargs):
+        return None
 
     monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+    monkeypatch.setattr(daemon_module, "_assert_model_accessible_by_user", _allow_model)
 
-    result = await daemon.run_session("empty-response-test", "system", "prompt")
+    result = await daemon.run_session(
+        "empty-response-test",
+        "system",
+        "prompt",
+        model="test-model",
+        audit_context={"organization_id": "org-1", "user_id": "user-1"},
+    )
 
     assert result == "review decision"
     assert attempts["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_session_rejects_text_without_completion_event(monkeypatch):
+    daemon = LucentDaemon()
+
+    async def _inner(*_args, **_kwargs):
+        return "unfinished provider text"
+
+    async def _allow_model(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+    monkeypatch.setattr(daemon_module, "_assert_model_accessible_by_user", _allow_model)
+
+    result = await daemon.run_session(
+        "unconfirmed-response-test",
+        "system",
+        "prompt",
+        model="test-model",
+        audit_context={"organization_id": "org-1", "user_id": "user-1"},
+    )
+
+    assert result is None
+    assert daemon._session_terminal_outcomes["unconfirmed-response-test"] == {
+        "completed": False,
+        "error": "Provider returned a response without an explicit completion event",
+    }
 
 
 @pytest.mark.asyncio
