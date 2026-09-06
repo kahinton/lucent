@@ -16,7 +16,12 @@ from itertools import count
 from typing import Any, Callable
 
 from lucent import settings as runtime_settings
-from lucent.llm.engine import LLMEngine, SessionEvent, SessionEventType
+from lucent.llm.engine import (
+    LLMEngine,
+    SessionEvent,
+    SessionEventType,
+    validate_expected_surface,
+)
 from lucent.llm.hooks import HookManager, append_hook_context
 from lucent.llm.token_usage import normalize_token_usage
 from lucent.logging import get_logger
@@ -140,7 +145,7 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
 
 
 def _schema_tool_name(schema: dict[str, Any]) -> str | None:
-    """Extract a tool name from an OpenAI/LangChain-style function schema."""
+    """Extract a tool name from an OpenAI/LangChain function schema."""
     if not isinstance(schema, dict):
         return None
     function = schema.get("function")
@@ -149,6 +154,42 @@ def _schema_tool_name(schema: dict[str, Any]) -> str | None:
         return str(name) if name else None
     name = schema.get("name")
     return str(name) if name else None
+
+
+def _compose_surface_report(
+    tool_to_bridge: dict[str, Any],
+    managed_tools: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Build a report of the actually-composed tool surface for a session.
+
+    The surface is what the model will really see: bridge-discovered MCP
+    tools (``tool_to_bridge`` encodes the real bridge routing, including
+    duplicate-name skips) plus managed MCP-proxy tools whose cached
+    discovered_tools are carried by the memory-server carrier. Built-ins
+    are excluded — static engine capabilities, not composed per-session.
+
+    Mirrors the registration logic in ``_run_with_tools``: a proxy
+    descriptor whose name is already bridge-routed is skipped there, so it
+    is excluded from ``managed_proxies`` here too.
+    """
+    proxy_names: set[str] = set()
+    for managed_tool in managed_tools or []:
+        if not (
+            isinstance(managed_tool, dict)
+            and (managed_tool.get("runtime_config") or {}).get("mcp_proxy")
+        ):
+            continue
+        for descriptor in managed_tool.get("discovered_tools") or []:
+            name = descriptor.get("name") if isinstance(descriptor, dict) else None
+            if name and name not in tool_to_bridge:
+                proxy_names.add(str(name))
+    bridge_names = sorted(tool_to_bridge)
+    return {
+        "tool_count": len(bridge_names),
+        "tools": bridge_names,
+        "carrier_present": "run_managed_tool" in tool_to_bridge,
+        "managed_proxies": sorted(proxy_names),
+    }
 
 
 def _messages_for_hooks(messages: list[Any]) -> list[dict[str, Any]]:
@@ -291,6 +332,7 @@ class LangChainEngine(LLMEngine):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        expected_surface: dict[str, Any] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -308,6 +350,7 @@ class LangChainEngine(LLMEngine):
                 attachments=attachments,
                 approve_permissions=approve_permissions,
                 managed_tools=managed_tools,
+                expected_surface=expected_surface,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -332,6 +375,7 @@ class LangChainEngine(LLMEngine):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        expected_surface: dict[str, Any] | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern)."""
         try:
@@ -350,6 +394,7 @@ class LangChainEngine(LLMEngine):
                 attachments=attachments,
                 approve_permissions=approve_permissions,
                 managed_tools=managed_tools,
+                expected_surface=expected_surface,
             )
         except Exception as e:
             error_message = str(e) or type(e).__name__
@@ -374,6 +419,7 @@ class LangChainEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None = None,
         approve_permissions: bool = True,
         managed_tools: list[dict[str, Any]] | None = None,
+        expected_surface: dict[str, Any] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -383,6 +429,15 @@ class LangChainEngine(LLMEngine):
         Tools come from two sources: MCP bridges (memory/requests/etc.) and the
         engine's built-in toolset (file/shell/web), which gives local/LangChain
         models parity with the Copilot SDK's provider-native built-ins.
+
+        ``expected_surface`` optionally asserts which granted tools must be
+        present in the composed surface. When the model is about to run with a
+        granted tool missing — e.g. discovery lost the run_managed_tool
+        carrier during a transient server window — the session refuses BEFORE
+        the model loop instead of failing later with vague per-call
+        "tool is not available" errors. Validation is delegated to
+        ``validate_expected_surface``; see its docs for the empty-allowlist
+        semantics.
         """
         from lucent.llm.builtin_tools import build_default_toolset
         from langchain_core.messages import (
@@ -468,6 +523,52 @@ class LangChainEngine(LLMEngine):
                     continue
                 builtin_names.add(name)
                 tool_schemas.append(schema)
+
+        # Composition telemetry + fail-fast refusal. This is Layer 2 of the
+        # hardening design: Layer 1 (daemon.py) checks the dispatch-time
+        # config; here we check what bridge discovery ACTUALLY produced.
+        # discover_tools() now raises loudly on discovery failure instead of
+        # silently composing an empty surface — but even with that, a
+        # transient window can leave the carrier off the composed surface
+        # (its server skipped, or allowed_tools filtered it out). Rather
+        # than run the model loop and fail later with vague per-call
+        # "tool is not available" errors, record the actual surface and
+        # refuse BEFORE the model starts.
+        surface_report = _compose_surface_report(tool_to_bridge, managed_tools)
+        if on_event:
+            on_event(
+                SessionEvent(
+                    type=SessionEventType.COMPOSITION_SURFACE,
+                    content=(
+                        f"Composed surface: {surface_report['tool_count']} MCP tool(s); "
+                        f"run_managed_tool "
+                        f"{'present' if surface_report['carrier_present'] else 'ABSENT'}"
+                    ),
+                    raw=surface_report,
+                )
+            )
+        try:
+            validate_expected_surface(
+                surface_report["tools"],
+                expected_surface=expected_surface,
+                carrier_present=surface_report["carrier_present"],
+                logger=logger,
+            )
+        except Exception as e:
+            if on_event:
+                on_event(
+                    SessionEvent(
+                        type=SessionEventType.ERROR,
+                        content=str(e),
+                    )
+                )
+            raise
+        if surface_report["carrier_present"] is False:
+            logger.warning(
+                "run_managed_tool carrier missing from composed surface "
+                "(managed proxies: %s); session proceeding without managed tools",
+                surface_report["managed_proxies"],
+            )
 
         async def _dispatch_tool(name: str, arguments: dict) -> str | None:
             """Route a tool call to a built-in tool or an MCP bridge.

@@ -1156,7 +1156,7 @@ class RequestRepository:
                                 (
                                     task["id"],
                                     f"Task cancelled because parent request was {status}",
-                                    json.dumps({"request_status": status}),
+                                    {"request_status": status},
                                 )
                                 for task in cancelled_tasks
                             ],
@@ -3328,8 +3328,6 @@ class RequestRepository:
         metadata: dict | None = None,
         org_id: str | None = None,
     ) -> dict:
-        import json
-
         async with self.pool.acquire() as conn:
             if org_id:
                 task_exists = await conn.fetchval(
@@ -3345,7 +3343,7 @@ class RequestRepository:
                 UUID(task_id),
                 event_type,
                 detail,
-                json.dumps(metadata) if metadata else "{}",
+                metadata or {},
             )
         return dict(row)
 

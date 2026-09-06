@@ -13,6 +13,17 @@ from asyncpg import Pool
 from jsonschema.exceptions import SchemaError
 from jsonschema.validators import validator_for
 
+from lucent.db.admin_audit import (
+    DEFINITION_APPROVE as ADMIN_DEFINITION_APPROVE,
+    DEFINITION_CREATE as ADMIN_DEFINITION_CREATE,
+    DEFINITION_DELETE as ADMIN_DEFINITION_DELETE,
+    DEFINITION_GRANT as ADMIN_DEFINITION_GRANT,
+    DEFINITION_REJECT as ADMIN_DEFINITION_REJECT,
+    DEFINITION_REVOKE as ADMIN_DEFINITION_REVOKE,
+    DEFINITION_UPDATE as ADMIN_DEFINITION_UPDATE,
+    AdminAuditRepository,
+    resolve_audit_actor,
+)
 from lucent.db.audit import (
     DEFINITION_APPROVE,
     DEFINITION_CREATE,
@@ -86,9 +97,35 @@ class BuiltInProtectionError(Exception):
 class DefinitionRepository:
     """Repository for managing agent, skill, and MCP server definitions."""
 
-    def __init__(self, pool: Pool, audit_repo: AuditRepository | None = None):
+    # Map memory-audit definition event constants → admin-audit action names.
+    # Keys are the action_type values carried by AuditRepository.log_definition_event.
+    _ADMIN_ACTION_MAP = {
+        DEFINITION_CREATE: ADMIN_DEFINITION_CREATE,
+        DEFINITION_UPDATE: ADMIN_DEFINITION_UPDATE,
+        DEFINITION_APPROVE: ADMIN_DEFINITION_APPROVE,
+        DEFINITION_REJECT: ADMIN_DEFINITION_REJECT,
+        DEFINITION_DELETE: ADMIN_DEFINITION_DELETE,
+        DEFINITION_GRANT: ADMIN_DEFINITION_GRANT,
+        DEFINITION_REVOKE: ADMIN_DEFINITION_REVOKE,
+    }
+
+    # Mechanical update paths that mutate DB rows but are not admin actions:
+    # MCP tool-discovery caching refreshes discovered_tools on TTL expiry.
+    _AUDIT_EXEMPT_CONTEXT_FIELDS = frozenset(
+        {"discovered_tools", "tools_discovered_at"}
+    )
+
+    def __init__(
+        self,
+        pool: Pool,
+        audit_repo: AuditRepository | None = None,
+        *,
+        admin_audit: bool = True,
+    ):
         self.pool = pool
         self.audit_repo = audit_repo
+        self._admin_audit = admin_audit
+        self._admin_audit_repo: AdminAuditRepository | None = None
 
     @staticmethod
     def _role_value(role: str | None) -> str:
@@ -332,22 +369,104 @@ class DefinitionRepository:
         context: dict[str, Any] | None = None,
         notes: str | None = None,
     ) -> None:
-        """Fire-and-forget audit log. Never raises."""
-        if self.audit_repo is None:
-            return
+        """Fire-and-forget audit logging on every definition mutation.
+
+        Two independent surfaces, neither of which may break the mutation:
+
+        * The memory-centric audit stream (``memory_audit_log``) via the
+          optional ``audit_repo``. When none is wired, a lazily-constructed
+          ``AuditRepository`` over the same pool is used so MCP-tool and
+          daemon callers keep their historical audit coverage.
+        * The admin/security audit (``admin_audit_log``), default-on. Actor
+          attribution falls back to the request-scoped auth context
+          (``lucent.auth.get_current_user``) so the MCP/daemon paths — which
+          construct this repository without an explicit actor — still record
+          who mutated what. Unauthenticated (system-originated) mutations are
+          logged with a NULL actor and ``actor_source=system``.
+        """
+        audit = self.audit_repo
+        if audit is None:
+            try:
+                audit = AuditRepository(self.pool)
+            except Exception:
+                logger.debug("Memory audit fallback unavailable", exc_info=True)
+        if audit is not None:
+            try:
+                await audit.log_definition_event(
+                    event_type=event_type,
+                    organization_id=UUID(org_id),
+                    user_id=UUID(user_id) if user_id else None,
+                    definition_type=definition_type,
+                    definition_id=UUID(definition_id),
+                    context=context,
+                    notes=notes,
+                )
+            except Exception:
+                logger.warning(
+                    "Audit log failed for %s on %s %s",
+                    event_type,
+                    definition_type,
+                    definition_id,
+                    exc_info=True,
+                )
+
+        # Admin audit: dual-fire alongside the memory audit stream (default-on).
+        if self._admin_audit:
+            await self._log_admin_audit(
+                event_type, org_id, definition_type, definition_id,
+                user_id=user_id, context=context, notes=notes,
+            )
+
+    async def _log_admin_audit(
+        self,
+        event_type: str,
+        org_id: str,
+        definition_type: str,
+        definition_id: str,
+        user_id: str | None = None,
+        context: dict[str, Any] | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Write the admin_audit_log row. Never raises.
+
+        Actor resolution order: explicit ``user_id`` argument, then the
+        request-scoped auth context, then a NULL (system) actor. Any
+        attribution failure degrades to the system actor instead of
+        breaking the mutation or dropping the row.
+        """
+        # Mechanical caching updates are not admin actions. The exemption
+        # list describes updated-FIELD names carried by discovery-cache
+        # writes; apply it to that list, not to the context keys themselves,
+        # so a manual admin update that happens to set a cached field is
+        # still audited.
+        if isinstance(context, dict):
+            updated = context.get("updated_fields")
+            if (
+                isinstance(updated, (list, tuple, set))
+                and self._AUDIT_EXEMPT_CONTEXT_FIELDS.intersection(updated)
+                and "tool_count" in context
+            ):
+                return
+        ctx: dict[str, Any] = dict(context) if context else {}
+        actor_user_id, impersonator_user_id, auth_ctx = resolve_audit_actor(user_id)
+        ctx.update(auth_ctx)
+
+        if self._admin_audit_repo is None:
+            self._admin_audit_repo = AdminAuditRepository(self.pool)
         try:
-            await self.audit_repo.log_definition_event(
-                event_type=event_type,
+            await self._admin_audit_repo.log_definition_event(
+                event_type=self._ADMIN_ACTION_MAP[event_type],
                 organization_id=UUID(org_id),
-                user_id=UUID(user_id) if user_id else None,
+                user_id=actor_user_id,
+                impersonator_user_id=impersonator_user_id,
                 definition_type=definition_type,
                 definition_id=UUID(definition_id),
-                context=context,
+                context=ctx,
                 notes=notes,
             )
         except Exception:
             logger.warning(
-                "Audit log failed for %s on %s %s",
+                "Admin audit failed for %s on %s %s",
                 event_type,
                 definition_type,
                 definition_id,

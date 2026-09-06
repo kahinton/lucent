@@ -35,6 +35,11 @@ MEMORY_TOOL_NAMES = frozenset({
     "export_memories",
 })
 MCP_CONNECTION_TIMEOUT_SECONDS = 2
+# Transient windows (e.g. the MCP server restarting mid-session) surface as
+# discovery failures; retrying with short backoff before giving up prevents
+# a reachable server from being silently dropped from the composed surface.
+MCP_DISCOVERY_ATTEMPTS = 3
+MCP_DISCOVERY_RETRY_BACKOFF_SECONDS = 1.0
 
 
 class MCPToolBridge:
@@ -74,8 +79,17 @@ class MCPToolBridge:
 
     @staticmethod
     def _is_terminated_session_error(error: Exception) -> bool:
-        """Return whether an MCP client stream was closed before a tool call."""
-        return "session terminated" in str(error).lower()
+        """Return whether an MCP client stream was closed before a tool call.
+
+        Covers both failure surfaces of a stale Streamable HTTP session:
+        the explicit "session terminated" MCP error and the transport-level
+        ``MCPError: SSE stream ended without a response`` raised when the
+        server's SSE channel died underneath an in-flight request.
+        """
+        message = str(error).lower()
+        return "session terminated" in message or (
+            "sse stream ended without a response" in message
+        )
 
     async def _ensure_session(self) -> Any:
         """Open an MCP streamable HTTP session if one is not already active."""
@@ -130,30 +144,79 @@ class MCPToolBridge:
                 f"MCP server is unreachable at {host}:{port}"
             ) from exc
 
+    async def _attempt_discovery(self) -> list[dict[str, Any]]:
+        """One discovery attempt against the MCP server (tools/list)."""
+        session = await self._ensure_session()
+        listed = await session.list_tools()
+        raw_tools = getattr(listed, "tools", []) or []
+        mcp_tools = [
+            tool
+            for tool in (_normalize_tool(tool) for tool in raw_tools)
+            if self._is_tool_allowed(str(tool.get("name", "")))
+        ]
+        self._tools = mcp_tools
+        return self._to_langchain_tools(mcp_tools)
+
     async def discover_tools(self) -> list[dict[str, Any]]:
         """Discover available tools from the MCP server.
 
         Calls the MCP tools/list endpoint and converts the response
         to LangChain-compatible tool schemas.
-        """
-        try:
-            session = await self._ensure_session()
-            listed = await session.list_tools()
-            raw_tools = getattr(listed, "tools", []) or []
-            mcp_tools = [
-                tool
-                for tool in (_normalize_tool(tool) for tool in raw_tools)
-                if self._is_tool_allowed(str(tool.get("name", "")))
-            ]
-            self._tools = mcp_tools
-            return self._to_langchain_tools(mcp_tools)
-        except Exception as e:
-            # If tool discovery fails, continue without tools
-            import logging
 
-            logging.getLogger("llm.mcp_bridge").warning("MCP tool discovery failed: %s", e)
-            self._tools = []
-            return []
+        Transient failures (server restarting mid-session, dead SSE channel)
+        are retried with backoff — a reconnect closes the possibly-stale
+        session so the next attempt dials fresh. Only after all attempts
+        fail does this raise LOUDLY: a structured LUCENT_EVENT on stderr
+        plus an error log, never a silent empty surface.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, MCP_DISCOVERY_ATTEMPTS + 1):
+            try:
+                return await self._attempt_discovery()
+            except Exception as e:
+                last_error = e
+                if attempt >= MCP_DISCOVERY_ATTEMPTS:
+                    break
+                delay = MCP_DISCOVERY_RETRY_BACKOFF_SECONDS * attempt
+                logger.warning(
+                    "MCP tool discovery attempt %d/%d failed for %s; "
+                    "retrying in %.1fs: %s",
+                    attempt,
+                    MCP_DISCOVERY_ATTEMPTS,
+                    self._mcp_url,
+                    delay,
+                    e,
+                )
+                try:
+                    await self.close()
+                except Exception:
+                    logger.debug("MCP bridge close during discovery retry failed", exc_info=True)
+                await asyncio.sleep(delay)
+        # Discovery failure must be LOUD. Returning [] silently composes an
+        # empty tool surface for the model: granted managed tools vanish, the
+        # session proceeds unaware, and callers observe only a vague
+        # "tool is not available" later. Emit a structured discovery-loss
+        # event for any stderr consumer, then re-raise so callers can refuse
+        # to compose a degraded surface.
+        import sys
+
+        event = {
+            "event": "MCP_DISCOVERY_FAILED",
+            "mcp_url": self._mcp_url,
+            "error": str(last_error),
+            "error_type": type(last_error).__name__,
+            "attempts": MCP_DISCOVERY_ATTEMPTS,
+            "allowed_tools": sorted(self._allowed_tools),
+        }
+        print(f"LUCENT_EVENT:{json.dumps(event, default=str)}", file=sys.stderr, flush=True)
+        logger.error(
+            "MCP tool discovery failed for %s after %d attempts: %s",
+            self._mcp_url,
+            MCP_DISCOVERY_ATTEMPTS,
+            last_error,
+        )
+        self._tools = []
+        raise last_error
 
     def _to_langchain_tools(self, mcp_tools: list[dict]) -> list[dict[str, Any]]:
         """Convert MCP tool definitions to OpenAI-style function schemas.
@@ -201,7 +264,22 @@ class MCPToolBridge:
                 )
                 return result_text
 
-            session = await self._ensure_session()
+            try:
+                session = await self._ensure_session()
+            except Exception as error:
+                # A cached session may already be dead — the server restarted
+                # between calls or its SSE channel dropped — so even
+                # _ensure_session's initialize can fail with a terminated /
+                # ended-stream error. Reconnect once rather than turning an
+                # available MCP tool into a false capability failure.
+                if not self._is_terminated_session_error(error):
+                    raise
+                logger.warning(
+                    "MCP session terminated while preparing call to %s; reconnecting once",
+                    tool_name,
+                )
+                await self.close()
+                session = await self._ensure_session()
             try:
                 result = await session.call_tool(tool_name, arguments or {})
             except Exception as error:

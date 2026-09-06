@@ -51,6 +51,22 @@ async def _get_pool():
     return await init_db(database_url)
 
 
+def _coerce_event_metadata(metadata: Any) -> dict:
+    """Normalize a task_events.metadata value (dict or JSON string) into a dict.
+
+    Mirrors RequestRepository._coerce_metadata (lucent/db/requests.py). Historical
+    rows written via json.dumps() pre-encoding were stored as JSONB strings, which
+    asyncpg decodes back to str — dict() on that string iterates characters and
+    raises ValueError, so decode defensively when we get a str.
+    """
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def _request_visibility_args(
     user_id: UUID | None,
     role: str | None,
@@ -1185,7 +1201,9 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
                        LIMIT 1""",
                     task_id,
                 )
-                metadata = dict(event_row["metadata"] or {}) if event_row else {}
+                metadata = (
+                    _coerce_event_metadata(event_row["metadata"]) if event_row else {}
+                )
                 resolved_sandbox_id = _valid_uuid(metadata.get("sandbox_id"))
                 if not resolved_sandbox_id:
                     return json.dumps({"error": "No sandbox_created event for current task"})

@@ -728,6 +728,39 @@ def _build_scoped_memory_server_config(
     )
 
 
+# Managed-tool carrier: the scoped memory-server MCP config is where granted
+# managed tools are injected at dispatch time (the definition-runtime tool
+# names below). If the carrier never materializes — e.g. MCP_CONFIG was wiped
+# so the scoped-server block is skipped — every granted tool is silently
+# missing from the composed surface.
+_MANAGED_TOOL_RUNTIME_TOOLS = (
+    "list_tool_definitions",
+    "get_tool_definition",
+    "run_managed_tool",
+)
+
+
+def compose_task_tool_surface(
+    *,
+    carrier_tools: list[str] | None,
+    managed_tool_names: list[str | None],
+) -> dict:
+    """Derive the task's composed MCP surface for dispatch-time telemetry.
+
+    Returns the composed tool count, ``run_managed_tool`` presence, and the
+    resolved granted tool names. Pure function of the task's MCP config and
+    its managed-tool grants, so both the telemetry payload and the fail-fast
+    refusal can be derived and tested without a live server.
+    """
+    tools = [t for t in (carrier_tools or []) if isinstance(t, str)]
+    granted = [name for name in managed_tool_names if name]
+    return {
+        "composed_tool_count": len(tools),
+        "run_managed_tool": "run_managed_tool" in tools,
+        "granted_tool_names": granted,
+    }
+
+
 async def _refresh_scoped_memory_server_config(
     mcp_config: dict | None,
 ) -> dict | None:
@@ -3413,12 +3446,15 @@ class LucentDaemon(
         enable_config_discovery: bool = False,
         hooks: list[dict] | None = None,
         audit_context: dict | None = None,
+        expected_surface: dict | None = None,
     ) -> str | None:
         """Run a single Copilot session with the given system message and prompt.
 
         Each session gets its own CopilotClient for full isolation.
         Args:
             model: Override the default model. If None, uses MODEL config.
+            expected_surface: Dispatch-time tool expectations forwarded to the
+                engine's composition validator (Layer 2); None/empty = no-op.
         Returns the assistant's final message text, or None on error.
         """
         def record_terminal_outcome(*, completed: bool, error: str | None = None) -> None:
@@ -3490,6 +3526,8 @@ class LucentDaemon(
                         inner_kwargs["hooks"] = hooks
                     if audit_context is not None:
                         inner_kwargs["audit_context"] = audit_context
+                    if expected_surface is not None:
+                        inner_kwargs["expected_surface"] = expected_surface
                     if reasoning_effort:
                         inner_kwargs["reasoning_effort"] = reasoning_effort
                     result = await asyncio.wait_for(
@@ -3634,6 +3672,7 @@ class LucentDaemon(
         enable_config_discovery: bool = False,
         hooks: list[dict] | None = None,
         audit_context: dict | None = None,
+        expected_surface: dict | None = None,
     ) -> str | None:
         """Inner session runner — uses the LLM engine abstraction.
 
@@ -3655,6 +3694,7 @@ class LucentDaemon(
                 enable_config_discovery=enable_config_discovery,
                 hooks=hooks,
                 audit_context=audit_context,
+                expected_surface=expected_surface,
             )
         elif _COPILOT_SDK_AVAILABLE:
             return await self._run_via_copilot_direct(
@@ -3697,6 +3737,7 @@ class LucentDaemon(
         enable_config_discovery: bool = False,
         hooks: list[dict] | None = None,
         audit_context: dict | None = None,
+        expected_surface: dict | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
         engine = get_engine_for_model(model) if _LLM_ENGINE_AVAILABLE else get_engine()
@@ -3843,6 +3884,14 @@ class LucentDaemon(
                     "engine": getattr(engine, "name", "unknown"),
                 },
                 enable_config_discovery=enable_config_discovery,
+                **(
+                    # CopilotEngine has no expected_surface parameter — Layer 2
+                    # validation is LangChain-engine-only. Pass it only when set
+                    # so a Copilot-engine fallback doesn't TypeError.
+                    {"expected_surface": expected_surface}
+                    if expected_surface is not None
+                    else {}
+                ),
             )
 
             if not terminal_outcome["completed"] and not terminal_outcome["error"]:
@@ -4467,9 +4516,7 @@ class LucentDaemon(
                         },
                     )
                     if managed_tools:
-                        for tool_name in (
-                            "list_tool_definitions", "get_tool_definition", "run_managed_tool",
-                        ):
+                        for tool_name in _MANAGED_TOOL_RUNTIME_TOOLS:
                             if tool_name not in task_mcp_config["memory-server"]["tools"]:
                                 task_mcp_config["memory-server"]["tools"].append(tool_name)
                     log(f"Task {task_id[:8]} using {_scope_type} scoped key"
@@ -4486,6 +4533,62 @@ class LucentDaemon(
                     await _fail_owned(task_id, reason)
                     await RequestAPI.add_event(task_id, "dispatch_denied", reason)
                     continue
+
+            # Dispatch-time composition surface: always emit task-level
+            # telemetry for what this dispatch actually composed. The managed
+            # tool carrier is task_mcp_config["memory-server"] — when the
+            # daemon's MCP_CONFIG is transiently wiped, the scoped-server
+            # block above is skipped and the carrier (and every granted
+            # managed tool with it) silently vanishes from the surface. The
+            # event makes that visible; the refusal makes it fatal.
+            _carrier_tools = (
+                task_mcp_config.get("memory-server", {}).get("tools") or []
+            )
+            _surface = compose_task_tool_surface(
+                carrier_tools=_carrier_tools,
+                managed_tool_names=[t.get("name") for t in (managed_tools or [])],
+            )
+            try:
+                await RequestAPI.add_event(
+                    task_id,
+                    "composition_surface",
+                    (
+                        f"composed tools={_surface['composed_tool_count']}, "
+                        f"run_managed_tool={_surface['run_managed_tool']}, "
+                        f"granted={_surface['granted_tool_names']}"
+                    ),
+                    {
+                        "composed_tool_count": _surface["composed_tool_count"],
+                        "run_managed_tool": _surface["run_managed_tool"],
+                        "granted_tool_names": _surface["granted_tool_names"],
+                    },
+                )
+            except Exception as exc:
+                log(
+                    f"Task {task_id[:8]} composition_surface event failed: {exc}",
+                    "WARN",
+                )
+            if _surface["granted_tool_names"] and not _surface["run_managed_tool"]:
+                reason = (
+                    f"Refusing dispatch: agent '{agent_type}' carries "
+                    f"{len(_surface['granted_tool_names'])} managed tool grant(s) "
+                    f"({_surface['granted_tool_names']}) but the MCP config carrier "
+                    f"is absent — run_managed_tool would not exist in the composed "
+                    f"surface (likely MCP_CONFIG wipe; granted tools silently lost)."
+                )
+                log(reason, "ERROR")
+                await _fail_owned(task_id, reason)
+                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                continue
+
+            # Layer 2 expectations: when the task carries managed-tool grants,
+            # the engine-side surface check must require the carrier. None for
+            # grant-free dispatches keeps the engine validator a no-op
+            # (empty-allowlist semantics) so grant-free sessions are never
+            # blocked by Layer 2.
+            _expected_surface = (
+                {"run_managed_tool": True} if _surface["granted_tool_names"] else None
+            )
 
             # Mark running only after requester-scoped resources resolve successfully
             await _start_owned(task_id)
@@ -4683,6 +4786,7 @@ class LucentDaemon(
                     mcp_config_override=task_mcp_config,
                     enable_config_discovery=task_enable_config_discovery,
                     hooks=hooks,
+                    expected_surface=_expected_surface,
                     audit_context={
                         "source": "daemon.task",
                         "organization_id": org_id,

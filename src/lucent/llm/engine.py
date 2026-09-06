@@ -22,6 +22,7 @@ class SessionEventType(enum.Enum):
     SESSION_IDLE = "session.idle"
     ERROR = "error"
     OTHER = "other"
+    COMPOSITION_SURFACE = "composition.surface"
 
 
 @dataclass
@@ -35,6 +36,73 @@ class SessionEvent:
     tool_output: str | None = None
     usage: dict[str, Any] | None = None
     raw: Any = None  # Original event object from the backend
+
+
+def validate_expected_surface(
+    tools: Any,
+    *,
+    expected_surface: dict[str, Any] | None,
+    carrier_present: bool,
+    logger: Any,
+) -> None:
+    """Fail fast when the composed tool surface contradicts dispatch expectations.
+
+    Layer 2 of the composition-hardening design: the daemon composes the
+    task's MCP config and managed-tool grants at dispatch time (Layer 1,
+    ``daemon.compose_task_tool_surface``), but the session's actual surface
+    is whatever bridge discovery produced. When a required tool is missing
+    from the real surface — e.g. the memory-server carrier was transiently
+    wiped and ``run_managed_tool`` vanished — the session must refuse before
+    the model loop instead of failing later with vague per-call
+    "tool is not available" errors.
+
+    Args:
+        tools: The actually-composed surface tool names (iterable of str).
+        expected_surface: Dispatch-time expectations keyed by tool name.
+            ``None`` or an empty dict means "no expectations" and is a no-op,
+            so sessions without managed-tool grants are never blocked.
+            A truthy value requires the tool to be present in the composed
+            surface; a falsy value requires the tool to be absent.
+        carrier_present: Whether the ``run_managed_tool`` carrier composed
+            into the surface. When an expectation requires the carrier, its
+            absence alone is a refusal even if the tools listing is stale.
+        logger: Logger for the pass-through debug line.
+
+    Raises:
+        ValueError: On a malformed expectation or a violated expectation.
+    """
+    if not expected_surface:
+        return
+    if not isinstance(expected_surface, dict):
+        raise ValueError(
+            "expected_surface must be a dict keyed by tool name, got "
+            f"{type(expected_surface).__name__}"
+        )
+    actual = sorted(str(t) for t in tools or [] if isinstance(t, str) and t)
+    for name, required in expected_surface.items():
+        if not name:
+            continue
+        present = str(name) in actual or (
+            str(name) == "run_managed_tool" and bool(carrier_present)
+        )
+        if required and not present:
+            raise ValueError(
+                f"Composition refusal: expected surface requires tool "
+                f"'{name}' but it is absent from the composed surface "
+                f"(actual: {actual or '[]'}). Likely the MCP config carrier "
+                f"was wiped or discovery dropped the tool — refusing to run "
+                f"the model loop rather than failing later with per-call "
+                f"'tool is not available' errors."
+            )
+        if not required and present:
+            raise ValueError(
+                f"Composition refusal: expected surface forbids tool "
+                f"'{name}' but it is present in the composed surface "
+                f"(actual: {actual})."
+            )
+    logger.debug(
+        "Expected surface validated: %s vs actual %s", expected_surface, actual
+    )
 
 
 class ModelNotAvailableError(Exception):

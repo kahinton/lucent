@@ -65,9 +65,91 @@ MODEL_UPDATE = "model.update"
 MODEL_CREATE = "model.create"
 MODEL_DELETE = "model.delete"
 
+# Definitions (agents, skills, hooks, managed tools, MCP servers)
+DEFINITION_CREATE = "definition.create"
+DEFINITION_UPDATE = "definition.update"
+DEFINITION_APPROVE = "definition.approve"
+DEFINITION_REJECT = "definition.reject"
+DEFINITION_DELETE = "definition.delete"
+DEFINITION_GRANT = "definition.grant"
+DEFINITION_REVOKE = "definition.revoke"
+
+# Sandbox templates
+TEMPLATE_CREATE = "sandbox_template.create"
+TEMPLATE_UPDATE = "sandbox_template.update"
+TEMPLATE_DELETE = "sandbox_template.delete"
+TEMPLATE_STATUS_CHANGE = "sandbox_template.status_change"
+
 # Runtime settings
 SETTING_UPDATE = "settings.update"
 SETTING_RESET = "settings.reset"
+
+
+def resolve_audit_actor(
+    explicit_user_id: str | UUID | None = None,
+) -> tuple[UUID | None, UUID | None, dict[str, Any]]:
+    """Resolve the actor for an admin audit row.
+
+    Resolution order: an explicitly passed user id wins; otherwise the
+    request-scoped auth context (``lucent.auth.get_current_user``) supplies
+    the actor. This lets the MCP-tool/daemon paths — which construct
+    repositories without an explicit actor — still attribute mutations to
+    the authenticated caller. Unauthenticated (system-originated) mutations
+    resolve to a NULL actor with ``actor_source=system`` in the context.
+
+    Returns:
+        ``(actor_user_id, impersonator_user_id, auth_context)`` where
+        ``auth_context`` carries only attribution markers (``auth_source``,
+        ``actor_source``, ``actor_source_invalid``, ``impersonation``) to be
+        merged into the audit row's context. Never raises: any attribution
+        failure degrades to the system actor.
+
+    Note:
+        ``lucent.auth`` is imported at call time on purpose — it imports
+        ``lucent.db`` at module level, so a module-level import here would
+        be circular.
+    """
+    from lucent.auth import get_current_user  # function-level: avoids import cycle
+
+    auth_ctx: dict[str, Any] = {}
+    actor: UUID | None = None
+    impersonator: UUID | None = None
+
+    resolved = explicit_user_id
+    if resolved is None:
+        user = get_current_user()
+        if user and user.get("id") is not None:
+            try:
+                resolved = str(user["id"])
+            except Exception:
+                resolved = None
+        else:
+            user = None
+    else:
+        user = None
+
+    if resolved is not None:
+        try:
+            actor = UUID(str(resolved))
+            auth_ctx["auth_source"] = "request_context"
+        except (ValueError, AttributeError, TypeError):
+            actor = None
+            auth_ctx["actor_source_invalid"] = True
+    if actor is None:
+        auth_ctx["actor_source"] = "system"
+
+    # Impersonation only matters when the actor came from the auth context;
+    # an explicit user id is already the precise actor.
+    if explicit_user_id is None and user:
+        imp = user.get("impersonator_id")
+        if imp:
+            try:
+                impersonator = UUID(imp)
+                auth_ctx["impersonation"] = True
+            except (ValueError, AttributeError, TypeError):
+                impersonator = None
+
+    return actor, impersonator, auth_ctx
 
 
 class AdminAuditRepository:
@@ -131,6 +213,69 @@ class AdminAuditRepository:
                 outcome,
             )
         return dict(row) if row else {}
+
+    async def log_definition_event(
+        self,
+        event_type: str,
+        organization_id: UUID,
+        user_id: UUID | None = None,
+        impersonator_user_id: UUID | None = None,
+        definition_type: str | None = None,
+        definition_id: UUID | None = None,
+        context: dict[str, Any] | None = None,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Log a definition lifecycle event (agent/skill/hook/managed tool/MCP server).
+
+        Mirrors ``AuditRepository.log_definition_event`` so the admin audit
+        table can accept the same definition lifecycle events alongside the
+        memory-centric audit stream. Definition events are stored with
+        ``entity_type`` = definition_type and the dotted ``definition.*``
+        action name derived from the event type.
+
+        Event types are accepted in either form — the dotted admin action
+        (``definition.update``) or the underscore memory-audit constant
+        (``definition_update``) — since call sites pass both shapes.
+
+        Args:
+            event_type: One of the DEFINITION_EVENT_TYPES constants
+                (e.g. ``definition_update``) or its dotted admin-audit form
+                (e.g. ``definition.update``).
+            organization_id: The organization this event belongs to.
+            user_id: The user who triggered the event (if applicable).
+            definition_type: 'agent', 'skill', 'hook', 'managed_tool', or
+                'mcp_server'.
+            definition_id: The UUID of the definition involved.
+            context: Additional event-specific metadata.
+            notes: Optional human-readable notes.
+
+        Returns:
+            The created audit log entry.
+        """
+        # Accept both the dotted admin action (definition.update) and the
+        # underscore memory-audit constant (definition_update); the dotted
+        # form is what call sites carry after the action map, the underscore
+        # form what direct callers pass from DEFINITION_EVENT_TYPES.
+        raw = str(event_type)
+        dotted = raw if "." in raw else raw.replace("_", ".", 1)
+        prefix, _, suffix = dotted.partition(".")
+        if not suffix or prefix != "definition":
+            raise ValueError(f"Unknown definition event type: {event_type}")
+        ctx = dict(context) if context else {}
+        if definition_type:
+            ctx["definition_type"] = definition_type
+        if definition_id:
+            ctx["definition_id"] = str(definition_id)
+        return await self.log(
+            organization_id=organization_id,
+            action=f"definition.{suffix}",
+            entity_type=definition_type or "definition",
+            entity_id=definition_id,
+            actor_user_id=user_id,
+            impersonator_user_id=impersonator_user_id,
+            context=ctx,
+            notes=notes,
+        )
 
     async def log_for_user(
         self,

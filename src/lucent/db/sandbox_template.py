@@ -3,17 +3,38 @@
 from __future__ import annotations
 
 import json
+import logging
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 import asyncpg
 
+from lucent.db.admin_audit import (
+    TEMPLATE_CREATE,
+    TEMPLATE_DELETE,
+    TEMPLATE_STATUS_CHANGE,
+    TEMPLATE_UPDATE,
+    AdminAuditRepository,
+    resolve_audit_actor,
+)
 from lucent.secrets.utils import validate_env_var_references
 from lucent.sandbox.models import validate_extra_hosts
 
+logger = logging.getLogger(__name__)
+
 
 class SandboxTemplateRepository:
-    """CRUD for sandbox environment templates."""
+    """CRUD for sandbox environment templates.
+
+    Mutating operations (create/update/delete/set_status) write an
+    ``admin_audit_log`` row by default so administrative changes — including
+    destructive field wipes — always leave a trace. Reads and the mechanical
+    ``mark_used``/built-in-sync paths are not audited. Pass ``audit=False``
+    (constructor or per-call on ``create``) for purely mechanical mutation
+    paths such as startup template sync.
+    """
 
     _json_fields = {
         "setup_commands",
@@ -23,8 +44,10 @@ class SandboxTemplateRepository:
         "extra_hosts",
     }
 
-    def __init__(self, pool: asyncpg.Pool):
+    def __init__(self, pool: asyncpg.Pool, *, audit: bool = True):
         self.pool = pool
+        self._audit_enabled = audit
+        self._admin_audit_repo: AdminAuditRepository | None = None
 
     @classmethod
     def _parse_row(cls, row: asyncpg.Record) -> dict:
@@ -35,6 +58,87 @@ class SandboxTemplateRepository:
             if isinstance(val, str):
                 d[field] = json.loads(val)
         return d
+
+    @staticmethod
+    def _audit_safe(row: dict | None) -> dict | None:
+        """Make a row dict JSON-serializable for the audit payload.
+
+        asyncpg returns datetimes/UUIDs as native objects; the admin audit
+        INSERT serializes old/new values with ``json.dumps``, which would
+        fail on them. Timestamps are kept (ISO-formatted) rather than
+        dropped so the trail shows exactly when the prior state was set.
+        """
+        if row is None:
+            return None
+        out: dict[str, Any] = {}
+        for key, val in row.items():
+            if isinstance(val, datetime):
+                out[key] = val.isoformat()
+            elif isinstance(val, UUID):
+                out[key] = str(val)
+            elif isinstance(val, Decimal):
+                out[key] = str(val)
+            else:
+                out[key] = val
+        return out
+
+    async def _fire_audit(
+        self,
+        action: str,
+        organization_id: str,
+        entity_id: str,
+        *,
+        actor_user_id: UUID | None = None,
+        impersonator_user_id: UUID | None = None,
+        audit: bool | None = None,
+        old_values: dict | None = None,
+        new_values: dict | None = None,
+        changed_fields: list[str] | None = None,
+        notes: str | None = None,
+    ) -> None:
+        """Fire-and-forget admin audit row. Never raises.
+
+        Actor resolution order: explicit ``actor_user_id``, then the
+        request-scoped auth context (via ``resolve_audit_actor``), then a
+        NULL (system) actor — so template mutations made through MCP-tool
+        and daemon paths (which construct this repository without an
+        explicit actor) still attribute to the authenticated caller.
+
+        Per-call ``audit`` (None = defer to the constructor's ``audit``
+        flag) lets mechanical mutation paths such as built-in template
+        sync opt out of admin_audit_log noise.
+        """
+        if audit is False or (audit is None and not self._audit_enabled):
+            return
+        if actor_user_id is None and impersonator_user_id is None:
+            resolved_actor, resolved_impersonator, auth_ctx = resolve_audit_actor(None)
+        else:
+            resolved_actor = actor_user_id
+            resolved_impersonator = impersonator_user_id
+            auth_ctx = {}
+        if self._admin_audit_repo is None:
+            self._admin_audit_repo = AdminAuditRepository(self.pool)
+        try:
+            await self._admin_audit_repo.log(
+                organization_id=UUID(organization_id),
+                action=action,
+                entity_type="sandbox_template",
+                entity_id=UUID(entity_id),
+                actor_user_id=resolved_actor,
+                impersonator_user_id=resolved_impersonator,
+                changed_fields=changed_fields,
+                old_values=old_values,
+                new_values=new_values,
+                context=dict(auth_ctx or {}),
+                notes=notes,
+            )
+        except Exception:
+            logger.warning(
+                "Admin audit failed for sandbox_template %s (%s)",
+                entity_id,
+                action,
+                exc_info=True,
+            )
 
     async def create(
         self,
@@ -63,6 +167,7 @@ class SandboxTemplateRepository:
         status: str = "approved",
         proposed_by: str | None = None,
         proposal_reason: str | None = None,
+        audit: bool | None = None,
     ) -> dict:
         validate_env_var_references(env_vars)
         extra_hosts = validate_extra_hosts(extra_hosts or {})
@@ -114,6 +219,16 @@ class SandboxTemplateRepository:
                 UUID(proposed_by) if proposed_by else None,
                 proposal_reason,
             )
+            if row is not None:
+                await self._fire_audit(
+                    TEMPLATE_CREATE,
+                    organization_id,
+                    str(row["id"]),
+                    actor_user_id=UUID(created_by) if created_by else None,
+                    impersonator_user_id=None,
+                    audit=audit,
+                    new_values=self._audit_safe(dict(row)),
+                )
             return self._parse_row(row)
 
     async def get(self, template_id: str, organization_id: str | None = None) -> dict | None:
@@ -193,7 +308,8 @@ class SandboxTemplateRepository:
                 "has_more": offset + len(rows) < total_count,
             }
 
-    async def update(self, template_id: str, organization_id: str, **kwargs) -> dict | None:
+    async def update(self, template_id: str, organization_id: str, *,
+                     audit: bool | None = None, **kwargs) -> dict | None:
         """Update template fields. Only non-None kwargs are applied."""
         if "env_vars" in kwargs and kwargs["env_vars"] is not None:
             validate_env_var_references(kwargs["env_vars"])
@@ -250,21 +366,58 @@ class SandboxTemplateRepository:
             return await self.get(template_id, organization_id)
 
         async with self.pool.acquire() as conn:
+            before = await conn.fetchrow(
+                "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
+                UUID(template_id),
+                UUID(organization_id),
+            )
             row = await conn.fetchrow(
                 f"""UPDATE sandbox_templates SET {", ".join(sets)}
                     WHERE id = $1 AND organization_id = $2
                     RETURNING *""",
                 *params,
             )
+            if before is not None:
+                await self._fire_audit(
+                    TEMPLATE_UPDATE,
+                    organization_id,
+                    template_id,
+                    actor_user_id=None,
+                    impersonator_user_id=None,
+                    audit=audit,
+                    old_values=self._audit_safe(dict(before)),
+                    new_values=self._audit_safe(dict(row)) if row else None,
+                    changed_fields=sorted(
+                        k for k in kwargs
+                        if k in self._json_fields | set(field_map)
+                        | ownership_fields | {"status"}
+                    ),
+                )
             return self._parse_row(row) if row else None
 
-    async def delete(self, template_id: str, organization_id: str) -> bool:
+    async def delete(self, template_id: str, organization_id: str, *,
+                     audit: bool | None = None) -> bool:
         async with self.pool.acquire() as conn:
+            before = await conn.fetchrow(
+                "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
+                UUID(template_id),
+                UUID(organization_id),
+            )
             result = await conn.execute(
                 "DELETE FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
                 UUID(template_id),
                 UUID(organization_id),
             )
+            if result == "DELETE 1":
+                await self._fire_audit(
+                    TEMPLATE_DELETE,
+                    organization_id,
+                    template_id,
+                    actor_user_id=None,
+                    impersonator_user_id=None,
+                    audit=audit,
+                    old_values=self._audit_safe(dict(before)) if before else None,
+                )
             return result == "DELETE 1"
 
     def to_sandbox_config(self, template: dict) -> dict:
@@ -365,10 +518,17 @@ class SandboxTemplateRepository:
         organization_id: str,
         status: str,
         reviewed_by: str | None = None,
+        *,
+        audit: bool | None = None,
     ) -> dict | None:
         if status not in {"approved", "proposed", "rejected"}:
             raise ValueError(f"Invalid status: {status}")
         async with self.pool.acquire() as conn:
+            before = await conn.fetchrow(
+                "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
+                UUID(template_id),
+                UUID(organization_id),
+            )
             row = await conn.fetchrow(
                 """UPDATE sandbox_templates
                    SET status = $3,
@@ -382,6 +542,19 @@ class SandboxTemplateRepository:
                 status,
                 UUID(reviewed_by) if reviewed_by else None,
             )
+            if before is not None:
+                await self._fire_audit(
+                    TEMPLATE_STATUS_CHANGE,
+                    organization_id,
+                    template_id,
+                    actor_user_id=UUID(reviewed_by) if reviewed_by else None,
+                    impersonator_user_id=None,
+                    audit=audit,
+                    old_values=self._audit_safe(dict(before)),
+                    new_values=self._audit_safe(dict(row)) if row else None,
+                    changed_fields=["status", "reviewed_by", "reviewed_at"],
+                    notes=f"Status change to '{status}'",
+                )
             return self._parse_row(row) if row else None
 
     async def mark_used(self, template_id: str) -> None:
@@ -479,6 +652,9 @@ class SandboxTemplateRepository:
                     organization_id=organization_id,
                     scope="built-in",
                     status="approved",
+                    # Mechanical startup sync — not an administrative
+                    # action; keeps admin_audit_log free of boot noise.
+                    audit=False,
                     **payload,
                 )
             synced += 1
