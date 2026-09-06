@@ -484,7 +484,7 @@
             </div>
             {% endif %}
             
-            <main class="py-8 px-8">
+            <main data-lucent-copy-normalized class="py-8 px-8">
                 {% block content_wrapper %}
                 <div class="{% block content_max_width %}max-w-6xl{% endblock %} mx-auto">
                     {% block content %}{% endblock %}
@@ -554,6 +554,38 @@
             const output = document.getElementById(input.dataset.valueOutput);
             if (output) output.textContent = input.value;
         }
+    });
+    </script>
+
+    <script nonce="{{ request.state.csp_nonce }}">
+    document.addEventListener('copy', function(event) {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed || !selection.rangeCount || !event.clipboardData) return;
+
+        const range = selection.getRangeAt(0);
+        const contentRoot = document.querySelector('[data-lucent-copy-normalized]');
+        if (!contentRoot || !contentRoot.contains(range.startContainer) || !contentRoot.contains(range.endContainer)) return;
+
+        const elementForNode = function(node) {
+            return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        };
+        const startElement = elementForNode(range.startContainer);
+        const endElement = elementForNode(range.endContainer);
+        const editableSelector = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+        if (startElement?.closest(editableSelector) || endElement?.closest(editableSelector)) return;
+
+        const wrapper = document.createElement('div');
+        wrapper.style.setProperty('color', '#000000', 'important');
+        wrapper.style.setProperty('background-color', '#ffffff', 'important');
+        wrapper.appendChild(range.cloneContents());
+        wrapper.querySelectorAll('*').forEach(function(element) {
+            element.style.setProperty('color', '#000000', 'important');
+            element.style.setProperty('background-color', '#ffffff', 'important');
+        });
+
+        event.clipboardData.setData('text/plain', selection.toString());
+        event.clipboardData.setData('text/html', wrapper.outerHTML);
+        event.preventDefault();
     });
     </script>
     
