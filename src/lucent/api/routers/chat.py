@@ -1040,6 +1040,27 @@ async def update_chat_session(
     return session
 
 
+@router.get("/sessions/{session_id}/usage")
+async def get_chat_session_usage(request: Request, session_id: str):
+    """Per-session token usage for the context-window usage indicator.
+
+    Returns the most recent LLM call's record: its input_tokens is the
+    context size sent on the latest turn (each turn re-sends the full
+    conversation), not a cumulative session total.
+    """
+    user, pool = await _get_session_user(request)
+    from lucent.db.token_usage import TokenUsageRepository
+
+    usage = await TokenUsageRepository(pool).get_session_usage(
+        session_id,
+        organization_id=str(user["organization_id"]),
+        user_id=str(user["id"]),
+    )
+    if not usage:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return usage
+
+
 @router.post("/stream")
 async def chat_stream(
     request: Request,
@@ -1264,6 +1285,7 @@ async def chat_models(request: Request):
                 "category": model["category"],
                 "reasoning_efforts": model.get("reasoning_efforts") or [],
                 "supports_vision": bool(model.get("supports_vision")),
+                "context_window": int(model.get("context_window") or 0),
             }
             for model in models
         ],

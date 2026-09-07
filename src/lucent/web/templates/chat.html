@@ -499,7 +499,14 @@
                     <span id="status-text">Thinking...</span>
                 </div>
             </div>
-            
+
+            <!-- Context usage indicator (visible: slim bar; details on hover via title) -->
+            <div id="context-usage" class="hidden mb-2 px-1">
+                <div id="context-usage-track" class="h-1.5 bg-gray-100 rounded-full overflow-hidden" title="">
+                    <div id="context-usage-bar" class="h-full bg-primary-500 rounded-full transition-colors" style="width: 0%"></div>
+                </div>
+            </div>
+
             <form class="input-glow flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 transition-all">
                 <input type="file" id="attach-input" class="hidden" multiple
                     accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,text/csv" />
@@ -600,6 +607,7 @@ const state = {
     streamedText: '',   // Current streaming text
     msgCount: 0,
     modelsById: {},
+    contextTokens: 0,   // Context tokens sent on the latest LLM call (usage ledger)
     pendingAttachments: [],
 };
 
@@ -954,6 +962,7 @@ async function loadSession(sessionId) {
         applySessionConfig(session);
         renderSessionMessages(session.messages || [], session.events || []);
         await loadSessions();
+        refreshContextUsage();
     } catch(e) {
         console.error('Failed to load session:', e);
     }
@@ -1216,6 +1225,7 @@ async function sendMessage(e) {
                                 reasoningEl = null;
                             }
                             hideStatus();
+                            refreshContextUsage();
                             break;
                     }
                 } catch(e) { /* skip malformed event */ }
@@ -1420,6 +1430,7 @@ function clearConversation(options = {}) {
         state.abortController = null;
     }
     state.streaming = false;
+    updateContextUsage(0);
     
     const msgs = document.getElementById('messages');
     msgs.innerHTML = '';
@@ -1486,6 +1497,61 @@ function showStatus(text) {
 
 function hideStatus() {
     document.getElementById('status-bar').classList.add('hidden');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Context-window usage indicator
+// ═══════════════════════════════════════════════════════════════════
+
+function updateContextUsage(sessionTokens) {
+    state.contextTokens = sessionTokens || 0;
+    const wrapper = document.getElementById('context-usage');
+    const bar = document.getElementById('context-usage-bar');
+    const track = document.getElementById('context-usage-track');
+    if (!wrapper || !bar || !track) return;
+
+    const model = state.modelsById[document.getElementById('model-select').value];
+    const contextWindow = model && model.context_window ? model.context_window : 0;
+    if (!contextWindow) {
+        // Context window unknown — bar stays empty/primary; hover shows raw token count only.
+        bar.style.width = '0%';
+        bar.className = bar.className.replace(/bg-(primary|amber|orange|red)-\d00/g, 'bg-primary-500');
+        track.title = state.contextTokens > 0
+            ? `${state.contextTokens.toLocaleString()} tokens (context window unknown)`
+            : '';
+        wrapper.classList.toggle('hidden', state.contextTokens === 0);
+        return;
+    }
+
+    const pct = Math.min(100, Math.round((state.contextTokens / contextWindow) * 100));
+    bar.style.width = pct + '%';
+    let colorClass = 'bg-primary-500';          // < 75%
+    if (pct >= 100) colorClass = 'bg-red-400';  // full
+    else if (pct >= 90) colorClass = 'bg-orange-400';
+    else if (pct >= 75) colorClass = 'bg-amber-400';
+    bar.className = bar.className.replace(/bg-(primary|amber|orange|red)-\d00/g, colorClass);
+    track.title = `${state.contextTokens.toLocaleString()} of ${contextWindow.toLocaleString()} tokens · ${pct}% of context`;
+    wrapper.classList.remove('hidden');
+}
+
+async function refreshContextUsage() {
+    if (!state.sessionId) {
+        updateContextUsage(0);
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/chat/sessions/${state.sessionId}/usage`);
+        if (resp.status === 404) {
+            // No LLM calls yet in this session — no context in use.
+            updateContextUsage(0);
+            return;
+        }
+        if (!resp.ok) throw new Error('Unable to load session usage');
+        const usage = await resp.json();
+        updateContextUsage(usage.input_tokens);
+    } catch(e) {
+        console.error('Failed to load session usage:', e);
+    }
 }
 
 function scrollToBottom() {

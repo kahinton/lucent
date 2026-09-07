@@ -70,6 +70,41 @@ class TokenUsageRepository:
             )
         return dict(row) if row else {}
 
+    async def get_session_usage(
+        self,
+        session_id: str | UUID,
+        *,
+        organization_id: str | UUID,
+        user_id: str | UUID | None = None,
+    ) -> dict[str, Any]:
+        """Most recent usage record for one chat session (org- and user-scoped).
+
+        Context usage consumers read ``input_tokens`` from the latest call:
+        each turn re-sends the full conversation, so the latest call's
+        input_tokens approximates the model context currently in use.
+        """
+        clauses = ["session_id = $1", "organization_id = $2"]
+        params: list[Any] = [_uuid(session_id), _uuid(organization_id)]
+        if user_id is not None:
+            params.append(_uuid(user_id))
+            clauses.append(f"user_id = ${len(params)}")
+        sql = f"""
+            SELECT input_tokens,
+                   output_tokens,
+                   cache_read_tokens,
+                   cache_write_tokens,
+                   reasoning_tokens,
+                   input_tokens + output_tokens AS total_tokens,
+                   model,
+                   created_at
+            FROM llm_token_usage WHERE {" AND ".join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(sql, *params)
+        return dict(row) if row else {}
+
     async def get_report(
         self,
         organization_id: str | UUID,
