@@ -397,6 +397,39 @@ class ModelRepository:
             "disabled_missing": disabled_missing if disable_missing else 0,
         }
 
+    async def list_discovery_state(self) -> dict[str, dict]:
+        """Return ``{model_id: discovery_metadata}`` for digest change detection.
+
+        Lets discovery skip re-fetching provider details for models whose
+        catalog digest has not changed since the last sync.
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT id, discovery_metadata FROM models")
+        return {
+            str(row["id"]): row["discovery_metadata"] or {}
+            for row in rows
+            if isinstance(row["discovery_metadata"], dict)
+        }
+
+    async def touch_discovered_at(self, model_ids: list[str]) -> None:
+        """Bump ``last_discovered_at`` without touching row content.
+
+        Used on unchanged-digest syncs so the model list still reflects that
+        the provider catalog was seen recently.
+        """
+        if not model_ids:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE models
+                SET last_discovered_at = $1, updated_at = $1
+                WHERE id = ANY($2::text[])
+                """,
+                datetime.now(timezone.utc),
+                list(model_ids),
+            )
+
     async def toggle_model(self, model_id: str, enabled: bool) -> dict | None:
         return await self.update_model(model_id, is_enabled=enabled)
 

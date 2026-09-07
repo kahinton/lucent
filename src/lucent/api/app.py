@@ -7,7 +7,9 @@ This module provides:
 The API and web interface run alongside the MCP server.
 """
 
+import asyncio
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -91,26 +93,57 @@ async def _sync_built_in_definitions():
         logger.warning(f"Failed to sync built-in definitions: {e}")
 
 
+# Background task reference for the startup model-discovery sync. Kept at
+# module level so lifespan shutdown can await/cancel it if it is still running.
+_model_discovery_task: asyncio.Task | None = None
+
+
 async def _sync_configured_model_providers(pool) -> None:
     """Refresh model registry rows from configured providers on startup."""
     enabled = os.environ.get("LUCENT_MODEL_DISCOVERY_ON_STARTUP", "true").lower()
     if enabled in {"0", "false", "no", "off"}:
         return
+    started = time.monotonic()
     try:
         from lucent.model_discovery import ModelDiscoveryService
 
         service = ModelDiscoveryService(pool)
         result = await service.sync()
+        elapsed = time.monotonic() - started
         if result.get("provider_count"):
             logger.info(
-                "Model discovery synced %s models from %s configured provider(s)",
+                "Model discovery synced %s models from %s configured provider(s) in %.2fs",
                 result.get("upserted_count", 0),
                 result.get("provider_count", 0),
+                elapsed,
             )
         if result.get("errors"):
             logger.warning("Model discovery had provider errors: %s", result.get("errors"))
     except Exception as e:
         logger.warning("Model discovery startup sync failed: %s", e)
+
+
+async def _start_model_discovery_task(pool) -> None:
+    """Kick off the model-discovery sync without blocking startup.
+
+    The server starts serving requests immediately; discovery continues in the
+    background and reloads the runtime model registry when it finishes. The
+    LUCENT_MODEL_DISCOVERY_ON_STARTUP kill-switch gates this the same way it
+    gated the old blocking startup sync.
+    """
+    global _model_discovery_task
+
+    async def _run() -> None:
+        await _sync_configured_model_providers(pool)
+        try:
+            from lucent.model_registry import load_models_from_db
+
+            await load_models_from_db(pool)
+        except Exception:
+            pass  # Registry keeps its current state (hardcoded fallback)
+        logger.info("Background model discovery complete")
+
+    _model_discovery_task = asyncio.create_task(_run())
 
 
 # Known insecure default values that must not be used in production.
@@ -206,16 +239,17 @@ async def lifespan(app: FastAPI):
 
         await load_runtime_settings_from_db(_secret_pool)
 
-    # Load model registry from database
+    # Load model registry from database, then refresh it from providers in the
+    # background so network discovery never blocks first-request serving.
     try:
         from lucent.db import get_pool as _get_pool
 
         _pool = await _get_pool()
         if _pool:
-            await _sync_configured_model_providers(_pool)
             from lucent.model_registry import load_models_from_db
 
             await load_models_from_db(_pool)
+            await _start_model_discovery_task(_pool)
     except Exception:
         pass  # Fall back to hardcoded registry
 
@@ -235,7 +269,14 @@ async def lifespan(app: FastAPI):
         else:
             yield
     finally:
-        # Shutdown: stop runner, close database pool, then telemetry
+        # Shutdown: stop the background model-discovery task if it is still
+        # running, then the schedule runner, database pool, and telemetry.
+        if _model_discovery_task is not None and not _model_discovery_task.done():
+            _model_discovery_task.cancel()
+            try:
+                await _model_discovery_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if started_system_schedule_runner:
             await stop_server_system_schedule_runner()
         from lucent.web.live_events import live_event_broker

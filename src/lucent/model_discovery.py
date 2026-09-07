@@ -8,6 +8,7 @@ method for Copilot-hosted models.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from dataclasses import asdict, dataclass, field
@@ -157,6 +158,27 @@ def _infer_tags(model_id: str, category: str, *, local: bool = False) -> list[st
     return sorted(tags)
 
 
+def _trained_context_length(show: dict[str, Any], tags_row: dict[str, Any]) -> int:
+    """Extract the model's trained context length (capability ceiling).
+
+    Ollama scopes context keys by architecture (``<arch>.context_length``) in
+    ``/api/show``'s ``model_info``; the exact prefix varies per architecture, so
+    scan for any such key rather than a hardcoded allowlist. Falls back to the
+    ``details.context_length`` hint from ``/api/tags`` when ``model_info`` is
+    unavailable. Never uses ``/api/ps`` — that reports the runtime allocation,
+    which is hardware-dependent and not the trained limit.
+    """
+    model_info = show.get("model_info") or {}
+    arch = model_info.get("general.architecture")
+    if arch and model_info.get(f"{arch}.context_length"):
+        return int(model_info[f"{arch}.context_length"])
+    for key, value in model_info.items():
+        if key.endswith(".context_length"):
+            return int(value)
+    details = tags_row.get("details") or {}
+    return int(details.get("context_length") or 0)
+
+
 _REASONING_EFFORT_METADATA_KEYS = {
     "reasoningeffort",
     "reasoningefforts",
@@ -267,13 +289,6 @@ def _is_generation_model(model_id: str) -> bool:
     return not any(part in lowered for part in excluded)
 
 
-def _env_flag(name: str, *, default: bool = True) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
-
-
 class ModelDiscoveryService:
     """Discovers models from configured providers and syncs them to the DB."""
 
@@ -281,6 +296,10 @@ class ModelDiscoveryService:
         self.pool = pool
         self.repo = ModelRepository(pool)
         self.timeout = timeout
+        self._show_semaphore = asyncio.Semaphore(8)
+        # Digest-skip handoff from _discover_ollama() to sync(): ids whose
+        # catalog digest was unchanged this run (timestamp-only updates).
+        self._last_unchanged_model_ids: set[str] = set()
 
     def configured_providers(self, providers: list[str] | None = None) -> list[str]:
         """Return env-configured providers.
@@ -419,21 +438,24 @@ class ModelDiscoveryService:
             return []
 
         results: list[ProviderDiscoveryResult] = []
-        for provider in provider_ids:
-            try:
-                models = await self._discover_provider(provider, org_id=org_id)
-                results.append(
-                    ProviderDiscoveryResult(provider=provider, configured=True, models=models)
+        provider_results = await asyncio.gather(
+            *(
+                self._discover_provider_safe(provider, org_id=org_id)
+                for provider in provider_ids
+            )
+        )
+        for provider, outcome in zip(provider_ids, provider_results):
+            models, error = outcome
+            if error is not None:
+                logger.warning("Model discovery failed for %s: %s", provider, error)
+            results.append(
+                ProviderDiscoveryResult(
+                    provider=provider,
+                    configured=True,
+                    models=models,
+                    error=error,
                 )
-            except Exception as exc:
-                logger.warning("Model discovery failed for %s: %s", provider, exc)
-                results.append(
-                    ProviderDiscoveryResult(
-                        provider=provider,
-                        configured=True,
-                        error=str(exc),
-                    )
-                )
+            )
         return results
 
     async def sync(
@@ -453,6 +475,8 @@ class ModelDiscoveryService:
         provider_summaries: list[dict[str, Any]] = []
         total_models = 0
         total_upserted = 0
+        unchanged_ids: set[str] = set(self._last_unchanged_model_ids)
+        self._last_unchanged_model_ids = set()
 
         for result in results:
             summary: dict[str, Any] = {
@@ -467,15 +491,28 @@ class ModelDiscoveryService:
                 provider_summaries.append(summary)
                 continue
 
-            sync_result = await self.repo.sync_discovered_models(
-                provider=result.provider,
-                models=[m.to_repo_kwargs() for m in result.models],
-                org_id=org_id,
-                disable_missing=disable_missing,
-            )
-            summary.update(sync_result)
+            unchanged_for_provider = {
+                m.id for m in result.models if m.id in unchanged_ids
+            }
+            if unchanged_for_provider:
+                await self.repo.touch_discovered_at(sorted(unchanged_for_provider))
+            models_to_sync = [
+                m for m in result.models if m.id not in unchanged_for_provider
+            ]
+            if models_to_sync:
+                sync_result = await self.repo.sync_discovered_models(
+                    provider=result.provider,
+                    models=[m.to_repo_kwargs() for m in models_to_sync],
+                    org_id=org_id,
+                    disable_missing=disable_missing,
+                )
+                summary.update(sync_result)
+                summary["skipped_unchanged"] = len(unchanged_for_provider)
+            else:
+                summary["upserted"] = 0
+                summary["skipped_unchanged"] = len(unchanged_for_provider)
             total_models += len(result.models)
-            total_upserted += sync_result.get("upserted", 0)
+            total_upserted += summary.get("upserted", 0)
             provider_summaries.append(summary)
 
         return {
@@ -505,6 +542,19 @@ class ModelDiscoveryService:
             return await self._discover_copilot(org_id=org_id)
         raise ValueError(f"Unsupported model provider: {provider}")
 
+    async def _discover_provider_safe(
+        self,
+        provider: str,
+        *,
+        org_id: str | None = None,
+    ) -> tuple[list[DiscoveredModel], str | None]:
+        """Discover one provider, returning (models, error) so one provider
+        failing never blocks the others."""
+        try:
+            return await self._discover_provider(provider, org_id=org_id), None
+        except Exception as exc:
+            return [], str(exc)
+
     async def _get_json(
         self,
         url: str,
@@ -528,76 +578,41 @@ class ModelDiscoveryService:
             resp.raise_for_status()
             return resp.json()
 
-    async def _probe_ollama_tool_support(
-        self,
-        api_base: str,
-        model_id: str,
-    ) -> dict[str, Any]:
-        """Probe whether Ollama returns structured ``message.tool_calls``.
+    def _summarize_ollama_show(self, show: dict[str, Any]) -> dict[str, Any]:
+        """Extract the fields the app actually uses from an ``/api/show`` payload.
 
-        Some local models advertise a ``tools`` capability because their template
-        accepts tool schemas, but they still emit JSON as plain assistant text.
-        LangChain cannot execute those as tools. The daemon needs actual
-        structured tool calls, so discovery verifies the end-to-end API shape.
+        ``/api/show`` responses carry the full tensors array and the modelfile
+        string — tens to hundreds of KB per model that nothing in Lucent reads.
+        Persisting a compact summary instead keeps ``discovery_metadata`` small
+        while preserving context-window, capability, and provenance details.
         """
-        payload = {
-            "model": model_id,
-            "stream": False,
-            "think": False,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "Call the lucent_probe_tool for Paris. Return only the tool call."
-                    ),
-                }
-            ],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "lucent_probe_tool",
-                        "description": "Probe function-calling support.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                    },
-                }
-            ],
-            "options": {"temperature": 0, "num_predict": 256},
+        capabilities = [str(cap) for cap in (show.get("capabilities") or [])]
+        model_info = show.get("model_info") or {}
+        context_info = {
+            key: value
+            for key, value in model_info.items()
+            if key.endswith(".context_length")
         }
-        try:
-            async with httpx.AsyncClient(timeout=max(self.timeout, 45.0)) as client:
-                resp = await client.post(f"{api_base}/chat", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as exc:
-            return {
-                "ok": False,
-                "error": str(exc),
-                "checked_at": datetime.now(timezone.utc).isoformat(),
-            }
-
-        message = data.get("message") if isinstance(data, dict) else {}
-        tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
-        ok = False
-        if isinstance(tool_calls, list):
-            ok = any(
-                isinstance(call, dict)
-                and isinstance(call.get("function"), dict)
-                and call["function"].get("name") == "lucent_probe_tool"
-                for call in tool_calls
+        summary: dict[str, Any] = {
+            "capabilities": capabilities,
+            "model_info": context_info,
+        }
+        parameters = str(show.get("parameters") or "").strip()
+        if parameters:
+            summary["parameters"] = parameters
+        license_info = show.get("license")
+        if license_info:
+            # Keep only a short identification line — full license text runs
+            # ~10KB per model and nothing in Lucent reads it.
+            license_text = (
+                license_info
+                if isinstance(license_info, str)
+                else " ".join(str(part) for part in license_info)
             )
-        return {
-            "ok": ok,
-            "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
-            "content_excerpt": str((message or {}).get("content") or "")[:200]
-            if isinstance(message, dict)
-            else "",
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-        }
+            short_license = license_text.strip().splitlines()[0].strip()[:200]
+            if short_license:
+                summary["license"] = short_license
+        return summary
 
     async def _discover_openai(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
         api_key = await self._provider_credential("openai", org_id=org_id)
@@ -753,26 +768,59 @@ class ModelDiscoveryService:
             api_base = f"{base_url}/api"
         data = await self._get_json(f"{api_base}/tags")
         rows = data.get("models", []) if isinstance(data, dict) else []
-        models: list[DiscoveredModel] = []
-        for row in rows:
+
+        # Persisted digests let unchanged models skip /api/show and the content
+        # write entirely: capability and context values are static per digest.
+        try:
+            discovery_state = await self.repo.list_discovery_state()
+        except Exception as exc:
+            logger.warning("Model discovery could not read prior digests: %s", exc)
+            discovery_state = {}
+
+        async def fetch_show(model_id: str) -> dict[str, Any]:
+            async with self._show_semaphore:
+                return await self._post_json(f"{api_base}/show", json={"model": model_id})
+
+        async def discover_row(row: dict[str, Any]) -> DiscoveredModel | None:
             model_id = str(row.get("model") or row.get("name") or "")
             if not model_id:
-                continue
-            show: dict[str, Any] = {}
-            try:
-                show_data = await self._post_json(f"{api_base}/show", json={"model": model_id})
-                show = show_data if isinstance(show_data, dict) else {}
-            except Exception:
-                show = {}
+                return None
             category = _infer_category(model_id)
             details = row.get("details") or {}
-            model_info = show.get("model_info") or {}
-            context_window = int(
-                model_info.get("llama.context_length")
-                or model_info.get("qwen2.context_length")
-                or model_info.get("gemma.context_length")
-                or 0
-            )
+            digest = str(row.get("digest") or "")
+            previous = discovery_state.get(model_id) or {}
+            metadata: dict[str, Any] = {}
+            show: dict[str, Any] = {}
+            unchanged = bool(digest) and previous.get("digest") == digest
+            if unchanged:
+                # Digest match: /api/show would return identical data. Reuse the
+                # persisted summary and only refresh the timestamp downstream.
+                self._last_unchanged_model_ids.add(model_id)
+                show = previous.get("show_summary") or {}
+                metadata = dict(previous)
+            else:
+                try:
+                    show_data = await asyncio.wait_for(
+                        fetch_show(model_id), timeout=self.timeout
+                    )
+                    show = show_data if isinstance(show_data, dict) else {}
+                except Exception as exc:
+                    # Transient failure must not drop an existing row's data:
+                    # fall back to the persisted summary for this pass.
+                    logger.warning(
+                        "Model discovery /api/show failed for %s: %s", model_id, exc
+                    )
+                    show = previous.get("show_summary") or {}
+                metadata = {
+                    "digest": digest,
+                    "modified_at": row.get("modified_at"),
+                    "tags_row": {
+                        key: row[key]
+                        for key in ("size", "parameter_size", "quantization_level")
+                        if row.get(key) is not None
+                    },
+                    "show_summary": self._summarize_ollama_show(show) if show else {},
+                }
             capabilities = {
                 str(capability).lower()
                 for capability in [
@@ -787,10 +835,7 @@ class ModelDiscoveryService:
                 if "thinking" in capabilities
                 else []
             )
-            tool_probe: dict[str, Any] | None = None
-            if supports_tools and _env_flag("LUCENT_OLLAMA_TOOL_PROBE", default=True):
-                tool_probe = await self._probe_ollama_tool_support(api_base, model_id)
-                supports_tools = bool(tool_probe.get("ok"))
+            context_window = _trained_context_length(show, row)
             tags = _infer_tags(model_id, category, local=True)
             if details.get("parameter_size"):
                 tags.append(str(details["parameter_size"]).lower())
@@ -801,36 +846,39 @@ class ModelDiscoveryService:
             notes = "Discovered from local Ollama server."
             if reasoning_efforts:
                 notes += " Supports low, medium, and high thinking effort."
-            if "tools" in capabilities and not supports_tools:
-                notes += " Tool capability was advertised but structured tool-call probe failed."
-            elif not supports_tools:
+            if not supports_tools:
                 notes += " Ollama reports no structured tool-call support."
-            models.append(
-                DiscoveredModel(
-                    id=model_id,
-                    provider="ollama",
-                    name=_display_name(model_id),
-                    category=category,
-                    api_model_id=model_id,
-                    context_window=context_window,
-                    supports_tools=supports_tools,
-                    supports_vision=supports_vision,
-                    notes=notes,
-                    tags=sorted(set(tags)),
-                    reasoning_efforts=reasoning_efforts,
-                    engine="langchain",
-                    discovery_metadata={
-                        "tags_row": dict(row),
-                        "show": show,
-                        "tool_probe": tool_probe,
-                        "reasoning_efforts_source": (
-                            "ollama-thinking-capability"
-                            if reasoning_efforts
-                            else None
-                        ),
-                    },
-                )
+            return DiscoveredModel(
+                id=model_id,
+                provider="ollama",
+                name=_display_name(model_id),
+                category=category,
+                api_model_id=model_id,
+                context_window=context_window,
+                supports_tools=supports_tools,
+                supports_vision=supports_vision,
+                notes=notes,
+                tags=sorted(set(tags)),
+                reasoning_efforts=reasoning_efforts,
+                engine="langchain",
+                discovery_metadata=metadata,
             )
+
+        rows = [row for row in rows if isinstance(row, dict)]
+        results = await asyncio.gather(
+            *(discover_row(row) for row in rows), return_exceptions=True
+        )
+        models: list[DiscoveredModel] = []
+        for row, result in zip(rows, results):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Model discovery failed for %s: %s",
+                    row.get("model") or row.get("name"),
+                    result,
+                )
+                continue
+            if result is not None:
+                models.append(result)
         return models
 
     async def _discover_copilot(self, *, org_id: str | None = None) -> list[DiscoveredModel]:

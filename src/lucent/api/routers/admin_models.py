@@ -255,6 +255,11 @@ async def update_model(model_id: str, body: ModelPatchRequest, user: Authenticat
     updates = body.model_dump(exclude_unset=True)
     if "owner_user_id" in updates or "owner_group_id" in updates:
         updates["organization_id"] = user.organization_id
+    # Any save through this route is a human-authored edit: flag the row so
+    # sync_discovered_models' manual/is_custom CASE guards preserve it from
+    # being overwritten on the next provider sync.
+    if existing.get("discovery_source") != "manual" and not existing.get("is_custom"):
+        updates["is_custom"] = True
     updated = await repo.update_model(model_id, **updates)
     if not updated:
         raise HTTPException(status_code=404, detail="Model not found")

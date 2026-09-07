@@ -887,6 +887,11 @@ async def edit_model(request: Request, model_id: str):
         organization_id=str(user.organization_id),
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
+        # A save through this form is a human-authored edit: flag the row so
+        # sync_discovered_models' manual/is_custom CASE guards preserve it
+        # from being overwritten on the next provider sync.
+        discovery_source="manual",
+        is_custom=True,
     )
     await _refresh_runtime_registry(pool)
     if warnings:
