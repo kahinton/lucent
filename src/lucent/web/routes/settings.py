@@ -25,10 +25,10 @@ from lucent.auth_providers import (
     CSRF_FIELD_NAME,
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
-    create_session,
-    destroy_session,
+    destroy_all_user_sessions,
     generate_csrf_token,
     get_cookie_params,
+    rotate_session,
     set_user_password,
     sign_value,
     validate_password_complexity,
@@ -301,19 +301,28 @@ async def change_password(request: Request):
         return _err("Current password is incorrect.")
 
     await set_user_password(pool, user.id, new_password)
-    await destroy_session(pool, user.id)
-    new_token = await create_session(pool, user.id)
+    # Keep this device signed in with a freshly rotated token; revoke every
+    # other session for the account.
+    session_token = request.cookies.get(SESSION_COOKIE_NAME) or ""
+    new_token = None
+    if session_token:
+        new_token = await rotate_session(pool, session_token)
+    await destroy_all_user_sessions(pool, user.id, except_token=session_token or None)
 
     await audit_repo.log_for_user(
         user, request,
         action=audit_actions.PASSWORD_CHANGE,
         entity_type="user",
         entity_id=user.id,
-        notes="self-service password change; all other sessions revoked",
+        notes="self-service password change; other sessions revoked",
     )
 
+    if new_token is None:
+        # No valid session token on this device — fall back to a normal login.
+        return RedirectResponse("/login", status_code=303)
+
     response = RedirectResponse(
-        f"/settings/account?success={quote('Password updated. Other sessions were signed out.')}",
+        f"/settings/account?success={quote('Password updated. Other devices were signed out.')}",
         status_code=303,
     )
     params = get_cookie_params()
@@ -390,16 +399,24 @@ async def force_password_change_submit(request: Request):
     from lucent.auth_providers import clear_force_password_change
     await clear_force_password_change(pool, user.id)
 
-    await destroy_session(pool, user.id)
-    new_token = await create_session(pool, user.id)
+    # Forced change: keep this device signed in, revoke every other session.
+    session_token = request.cookies.get(SESSION_COOKIE_NAME) or ""
+    new_token = None
+    if session_token:
+        new_token = await rotate_session(pool, session_token)
+    await destroy_all_user_sessions(pool, user.id, except_token=session_token or None)
 
     await audit_repo.log_for_user(
         user, request,
         action=audit_actions.PASSWORD_CHANGE,
         entity_type="user",
         entity_id=user.id,
-        notes="forced password change at first login",
+        notes="forced password change at first login; other sessions revoked",
     )
+
+    if new_token is None:
+        # No valid session token on this device — fall back to a normal login.
+        return RedirectResponse("/login", status_code=303)
 
     response = RedirectResponse("/", status_code=303)
     params = get_cookie_params()
@@ -845,7 +862,9 @@ async def settings_revoke_all_sessions(request: Request):
     pool = await get_pool()
     audit_repo = AdminAuditRepository(pool)
 
-    await destroy_session(pool, user.id)
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if session_token:
+        await destroy_all_user_sessions(pool, user.id)
     await audit_repo.log_for_user(
         user, request,
         action=audit_actions.SESSION_REVOKE_ALL,

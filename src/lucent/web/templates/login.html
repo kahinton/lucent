@@ -33,7 +33,6 @@
             --login-muted: #9d9995;
             --login-teal: #00cfc1;
             --login-pink: #ff3f9b;
-            --login-yellow: #ffd84d;
         }
         html { background: var(--login-black); }
         body {
@@ -58,11 +57,6 @@
         }
         .login-title, .login-heading { color: var(--login-text) !important; }
         .login-subtitle, .login-label { color: var(--login-muted) !important; }
-        .login-warning {
-            color: #fff0a8 !important;
-            background: rgba(255, 216, 77, 0.1) !important;
-            border-color: rgba(255, 216, 77, 0.38) !important;
-        }
         input {
             background-color: rgba(5, 5, 5, 0.72) !important;
             color: var(--login-text) !important;
@@ -106,12 +100,6 @@
             {% if error %}
             <div class="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded-lg text-sm">
                 {{ error }}
-            </div>
-            {% endif %}
-
-            {% if session_warning %}
-            <div class="login-warning mb-4 p-3 border rounded-lg text-xs">
-                {{ session_warning }}
             </div>
             {% endif %}
 

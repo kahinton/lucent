@@ -320,7 +320,10 @@ def hash_session_token(token: str) -> str:
 
 
 async def create_session(pool: Pool, user_id: UUID) -> str:
-    """Create a new session for a user and return the raw token.
+    """Create a new login session for a user and return the raw token.
+
+    Users may hold any number of concurrent active sessions — one per device.
+    Creating a session never touches a user's other sessions.
 
     Args:
         pool: Database connection pool.
@@ -334,14 +337,45 @@ async def create_session(pool: Pool, user_id: UUID) -> str:
     expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
 
     query = """
-        UPDATE users
-        SET session_token = $1, session_expires_at = $2
-        WHERE id = $3
+        INSERT INTO user_sessions (token_hash, user_id, expires_at, last_seen_at)
+        VALUES ($1, $2, $3, NOW())
     """
     async with pool.acquire() as conn:
-        await conn.execute(query, token_hash, expires_at, str(user_id))
+        await conn.execute(query, token_hash, str(user_id), expires_at)
 
     return token
+
+
+async def rotate_session(pool: Pool, token: str) -> str | None:
+    """Replace an existing session in place, returning the new raw token.
+
+    Used for session-fixation defense (e.g. at impersonation start) and at
+    password change: the same device keeps its login while its token value
+    changes. Other sessions for the user are not affected.
+
+    Args:
+        pool: Database connection pool.
+        token: The raw session token currently in use.
+
+    Returns:
+        The new raw session token, or None if the token was not valid.
+    """
+    token_hash = hash_session_token(token)
+    new_token = generate_session_token()
+    new_hash = hash_session_token(new_token)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
+
+    query = """
+        UPDATE user_sessions
+        SET token_hash = $1, expires_at = $2, last_seen_at = NOW()
+        WHERE token_hash = $3
+    """
+    async with pool.acquire() as conn:
+        status = await conn.execute(query, new_hash, expires_at, token_hash)
+
+    if status == "UPDATE 0":
+        return None
+    return new_token
 
 
 async def validate_session(pool: Pool, token: str) -> dict[str, Any] | None:
@@ -360,16 +394,24 @@ async def validate_session(pool: Pool, token: str) -> dict[str, Any] | None:
     token_hash = hash_session_token(token)
 
     query = """
-        SELECT id, external_id, provider, organization_id, email, display_name,
-               avatar_url, provider_metadata, is_active, created_at, updated_at,
-               last_login_at, role, session_expires_at, force_password_change
-        FROM users
-        WHERE session_token = $1
-          AND session_expires_at > NOW()
-          AND is_active = true
+        SELECT u.id, u.external_id, u.provider, u.organization_id, u.email,
+               u.display_name, u.avatar_url, u.provider_metadata, u.is_active,
+               u.created_at, u.updated_at, u.last_login_at, u.role,
+               u.force_password_change, s.expires_at AS session_expires_at
+        FROM user_sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.token_hash = $1
+          AND s.expires_at > NOW()
+          AND u.is_active = true
     """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(query, token_hash)
+        if row is not None:
+            # Touch activity so expiry-side cleanup can use last_seen_at.
+            await conn.execute(
+                "UPDATE user_sessions SET last_seen_at = NOW() WHERE token_hash = $1",
+                token_hash,
+            )
 
     if row is None:
         return None
@@ -397,20 +439,52 @@ async def organization_allows_access(pool: Pool, user: dict[str, Any]) -> bool:
     return status == "active"
 
 
-async def destroy_session(pool: Pool, user_id: UUID) -> None:
-    """Destroy a user's session.
+async def destroy_session(pool: Pool, token: str) -> bool:
+    """Destroy one session by its raw token — a per-device logout.
+
+    Only the session matching the presented token is removed; the user's
+    other devices stay logged in.
 
     Args:
         pool: Database connection pool.
-        user_id: The user whose session to destroy.
+        token: The raw session token from the cookie.
+
+    Returns:
+        True if a session row was deleted.
     """
-    query = """
-        UPDATE users
-        SET session_token = NULL, session_expires_at = NULL
-        WHERE id = $1
-    """
+    token_hash = hash_session_token(token)
     async with pool.acquire() as conn:
-        await conn.execute(query, str(user_id))
+        status = await conn.execute(
+            "DELETE FROM user_sessions WHERE token_hash = $1", token_hash
+        )
+    return status != "DELETE 0"
+
+
+async def destroy_all_user_sessions(
+    pool: Pool, user_id: UUID, *, except_token: str | None = None
+) -> None:
+    """Destroy every active session for a user across all devices.
+
+    Used for security-sensitive flows: password resets and
+    "sign out all sessions". Pass ``except_token`` to keep one device
+    (e.g. the device that just changed its own password) logged in.
+
+    Args:
+        pool: Database connection pool.
+        user_id: The user whose sessions to destroy.
+        except_token: Raw token of a session to leave intact.
+    """
+    if except_token:
+        query = """
+            DELETE FROM user_sessions
+            WHERE user_id = $1 AND token_hash != $2
+        """
+        params: tuple[Any, ...] = (str(user_id), hash_session_token(except_token))
+    else:
+        query = "DELETE FROM user_sessions WHERE user_id = $1"
+        params = (str(user_id),)
+    async with pool.acquire() as conn:
+        await conn.execute(query, *params)
 
 
 # --- Password Utilities ---
@@ -483,8 +557,8 @@ async def admin_reset_password(pool: Pool, user_id: UUID) -> str:
     """
     temp_password = generate_temporary_password()
     await set_user_password(pool, user_id, temp_password, force_change=True)
-    # Invalidate existing sessions so user must re-login
-    await destroy_session(pool, user_id)
+    # Invalidate existing sessions on all devices so user must re-login
+    await destroy_all_user_sessions(pool, user_id)
     return temp_password
 
 

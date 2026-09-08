@@ -14,9 +14,9 @@ from lucent.auth_providers import (
     SECURE_COOKIES,
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
-    create_session,
     get_cookie_params,
     hash_session_token,
+    rotate_session,
     sign_value,
 )
 from lucent.db import AdminAuditRepository, UserRepository, get_pool
@@ -311,9 +311,13 @@ async def start_impersonation(request: Request, user_id: UUID):
     if user_role_value == "owner" and target_role == "owner":
         return RedirectResponse(url="/settings/users?error=Cannot+impersonate+other+owners", status_code=303)
 
-    # Regenerate session to prevent session fixation during impersonation
+    # Regenerate the current device's session in place to prevent session
+    # fixation during impersonation. Other devices are not affected.
     try:
-        new_token = await create_session(pool, user.id)
+        current_token = request.cookies.get(SESSION_COOKIE_NAME) or ""
+        new_token = await rotate_session(pool, current_token) if current_token else None
+        if new_token is None:
+            raise RuntimeError("session rotation failed")
     except Exception:
         logger.exception("Error regenerating session for impersonation")
         raise HTTPException(status_code=500, detail="Failed to start impersonation")
@@ -454,10 +458,10 @@ async def deactivate_user(request: Request, user_id: UUID):
 
     user_repo = UserRepository(pool)
     await user_repo.update(user_id, is_active=False)
-    # Also kill any active session for them.
-    from lucent.auth_providers import destroy_session
+    # Also kill every active session for them, on all devices.
+    from lucent.auth_providers import destroy_all_user_sessions
     try:
-        await destroy_session(pool, user_id)
+        await destroy_all_user_sessions(pool, user_id)
     except Exception:
         logger.debug("failed to destroy sessions for deactivated user", exc_info=True)
 

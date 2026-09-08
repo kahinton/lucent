@@ -51,7 +51,6 @@ async def _render_login_page(
             "csrf_token": csrf_token,
             "csrf_field_name": CSRF_FIELD_NAME,
             "fields": provider.get_login_fields(),
-            "session_warning": "Logging in will end any other active sessions.",
         },
         status_code=status_code,
     )
@@ -229,17 +228,13 @@ async def login_submit(request: Request):
 
 @router.post("/logout")
 async def logout(request: Request):
-    """Log the user out."""
+    """Log the current device out. Other devices stay signed in."""
     await _check_csrf(request)
     pool = await get_pool()
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
     if session_token:
-        from lucent.auth_providers import validate_session
-
-        user = await validate_session(pool, session_token)
-        if user:
-            await destroy_session(pool, user["id"])
+        await destroy_session(pool, session_token)
 
     response = RedirectResponse("/login", status_code=303)
     params = get_cookie_params()
