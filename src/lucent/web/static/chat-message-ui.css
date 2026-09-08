@@ -8,6 +8,125 @@
     max-height: 500px;
 }
 
+/* Hook-call chip variant — distinct identity via the brand-pink accent
+   (--lucent-pink #ff3f9b), never used by tool chips (amber/green/gray). */
+.hook-chip {
+    border-left: 3px solid #ff3f9b !important;
+}
+.hook-status-icon {
+    color: #ff3f9b;
+}
+.hook-icon {
+    width: 1rem;
+    height: 1rem;
+}
+.hook-inline-accent {
+    color: #be185d;
+    font-weight: 500;
+}
+.hook-details {
+    background-color: #fdf2f8;
+    border-color: #fbcfe8;
+}
+.hook-detail-label {
+    display: inline-block;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 10px;
+    line-height: 1.25rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #9ca3af;
+    flex-shrink: 0;
+}
+.hook-detail-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+}
+.hook-detail-row + .hook-detail-row {
+    margin-top: 0.5rem;
+}
+.hook-detail-column {
+    flex-direction: column;
+    gap: 0.25rem;
+}
+.hook-detail-value {
+    color: #4b5563;
+    overflow-wrap: anywhere;
+}
+.hook-decision {
+    font-weight: 600;
+}
+.hook-decision-block {
+    color: #b91c1c;
+}
+.hook-decision-replace_args,
+.hook-decision-replace_result {
+    color: #b45309;
+}
+.hook-ref-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+}
+.hook-file-ref {
+    display: inline-block;
+    background-color: #fce7f3;
+    border: 1px solid #f9c6e0;
+    border-radius: 0.25rem;
+    padding: 0.05rem 0.375rem;
+    color: #9d174d;
+    overflow-wrap: anywhere;
+}
+.hook-memory-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+.hook-memory-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.375rem;
+}
+.hook-memory-id {
+    font-weight: 600;
+    color: #be185d;
+    flex-shrink: 0;
+}
+.hook-memory-tags {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    flex-shrink: 0;
+}
+.hook-memory-tag {
+    display: inline-block;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 10px;
+    background-color: #fce7f3;
+    border-radius: 9999px;
+    padding: 0 0.375rem;
+    color: #9d174d;
+}
+.hook-memory-content {
+    color: #4b5563;
+    min-width: 0;
+    flex-basis: 100%;
+    overflow-wrap: anywhere;
+}
+.hook-context-text {
+    margin-top: 0.25rem;
+    max-height: 12rem;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    break-words: anywhere;
+    color: #4b5563;
+}
+
 .chat-streaming-cursor::after {
     content: '\258a';
     animation: chat-cursor-blink 0.8s step-end infinite;

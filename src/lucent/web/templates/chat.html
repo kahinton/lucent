@@ -259,6 +259,18 @@
         .session-drawer { background: rgba(18, 18, 18, 0.98) !important; border-color: #333333 !important; }
         .session-drawer-backdrop { background: rgba(10, 11, 8, 0.28) !important; }
         .session-row.active { background: rgba(0, 207, 193, 0.14) !important; color: #7feee4 !important; border-color: #00a89f !important; }
+        .hook-chip { background-color: #181818 !important; border-color: #3d3d3d !important; color: #b8b4b0 !important; border-left-width: 3px !important; border-left-color: #ff3f9b !important; }
+        .hook-chip:hover { background-color: #242424 !important; }
+        .hook-inline-accent { color: #ff3f9b !important; }
+        .hook-details { background-color: #121212 !important; border-color: #333333 !important; }
+        .hook-detail-value { color: #d5d2ce !important; }
+        .hook-memory-content { color: #d5d2ce !important; }
+        .hook-context-text { color: #d5d2ce !important; }
+        .hook-decision-block { color: #f87171 !important; }
+        .hook-decision-replace_args, .hook-decision-replace_result { color: #fbbf24 !important; }
+        .hook-file-ref { background-color: rgba(255, 63, 155, 0.12) !important; border-color: rgba(255, 63, 155, 0.35) !important; color: #ff8fc4 !important; }
+        .hook-memory-tag { background-color: rgba(255, 63, 155, 0.12) !important; color: #ff8fc4 !important; }
+        .hook-memory-id { color: #ff3f9b !important; }
     }
 
     #empty-state .grid button {
@@ -983,6 +995,8 @@ function replaySessionEvents(assistantEl, events) {
             appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input);
         } else if (eventTypeMatches(event, 'tool_result', 'tool.result')) {
             updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output);
+        } else if (eventTypeMatches(event, 'hook_context')) {
+            appendHookCall(toolsEl, event);
         } else if (eventTypeMatches(event, 'reasoning')) {
             if (!reasoningEl) reasoningEl = createReasoningBlock(toolsEl);
             reasoningText += event.detail || '';
@@ -1206,6 +1220,14 @@ async function sendMessage(e) {
                             showStatus('Thinking...');
                             scrollToBottom();
                             break;
+
+                        case 'hook_context':
+                            // Hook execution — rendered as its own inline chip
+                            // variant (distinct icon + accent, collapsed).
+                            appendHookCall(toolsEl, event);
+                            showStatus(`Running ${(event.hook || 'hook').replace(/_/g, ' ')}...`);
+                            scrollToBottom();
+                            break;
                             
                         case 'error':
                             contentEl.innerHTML = `<div class="flex items-center gap-2 text-red-600 text-sm"><svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/></svg><span>${escapeHtml(event.error)}</span></div>`;
@@ -1353,6 +1375,10 @@ function updateToolResult(container, toolName, output) {
 
 function toggleToolDetails(toolId) {
     LucentChatMessageUI.toggleToolDetails(toolId);
+}
+
+function appendHookCall(container, payload) {
+    LucentChatMessageUI.appendHookCall(container, payload);
 }
 
 // ═══════════════════════════════════════════════════════════════════

@@ -319,6 +319,7 @@ def _event_raw(event) -> dict[str, Any]:
         "tool_input": event.tool_input,
         "tool_output": event.tool_output,
         "usage": event.usage,
+        "raw": event.raw,
     }
 
 
@@ -949,12 +950,27 @@ async def _load_agent_hooks(pool, agent_id: str | None) -> list[dict[str, Any]]:
 
 def _hook_event_payload(event: Any) -> dict[str, Any]:
     raw = event.raw if isinstance(event.raw, dict) else {}
-    return {
+    payload = {
         "type": "hook_context",
         "hook": raw.get("hook") or "hook",
         "text": event.content or "",
         "metadata": {k: v for k, v in raw.items() if k != "hook"},
     }
+    # Promote structured fields for the hook-call UI (additive; absent when the
+    # emitting engine did not supply them, e.g. older persisted events).
+    if raw.get("phase"):
+        payload["phase"] = raw["phase"]
+    if raw.get("trigger_tool"):
+        payload["trigger_tool"] = raw["trigger_tool"]
+    if raw.get("decision"):
+        payload["decision"] = raw["decision"]
+    if isinstance(raw.get("file_refs"), list):
+        payload["file_refs"] = raw["file_refs"]
+    if isinstance(raw.get("memory_count"), int):
+        payload["memory_count"] = raw["memory_count"]
+    if isinstance(raw.get("memories"), list):
+        payload["injected"] = raw["memories"]
+    return payload
 
 
 @router.get("/sessions")

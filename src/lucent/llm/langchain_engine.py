@@ -651,7 +651,11 @@ class LangChainEngine(LLMEngine):
                                 type=SessionEventType.OTHER,
                                 tool_name="_hook",
                                 content=blocked_text[:2000],
-                                raw={"hook_event": "before_model_call", "blocked": True},
+                                raw={
+                                    "hook": "model_call_guard",
+                                    "phase": "before_model_call",
+                                    "blocked": True,
+                                },
                             )
                         )
                     break
@@ -806,22 +810,27 @@ class LangChainEngine(LLMEngine):
                     result_for_model = append_hook_context(result, hook_context)
 
                     if on_event:
-                        hook_events = list(before_tool.executions)
-                        if after_tool is not None:
-                            hook_events.extend(after_tool.executions)
-                        for hook_execution in hook_events:
-                            on_event(
-                                SessionEvent(
-                                    type=SessionEventType.OTHER,
-                                    tool_name="_hook",
-                                    content=hook_execution.text[:2000],
-                                    raw={
-                                        "hook": hook_execution.hook_name,
-                                        "decision": hook_execution.decision,
-                                        **hook_execution.metadata,
-                                    },
+                        for phase, phase_outcome in (
+                            ("before_tool_call", before_tool),
+                            ("after_tool_call", after_tool),
+                        ):
+                            if phase_outcome is None:
+                                continue
+                            for execution in phase_outcome.executions:
+                                on_event(
+                                    SessionEvent(
+                                        type=SessionEventType.OTHER,
+                                        tool_name="_hook",
+                                        content=execution.text[:2000],
+                                        raw={
+                                            "hook": execution.hook_name,
+                                            "phase": phase,
+                                            "trigger_tool": tool_name,
+                                            "decision": execution.decision,
+                                            **execution.metadata,
+                                        },
+                                    )
                                 )
-                            )
                         on_event(
                             SessionEvent(
                                 type=SessionEventType.TOOL_RESULT,

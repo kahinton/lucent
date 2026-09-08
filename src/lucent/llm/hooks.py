@@ -373,7 +373,18 @@ async def _run_memory_lookup_hook(
     return HookExecution(
         hook_name=str(hook.get("name") or "memory_lookup"),
         text="\n".join(lines),
-        metadata={"file_refs": file_refs, "memory_count": len(found)},
+        metadata={
+            "file_refs": file_refs,
+            "memory_count": len(found),
+            "memories": [
+                {
+                    "id": str(memory.get("id", ""))[:8],
+                    "tags": list((memory.get("tags") or [])[:5]),
+                    "content": _single_line(str(memory.get("content") or ""))[:500],
+                }
+                for memory in found
+            ],
+        },
     )
 
 
