@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+
+logger = logging.getLogger(__name__)
 
 _VALID_SESSION_KINDS = {
     "chat",
@@ -485,19 +488,18 @@ class LLMSessionRepository:
                            FROM llm_session_events WHERE session_id = $1""",
                         _uuid(session_id),
                     )
+                # Append-only: events are never rewritten. If a caller passes
+                # an explicit sequence that already exists (stale replay), the
+                # existing row is authoritative and the insert is dropped.
+                # Auto-sequenced inserts can never collide (MAX+1 is computed
+                # under the session-row lock above), so this clause is a pure
+                # defensive no-op against last-writer-wins overwrites.
                 row = await conn.fetchrow(
                     """INSERT INTO llm_session_events
                            (session_id, message_id, turn_id, sequence, event_type,
                             tool_name, tool_input, tool_output, detail, raw, visible)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                       ON CONFLICT (session_id, sequence) DO UPDATE
-                       SET event_type = EXCLUDED.event_type,
-                           tool_name = EXCLUDED.tool_name,
-                           tool_input = EXCLUDED.tool_input,
-                           tool_output = EXCLUDED.tool_output,
-                           detail = EXCLUDED.detail,
-                           raw = EXCLUDED.raw,
-                           visible = EXCLUDED.visible
+                       ON CONFLICT (session_id, sequence) DO NOTHING
                        RETURNING *""",
                     _uuid(session_id),
                     _uuid(message_id),
@@ -511,6 +513,15 @@ class LLMSessionRepository:
                     raw or {},
                     visible,
                 )
+                if row is None:
+                    logger.warning(
+                        "add_event dropped duplicate (session_id, sequence): "
+                        "session=%s sequence=%s type=%s (append-only guard)",
+                        session_id,
+                        sequence,
+                        event_type,
+                    )
+                    return {"id": None, "dropped_duplicate": True}
                 await conn.execute(
                     "UPDATE llm_sessions SET updated_at = NOW() WHERE id = $1",
                     _uuid(session_id),
@@ -524,17 +535,21 @@ class LLMSessionRepository:
         *,
         limit: int = 500,
         visible_only: bool = False,
+        newest_first: bool = False,
     ) -> list[dict]:
         params: list[Any] = [_uuid(session_id), _uuid(org_id)]
         clauses = ["e.session_id = $1", "s.organization_id = $2"]
         if visible_only:
             clauses.append("e.visible = TRUE")
         params.append(limit)
+        # DESC+limit selects the newest N rows (bounded slice of a long
+        # session); ASC is the legacy full-tail order for other callers.
+        order = "DESC" if newest_first else "ASC"
         query = (
             "SELECT e.* FROM llm_session_events e "
             "JOIN llm_sessions s ON s.id = e.session_id "
             f"WHERE {' AND '.join(clauses)} "
-            "ORDER BY e.sequence "
+            f"ORDER BY e.sequence {order} "
             f"LIMIT ${len(params)}"
         )
         async with self.pool.acquire() as conn:
@@ -618,9 +633,20 @@ class LLMSessionRepository:
         if not session:
             return None
         session["messages"] = await self.list_messages(session_id, org_id, limit=500)
-        session["events"] = (
-            await self.list_events(session_id, org_id, limit=1000) if include_events else []
+        # Replay window: visible events only, newest-first, sized to the
+        # 500-message turn window. Live rendering rides the full SSE stream,
+        # so reload must return the events for the same recent turns — an
+        # oldest-N slice over ALL rows (mostly invisible text_delta/usage)
+        # silently dropped every recent tool/hook event from long sessions.
+        # Rows stay append-only; this only changes which rows are served.
+        events = await self.list_events(
+            session_id,
+            org_id,
+            limit=2000,
+            visible_only=True,
+            newest_first=True,
         )
+        session["events"] = list(reversed(events)) if include_events else []
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT lsr.*, r.title AS request_title, r.status AS request_status

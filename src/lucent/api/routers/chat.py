@@ -10,11 +10,11 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -310,9 +310,31 @@ def _normalize_last_attachments(messages: list[ChatMessage]) -> list[dict[str, A
 
 
 
+def _json_safe(value: Any, depth: int = 0) -> Any:
+    """Reduce an arbitrary engine payload to JSON-serializable primitives.
+
+    Engine SDKs hand us live event objects (Copilot SDK event instances,
+    LangChain objects, enums, UUIDs, datetimes). Any of them inside a
+    persisted ``raw`` makes asyncpg refuse the whole INSERT — under the old
+    fire-and-forget persistence that failure was silent, so entire copilot
+    sessions persisted nothing. Everything must survive ``json.dumps``.
+    """
+    if depth > 8:
+        return str(value)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v, depth + 1) for v in value]
+    if isinstance(value, (UUID, datetime, date, time)):
+        return str(value)
+    return str(value)
+
+
 def _event_raw(event) -> dict[str, Any]:
     """Build a small JSON-safe raw event summary for persistence."""
-    return {
+    return _json_safe({
         "type": event.type.value if hasattr(event.type, "value") else str(event.type),
         "content": event.content,
         "tool_name": event.tool_name,
@@ -320,7 +342,7 @@ def _event_raw(event) -> dict[str, Any]:
         "tool_output": event.tool_output,
         "usage": event.usage,
         "raw": event.raw,
-    }
+    })
 
 
 @lru_cache(maxsize=1)
@@ -1365,6 +1387,7 @@ async def chat_stream_v2(
 
     from lucent.llm import get_engine_for_model
     from lucent.llm.engine import SessionEvent, SessionEventType
+    from lucent.llm.event_persistence import EventPersistBridge
     from lucent.model_registry import validate_model, validate_reasoning_effort
 
     session_defaults = await _chat_session_defaults(
@@ -1577,77 +1600,98 @@ async def chat_stream_v2(
 
     # Use an asyncio.Queue to bridge callback events → SSE stream
     event_queue: asyncio.Queue[dict | None] = asyncio.Queue()
-    event_persist_tasks: list[asyncio.Task] = []
     tool_call_inputs: dict[str, Any] = {}
 
+    # Serialized FIFO persistence bridge (lucent.llm.event_persistence).
+    # on_event fires synchronously inside engine callbacks (CopilotEngine and
+    # LangChainEngine both funnel through this single persist path), so
+    # persistence must never block an SDK callback — but it also must never
+    # REORDER them. The bridge's single worker drains the FIFO strictly in
+    # emission order; add_event assigns each row's sequence under the
+    # session-row lock, so with one worker the persisted sequence order ==
+    # emission order for both engines. Reload then replays the exact sequence
+    # the user watched live. Note: CopilotEngine never executes hooks (it
+    # accepts a hooks config but silently ignores it), so hook_context rows
+    # only originate from LangChainEngine sessions; tool events persist
+    # identically on both.
+
     def persist_event(payload: dict, event: SessionEvent) -> None:
-        """Persist a normalized session event without blocking SDK callbacks."""
+        """Queue a normalized session event for serialized persistence."""
         if not chat_session.repo or not chat_session.session_id:
             return
+        event_persist_bridge.enqueue(payload, event)
 
-        async def persist_and_audit() -> None:
-            row = await chat_session.repo.add_event(
-                chat_session.session_id,
-                org_id=str(user["organization_id"]),
+    async def _persist_and_audit(payload: dict, event: SessionEvent) -> None:
+        raw = _event_raw(event)
+        if payload.get("type") == "hook_context":
+            # Preserve the hook-display promotion: the structured fields the UI
+            # renders (phase / trigger_tool / decision / file_refs / memories)
+            # live in payload, while _event_raw only captured the SessionEvent.
+            # Merge them at raw.raw so reload replays through normalizeHookEvent
+            # exactly like the live payload did.
+            raw["raw"] = payload
+        row = await chat_session.repo.add_event(
+            chat_session.session_id,
+            org_id=str(user["organization_id"]),
+            turn_id=chat_session.turn_id,
+            message_id=chat_session.user_message_id,
+            event_type=payload.get("type", event.type.value),
+            tool_name=payload.get("tool") or event.tool_name,
+            tool_input=event.tool_input or payload.get("input"),
+            tool_output=event.tool_output or payload.get("output"),
+            detail=payload.get("text") or payload.get("error"),
+            raw=raw,
+            visible=payload.get("type") not in {"text_delta", "usage"},
+        )
+        if event.type == SessionEventType.USAGE and event.usage:
+            from lucent.db.token_usage import TokenUsageRepository
+
+            await TokenUsageRepository(pool).record(
+                organization_id=str(user["organization_id"]),
+                user_id=str(user["id"]),
+                session_id=chat_session.session_id,
                 turn_id=chat_session.turn_id,
                 message_id=chat_session.user_message_id,
-                event_type=payload.get("type", event.type.value),
-                tool_name=payload.get("tool") or event.tool_name,
-                tool_input=event.tool_input or payload.get("input"),
-                tool_output=event.tool_output or payload.get("output"),
-                detail=payload.get("text") or payload.get("error"),
-                raw=_event_raw(event),
-                visible=payload.get("type") not in {"text_delta", "usage"},
+                model=selected_model,
+                engine=engine.name,
+                usage=event.usage,
             )
-            if event.type == SessionEventType.USAGE and event.usage:
-                from lucent.db.token_usage import TokenUsageRepository
+            return
+        if engine.name == "langchain" or payload.get("type") != "tool_result":
+            return
+        try:
+            from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
 
-                await TokenUsageRepository(pool).record(
-                    organization_id=str(user["organization_id"]),
-                    user_id=str(user["id"]),
-                    session_id=chat_session.session_id,
-                    turn_id=chat_session.turn_id,
-                    message_id=chat_session.user_message_id,
-                    model=selected_model,
-                    engine=engine.name,
-                    usage=event.usage,
-                )
-                return
-            if engine.name == "langchain" or payload.get("type") != "tool_result":
-                return
-            try:
-                from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
+            output = event.tool_output or payload.get("output") or ""
+            status, failure_class, error_message = classify_tool_result(output)
+            audit = ToolAuditRepository(pool)
+            tool_name = payload.get("tool") or event.tool_name or "unknown"
+            await audit.log_tool_call(
+                tool_name=tool_name,
+                status=status,
+                source="chat.stream_v2.session_event",
+                input_payload=tool_call_inputs.get(tool_name, {}),
+                output_payload=output,
+                failure_class=failure_class,
+                error_message=error_message,
+                context={
+                    "organization_id": str(user["organization_id"]),
+                    "user_id": str(user["id"]),
+                    "session_id": chat_session.session_id,
+                    "turn_id": chat_session.turn_id,
+                    "message_id": chat_session.user_message_id,
+                    "llm_event_id": str(row["id"]),
+                    "model": selected_model,
+                    "reasoning_effort": reasoning_effort,
+                    "engine": engine.name,
+                    "agent_definition_id": effective_agent_id,
+                    "skill_names": agent_skill_names,
+                },
+            )
+        except Exception:
+            logger.debug("Failed to audit chat tool event", exc_info=True)
 
-                output = event.tool_output or payload.get("output") or ""
-                status, failure_class, error_message = classify_tool_result(output)
-                audit = ToolAuditRepository(pool)
-                tool_name = payload.get("tool") or event.tool_name or "unknown"
-                await audit.log_tool_call(
-                    tool_name=tool_name,
-                    status=status,
-                    source="chat.stream_v2.session_event",
-                    input_payload=tool_call_inputs.get(tool_name, {}),
-                    output_payload=output,
-                    failure_class=failure_class,
-                    error_message=error_message,
-                    context={
-                        "organization_id": str(user["organization_id"]),
-                        "user_id": str(user["id"]),
-                        "session_id": chat_session.session_id,
-                        "turn_id": chat_session.turn_id,
-                        "message_id": chat_session.user_message_id,
-                        "llm_event_id": str(row["id"]),
-                        "model": selected_model,
-                        "reasoning_effort": reasoning_effort,
-                        "engine": engine.name,
-                        "agent_definition_id": effective_agent_id,
-                        "skill_names": agent_skill_names,
-                    },
-                )
-            except Exception:
-                logger.debug("Failed to audit chat tool event", exc_info=True)
-
-        event_persist_tasks.append(asyncio.create_task(persist_and_audit()))
+    event_persist_bridge = EventPersistBridge(_persist_and_audit)
 
     def on_event(event: SessionEvent):
         """Push normalized events into the queue for SSE consumption."""
@@ -1714,6 +1758,7 @@ async def chat_stream_v2(
 
     # Run the streaming session in a background task
     async def run_llm():
+        event_persist_bridge.start()
         try:
             result = await engine.run_session_streaming(
                 model=selected_model,
@@ -1775,9 +1820,24 @@ async def chat_stream_v2(
                 "error": str(e),
             })
         finally:
-            if event_persist_tasks:
-                await asyncio.gather(*event_persist_tasks, return_exceptions=True)
-            await _maybe_capture_session_experience(user=user, chat_session=chat_session)
+            # Stop intake, then drain the FIFO persist worker so every queued
+            # event row is written before anything reads the session. The
+            # bridge never raises (errors are logged per event), but guard the
+            # drain anyway so a dead worker can't mask completion.
+            async def _drain_and_stop_bridge():
+                await event_persist_bridge.drain_and_stop()
+                await _maybe_capture_session_experience(user=user, chat_session=chat_session)
+
+            drain_task = asyncio.create_task(_drain_and_stop_bridge())
+            try:
+                await asyncio.shield(drain_task)
+            except asyncio.CancelledError:
+                # Client aborted mid-stream: this generator's cancellation is
+                # already delivered, but the detached drain task keeps running
+                # so queued event rows still persist in append-only order.
+                logger.info("Chat stream aborted; event drain continuing detached")
+            except Exception:
+                logger.exception("Event persist worker failed during finalize drain")
             event_queue.put_nowait(None)  # Sentinel: stream done
 
     async def generate():
