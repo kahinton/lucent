@@ -256,6 +256,11 @@
         .chat-input-field::placeholder { color: #77736f !important; }
         .config-select { background-color: #181818 !important; border-color: #3d3d3d !important; color: #d5d2ce !important; }
         .empty-state-text { color: #94908c !important; }
+        .intro-summary { max-width: 42rem; white-space: pre-line; }
+        .intro-summary .intro-summary-loading { display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 9999px; background: currentColor; opacity: 0.45; animation: intro-pulse 1s ease-in-out infinite; }
+        .intro-summary .intro-summary-loading:nth-child(2) { animation-delay: 0.15s; }
+        .intro-summary .intro-summary-loading:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes intro-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.7; } }
         .session-drawer { background: rgba(18, 18, 18, 0.98) !important; border-color: #333333 !important; }
         .session-drawer-backdrop { background: rgba(10, 11, 8, 0.28) !important; }
         .session-row.active { background: rgba(0, 207, 193, 0.14) !important; color: #7feee4 !important; border-color: #00a89f !important; }
@@ -474,12 +479,13 @@
     <!-- Messages area -->
     <div id="messages" class="messages-area">
         <!-- Empty state -->
-        <div id="empty-state" class="flex flex-col items-center px-6">
+        <div id="empty-state" class="flex flex-col items-center px-6" data-intro-summary-target>
             <img src="/static/lucent_logo_v2.svg" alt="" class="lucent-mark mb-6">
             <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
             <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
                 Pick up where we left off, start something new, or just think out loud.
             </p>
+            <p class="empty-state-text intro-summary text-sm text-gray-600 text-center max-w-md mb-8" id="intro-summary-text" style="display:none;"></p>
             <div class="grid grid-cols-2 gap-3 max-w-lg w-full">
                 <button data-prompt="What have we been working on lately?" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
                     <span class="font-medium text-gray-900 group-hover:text-primary-700">What have we been working on?</span>
@@ -866,8 +872,81 @@ function applySessionConfig(session) {
         await loadSession(state.sessionId);
     }
 
+    loadIntroSummary();
+
     document.getElementById('chat-input').focus();
 })();
+
+// ═══════════════════════════════════════════════════════════════════
+// Intro work summary (async swap-in; default intro is the floor)
+// ═══════════════════════════════════════════════════════════════════
+
+function introSummaryTarget() {
+    return document.getElementById('empty-state');
+}
+
+function applyIntroSummary(text) {
+    const target = introSummaryTarget();
+    const slot = document.getElementById('intro-summary-text');
+    if (!target || !slot) return;
+    slot.textContent = text;   // textContent: summary renders as plain text
+    slot.style.display = '';
+    // Seamless swap: fade the summary in without touching the default hero.
+    slot.style.opacity = '0';
+    slot.style.transition = 'opacity 400ms ease';
+    requestAnimationFrame(() => { slot.style.opacity = '1'; });
+}
+
+function showIntroSummaryLoading() {
+    const target = introSummaryTarget();
+    const slot = document.getElementById('intro-summary-text');
+    if (!target || !slot) return;
+    slot.innerHTML = '<span class="intro-summary-loading"></span><span class="intro-summary-loading"></span><span class="intro-summary-loading"></span>';
+    slot.style.display = '';
+}
+
+function hideIntroSummary() {
+    const slot = document.getElementById('intro-summary-text');
+    if (slot) slot.style.display = 'none';
+}
+
+async function loadIntroSummary() {
+    // The endpoint spawns generation in the background; a cold page load can
+    // briefly get {"summary": null, "reason": "generating"}. Poll a few times
+    // so the summary lands on THIS load instead of the next one. Bounded: the
+    // default intro is always the floor if generation never completes.
+    for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+            const resp = await fetch('/api/chat/intro-summary');
+            if (!resp.ok) return;   // default intro stays untouched
+            const data = await resp.json();
+            if (!data || !data.summary) {
+                if (attempt < 3 && data && data.reason === 'generating') {
+                    if (introSummaryTarget() && introSummaryTarget().style.display !== 'none') {
+                        showIntroSummaryLoading();
+                    }
+                    await new Promise(r => setTimeout(r, 1500));
+                    continue;
+                }
+                return;   // disabled/quiet/unavailable: keep default intro
+            }
+            if (!introSummaryTarget() || introSummaryTarget().style.display === 'none') return;
+            showIntroSummaryLoading();
+            // Small beat so the loading dots read as intentional, not a flicker.
+            await new Promise(r => setTimeout(r, 250));
+            if (!introSummaryTarget() || introSummaryTarget().style.display === 'none') {
+                hideIntroSummary();
+                return;
+            }
+            applyIntroSummary(data.summary);
+            return;
+        } catch (e) {
+            // Silent: cosmetic feature, default intro is the floor.
+            return;
+        }
+    }
+    hideIntroSummary();
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Session Persistence
@@ -1464,12 +1543,13 @@ function clearConversation(options = {}) {
     // Re-add empty state
     document.getElementById('chat-root').classList.add('empty-mode');
     msgs.innerHTML = `
-        <div id="empty-state" class="flex flex-col items-center px-6">
+        <div id="empty-state" class="flex flex-col items-center px-6" data-intro-summary-target>
             <div class="lucent-orb lucent-orb-lg mb-6"></div>
             <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
             <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
                 Pick up where we left off, start something new, or just think out loud.
             </p>
+            <p class="empty-state-text intro-summary text-sm text-gray-600 text-center max-w-md mb-8" id="intro-summary-text" style="display:none;"></p>
             <div class="grid grid-cols-2 gap-3 max-w-lg w-full">
                 <button data-prompt="What have we been working on lately?" class="text-left px-4 py-3 rounded-xl border border-gray-200 hover:border-primary-300 hover:bg-primary-50/50 transition-all text-sm text-gray-700 group">
                     <span class="font-medium text-gray-900 group-hover:text-primary-700">What have we been working on?</span>
@@ -1489,6 +1569,9 @@ function clearConversation(options = {}) {
     updateButtons();
     hideStatus();
     renderSessionList();
+    // Fresh hero after a reset — offer the summary swap-in again, exactly
+    // like the initial page load.
+    loadIntroSummary();
 }
 
 function toggleSessionDrawer(forceOpen = null) {

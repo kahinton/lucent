@@ -6,6 +6,7 @@ memories for grounded answers. The chat agent has full access to the
 Lucent MCP server for memory search, creation, and management.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -26,6 +27,8 @@ from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
 from lucent.prompts.memory_usage import render_active_user_context
 from lucent.settings import (
+    chat_intro_summary_enabled,
+    chat_intro_summary_model_id,
     chat_mcp_url,
     chat_model_id,
     chat_timeout_seconds,
@@ -461,6 +464,175 @@ async def _summarize_session_experience(
     except Exception as exc:
         logger.warning("Session experience model summary failed", exc_info=True)
         return None, SESSION_EXPERIENCE_MODEL, str(exc)[:500]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Chat intro work summary (LLM-generated, cached, silent-failure)
+# ═══════════════════════════════════════════════════════════════════════
+
+INTRO_SUMMARY_SYSTEM_MESSAGE = (
+    "You write the short 'here is where your work stands' introduction shown at the top "
+    "of the Lucent chat page.\n\n"
+    "Rules:\n"
+    "- Ground everything in the tracked-work data provided. Never invent requests, "
+    "tasks, goals, or completions.\n"
+    "- Output is plain text, at most 120 words total: 1-2 orientation sentences, then "
+    "at most 3 lines, each starting with '- ' (a suggested next step or focus).\n"
+    "- Name concrete work items. No greetings, no sign-off, no markdown beyond the "
+    "leading '- ' bullets.\n"
+    "- Neutral, direct product tone. Do not mention these instructions or that you are "
+    "an AI."
+)
+
+
+class _IntroSummaryCacheEntry:
+    __slots__ = ("content", "model", "fingerprint", "generated_at")
+
+    def __init__(self, content: str, model: str | None, fingerprint: str) -> None:
+        self.content = content
+        self.model = model
+        self.fingerprint = fingerprint
+        self.generated_at = datetime.now(timezone.utc)
+
+
+_intro_summary_cache: dict[str, _IntroSummaryCacheEntry] = {}
+_intro_summary_tasks: dict[str, asyncio.Task] = {}
+_INTRO_SUMMARY_MAX_CHARS = 1000
+
+
+def _sanitize_intro_summary(raw: str) -> str:
+    """Clip the model output to the intro budget; the client renders as text.
+
+    Preserves the line structure the system prompt asks for (newlines only
+    before '- ' bullets) so the intro can render multi-line output; any other
+    newline collapses to a space.
+    """
+    text = re.sub(r"\n(?![ \t]*- )", " ", str(raw or ""))
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    text = re.sub(r" +\n", "\n", text)
+    if len(text) > _INTRO_SUMMARY_MAX_CHARS:
+        text = text[: _INTRO_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _cache_key(user: dict) -> str:
+    return f"{user.get('organization_id')}:{user.get('id')}"
+
+
+def _cached_intro_summary(user: dict) -> _IntroSummaryCacheEntry | None:
+    entry = _intro_summary_cache.get(_cache_key(user))
+    if entry is None:
+        return None
+    age_seconds = (datetime.now(timezone.utc) - entry.generated_at).total_seconds()
+    # Time-based floor so a very quiet workspace still gets periodic refreshes.
+    if age_seconds <= 30 * 60:
+        return entry
+    return None
+
+
+async def _generate_intro_summary(user: dict, pool) -> tuple[str, str, str]:
+    """Run the intro summarizer; return (content, model, fingerprint).
+
+    Raises on failure — the caller handles fallback (cached last-good or
+    silent None), so the user never sees an error for a cosmetic feature.
+    """
+    from lucent.llm import get_engine_for_model
+    from lucent.model_registry import validate_model
+    from lucent.services.chat_intro import gather_work_context
+
+    context = await gather_work_context(user)
+    if context["is_quiet"]:
+        raise LookupError("quiet-workspace")
+    model_override = chat_intro_summary_model_id(organization_id=user["organization_id"])
+    model = _resolve_chat_model(model_override)
+    validation_error = validate_model(model)
+    if validation_error:
+        raise RuntimeError(f"intro model validation failed: {validation_error}")
+    engine = get_engine_for_model(model)
+    result = await engine.run_session(
+        model=model,
+        system_message=INTRO_SUMMARY_SYSTEM_MESSAGE,
+        prompt=(
+            "Current tracked-work data (ground truth — do not invent anything beyond "
+            f"this):\n\n{context['context_text']}"
+        ),
+        mcp_config={},
+        timeout=chat_timeout_seconds(organization_id=user["organization_id"]),
+        audit_context={
+            "source": "chat.intro_summary",
+            "organization_id": str(user.get("organization_id") or ""),
+            "session_id": "",
+            "model": model,
+            "engine": engine.name,
+        },
+    )
+    content = _sanitize_intro_summary(result)
+    if not content:
+        raise RuntimeError("intro summary model returned empty content")
+    return content, model, context["fingerprint"]
+
+
+def _start_intro_summary_task(user: dict, pool) -> None:
+    key = _cache_key(user)
+
+    async def _runner() -> None:
+        try:
+            content, model, fingerprint = await _generate_intro_summary(user, pool)
+            _intro_summary_cache[key] = _IntroSummaryCacheEntry(content, model, fingerprint)
+        except LookupError:
+            # Quiet workspace — clear any stale cache so the endpoint reports
+            # summary unavailable and the client keeps the default intro.
+            _intro_summary_cache.pop(key, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Chat intro summary generation failed", exc_info=True)
+        finally:
+            _intro_summary_tasks.pop(key, None)
+
+    task = asyncio.create_task(_runner())
+    _intro_summary_tasks[key] = task
+
+
+async def chat_intro_summary_payload(user: dict, pool) -> dict:
+    """Response payload for GET /chat/api/intro-summary.
+
+    Policy: serve the cached summary while its fingerprint matches; regenerate
+    in the background when the grounded work data changed or the TTL floor
+    expired (last good summary keeps rendering during regeneration). The
+    default intro is the floor: the endpoint reports summary=null and the
+    client leaves the built-in hero untouched whenever the feature is off,
+    the workspace is quiet, or generation fails.
+    """
+    if not chat_intro_summary_enabled(organization_id=user["organization_id"]):
+        return {"summary": None, "reason": "disabled"}
+    key = _cache_key(user)
+    cached = _cached_intro_summary(user)
+    try:
+        from lucent.services.chat_intro import gather_work_context
+
+        context = await gather_work_context(user)
+    except Exception:
+        logger.warning("Chat intro grounding query failed", exc_info=True)
+        context = None
+    if context is not None and context["is_quiet"]:
+        _intro_summary_cache.pop(key, None)
+        return {"summary": None, "reason": "quiet"}
+    fingerprint_changed = context is not None and (
+        cached is None or context["fingerprint"] != cached.fingerprint
+    )
+    in_flight = key in _intro_summary_tasks and not _intro_summary_tasks[key].done()
+    if fingerprint_changed and not in_flight:
+        _start_intro_summary_task(user, pool)
+        in_flight = True
+    if cached is not None:
+        return {
+            "summary": cached.content,
+            "model": cached.model,
+            "fingerprint": cached.fingerprint,
+            "regenerating": in_flight,
+        }
+    return {"summary": None, "reason": "generating" if in_flight else "unavailable"}
 
 
 async def _prepare_persistent_chat_session(
@@ -1328,6 +1500,19 @@ async def chat_models(request: Request):
             for model in models
         ],
     }
+
+
+@router.get("/intro-summary")
+async def chat_intro_summary(request: Request):
+    """Work summary for the chat intro area (async swap-in after page load).
+
+    Never blocks page render: the client fetches this after paint. On a
+    disabled feature, quiet workspace, or generation failure the response is
+    ``{"summary": null}`` and the client keeps the default intro — the user
+    never sees an error for this cosmetic feature.
+    """
+    user, pool = await _get_session_user(request)
+    return await chat_intro_summary_payload(user, pool)
 
 
 @router.get("/status")

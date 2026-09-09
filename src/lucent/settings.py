@@ -343,6 +343,32 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         min_value=30,
     ),
     RuntimeSettingDefinition(
+        key="chat.intro_summary_enabled",
+        env_var="LUCENT_CHAT_INTRO_SUMMARY_ENABLED",
+        value_type="boolean",
+        default=False,
+        title="Chat intro work summary",
+        section="Chat",
+        description="Replace the default chat intro with a model-generated summary of current tracked work.",
+        help_text=(
+            "When disabled — or whenever generation fails — the chat page falls "
+            "back to the standard default introduction."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="chat.intro_summary_model",
+        env_var="LUCENT_CHAT_INTRO_SUMMARY_MODEL",
+        value_type="string",
+        default="",
+        title="Chat intro summary model",
+        section="Chat",
+        description="Model used to generate the chat intro work summary.",
+        help_text="Leave blank to use the chat/default model.",
+        control="model",
+        option_source="models",
+        allow_empty=True,
+    ),
+    RuntimeSettingDefinition(
         key="daemon.max_sessions",
         env_var="LUCENT_MAX_SESSIONS",
         value_type="integer",
@@ -1351,6 +1377,19 @@ def session_experience_timeout_seconds(*, organization_id: Any | None = None) ->
         "chat.session_experience_timeout_seconds",
         organization_id=organization_id,
     )
+
+
+def chat_intro_summary_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether the chat page should show a model-generated work-summary intro."""
+    return _setting_bool(
+        "chat.intro_summary_enabled",
+        organization_id=organization_id,
+    )
+
+
+def chat_intro_summary_model_id(*, organization_id: Any | None = None) -> str | None:
+    """Model for chat intro work summaries, or None for the default model."""
+    return _setting_string("chat.intro_summary_model", organization_id=organization_id) or None
 
 
 def daemon_max_sessions(*, organization_id: Any | None = None) -> int:
