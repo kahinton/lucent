@@ -44,9 +44,11 @@ STALE_TASK_REAPER_ACTION = {
     "action_type": "server_function",
     "title": "Release stale task claims",
     "description": (
-        "Runs directly inside the Lucent API process. It checks for expired "
-        "task claims or dead daemon owners, releases eligible claims, and records "
-        "the result in schedule_runs. It does not dispatch an agent task."
+        "Runs directly inside the Lucent API process. It releases task claims "
+        "only when the claim lease expired, the owning daemon is dead, or the "
+        "task shows no activity (heartbeat, tool audit, or task events) for the "
+        "stale threshold. Actively working tasks are never released. Results "
+        "are recorded in schedule_runs; no agent task is dispatched."
     ),
     "function": "release_stale_tasks",
     "module": "lucent.api.system_schedules",

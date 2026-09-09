@@ -32,6 +32,30 @@ logger = logging.getLogger(__name__)
 DEFAULT_TASK_LEASE_SECONDS = int(os.environ.get("LUCENT_TASK_LEASE_SECONDS", "1800"))
 DEFAULT_INSTANCE_STALE_SECONDS = int(os.environ.get("LUCENT_INSTANCE_STALE_SECONDS", "1800"))
 
+# Activity-staleness predicate for the stale-task reaper, shared by
+# release_stale_tasks() and stale_task_reaper_has_work() so the preflight gate
+# and the reaper can never drift apart. $1 is the stale threshold in seconds.
+# A claimed/running task counts as stale only when it has NO activity within
+# the threshold — where activity is a heartbeat from the owning daemon's
+# heartbeat loop, a task-attributed tool-audit row, or a task event. Claim age
+# alone never releases a task that is actively working.
+_STALE_TASK_ACTIVITY_CLAUSE = """
+                                 COALESCE(t.last_heartbeat_at, t.claimed_at)
+                                     < NOW() - make_interval(secs := $1)
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM tool_call_audit_log a
+                                     WHERE a.task_id = t.id
+                                       AND a.created_at
+                                           >= NOW() - make_interval(secs := $1)
+                                 )
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM task_events te
+                                     WHERE te.task_id = t.id
+                                       AND te.created_at
+                                           >= NOW() - make_interval(secs := $1)
+                                 )
+"""
+
 # Advisory lock namespace for serializing memory-link operations on the same
 # memory_id across concurrent transactions. Keyed alongside the memory UUID.
 # Distinct from DECOMPOSITION_LOCK_NAMESPACE in daemon.py.
@@ -3143,7 +3167,18 @@ class RequestRepository:
         org_id: str | None = None,
         instance_stale_seconds: int = DEFAULT_INSTANCE_STALE_SECONDS,
     ) -> int:
-        """Release tasks from stale instances or expired leases."""
+        """Release tasks from stale instances, expired leases, or inactive claims.
+
+        A claimed/running task is released only when one of these holds:
+        - its claim lease has expired;
+        - the owning daemon instance is dead (not active or not seen for
+          instance_stale_seconds);
+        - the task is ACTIVITY-STALE: no heartbeat from the owning daemon's
+          heartbeat loop, no task-attributed tool-audit rows, and no task
+          events within stale_seconds. Claim age alone never releases a task
+          that is still producing work; a hung task (zero activity) is still
+          reaped at the threshold.
+        """
         stale_seconds = max(60, int(stale_minutes * 60))
         if org_id:
             async with self.pool.acquire() as conn:
@@ -3170,7 +3205,20 @@ class RequestRepository:
                                  )
                                  OR (
                                      t.claimed_at IS NOT NULL
-                                     AND t.claimed_at < NOW() - make_interval(secs := $1)
+AND (
+    COALESCE(t.last_heartbeat_at, t.claimed_at)
+        < NOW() - make_interval(secs := $1)
+    AND NOT EXISTS (
+        SELECT 1 FROM tool_call_audit_log a
+        WHERE a.task_id = t.id
+          AND a.created_at >= NOW() - make_interval(secs := $1)
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM task_events te
+        WHERE te.task_id = t.id
+          AND te.created_at >= NOW() - make_interval(secs := $1)
+    )
+)
                                  )
                              )
                            FOR UPDATE
@@ -3216,7 +3264,20 @@ class RequestRepository:
                                  )
                                  OR (
                                      t.claimed_at IS NOT NULL
-                                     AND t.claimed_at < NOW() - make_interval(secs := $1)
+AND (
+    COALESCE(t.last_heartbeat_at, t.claimed_at)
+        < NOW() - make_interval(secs := $1)
+    AND NOT EXISTS (
+        SELECT 1 FROM tool_call_audit_log a
+        WHERE a.task_id = t.id
+          AND a.created_at >= NOW() - make_interval(secs := $1)
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM task_events te
+        WHERE te.task_id = t.id
+          AND te.created_at >= NOW() - make_interval(secs := $1)
+    )
+)
                                  )
                              )
                            FOR UPDATE
@@ -3252,7 +3313,13 @@ class RequestRepository:
         org_id: str | None = None,
         instance_stale_seconds: int = DEFAULT_INSTANCE_STALE_SECONDS,
     ) -> bool:
-        """True when at least one claimed/running task is stale enough to release."""
+        """True when at least one claimed/running task is stale enough to release.
+
+        Uses the same activity-based predicate as release_stale_tasks() so the
+        preflight gate and the reaper always agree: lease expired, dead owning
+        daemon instance, or no activity (heartbeat / tool-audit rows / task
+        events) within the threshold.
+        """
         stale_seconds = max(60, int(stale_minutes * 60))
         if org_id:
             async with self.pool.acquire() as conn:
@@ -3278,7 +3345,20 @@ class RequestRepository:
                           )
                           OR (
                               t.claimed_at IS NOT NULL
-                              AND t.claimed_at < NOW() - make_interval(secs := $1)
+AND (
+    COALESCE(t.last_heartbeat_at, t.claimed_at)
+        < NOW() - make_interval(secs := $1)
+    AND NOT EXISTS (
+        SELECT 1 FROM tool_call_audit_log a
+        WHERE a.task_id = t.id
+          AND a.created_at >= NOW() - make_interval(secs := $1)
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM task_events te
+        WHERE te.task_id = t.id
+          AND te.created_at >= NOW() - make_interval(secs := $1)
+    )
+)
                           )
                       )
                     """,
@@ -3309,7 +3389,20 @@ class RequestRepository:
                           )
                           OR (
                               t.claimed_at IS NOT NULL
-                              AND t.claimed_at < NOW() - make_interval(secs := $1)
+AND (
+    COALESCE(t.last_heartbeat_at, t.claimed_at)
+        < NOW() - make_interval(secs := $1)
+    AND NOT EXISTS (
+        SELECT 1 FROM tool_call_audit_log a
+        WHERE a.task_id = t.id
+          AND a.created_at >= NOW() - make_interval(secs := $1)
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM task_events te
+        WHERE te.task_id = t.id
+          AND te.created_at >= NOW() - make_interval(secs := $1)
+    )
+)
                           )
                       )
                     """,
