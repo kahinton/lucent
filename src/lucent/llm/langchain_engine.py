@@ -333,6 +333,7 @@ class LangChainEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
         expected_surface: dict[str, Any] | None = None,
+        session_state: dict[str, Any] | None = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -351,6 +352,7 @@ class LangChainEngine(LLMEngine):
                 approve_permissions=approve_permissions,
                 managed_tools=managed_tools,
                 expected_surface=expected_surface,
+                session_state=session_state,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -376,8 +378,15 @@ class LangChainEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
         expected_surface: dict[str, Any] | None = None,
+        session_state: dict[str, Any] | None = None,
     ) -> str | None:
-        """Run a streaming session with event callbacks (daemon pattern)."""
+        """Run a streaming session with event callbacks (daemon pattern).
+
+        ``session_state`` is an optional per-conversation dict owned by the
+        session caller: the engine does not mutate it, but the HookManager it
+        seeds persists hook state (e.g. injected-memory dedup ids) across the
+        turns of one conversation. Each call without one starts fresh.
+        """
         try:
             return await self._run_with_tools(
                 model=model,
@@ -395,6 +404,7 @@ class LangChainEngine(LLMEngine):
                 approve_permissions=approve_permissions,
                 managed_tools=managed_tools,
                 expected_surface=expected_surface,
+                session_state=session_state,
             )
         except Exception as e:
             error_message = str(e) or type(e).__name__
@@ -420,6 +430,7 @@ class LangChainEngine(LLMEngine):
         approve_permissions: bool = True,
         managed_tools: list[dict[str, Any]] | None = None,
         expected_surface: dict[str, Any] | None = None,
+        session_state: dict[str, Any] | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -469,7 +480,7 @@ class LangChainEngine(LLMEngine):
                     "engine": self.name,
                 },
             )
-        hook_manager = HookManager(hooks)
+        hook_manager = HookManager(hooks, session_state=session_state)
 
         from lucent.services.managed_tools import normalize_discovered_mcp_tools
 
@@ -641,6 +652,7 @@ class LangChainEngine(LLMEngine):
             for _round in tool_rounds:
                 before_model = await hook_manager.before_model_call(
                     messages=_messages_for_hooks(messages),
+                    memory_bridge=memory_bridge,
                 )
                 if before_model.blocked:
                     blocked_text = before_model.block_message or "Model call blocked by hook."
@@ -667,6 +679,21 @@ class LangChainEngine(LLMEngine):
                             )
                         )
                     )
+                    if on_event:
+                        for execution in before_model.injectable_executions:
+                            on_event(
+                                SessionEvent(
+                                    type=SessionEventType.OTHER,
+                                    tool_name="_hook",
+                                    content=execution.text[:2000],
+                                    raw={
+                                        "hook": execution.hook_name,
+                                        "phase": "before_model_call",
+                                        "decision": execution.decision,
+                                        **execution.metadata,
+                                    },
+                                )
+                            )
 
                 # Streaming callers consume provider chunks so slow local models
                 # can show progress and use activity-based timeout handling.

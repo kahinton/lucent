@@ -83,8 +83,8 @@ def _prepare_json_schema(schema: dict | None, field_name: str) -> dict | None:
     except SchemaError as exc:
         raise ValueError(f"{field_name} is not valid JSON Schema: {exc.message}") from exc
     return normalized
-VALID_HOOK_ACTION_TYPES = frozenset({"memory_lookup", "static_context", "command"})
-DEFAULT_AGENT_HOOK_NAMES = ("file-memory-lookup",)
+VALID_HOOK_ACTION_TYPES = frozenset({"memory_lookup", "message_memory_lookup", "static_context", "command"})
+DEFAULT_AGENT_HOOK_NAMES = ("file-memory-lookup", "message-memory-lookup")
 
 
 class BuiltInProtectionError(Exception):
@@ -2695,7 +2695,21 @@ class DefinitionRepository:
                     "memory_type": "technical",
                     "include_archived": False,
                 },
-            }
+            },
+            {
+                "name": "message-memory-lookup",
+                "description": (
+                    "Injects memories relevant to the user's latest message "
+                    "before the model is invoked (proactive injection pipeline)."
+                ),
+                "trigger_event": "before_model_call",
+                "action_type": "message_memory_lookup",
+                "content": "",
+                "config": {
+                    "max_memories": 3,
+                    "include_archived": False,
+                },
+            },
         ]
         async with self.pool.acquire() as conn:
             for hook in builtins:

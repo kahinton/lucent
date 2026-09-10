@@ -17,6 +17,21 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+# Per-conversation hook state (message-pipeline design §5): one dict per chat
+# session id, holding e.g. the injected-memory-id dedup set across turns.
+_CHAT_SESSION_STATES: dict[str, dict[str, Any]] = {}
+
+
+def _chat_session_state(session_id: str | None) -> dict[str, Any]:
+    """Return (creating if needed) hook state for a chat session."""
+    key = str(session_id or uuid4())
+    state = _CHAT_SESSION_STATES.setdefault(key, {})
+    # Bound the in-process map: keep the newest 200 sessions' state.
+    if len(_CHAT_SESSION_STATES) > 200:
+        for stale_key in list(_CHAT_SESSION_STATES)[:-100]:
+            _CHAT_SESSION_STATES.pop(stale_key, None)
+    return state
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -1387,6 +1402,19 @@ async def chat_stream(
 
         usage_persist_tasks.append(asyncio.create_task(record_usage()))
 
+    # Thread the raw latest user text for the message-memory-lookup hook
+    # (living-memory M3): the prompt may be the flattened transcript
+    # (_history_prompt), so the hook must not re-derive the turn's topic
+    # from it. The hook falls back to prompt-derived extraction when the
+    # key is absent.
+    session_state_for_engine = (
+        _chat_session_state(chat_session.session_id)
+        if engine.name == "langchain"
+        else None
+    )
+    if session_state_for_engine is not None:
+        session_state_for_engine["_latest_user_text"] = last_message
+
     # Run the LLM session via the engine abstraction
     try:
         result_text = await engine.run_session_streaming(
@@ -1402,6 +1430,7 @@ async def chat_stream(
             resume=resume_provider,
             message_history=message_history,
             hooks=agent_hooks,
+            session_state=session_state_for_engine,
             approve_permissions=False,
             attachments=attachments,
             audit_context={
@@ -1941,6 +1970,19 @@ async def chat_stream_v2(
         elif event.type == SessionEventType.SESSION_IDLE:
             pass  # We'll handle done when the task completes
 
+    # Thread the raw latest user text for the message-memory-lookup hook
+    # (living-memory M3): the prompt may be the flattened transcript
+    # (_history_prompt), so the hook must not re-derive the turn's topic
+    # from it. The hook falls back to prompt-derived extraction when the
+    # key is absent.
+    session_state_for_engine = (
+        _chat_session_state(chat_session.session_id)
+        if engine.name == "langchain"
+        else None
+    )
+    if session_state_for_engine is not None:
+        session_state_for_engine["_latest_user_text"] = last_message
+
     # Run the streaming session in a background task
     async def run_llm():
         event_persist_bridge.start()
@@ -1958,6 +2000,7 @@ async def chat_stream_v2(
                 resume=resume_provider,
                 message_history=message_history,
                 hooks=agent_hooks,
+                session_state=session_state_for_engine,
                 approve_permissions=False,
                 attachments=attachments,
                 managed_tools=agent_managed_tools if engine.name == "langchain" else None,

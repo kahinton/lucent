@@ -137,6 +137,53 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         max_value=50,
     ),
     RuntimeSettingDefinition(
+        key="memory.inject_min_similarity",
+        env_var="LUCENT_INJECT_MIN_SIMILARITY",
+        value_type="float",
+        default=0.30,
+        title="Message injection similarity threshold",
+        section="Memory lifecycle",
+        description=(
+            "Minimum similarity_score for a memory to be proactively injected "
+            "on a user message (injection-layer filter)."
+        ),
+        help_text=(
+            "Calibrated against live search scores: content-matching queries "
+            "score ~0.52+, filler/noise queries ~0.11. Lower it only if useful "
+            "memories stop arriving."
+        ),
+        min_value=0.0,
+        max_value=1.0,
+    ),
+    RuntimeSettingDefinition(
+        key="memory.inject_max_terms",
+        env_var="LUCENT_INJECT_MAX_TERMS",
+        value_type="integer",
+        default=8,
+        title="Message injection term cap",
+        section="Memory lifecycle",
+        description=(
+            "Maximum terms extracted from a user message for the proactive "
+            "memory search."
+        ),
+        min_value=1,
+        max_value=32,
+    ),
+    RuntimeSettingDefinition(
+        key="memory.inject_max_memories",
+        env_var="LUCENT_INJECT_MAX_MEMORIES",
+        value_type="integer",
+        default=3,
+        title="Message injection memory cap",
+        section="Memory lifecycle",
+        description=(
+            "Maximum memories injected per user message by the proactive "
+            "injection pipeline."
+        ),
+        min_value=1,
+        max_value=10,
+    ),
+    RuntimeSettingDefinition(
         key="requests.daemon_auto_approve",
         env_var="LUCENT_AUTO_APPROVE",
         value_type="boolean",
@@ -1594,6 +1641,42 @@ def search_vitality_boost_log_top_n(*, organization_id: Any | None = None) -> in
     return int(
         get_runtime_setting(
             "memory.search_vitality_boost_log_top_n",
+            organization_id=organization_id,
+        )
+    )
+
+
+def message_inject_min_similarity(*, organization_id: Any | None = None) -> float:
+    """Injection-layer similarity threshold for proactive message injection.
+
+    Message-pipeline design §4: applied client-side in the hook to each
+    search result's ``similarity_score`` — the search API stays untouched.
+    Default 0.30 sits ~2.5x above the empirical noise band (0.106-0.120) and
+    comfortably below genuine signal (0.52-0.57).
+    """
+    return float(
+        get_runtime_setting(
+            "memory.inject_min_similarity",
+            organization_id=organization_id,
+        )
+    )
+
+
+def message_inject_max_terms(*, organization_id: Any | None = None) -> int:
+    """Maximum terms extracted from a user message for proactive injection."""
+    return int(
+        get_runtime_setting(
+            "memory.inject_max_terms",
+            organization_id=organization_id,
+        )
+    )
+
+
+def message_inject_max_memories(*, organization_id: Any | None = None) -> int:
+    """Maximum memories injected per user message by the injection pipeline."""
+    return int(
+        get_runtime_setting(
+            "memory.inject_max_memories",
             organization_id=organization_id,
         )
     )
