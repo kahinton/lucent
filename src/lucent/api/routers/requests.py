@@ -322,21 +322,29 @@ async def list_planning_targets(
 
     When called with a user-scoped API key (memory_scope_user_id set),
     automatically restricts results to that user's goals so the per-user
-    fan-out gets only its own user's targets.
+    fan-out gets only its own user's targets. Every non-daemon caller —
+    including humans with unscoped personal API keys and owners — is
+    scoped to their own goals, mirroring _request_visibility_args.
+    Only an unscoped daemon-service caller keeps the org-wide view.
     """
     from lucent.db.requests import RequestRepository
 
-    # If the caller's key is scoped to a user, force-filter to that user.
-    # An explicit ?user_id= override is only honored when it matches the
-    # scoped user id (defense in depth — a scoped key could not actually
-    # broaden its view but we shouldn't pretend otherwise).
-    effective_user_id: str | None = user_id
-    if user.memory_scope == "user" and user.memory_scope_user_id is not None:
-        scoped = str(user.memory_scope_user_id)
-        if effective_user_id and effective_user_id != scoped:
-            effective_user_id = scoped
-        else:
-            effective_user_id = scoped
+    # Scope by caller identity, mirroring _request_visibility_args:
+    #   - an unscoped daemon-service caller (RequestAPI's API_HEADERS
+    #     fallback) legitimately serves the whole org — keep org-wide;
+    #   - a user-scoped API key (per-user cognitive fan-out) is forced
+    #     to the scoped user; an explicit ?user_id= override is honored
+    #     only when it matches the scoped user id (defense in depth —
+    #     a scoped key could not actually broaden its view but we
+    #     shouldn't pretend otherwise);
+    #   - every other caller sees only their own goals, regardless of
+    #     role or any caller-supplied ?user_id=.
+    if _is_daemon_user(user) and not user.is_memory_scoped:
+        effective_user_id = None
+    elif user.memory_scope == "user" and user.memory_scope_user_id is not None:
+        effective_user_id = str(user.memory_scope_user_id)
+    else:
+        effective_user_id = str(user.effective_memory_user_id)
 
     repo = RequestRepository(pool)
     targets = await repo.list_planning_targets(

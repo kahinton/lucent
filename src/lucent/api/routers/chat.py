@@ -467,6 +467,7 @@ async def _summarize_session_experience(
             audit_context={
                 "source": "chat.session_experience_summary",
                 "organization_id": str(session.get("organization_id") or ""),
+                "user_id": str(session.get("user_id") or ""),
                 "session_id": str(session.get("id") or ""),
                 "model": model,
                 "engine": engine.name,
@@ -576,6 +577,7 @@ async def _generate_intro_summary(user: dict, pool) -> tuple[str, str, str]:
         audit_context={
             "source": "chat.intro_summary",
             "organization_id": str(user.get("organization_id") or ""),
+            "user_id": str(user.get("id") or ""),
             "session_id": "",
             "model": model,
             "engine": engine.name,

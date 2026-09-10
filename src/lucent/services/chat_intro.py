@@ -98,6 +98,32 @@ def _fingerprint_component(label: str, *values: Any) -> str:
     return f"{label}=" + ",".join(str(v) for v in values)
 
 
+def _goal_rollup_sql(memory_access: str) -> str:
+    """Goal-milestone rollup SQL composed with the requester's access condition.
+
+    MemoryRepository's condition builders hard-code the bare ``memories``
+    table name, so this query must not alias the table. Parameter layout is
+    the repo's composition convention (web/routes/memories.py): $1 = user_id,
+    $2 = organization_id, $3 = limit.
+    """
+    return f"""SELECT memories.id,
+                      COALESCE(memories.content, '') AS title,
+                      COALESCE(memories.metadata->>'status', 'active') AS status,
+                      CASE
+                          WHEN jsonb_typeof(memories.metadata) = 'object'
+                               AND jsonb_typeof(memories.metadata->'milestones') = 'array'
+                          THEN memories.metadata->'milestones'
+                          ELSE '[]'::jsonb
+                      END AS milestones
+               FROM memories
+               WHERE memories.type = 'goal'
+                 AND memories.deleted_at IS NULL
+                 AND memories.organization_id = $2::uuid
+                 AND {memory_access}
+               ORDER BY COALESCE(memories.updated_at, memories.created_at) DESC
+               LIMIT $3"""
+
+
 async def gather_work_context(user) -> dict[str, Any]:
     """Gather grounded tracked-work data for the intro summary.
 
@@ -147,23 +173,16 @@ async def gather_work_context(user) -> dict[str, Any]:
 
     # Lightweight goal-milestone rollup via SQL (JSONB path), bounded to
     # recently-updated goals. DB-only; no LLM calls to gather context.
+    # Scoped to the requesting user's memory boundary (own + org-granted +
+    # daemon-owner-visible) — NOT org-wide, or one member's private goals
+    # would ground another member's summary.
+    from lucent.db.memory import MemoryRepository
+
+    memory_access = MemoryRepository.user_memory_access_condition("$2", "$1")
     async with pool.acquire() as conn:
         goal_rows = await conn.fetch(
-            """SELECT m.id,
-                      COALESCE(m.content, '') AS title,
-                      COALESCE(m.metadata->>'status', 'active') AS status,
-                      CASE
-                          WHEN jsonb_typeof(m.metadata) = 'object'
-                               AND jsonb_typeof(m.metadata->'milestones') = 'array'
-                          THEN m.metadata->'milestones'
-                          ELSE '[]'::jsonb
-                      END AS milestones
-               FROM memories m
-               WHERE m.type = 'goal'
-                 AND m.deleted_at IS NULL
-                 AND m.organization_id = $1::uuid
-               ORDER BY COALESCE(m.updated_at, m.created_at) DESC
-               LIMIT $2""",
+            _goal_rollup_sql(memory_access),
+            UUID(user_id),
             UUID(org_id),
             MAX_GOALS * 4,
         )
