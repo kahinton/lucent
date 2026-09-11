@@ -195,6 +195,7 @@ class LLMEngine(ABC):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        current_user_text: str | None = None,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -227,6 +228,10 @@ class LLMEngine(ABC):
             attachments: Optional normalized multimodal attachments (images and
                 documents) for the current user turn. See
                 ``lucent.llm.attachments`` for the normalized shape.
+            current_user_text: Raw text of the user message that started this
+                turn. Engines with runtime hooks (message-memory-lookup) use it
+                to anchor message-phase extraction to the current turn; engines
+                without such hooks may ignore it.
 
         Returns:
             The assistant's full response text, or None on error.

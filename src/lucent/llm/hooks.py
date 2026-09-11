@@ -210,6 +210,7 @@ class HookManager:
         *,
         messages: list[dict[str, Any]],
         memory_bridge: Any | None = None,
+        current_user_text: str | None = None,
     ) -> HookOutcome:
         """Run hooks immediately before a model invocation.
 
@@ -217,11 +218,19 @@ class HookManager:
         hooks, which no-op when it is absent (message pipeline design §2 —
         model-phase lookups were previously unreachable because this method
         never passed a bridge or a tool name).
+
+        ``current_user_text`` is the raw text of the user message that started
+        this turn. The message-memory-lookup hook extracts its search terms
+        from it in preference to the (possibly transcript-flattened) prompt
+        inside ``messages``, which keeps the hook anchored to the current turn
+        without depending on when a session-state side channel was last
+        written.
         """
         return await self._run_event_hooks(
             event=BEFORE_MODEL_CALL,
             messages=messages,
             memory_bridge=memory_bridge,
+            current_user_text=current_user_text,
         )
 
     async def after_model_call(
@@ -247,6 +256,7 @@ class HookManager:
         messages: list[dict[str, Any]] | None = None,
         model_text: str | None = None,
         memory_bridge: Any | None = None,
+        current_user_text: str | None = None,
     ) -> HookOutcome:
         """Run all hooks matching a lifecycle event."""
         outputs: list[HookExecution] = []
@@ -279,6 +289,7 @@ class HookManager:
                         messages=messages,
                         memory_bridge=memory_bridge,
                         session_state=self.session_state,
+                        current_user_text=current_user_text,
                     )
                 elif hook.get("action_type") == "static_context":
                     result = _run_static_context_hook(
@@ -611,6 +622,7 @@ async def _run_message_memory_lookup_hook(
     messages: list[dict[str, Any]],
     memory_bridge: Any | None,
     session_state: dict[str, Any] | None,
+    current_user_text: str | None = None,
 ) -> HookExecution | None:
     """Message-phase injection layer (living-memory pipeline, design §2–§5).
 
@@ -622,6 +634,14 @@ async def _run_message_memory_lookup_hook(
     modes (no bridge, no terms, later rounds) no-op silently; once the search
     has run, a no-injection turn emits an explicit ``memory-lookup: 0
     injected`` silence line so it is distinguishable from a didn't-run turn.
+
+    Extraction source priority (turn-anchoring, 2026-09-11): the caller-supplied
+    ``current_user_text`` — the raw text of the message that started THIS turn
+    — always wins, so the hook cannot depend on when a session-state side
+    channel was last written. ``session_state["_latest_user_text"]`` is the
+    legacy channel (chat.py pre-2026-09-11) and is still honored; the
+    message-phase extraction source (first message of a fresh conversation and
+    non-chat callers) is the final fallback.
     """
     if memory_bridge is None:
         return None
@@ -635,16 +655,24 @@ async def _run_message_memory_lookup_hook(
     )
     if latest_user is None:
         return None
-    # Extraction source (living-memory M3): chat.py threads the raw latest
-    # user text via session_state["_latest_user_text"] because the prompt may
-    # be the flattened transcript (_history_prompt), whose head terms are not
-    # the current turn's topic. Prefer the threaded text when present and
-    # truthy; fall back to the message-phase extraction source (first message
-    # of a fresh conversation and non-chat callers).
+    # Extraction source priority:
+    #   1. ``current_user_text`` — explicit per-turn input from the engine
+    #      (chat.py threads the current message every turn). Never stale by
+    #      construction, because the engine passes it alongside the very
+    #      messages the hook is guarding.
+    #   2. ``session_state["_latest_user_text"]`` — legacy side channel
+    #      (living-memory M3), kept for callers that thread it directly.
+    #   3. The message-phase extraction source — first message of a fresh
+    #      conversation and non-chat callers.
     threaded_text = session_state.get("_latest_user_text") if session_state else None
-    source_text = (
-        str(threaded_text) if threaded_text else str(latest_user.get("content") or "")
-    )
+    explicit_text = (current_user_text or "").strip()
+    threaded = str(threaded_text).strip() if threaded_text else ""
+    if explicit_text:
+        source_text = explicit_text
+    elif threaded:
+        source_text = threaded
+    else:
+        source_text = str(latest_user.get("content") or "")
     terms = extract_semantic_terms(source_text)
     if not terms:
         # Zero-term short-circuit (design §3.4): all-stopword/fragment messages

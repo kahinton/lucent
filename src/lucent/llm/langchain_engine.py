@@ -220,6 +220,28 @@ def _messages_for_hooks(messages: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _current_user_text_from_messages(messages: list[Any]) -> str | None:
+    """Return the raw text of the LAST human message, for message-phase hooks.
+
+    The hook loop appends this turn's user message (plain text or the
+    attachment-block form) as the final entry of the history list, so the last
+    human message is always the CURRENT turn's text — the same discriminator
+    ``_is_first_model_call_after_user_message`` uses for the round-1 guard.
+    Returns ``None`` when no human message exists (the hook then falls back to
+    its legacy extraction sources).
+    """
+    for message in reversed(messages or []):
+        if message.__class__.__name__.removesuffix("Message").lower() == "human":
+            content = getattr(message, "content", "")
+            if isinstance(content, str):
+                return content
+            try:
+                return json.dumps(content, default=str)
+            except (TypeError, ValueError):
+                return str(content)
+    return None
+
+
 async def _provider_api_key(
     provider: str,
     audit_context: dict[str, Any] | None = None,
@@ -379,6 +401,7 @@ class LangChainEngine(LLMEngine):
         managed_tools: list[dict[str, Any]] | None = None,
         expected_surface: dict[str, Any] | None = None,
         session_state: dict[str, Any] | None = None,
+        current_user_text: str | None = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern).
 
@@ -386,6 +409,12 @@ class LangChainEngine(LLMEngine):
         session caller: the engine does not mutate it, but the HookManager it
         seeds persists hook state (e.g. injected-memory dedup ids) across the
         turns of one conversation. Each call without one starts fresh.
+
+        ``current_user_text`` is the raw text of the user message that started
+        this turn; it is threaded into the message-memory-lookup hook so its
+        search terms are anchored to the current turn (2026-09-11
+        turn-anchoring fix) instead of depending on a session-state side
+        channel being written before the engine call.
         """
         try:
             return await self._run_with_tools(
@@ -405,6 +434,7 @@ class LangChainEngine(LLMEngine):
                 managed_tools=managed_tools,
                 expected_surface=expected_surface,
                 session_state=session_state,
+                current_user_text=current_user_text,
             )
         except Exception as e:
             error_message = str(e) or type(e).__name__
@@ -431,6 +461,7 @@ class LangChainEngine(LLMEngine):
         managed_tools: list[dict[str, Any]] | None = None,
         expected_surface: dict[str, Any] | None = None,
         session_state: dict[str, Any] | None = None,
+        current_user_text: str | None = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -449,6 +480,10 @@ class LangChainEngine(LLMEngine):
         "tool is not available" errors. Validation is delegated to
         ``validate_expected_surface``; see its docs for the empty-allowlist
         semantics.
+
+        ``current_user_text`` overrides the prompt-derived extraction source
+        for the message-memory-lookup hook (chat.py threads the raw current
+        turn text; callers without hooks may leave it unset).
         """
         from lucent.llm.builtin_tools import build_default_toolset
         from langchain_core.messages import (
@@ -653,6 +688,15 @@ class LangChainEngine(LLMEngine):
                 before_model = await hook_manager.before_model_call(
                     messages=_messages_for_hooks(messages),
                     memory_bridge=memory_bridge,
+                    # THIS turn's raw user text: prefer the explicit text the
+                    # session caller threaded (chat.py passes the current
+                    # message every turn); when absent, derive it from the
+                    # last human message in the loop — `_run_with_tools`
+                    # appends this turn's message (or its attachment-block
+                    # form) last, so that is the current turn either way,
+                    # never the flattened transcript prompt. (2026-09-11 fix.)
+                    current_user_text=current_user_text
+                    or _current_user_text_from_messages(messages),
                 )
                 if before_model.blocked:
                     blocked_text = before_model.block_message or "Model call blocked by hook."

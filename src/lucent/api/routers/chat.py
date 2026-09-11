@@ -1433,6 +1433,9 @@ async def chat_stream(
             message_history=message_history,
             hooks=agent_hooks,
             session_state=session_state_for_engine,
+            # Turn-anchoring (2026-09-11): the CURRENT user message reaches
+            # the hook explicitly every turn, not via session-state ordering.
+            current_user_text=last_message,
             approve_permissions=False,
             attachments=attachments,
             audit_context={
@@ -2003,6 +2006,10 @@ async def chat_stream_v2(
                 message_history=message_history,
                 hooks=agent_hooks,
                 session_state=session_state_for_engine,
+                # Turn-anchoring (2026-09-11): the CURRENT user message
+                # reaches the hook explicitly every turn, not via
+                # session-state ordering.
+                current_user_text=last_message,
                 approve_permissions=False,
                 attachments=attachments,
                 managed_tools=agent_managed_tools if engine.name == "langchain" else None,

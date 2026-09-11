@@ -682,12 +682,17 @@ class CopilotEngine(LLMEngine):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        current_user_text: str | None = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
         Uses activity-based timeout: the session stays alive as long as events
         keep arriving. Only times out after `idle_timeout` seconds of silence.
         The hard `timeout` is a safety net for runaway sessions.
+
+        ``current_user_text`` is accepted for engine-signature parity with
+        LangChainEngine (chat.py passes it on every turn); the Copilot engine
+        runs no message-phase hooks, so it is accepted and ignored.
         """
         if not _ensure_sdk():
             raise RuntimeError(

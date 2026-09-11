@@ -585,3 +585,320 @@ async def test_hook_runtime_error_emitted_as_hook_error_line() -> None:
     assert execution.text == "hook error: ValueError"
     assert execution.metadata["hook_error"] == "ValueError"
     assert execution.hook_name == "exploding-hook"
+
+
+# ── turn-anchoring (2026-09-11 fix): explicit current-message text ──────────
+#
+# Turn-1 silence regression class (request 1c38345a): the hook's extraction
+# source must be the CURRENT user message every turn — round 1 of the turn's
+# model loop — never a session-state side channel whose write ordering can
+# drift, and never the transcript-flattened prompt. The engine now threads
+# ``current_user_text`` explicitly; chat.py passes it every turn.
+
+
+@pytest.mark.asyncio
+async def test_message_hook_fires_on_first_turn_with_explicit_text() -> None:
+    # Turn 1 of a conversation: no session state at all (fresh engine call),
+    # but the engine threads the current message explicitly. The hook must
+    # search — a turn-1 zero-candidate search emits the silence line, it is
+    # NEVER a silent no-op.
+    bridge = FakeBridge([])
+    manager = HookManager(session_state={})
+    outcome = await manager.before_model_call(
+        messages=[
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "tell me about the injection threshold"},
+        ],
+        memory_bridge=bridge,
+        current_user_text="tell me about the injection threshold",
+    )
+    assert [(name, payload["query"]) for name, payload in bridge.calls] == [
+        ("search_memories_full", "tell injection threshold"),
+    ]
+    assert len(outcome.executions) == 1
+    assert outcome.executions[0].text == (
+        "memory-lookup: 0 injected (0 deduped, 0 below threshold)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_message_hook_explicit_text_wins_over_stale_threaded_text() -> None:
+    # Fragile-ordering regression: session_state still holds the PREVIOUS
+    # turn's text (side channel not yet rewritten this turn) while the engine
+    # passes the CURRENT message explicitly. The explicit text must win —
+    # the hook must never search the prior turn's topic.
+    bridge = FakeBridge([
+        _memory("77777777-7777-7777-7777-777777777777", 0.6, "consolidation memory"),
+    ])
+    state: dict[str, Any] = {"_latest_user_text": "plan the public site launch"}
+    manager = HookManager(session_state=state)
+    outcome = await manager.before_model_call(
+        messages=[
+            {"role": "user", "content": "how does the daemon sleep cycle work"},
+        ],
+        memory_bridge=bridge,
+        current_user_text="how does the daemon sleep cycle work",
+    )
+    assert outcome.injectable_executions[0].metadata["terms"] == [
+        "daemon", "sleep", "cycle", "work",
+    ]
+    assert [
+        (name, payload["query"]) for name, payload in bridge.calls if name == "search_memories_full"
+    ] == [("search_memories_full", "daemon sleep cycle work")]
+
+
+@pytest.mark.asyncio
+async def test_message_hook_threaded_text_beats_message_fallback() -> None:
+    # Legacy channel still honored when no explicit text is passed: threaded
+    # session-state text must win over the (flattened) message content.
+    bridge = FakeBridge([
+        _memory("88888888-8888-8888-8888-888888888888", 0.6, "site plan memory"),
+    ])
+    state: dict[str, Any] = {"_latest_user_text": "plan the public site"}
+    manager = HookManager(session_state=state)
+    outcome = await manager.before_model_call(
+        messages=[
+            {"role": "user", "content": "Previous conversation:\nUser: give feedback"},
+        ],
+        memory_bridge=bridge,
+    )
+    assert outcome.injectable_executions[0].metadata["terms"] == [
+        "plan", "public", "site",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_message_hook_silence_line_all_filtered_results() -> None:
+    # Post-search no-injection turns must render an explicit silence line —
+    # candidates exist but every one is filtered (below threshold here), so
+    # the counters name the reason instead of looking like a didn't-run turn.
+    bridge = FakeBridge([
+        _memory("99999999-9999-9999-9999-999999999999", 0.10, "weak match"),
+        _memory("9aaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 0.15, "weaker match"),
+    ])
+    state: dict[str, Any] = {"_latest_user_text": "explain the injection threshold"}
+    manager = HookManager(session_state=state)
+    outcome = await manager.before_model_call(
+        messages=[{"role": "user", "content": "explain the injection threshold"}],
+        memory_bridge=bridge,
+        current_user_text="explain the injection threshold",
+    )
+    assert len(outcome.executions) == 1
+    execution = outcome.executions[0]
+    assert execution.text == "memory-lookup: 0 injected (0 deduped, 2 below threshold)"
+    assert execution.metadata["below_threshold"] == 2
+    assert execution.metadata["deduped"] == 0
+    assert execution.metadata["memory_count"] == 0
+    # Search ran with the explicit current-turn text.
+    assert [
+        (name, payload["query"]) for name, payload in bridge.calls if name == "search_memories_full"
+    ] == [("search_memories_full", "explain injection threshold")]
+
+
+@pytest.mark.asyncio
+async def test_message_hook_silence_line_after_dedup_suppression() -> None:
+    # Same memory qualifies on turn 2 but was injected on turn 1: dedup
+    # suppression is a post-search no-injection turn, so it renders the
+    # silence line with the deduped counter — never a silent no-op.
+    state: dict[str, Any] = {}
+    first = FakeBridge([
+        _memory("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 0.7, "sleep cycle memory"),
+    ])
+    first_manager = HookManager(session_state=state)
+    await first_manager.before_model_call(
+        messages=[{"role": "user", "content": "explain the daemon sleep cycle"}],
+        memory_bridge=first,
+        current_user_text="explain the daemon sleep cycle",
+    )
+    assert state["injected_memory_ids"] == {"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}
+    second = FakeBridge([
+        _memory("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 0.7, "sleep cycle memory"),
+    ])
+    second_manager = HookManager(session_state=state)
+    outcome = await second_manager.before_model_call(
+        messages=[{"role": "user", "content": "explain the daemon sleep cycle again"}],
+        memory_bridge=second,
+        current_user_text="explain the daemon sleep cycle again",
+    )
+    # No memory injected — but the silence line IS emitted as an injectable
+    # execution (that is how it reaches the model and the hook chip), with
+    # the deduped counter naming the reason.
+    assert len(outcome.executions) == 1
+    assert outcome.executions[0].text == (
+        "memory-lookup: 0 injected (1 deduped, 0 below threshold)"
+    )
+    assert outcome.executions[0].metadata["deduped"] == 1
+
+
+# ── engine-level round-1 wiring (langchain_engine._run_with_tools) ─────────
+
+
+class _StubChatModel:
+    """Minimal LangChain-compatible chat model stub (plain-text answer)."""
+
+    def bind_tools(self, _schemas):
+        return self
+
+    async def ainvoke(self, _messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(content="plain answer")
+
+
+async def _run_engine_turn(
+    *,
+    prompt: str,
+    message_history: list[dict[str, Any]] | None,
+    current_user_text: str | None,
+    session_state: dict[str, Any] | None,
+    bridge: FakeBridge,
+) -> str | None:
+    """Drive one real ``LangChainEngine._run_with_tools`` turn with stubs.
+
+    Stubs: the chat model (no provider/model lookups) and the MCP bridge
+    factory (no network) so the memory bridge — and therefore the message-
+    memory-lookup hook — is exercised through the engine's real round-1
+    wiring. ``langchain_max_tool_rounds`` is pinned to 1 so the loop
+    terminates after the stub's plain-text answer.
+    """
+    import lucent.llm.langchain_engine as engine_mod
+    from lucent.llm.langchain_engine import LangChainEngine
+
+    engine = LangChainEngine()
+
+    async def _fake_get_chat_model(_model, **_kwargs):
+        return _StubChatModel()
+
+    async def _fake_create_bridges(_self, _mcp_config, audit_context=None):
+        return [], {}, bridge, []
+
+    original_get_model = engine_mod._get_chat_model
+    original_create_bridges = LangChainEngine._create_bridges
+    original_rounds = engine_mod.runtime_settings.langchain_max_tool_rounds
+    engine_mod._get_chat_model = _fake_get_chat_model
+    LangChainEngine._create_bridges = _fake_create_bridges
+    engine_mod.runtime_settings.langchain_max_tool_rounds = (
+        lambda organization_id=None: 1
+    )
+    try:
+        return await engine._run_with_tools(
+            model="stub-model",
+            system_message="system",
+            prompt=prompt,
+            mcp_config={"stub-memory": {"type": "http", "url": "http://stub.invalid"}},
+            on_event=None,
+            message_history=message_history,
+            hooks=None,
+            audit_context=None,
+            approve_permissions=False,
+            managed_tools=None,
+            expected_surface=None,
+            session_state=session_state,
+            current_user_text=current_user_text,
+        )
+    finally:
+        engine_mod._get_chat_model = original_get_model
+        LangChainEngine._create_bridges = original_create_bridges
+        engine_mod.runtime_settings.langchain_max_tool_rounds = original_rounds
+
+
+@pytest.mark.asyncio
+async def test_engine_message_hook_fires_on_turn_1() -> None:
+    # Full engine path, turn 1 of a conversation: no prior history, no
+    # session state, no explicit text. The hook must fire on the fresh-
+    # conversation fallback (the prompt IS the current turn's text) — a
+    # zero-candidate turn-1 search emits the silence line and is NEVER a
+    # silent no-op. Regression for the turn-1 "total silence" report.
+    bridge = FakeBridge([])
+    result = await _run_engine_turn(
+        message_history=None,
+        current_user_text=None,
+        session_state={},
+        bridge=bridge,
+        prompt="explain the injection threshold",
+    )
+    assert result == "plain answer"
+    assert [
+        (name, payload["query"]) for name, payload in bridge.calls if name == "search_memories_full"
+    ] == [("search_memories_full", "explain injection threshold")]
+
+
+@pytest.mark.asyncio
+async def test_engine_message_hook_uses_current_not_prior_text() -> None:
+    # Turn 2 with a flattened transcript prompt: the engine's threaded
+    # current_user_text must win over the transcript head. The search must
+    # use turn 2's terms — never turn 1's.
+    bridge = FakeBridge([])
+    await _run_engine_turn(
+        message_history=[
+            {"role": "user", "content": "plan the public site launch"},
+            {"role": "assistant", "content": "Sounds good."},
+        ],
+        current_user_text="how does the daemon sleep cycle work",
+        session_state={"_latest_user_text": "plan the public site launch"},
+        bridge=bridge,
+        prompt=(
+            "Previous conversation:\n"
+            "User: plan the public site launch\n"
+            "Assistant: Sounds good.\n\n"
+            "User: how does the daemon sleep cycle work"
+        ),
+    )
+    assert [
+        (name, payload["query"]) for name, payload in bridge.calls if name == "search_memories_full"
+    ] == [("search_memories_full", "daemon sleep cycle work")]
+
+
+@pytest.mark.asyncio
+async def test_engine_message_hook_falls_back_to_loop_last_human_message() -> None:
+    # No explicit text (caller without the kwarg, e.g. a daemon-style session
+    # whose prompt is the raw turn text): the engine derives the current
+    # turn's text from the LAST human message in the loop. Round-1 fires.
+    bridge = FakeBridge([])
+    await _run_engine_turn(
+        message_history=[
+            {"role": "user", "content": "plan the public site launch"},
+            {"role": "assistant", "content": "Sounds good."},
+        ],
+        current_user_text=None,
+        session_state={},
+        bridge=bridge,
+        prompt="how does the daemon sleep cycle work",
+    )
+    assert [
+        (name, payload["query"]) for name, payload in bridge.calls if name == "search_memories_full"
+    ] == [("search_memories_full", "daemon sleep cycle work")]
+
+
+# ── engine API pass-through (current_user_text reaches the hook manager) ────
+
+
+@pytest.mark.asyncio
+async def test_engine_run_session_streaming_passes_current_user_text() -> None:
+    # The session API threads the kwarg into _run_with_tools, which reaches
+    # the hook as the explicit extraction source (turn 2 of a conversation,
+    # prior turn's text still in the legacy side channel).
+    from lucent.llm.langchain_engine import LangChainEngine
+
+    engine = LangChainEngine()
+    captured: dict[str, Any] = {}
+
+    async def _fake_run_with_tools(self, **kwargs):
+        captured.update(kwargs)
+        return "ok"
+
+    original = LangChainEngine._run_with_tools
+    LangChainEngine._run_with_tools = _fake_run_with_tools
+    try:
+        result = await engine.run_session_streaming(
+            model="stub-model",
+            system_message="system",
+            prompt="prompt",
+            current_user_text="how does the daemon sleep cycle work",
+            session_state={"_latest_user_text": "plan the public site launch"},
+        )
+    finally:
+        LangChainEngine._run_with_tools = original
+    assert result == "ok"
+    assert captured["current_user_text"] == "how does the daemon sleep cycle work"
+    assert captured["session_state"] == {"_latest_user_text": "plan the public site launch"}
