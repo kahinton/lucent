@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.name }} - Projects - Lucent{% endblock %}
+
+{% block content %}
+<div class="mb-5 flex items-center gap-2 text-sm text-gray-500">
+    <a href="/projects" class="hover:text-gray-700">Projects</a>
+    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+    <span class="truncate text-gray-700">{{ project.name }}</span>
+</div>
+
+<div class="mb-6 flex flex-col gap-4 border-b border-gray-200 pb-5 sm:flex-row sm:items-start sm:justify-between">
+    <div class="min-w-0">
+        <h1 class="break-words text-2xl font-bold text-gray-900" id="project-name">{{ project.name }}</h1>
+        <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-gray-500">
+            <span>{{ project.session_count }} chat{% if project.session_count != 1 %}s{% endif %}</span>
+            <span>{{ project.file_count }} file{% if project.file_count != 1 %}s{% endif %}</span>
+            <span>{{ (memories or []) | length }} memor{% if (memories or []) | length == 1 %}y{% else %}ies{% endif %}</span>
+            <span>{{ (interactions or []) | length }} handoff{% if (interactions or []) | length != 1 %}s{% endif %}</span>
+        </div>
+    </div>
+    <div class="flex shrink-0 items-center gap-2">
+        <form method="post" action="/projects/{{ project.id }}/new-chat">
+            <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+            <button type="submit" class="inline-flex items-center gap-2 rounded-md bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-700">
+                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+                New chat
+            </button>
+        </form>
+        <button type="button" data-toggle-target="rename-form" data-toggle-mode="remove" data-focus-selector="input[name=name]" class="inline-flex items-center rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50" title="Rename project">Rename</button>
+        <form method="post" action="/projects/{{ project.id }}/delete" data-confirm="Delete this project? Chats and files are kept and become unfiled.">
+            <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+            <button type="submit" class="inline-flex h-9 w-9 items-center justify-center rounded-md border border-gray-300 text-gray-500 hover:border-red-300 hover:bg-red-50 hover:text-red-700" title="Delete project" aria-label="Delete project">
+                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.108 48.108 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
+            </button>
+        </form>
+    </div>
+</div>
+
+<form id="rename-form" method="post" action="/projects/{{ project.id }}/rename" class="hidden mb-6 flex items-center gap-2">
+    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+    <input type="text" name="name" required maxlength="256" value="{{ project.name }}" class="w-72 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-primary-300 focus:outline-none" aria-label="Project name">
+    <button type="submit" class="rounded-md bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-700">Save</button>
+    <button type="button" data-toggle-target="rename-form" data-toggle-mode="add" class="rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</button>
+</form>
+
+<section class="mb-7" aria-labelledby="instructions-heading">
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="instructions-heading" class="text-base font-semibold text-gray-900">Instructions</h2>
+        <button type="button" data-toggle-target="instructions-editor" data-toggle-mode="remove" class="text-sm font-medium text-primary-600 hover:text-primary-700">Edit</button>
+    </div>
+    <div id="instructions-editor" class="hidden mb-3">
+        <form method="post" action="/projects/{{ project.id }}/instructions">
+            <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+            <textarea name="instructions" rows="5" class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-primary-300 focus:outline-none" placeholder="Standing context for every chat in this project." aria-label="Project instructions">{{ project.instructions or '' }}</textarea>
+            <div class="mt-2 flex gap-2">
+                <button type="submit" class="rounded-md bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-700">Save</button>
+                <button type="button" data-toggle-target="instructions-editor" data-toggle-mode="add" class="rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</button>
+            </div>
+        </form>
+    </div>
+    {% if project.instructions %}
+    <p class="whitespace-pre-wrap rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-700 shadow-sm">{{ project.instructions }}</p>
+    {% else %}
+    <p class="text-sm text-gray-500">No instructions yet — they are added to every chat in this project.</p>
+    {% endif %}
+</section>
+
+<section class="mb-7" aria-labelledby="chats-heading">
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="chats-heading" class="text-base font-semibold text-gray-900">Chats</h2>
+        <a href="/projects/{{ project.id }}/add-chats" class="text-sm font-medium text-primary-600 hover:text-primary-700">Add chats</a>
+    </div>
+    {% if sessions %}
+    <div class="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+        {% for session in sessions %}
+        <div class="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <a href="/chat/{{ session.id }}" class="min-w-0">
+                <p class="truncate text-sm font-semibold text-gray-900">{{ session.title or 'Untitled conversation' }}</p>
+                <p class="mt-0.5 truncate text-xs text-gray-500">{{ session.message_count }} message{% if session.message_count != 1 %}s{% endif %}{% if session.model %} · {{ session.model }}{% endif %}</p>
+            </a>
+            <form method="post" action="/projects/{{ project.id }}/remove-session">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="session_id" value="{{ session.id }}">
+                <button type="submit" class="text-xs font-medium text-gray-400 hover:text-red-600" title="Remove from project">Remove</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-500">No chats yet. Start one with “New chat” or add an existing chat.</p>
+    {% endif %}
+</section>
+
+<section class="mb-7" aria-labelledby="memories-heading">
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="memories-heading" class="text-base font-semibold text-gray-900">Memories</h2>
+        <a href="/projects/{{ project.id }}/add-memories" class="text-sm font-medium text-primary-600 hover:text-primary-700">Add memories</a>
+    </div>
+    {% if memories %}
+    <div class="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+        {% for memory in memories %}
+        <div class="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <a href="/memories/{{ memory.id }}" class="min-w-0">
+                <span class="flex flex-wrap items-center gap-2">
+                    <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">{{ memory.type }}</span>
+                    <span class="text-xs text-gray-500" title="Importance 1–10">Importance {{ memory.importance if memory.importance is not none else 5 }}</span>
+                </span>
+                <p class="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-gray-700">{{ memory.content | truncate(240) }}</p>
+            </a>
+            <form method="post" action="/projects/{{ project.id }}/remove-memory">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="memory_id" value="{{ memory.id }}">
+                <button type="submit" class="text-xs font-medium text-gray-400 hover:text-red-600" title="Detach from project">Remove</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-500">No memories attached. Memories here get a relevance boost in this project's chats.</p>
+    {% endif %}
+</section>
+
+<section aria-labelledby="files-heading">
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="files-heading" class="text-base font-semibold text-gray-900">Files</h2>
+        <a href="/projects/{{ project.id }}/add-files" class="text-sm font-medium text-primary-600 hover:text-primary-700">Add files</a>
+    </div>
+    {% if files %}
+    <div class="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+        {% for file in files %}
+        <div class="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <a href="/files/{{ file.id }}" class="min-w-0">
+                <p class="truncate text-sm font-semibold text-gray-900">{{ file.display_name }}</p>
+                <p class="mt-0.5 truncate text-xs text-gray-500">{{ file.filename }} · {{ file.size_bytes }} bytes</p>
+            </a>
+            <form method="post" action="/projects/{{ project.id }}/remove-file">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="file_id" value="{{ file.id }}">
+                <button type="submit" class="text-xs font-medium text-gray-400 hover:text-red-600" title="Remove from project">Remove</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-500">No files yet. Files here are shared with every chat in this project.</p>
+    {% endif %}
+</section>
+
+<section class="mt-7" aria-labelledby="handoffs-heading">
+    <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="handoffs-heading" class="text-base font-semibold text-gray-900">Handoffs</h2>
+        <a href="/projects/{{ project.id }}/add-interactions" class="text-sm font-medium text-primary-600 hover:text-primary-700">Add handoffs</a>
+    </div>
+    {% if interactions %}
+    <div class="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+        {% for interaction in interactions %}
+        <div class="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <a href="/handoffs/{{ interaction.id }}" class="min-w-0">
+                <p class="truncate text-sm font-semibold text-gray-900">{{ interaction.title }}</p>
+                <p class="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                    <span>{{ interaction.interaction_type }}</span>
+                    {% if interaction.user_id is none %}<span class="rounded bg-primary-50 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary-700">Org</span>{% endif %}
+                    {% if interaction.status != 'open' %}<span>· {{ interaction.status }}</span>{% endif %}
+                </p>
+            </a>
+            <form method="post" action="/projects/{{ project.id }}/remove-interaction">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                <input type="hidden" name="interaction_id" value="{{ interaction.id }}">
+                <button type="submit" class="text-xs font-medium text-gray-400 hover:text-red-600" title="Remove from project">Remove</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-500">No handoffs filed yet. Open Lucent handoffs can be grouped here.</p>
+    {% endif %}
+</section>
+{% endblock %}

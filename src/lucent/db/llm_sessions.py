@@ -249,15 +249,21 @@ class LLMSessionRepository:
             clauses.append("s.status NOT IN ('archived', 'deleted')")
         where_sql = " AND ".join(clauses)
         count_query = f"SELECT COUNT(*) AS total FROM llm_sessions s WHERE {where_sql}"
+        # project_name rides the list payload so session rows can badge their
+        # project without a per-row lookup. JOIN is scoped by construction:
+        # projects are (org, user)-owned and the session's org/user clauses
+        # already bound the row, so a foreign project name cannot surface.
         query = (
-            "SELECT s.*, "
+            "SELECT s.*, p.name AS project_name, "
             "       COUNT(m.id) AS message_count, "
             "       COUNT(DISTINCT sr.request_id) AS linked_request_count "
             "FROM llm_sessions s "
+            "LEFT JOIN projects p ON p.id = s.project_id "
+            "    AND p.organization_id = s.organization_id AND p.user_id = s.user_id "
             "LEFT JOIN llm_messages m ON m.session_id = s.id "
             "LEFT JOIN llm_session_requests sr ON sr.session_id = s.id "
             f"WHERE {where_sql} "
-            "GROUP BY s.id "
+            "GROUP BY s.id, p.id "
             "ORDER BY COALESCE(s.last_message_at, s.updated_at, s.created_at) DESC "
             f"LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
         )
@@ -379,7 +385,7 @@ class LLMSessionRepository:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 session = await conn.fetchrow(
-                    """SELECT id, title FROM llm_sessions
+                    """SELECT id, title, project_id FROM llm_sessions
                        WHERE id = $1 AND organization_id = $2
                        FOR UPDATE""",
                     _uuid(session_id),
@@ -394,8 +400,8 @@ class LLMSessionRepository:
                 row = await conn.fetchrow(
                     """INSERT INTO llm_messages
                            (session_id, turn_id, sequence, role, content,
-                            provider_message_id, metadata)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            provider_message_id, metadata, project_id)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                        RETURNING *""",
                     _uuid(session_id),
                     _uuid(turn_id),
@@ -404,6 +410,7 @@ class LLMSessionRepository:
                     content or "",
                     provider_message_id,
                     metadata or {},
+                    session["project_id"],
                 )
                 title_update = ""
                 title_params: list[Any] = []

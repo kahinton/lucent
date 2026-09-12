@@ -15,8 +15,24 @@ async def chat_page(request: Request, session_id: str | None = None):
     """Dedicated chat page with model/agent selection and tool visibility."""
     user = await get_user_context(request)
     overview = await load_chat_overview(user)
+
+    # Active-project workspace context (?project=<id>): shows a project chip
+    # so new chats land in the workspace. Fail-closed: unknown/foreign project
+    # ids are ignored (chip absent, unfiled behavior) — never a wrong project.
+    from lucent.db.projects import ProjectRepository
+    from lucent.db import get_pool
+
+    active_project = None
+    project_param = request.query_params.get("project")
+    if project_param:
+        project = await ProjectRepository(await get_pool()).get_owned(
+            project_param, org_id=str(user.organization_id), user_id=str(user.id)
+        )
+        if project:
+            active_project = {"id": str(project["id"]), "name": project["name"]}
+
     return templates.TemplateResponse(
         request,
         "chat.html",
-        {"user": user, "session_id": session_id, **overview},
+        {"user": user, "session_id": session_id, "active_project": active_project, **overview},
     )

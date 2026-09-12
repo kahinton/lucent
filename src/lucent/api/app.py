@@ -643,6 +643,11 @@ def create_app() -> FastAPI:
 
     app.include_router(chat_router.router, prefix="/api", tags=["Chat"])
 
+    # Include projects router
+    from lucent.api.routers import projects as projects_router
+
+    app.include_router(projects_router.router, prefix="/api", tags=["Projects"])
+
     # Include integrations routers
     from lucent.integrations.credential_router import router as credentials_router
     from lucent.integrations.router import admin_router as integrations_admin_router

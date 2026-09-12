@@ -33,6 +33,7 @@ from lucent.db.memory import (
 from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
+from lucent.db.projects import ProjectRepository
 from lucent.db.reviews import ReviewRepository
 from lucent.db.runtime_settings import RuntimeSettingsRepository
 from lucent.db.token_usage import TokenUsageRepository
@@ -75,6 +76,7 @@ __all__ = [
     "GroupRepository",
     "IntegrationRepository",
     "LLMSessionRepository",
+    "ProjectRepository",
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Add handoffs - {{ project.name }} - Lucent{% endblock %}
+
+{% block content %}
+<div class="mb-5 flex items-center gap-2 text-sm text-gray-500">
+    <a href="/projects" class="hover:text-gray-700">Projects</a>
+    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+    <a href="/projects/{{ project.id }}" class="hover:text-gray-700">{{ project.name }}</a>
+    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+    <span class="truncate text-gray-700">Add handoffs</span>
+</div>
+
+<h1 class="mb-1 text-2xl font-bold text-gray-900">Add handoffs</h1>
+<p class="mb-6 text-sm text-gray-500">Open Lucent handoffs not yet in another project. Filing one changes grouping only — who can read it is unchanged.</p>
+
+<form method="post" action="/projects/{{ project.id }}/add-interactions">
+    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+    {% if interactions %}
+    <div class="divide-y divide-gray-100 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+        {% for interaction in interactions %}
+        <label class="flex cursor-pointer items-start gap-3 px-4 py-3 hover:bg-gray-50">
+            <input type="checkbox" name="interaction_ids" value="{{ interaction.id }}" class="mt-1 h-4 w-4 shrink-0 rounded border-gray-300 text-primary-600 focus:ring-primary-100">
+            <span class="min-w-0">
+                <span class="flex flex-wrap items-center gap-2">
+                    <a href="/handoffs/{{ interaction.id }}" class="truncate text-sm font-semibold text-gray-900 hover:underline">{{ interaction.title }}</a>
+                    <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">{{ interaction.interaction_type }}</span>
+                    {% if interaction.user_id is none %}<span class="rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary-700">Org</span>{% endif %}
+                    {% if interaction.requires_response %}<span class="text-[10px] font-medium text-amber-600">needs response</span>{% endif %}
+                </span>
+                <span class="mt-1 block truncate text-xs text-gray-500">{{ interaction.body | truncate(180) }}</span>
+            </span>
+        </label>
+        {% endfor %}
+    </div>
+    <div class="mt-4 flex gap-2">
+        <button type="submit" class="rounded-md bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-700">Add to project</button>
+        <a href="/projects/{{ project.id }}" class="rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-600 hover:bg-gray-50">Cancel</a>
+    </div>
+    {% else %}
+    <div class="border-y border-gray-200 py-16 text-center">
+        <p class="text-sm font-medium text-gray-700">No unfiled handoffs</p>
+        <p class="mt-1 text-sm text-gray-500">Every open handoff is already in a project (or none exist yet).</p>
+    </div>
+    <a href="/projects/{{ project.id }}" class="text-sm font-medium text-primary-600 hover:text-primary-700">Back to project</a>
+    {% endif %}
+</form>
+{% endblock %}

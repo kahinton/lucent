@@ -222,6 +222,20 @@
         }
         if (memoryCount == null) memoryCount = memories.length;
 
+        // Project-context events (system-prompt injection, Projects v2):
+        // name/file_count/bytes ride the emitting engine's event metadata
+        // and describe the injected standing block — not tool activity.
+        // Legacy rows without metadata recover the name from the block text.
+        let projectName = asString(pick('name'));
+        let fileCount = pick('file_count');
+        let blockBytes = pick('bytes');
+        if (!projectName) {
+            const projMatch = text.match(/^## Project:\s*(.+)$/m);
+            projectName = projMatch ? projMatch[1].trim() : null;
+        }
+        if (!Number.isInteger(fileCount)) fileCount = null;
+        if (!Number.isInteger(blockBytes)) blockBytes = null;
+
         return {
             hookName: asString(pick('hook')) || 'hook',
             phase: asString(pick('phase')),
@@ -230,6 +244,9 @@
             fileRefs,
             memories,
             memoryCount,
+            projectName,
+            fileCount,
+            blockBytes,
             text,
         };
     }
@@ -245,6 +262,14 @@
         const inlineParts = [];
         if (hook.phase) inlineParts.push(hookPhaseLabel(hook.phase));
         if (hook.memoryCount) inlineParts.push(`${hook.memoryCount} ${hook.memoryCount === 1 ? 'memory' : 'memories'}`);
+        if (hook.projectName) {
+            const summaryParts = [];
+            if (Number.isInteger(hook.fileCount)) summaryParts.push(`${hook.fileCount} ${hook.fileCount === 1 ? 'file' : 'files'}`);
+            if (Number.isInteger(hook.blockBytes)) summaryParts.push(`${hook.blockBytes} B block`);
+            inlineParts.push(summaryParts.length
+                ? `${hook.projectName} · ${summaryParts.join(' · ')}`
+                : hook.projectName);
+        }
         const inlineDetail = inlineParts.length
             ? `· <span class="hook-inline-accent">${inlineParts.map(part => escapeHtml(part)).join(' · ')}</span>`
             : '';
@@ -255,6 +280,9 @@
             : '';
         const phaseBlock = hook.phase
             ? `<div class="hook-detail-row">${detailLabel('Trigger event')}<span class="hook-detail-value">${escapeHtml(hookPhaseLabel(hook.phase))}</span></div>`
+            : '';
+        const projectBlock = hook.projectName
+            ? `<div class="hook-detail-row">${detailLabel('Injected project block')}<span class="hook-detail-value font-medium">${escapeHtml(hook.projectName)}${Number.isInteger(hook.fileCount) ? ` · ${hook.fileCount} ${hook.fileCount === 1 ? 'file' : 'files'}` : ''}${Number.isInteger(hook.blockBytes) ? ` · ${hook.blockBytes} B` : ''}</span></div>`
             : '';
         const decisionBlock = hook.decision && hook.decision !== 'inject'
             ? `<div class="hook-detail-row">${detailLabel('Decision')}<span class="hook-detail-value hook-decision hook-decision-${escapeHtml(hook.decision)}">${escapeHtml(hook.decision)}</span></div>`
@@ -285,7 +313,7 @@
             </button>
             <div id="details-${hookId}" class="tool-details">
                 <div class="mt-1 ml-6 hook-details rounded-lg border p-3 text-xs font-mono">
-                    ${triggerBlock}${phaseBlock}${decisionBlock}${refsBlock}${memoriesBlock}${contextBlock}
+                    ${triggerBlock}${phaseBlock}${projectBlock}${decisionBlock}${refsBlock}${memoriesBlock}${contextBlock}
                 </div>
             </div>`;
         container.appendChild(wrapper);

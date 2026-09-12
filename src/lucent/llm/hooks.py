@@ -96,6 +96,14 @@ DEFAULT_MESSAGE_MEMORY_HOOK: dict[str, Any] = {
     },
 }
 
+# Projects (2026-09-11): chats filed into a project inherit their project
+# standing context through the system-prompt assembly in the engine path
+# (lucent.llm.project_context — refreshed every turn from a fail-closed
+# session-caller repo read threaded via session_state). No hook mediates it:
+# hooks keep only the ranking-only memory boost below, and a legacy
+# project-context hook definition (if one lingers) is deduped out as an
+# unknown action type.
+
 # Hook-UX (2026-09-10): message-lookup injection fetches FULL content for its
 # selected results with one batched ``get_memories`` call and injects it until
 # this byte budget is spent; remaining results keep the search-preview line.
@@ -186,6 +194,7 @@ class HookManager:
             tool_name=tool_name,
             arguments=arguments,
             memory_bridge=memory_bridge,
+            session_state=self.session_state,
         )
 
     async def after_tool_call(
@@ -257,6 +266,7 @@ class HookManager:
         model_text: str | None = None,
         memory_bridge: Any | None = None,
         current_user_text: str | None = None,
+        session_state: dict[str, Any] | None = None,
     ) -> HookOutcome:
         """Run all hooks matching a lifecycle event."""
         outputs: list[HookExecution] = []
@@ -279,6 +289,7 @@ class HookManager:
                         tool_name=tool_name,
                         arguments=current_arguments,
                         memory_bridge=memory_bridge,
+                        session_state=session_state,
                     )
                 elif hook.get("action_type") == MESSAGE_MEMORY_LOOKUP_ACTION:
                     if event != BEFORE_MODEL_CALL or not messages:
@@ -536,6 +547,31 @@ def _is_first_model_call_after_user_message(
     )
 
 
+def _project_memory_ids_from_session_state(
+    session_state: dict[str, Any] | None,
+) -> set[str]:
+    """Extract the chat's project-attached memory ids (fail-closed, ranking-only).
+
+    The id set is loaded by the session caller (chat.py, via
+    ``ProjectRepository.get_context_for_session``, which returns ids — never
+    content — for memories attached to the chat's project) and threaded
+    through ``session_state["_project_context"]["memory_ids"]``. Hooks never
+    touch the DB; an absent or malformed key means plain "no boost". The set
+    only reorders candidates the scoped search already returned — it never
+    injects anything that was not returned, so it cannot widen what the
+    model sees.
+    """
+    if not session_state:
+        return set()
+    context = session_state.get("_project_context")
+    if not isinstance(context, dict):
+        return set()
+    raw_ids = context.get("memory_ids")
+    if not isinstance(raw_ids, (list, tuple, set)):
+        return set()
+    return {str(m) for m in raw_ids if m}
+
+
 async def _run_memory_lookup_hook(
     *,
     hook: dict[str, Any],
@@ -543,6 +579,7 @@ async def _run_memory_lookup_hook(
     tool_name: str,
     arguments: dict[str, Any],
     memory_bridge: Any | None,
+    session_state: dict[str, Any] | None = None,
 ) -> HookExecution | None:
     if memory_bridge is None:
         return None
@@ -692,6 +729,29 @@ async def _run_message_memory_lookup_hook(
         },
     )
     candidates = _parse_memory_search_result(raw)
+    # Project-attached memory boost (Projects round 2): when the chat is
+    # filed into a project, memories attached to that project rank first
+    # among the candidates the search already returned. The search itself is
+    # untouched (same query, same limit, same threshold/dedup/budget rules
+    # below) — only the order in which qualifying candidates fill the cap
+    # changes, and the server's own ranking order is preserved inside each
+    # group (stable sort on the original index). The id set is loaded
+    # fail-closed by the session caller (chat.py) and threaded via
+    # session_state; hooks never touch the DB, and an absent/malformed key
+    # means plain "no boost".
+    project_memory_ids = _project_memory_ids_from_session_state(session_state)
+    if project_memory_ids:
+        order = list(range(len(candidates)))
+        candidates = [
+            memory
+            for _, memory in sorted(
+                zip(order, candidates),
+                key=lambda pair: (
+                    0 if str(pair[1].get("id") or "") in project_memory_ids else 1,
+                    pair[0],
+                ),
+            )
+        ]
     min_similarity = _message_lookup_min_similarity()
     if not candidates:
         # Search ran and returned nothing injectable: emit the explicit

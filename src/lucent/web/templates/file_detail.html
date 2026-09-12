@@ -20,6 +20,16 @@
         </div>
     </div>
     <div class="flex shrink-0 items-center gap-2">
+        <form method="post" action="/files/{{ file.id }}/project" class="flex items-center gap-2">
+            <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+            <select name="project_id" class="rounded-md border border-gray-300 px-2 py-2 text-sm text-gray-700 focus:border-primary-300 focus:outline-none" aria-label="Move to project">
+                <option value="" {% if not file.project_id %}selected{% endif %}>No project</option>
+                {% for project in projects %}
+                <option value="{{ project.id }}" {% if file.project_id and file.project_id == project.id %}selected{% endif %}>{{ project.name }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit" class="rounded-md border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50">Move</button>
+        </form>
         <a href="/files/{{ file.id }}/content?download=true" class="inline-flex items-center gap-2 rounded-md bg-gray-900 px-3 py-2 text-sm font-semibold text-white hover:bg-gray-700">
             <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-4.5-6L12 15m0 0l-4.5-4.5M12 15V3" /></svg>
             Download

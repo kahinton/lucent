@@ -1,42 +1,41 @@
 # Lucent Documentation
 
-## Getting Started
+Lucent is a flexible, self-hostable workspace for people and AI agents to collaborate on real work. These guides help you start small, shape Lucent around your workflow, and grow only into the features you need.
 
-- **[Getting Started](getting-started.md)** — Installation, account setup, and MCP client configuration
-- **[Architecture](architecture.md)** — System design, components, daemon, MCP tools, source layout
-- **[Configuration](configuration.md)** — All environment variables and settings
+## Start here
 
-## Development
+- **[Getting Started](getting-started.md)** — Run Lucent locally, create an account, connect an MCP client, and try a first workflow.
+- **[Architecture](architecture.md)** — See how the server, daemon, MCP tools, and source layout fit together.
+- **[Configuration](configuration.md)** — Explore environment variables and settings when you are ready to customize your setup.
 
-- **[Development Guide](development.md)** — Local setup, testing, contributing
-- **[API Reference](api-reference.md)** — REST API endpoints and parameters
+## Build and collaborate
 
-## Operations
+- **[Agent Integration](agent-integration.md)** — Bring an external agent into a Lucent workflow.
+- **[Tools](managed-tools.md)** — Create and manage tools agents can use.
+- **[Handoffs](api-reference.md#handoffs)** — Let people and agents exchange questions, decisions, outputs, and clarifications around a task.
+- **[Memory Lifecycle](memory-lifecycle-design.md)** — Understand the optional lifecycle tools for context that should persist.
+- **[API Reference](api-reference.md)** — Use the REST API to build your own integrations or interface.
 
-- **[Deployment Guide](deployment-guide.md)** — Production deployment with Docker Compose
-- **[Kubernetes Deployment](kubernetes-deployment.md)** — Helm chart and operator deployment
-- **[Operator Guide](operator-guide.md)** — Administration and maintenance
-- **[Observability](observability.md)** — OpenTelemetry, Prometheus, Jaeger, Grafana
-- **[Troubleshooting](troubleshooting.md)** — Common issues and fixes
+## Run your way
 
-## Security
-
-- **[Security Model](security-model.md)** — Authentication, authorization, multi-tenancy
-- **[Secret Storage](secret-storage.md)** — Pluggable encryption providers (OpenBao, Fernet, Vault)
-- **[Migration Guide: Security](migration-guide-security.md)** — Security feature migration
-
-## Features
-
-- **[Sandboxes](sandboxes.md)** — Docker sandbox configuration and lifecycle
-- **[Tools](managed-tools.md)** — Tool Builder lifecycle, sandbox runtime, external providers, grants, and security model
-- **[Handoffs](api-reference.md#handoffs)** — Human-in-the-loop messages, clarifications, decisions, workflow outputs, and response tracking
-- **[Agent Integration](agent-integration.md)** — MCP agent integration guide
-- **[Memory Lifecycle](memory-lifecycle-design.md)** — Memory type design and lifecycle
+- **[Connections](connections.md)** — Connect services and manage personal, shared, or managed credentials.
+- **[Sandboxes](sandboxes.md)** — Configure isolated execution for code and tool work.
+- **[Deployment Guide](deployment-guide.md)** — Deploy with Docker Compose.
+- **[Kubernetes Deployment](kubernetes-deployment.md)** — Use the Helm chart and operator deployment.
+- **[Operator Guide](operator-guide.md)** — Administration and maintenance.
+- **[Observability](observability.md)** — OpenTelemetry, Prometheus, Jaeger, and Grafana.
+- **[Troubleshooting](troubleshooting.md)** — Common issues and fixes.
 
 ## Integrations
 
-- **[Connections](connections.md)** — Workspace integrations, personal connected accounts, and enterprise credential profiles
-- **[Integrations API Reference](integrations-api-reference.md)** — Integration REST API
-- **[Slack Admin Setup](slack-admin-setup.md)** — Slack app configuration
-- **[Slack User Linking](slack-user-linking.md)** — Slack user pairing flow
-- **[Slack Security](slack-security.md)** — Slack integration security model
+- **[Integrations API Reference](integrations-api-reference.md)** — Integrate external services through the REST API.
+- **[Slack Admin Setup](slack-admin-setup.md)** — Configure the Slack app for a workspace.
+- **[Slack User Linking](slack-user-linking.md)** — Pair individual Slack users with Lucent accounts.
+- **[Slack Security](slack-security.md)** — Review the Slack integration security model.
+
+## Develop and secure
+
+- **[Development Guide](development.md)** — Set up locally, test changes, and contribute.
+- **[Security Model](security-model.md)** — Authentication, authorization, multi-tenancy, and auditability.
+- **[Secret Storage](secret-storage.md)** — Configure pluggable encryption providers (OpenBao, Fernet, Vault).
+- **[Migration Guide: Security](migration-guide-security.md)** — Move to the current security features.

@@ -1,6 +1,6 @@
 # Contributing to Lucent
 
-Thank you for your interest in contributing to Lucent! This guide will help you get started.
+Thanks for considering a contribution to Lucent. We want Lucent to be useful to the people who build with it, so bug reports, docs fixes, small focused improvements, new integrations, and experiments with human–agent collaboration are all valuable contributions. This guide will help you get set up.
 
 ## Prerequisites
 
@@ -71,11 +71,11 @@ Configuration is in `pyproject.toml`. Target Python version is 3.12, line length
 1. Fork the repository and create a feature branch from `main`.
 2. Make your changes with clear, focused commits.
 3. Ensure all tests pass and linting is clean.
-4. Open a pull request with a description of what you changed and why.
+4. Open a pull request that explains what you changed, why it helps, and any tradeoffs or follow-up ideas worth discussing.
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/kahinton/lucent/issues) to report bugs or request features. Include:
+Use [GitHub Issues](https://github.com/kahinton/lucent/issues) to report bugs, share an idea, or request a feature. Include:
 - Steps to reproduce (for bugs)
 - Expected vs actual behavior
 - Python version and OS

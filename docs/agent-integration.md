@@ -1,6 +1,8 @@
-# External Agent Integration Guide
+# Bring Another Agent Into Lucent
 
-Lucent exposes a REST API that allows external AI agents to submit tasks to the daemon, poll for completion, and retrieve results. This guide covers authentication, endpoints, and the integration flow.
+Lucent exposes a REST API that lets an external AI agent add work to Lucent, follow its progress, and collect the result. That makes it possible to connect agents that already have a home—an internal bot, a coding agent, or an experiment—to a shared workflow with people and other agents.
+
+This guide covers authentication, endpoints, and the integration flow.
 
 > **Note:** This guide documents the legacy daemon task API (`/api/daemon/tasks`). For new integrations, prefer the [Request/Task API](api-reference.md#requests--tasks) which provides structured work tracking, output contracts, and review workflows.
 
@@ -58,7 +60,7 @@ Daemon tasks are stored as Lucent memories with specific tags. When you create a
 |------|-------------|
 | `research` | Information gathering and analysis |
 | `code` | Code review, bug fixes, implementation |
-| `memory` | Memory maintenance and organization |
+| `memory` | Curating shared context when it is useful |
 | `reflection` | Self-analysis and improvement |
 | `documentation` | Documentation creation and updates |
 | `planning` | Project planning and task breakdown |

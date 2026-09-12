@@ -6,12 +6,35 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from lucent.db import get_pool
+from lucent.db.projects import ProjectNotFoundError, ProjectRepository
 from lucent.storage import UserFileService
 
 from ._shared import _check_csrf, _get_csrf_for_request, get_user_context, templates
 
 router = APIRouter()
 ALLOWED_PER_PAGE = {10, 25, 50, 100}
+
+
+@router.post("/files/{file_id}/project")
+async def move_file_to_project(
+    request: Request,
+    file_id: str,
+    project_id: str = Form(alias="project_id"),
+    csrf_token: str = Form(alias="csrf_token"),
+):
+    await _check_csrf(request, csrf_token)
+    user = await get_user_context(request)
+    target = project_id or None  # empty select = unfile
+    try:
+        await ProjectRepository(await get_pool()).set_file_project(
+            file_id,
+            target,
+            org_id=str(user.organization_id),
+            user_id=str(user.id),
+        )
+    except ProjectNotFoundError as exc:
+        raise HTTPException(404, "Project not found") from exc
+    return RedirectResponse(f"/files/{file_id}", status_code=303)
 
 
 @router.get("/files", response_class=HTMLResponse)
@@ -44,7 +67,8 @@ async def files_list(request: Request, page: int = 1, per_page: int = 25):
 @router.get("/files/{file_id}", response_class=HTMLResponse)
 async def file_detail(request: Request, file_id: str):
     user = await get_user_context(request)
-    service = UserFileService(await get_pool())
+    pool = await get_pool()
+    service = UserFileService(pool)
     result = await service.read_owned(file_id, str(user.organization_id), str(user.id))
     if not result:
         raise HTTPException(404, "File not found")
@@ -55,6 +79,11 @@ async def file_detail(request: Request, file_id: str):
     revisions = await service.repository.list_revisions_owned(
         file_id, str(user.organization_id), str(user.id)
     )
+    from lucent.db.projects import ProjectRepository
+
+    projects = (await ProjectRepository(pool).list_owned(
+        org_id=str(user.organization_id), user_id=str(user.id)
+    ))["items"]
     preview = None
     if item["mime_type"].startswith("text/") or item["mime_type"] in {
         "application/json",
@@ -69,6 +98,7 @@ async def file_detail(request: Request, file_id: str):
             "file": item,
             "preview": preview,
             "revisions": revisions,
+            "projects": projects,
             "csrf_token": _get_csrf_for_request(request),
         },
     )
@@ -139,7 +169,7 @@ async def delete_file(
     file_id: str,
     csrf_token: str = Form(alias="csrf_token"),
 ):
-    _check_csrf(request, csrf_token)
+    await _check_csrf(request, csrf_token)
     user = await get_user_context(request)
     deleted = await UserFileService(await get_pool()).delete_owned(
         file_id, str(user.organization_id), str(user.id)

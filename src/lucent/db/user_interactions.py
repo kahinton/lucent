@@ -5,6 +5,12 @@ workflow engine, or another Lucent subsystem to a human.  It can carry
 structured references to the exact requests, memories, task outputs, workflow
 runs, or chat sessions that motivated the message so future daemon cycles can
 resume from the saved context instead of rediscovering it.
+
+Handoffs are strictly per-user private, enforced by DB CHECK
+(ck_user_interactions_user_not_null, migration 113): every row carries a
+concrete owner ``user_id``.  There is no org-addressable/broadcast class —
+``create_interaction`` refuses ``user_id=None`` and every read clause filters
+on an exact owner match.
 """
 
 from __future__ import annotations
@@ -172,6 +178,16 @@ class UserInteractionRepository:
         user with repeated open messages.
         """
         source = _validate_choice(source, VALID_INTERACTION_SOURCES, "source")
+        if user_id is None:
+            # Handoffs are strictly per-user private (Kyle's directive,
+            # 2026-09-12): every interaction is owned by a concrete user.
+            # A NULL user_id would be an org-wide broadcast row, so it is
+            # refused here and by the DB CHECK
+            # (ck_user_interactions_user_not_null, migration 113).
+            raise ValueError(
+                "Interaction user_id is required: handoffs are strictly "
+                "per-user private and cannot be created without an owner"
+            )
         interaction_type = _validate_choice(
             interaction_type, VALID_INTERACTION_TYPES, "interaction_type"
         )
@@ -297,7 +313,7 @@ class UserInteractionRepository:
         clauses = ["i.organization_id = $1::uuid"]
         if user_id is not None:
             params.append(str(user_id))
-            clauses.append(f"(i.user_id = ${len(params)}::uuid OR i.user_id IS NULL)")
+            clauses.append(f"i.user_id = ${len(params)}::uuid")
         if status:
             statuses = [status] if isinstance(status, str) else status
             normalized = [
@@ -394,7 +410,7 @@ class UserInteractionRepository:
                        LIMIT 1
                    ) lm ON TRUE
                    WHERE i.organization_id = $1::uuid
-                     AND (i.user_id = $2::uuid OR i.user_id IS NULL)
+                     AND i.user_id = $2::uuid
                      AND i.status IN ('open', 'waiting_on_user', 'responded')
                      AND (
                          (i.requires_response AND i.status = 'waiting_on_user')
@@ -435,7 +451,7 @@ class UserInteractionRepository:
         user_clause = ""
         if user_id is not None:
             params.append(user_id)
-            user_clause = f" AND (user_id = ${len(params)}::uuid OR user_id IS NULL)"
+            user_clause = f" AND user_id = ${len(params)}::uuid"
         row = await conn.fetchrow(
             f"""SELECT * FROM user_interactions
                 WHERE id = $1::uuid
@@ -560,7 +576,7 @@ class UserInteractionRepository:
                    FROM user_interactions
                    WHERE id = $1::uuid
                      AND organization_id = $2::uuid
-                     AND (user_id = $3::uuid OR user_id IS NULL)
+                     AND user_id = $3::uuid
                    ON CONFLICT (interaction_id, user_id)
                    DO UPDATE SET last_viewed_at = EXCLUDED.last_viewed_at
                    RETURNING *""",
@@ -621,7 +637,7 @@ class UserInteractionRepository:
         user_clause = ""
         if user_id is not None:
             params.append(str(user_id))
-            user_clause = f" AND (user_id = ${len(params)}::uuid OR user_id IS NULL)"
+            user_clause = f" AND user_id = ${len(params)}::uuid"
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 updated = await conn.fetchrow(

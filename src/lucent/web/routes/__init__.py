@@ -19,6 +19,7 @@ from . import (
     groups,
     live,
     memories,
+    projects,
     requests_routes,
     sandboxes,
     schedules,
@@ -41,6 +42,7 @@ router.include_router(dashboard.router)
 router.include_router(definitions.router)
 router.include_router(daemon.router)
 router.include_router(files.router)
+router.include_router(projects.router)
 router.include_router(memories.router)
 router.include_router(sandboxes.router)
 router.include_router(settings.router)

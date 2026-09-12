@@ -23,6 +23,10 @@ from lucent.llm.engine import (
     validate_expected_surface,
 )
 from lucent.llm.hooks import HookManager, append_hook_context
+from lucent.llm.project_context import (
+    emit_project_context_event,
+    render_project_context_block,
+)
 from lucent.llm.token_usage import normalize_token_usage
 from lucent.logging import get_logger
 
@@ -516,6 +520,29 @@ class LangChainEngine(LLMEngine):
                 },
             )
         hook_manager = HookManager(hooks, session_state=session_state)
+
+        # Projects (v2 redesign, 2026-09-12): the chat's project standing
+        # context rides the system prompt itself — appended AFTER the global
+        # prompt, composing alongside hook-mediated memory injections (never
+        # replacing them). Refreshed every turn: the session caller re-reads
+        # the (org, user)-scoped project snapshot from the DB each turn and
+        # threads it via session_state; this recomposition happens per turn,
+        # before the first model call. Metadata-only block (name,
+        # instructions, file manifest) — file contents are fetched on demand
+        # through read_user_file, never injected here. No hook mediates this:
+        # absent/malformed/disabled context renders no block and no event.
+        if session_state:
+            project_block = render_project_context_block(
+                session_state,
+                audit_context=audit_context,
+            )
+            if project_block:
+                system_message = f"{system_message}\n\n{project_block}".strip() + "\n"
+                emit_project_context_event(
+                    on_event,
+                    session_state,
+                    block=project_block,
+                )
 
         from lucent.services.managed_tools import normalize_discovered_mcp_tools
 

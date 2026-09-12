@@ -115,6 +115,31 @@
     .session-list > div:focus-within .session-delete-button {
         opacity: 1;
     }
+    /* Subtle project badge on session rows — minimal chrome, both themes */
+    .session-project-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        max-width: 100%;
+        padding: 1px 7px;
+        border-radius: 9999px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        line-height: 14px;
+        color: #0f766e;
+        background: rgba(0, 207, 193, 0.10);
+        border: 1px solid rgba(0, 150, 141, 0.25);
+    }
+    .session-project-badge svg { flex-shrink: 0; }
+    .session-project-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    @media all {
+        .session-project-badge {
+            color: #7feee4 !important;
+            background: rgba(0, 207, 193, 0.08) !important;
+            border-color: rgba(0, 207, 193, 0.22) !important;
+        }
+    }
     .chat-confirm-dialog::backdrop {
         background: rgba(0, 0, 0, 0.6);
         backdrop-filter: blur(2px);
@@ -596,6 +621,14 @@
             </svg>
         </button>
     </div>
+    {% if active_project %}
+    <div class="border-b border-gray-100 px-4 py-2.5">
+        <a href="/projects/{{ active_project.id }}" class="inline-flex max-w-full items-center gap-1.5 rounded-full bg-primary-50 px-2.5 py-1 text-xs font-semibold text-primary-700 hover:bg-primary-100" title="Project: open workspace">
+            <svg class="h-3.5 w-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg>
+            <span class="truncate">{{ active_project.name }}</span>
+        </a>
+    </div>
+    {% endif %}
     <div id="session-list" class="session-list flex-1 p-3 space-y-1"></div>
 </aside>
 <dialog id="archive-session-dialog" class="chat-confirm-dialog w-[min(24rem,calc(100vw-2rem))] rounded-lg border border-gray-700 bg-[#181818] p-0 text-gray-100 shadow-2xl">
@@ -627,6 +660,9 @@ const state = {
     modelsById: {},
     contextTokens: 0,   // Context tokens sent on the latest LLM call (usage ledger)
     pendingAttachments: [],
+    activeProjectId: {{ (active_project.id if active_project else '') | tojson }},  // ?project= workspace for new chats
+    projectMenuOpen: null,  // session id whose Move-to-project menu is open
+    projects: [],
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -868,6 +904,7 @@ function applySessionConfig(session) {
     }
     
     await loadSessions();
+    await loadProjects();
     if (state.sessionId) {
         await loadSession(state.sessionId);
     }
@@ -971,6 +1008,15 @@ async function loadSessions() {
     }
 }
 
+async function loadProjects() {
+    try {
+        const resp = await fetch('/api/projects');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        state.projects = (data.items || []).map(p => ({ id: p.id, name: p.name }));
+    } catch (e) { /* Projects are an optional affordance — render without menu. */ }
+}
+
 function renderSessionList() {
     const list = document.getElementById('session-list');
     if (!state.sessions.length) {
@@ -978,18 +1024,31 @@ function renderSessionList() {
         return;
     }
     list.innerHTML = '';
+    const projects = state.projects;
     for (const session of state.sessions) {
         const item = document.createElement('div');
-        item.className = 'group flex items-center gap-1 rounded-xl border border-transparent hover:bg-white hover:border-gray-200 transition-colors ' + (session.id === state.sessionId ? 'session-row active' : '');
+        item.className = 'group relative flex items-center gap-1 rounded-xl border border-transparent hover:bg-white hover:border-gray-200 transition-colors ' + (session.id === state.sessionId ? 'session-row active' : '');
         const row = document.createElement('button');
         row.type = 'button';
         row.dataset.sessionId = session.id;
         row.className = 'min-w-0 flex-1 px-3 py-2.5 text-left';
         const title = session.title || 'Untitled conversation';
+        const projectName = session.project_id
+            ? (session.project_name || (projects.find(p => p.id === session.project_id) || {}).name)
+            : null;
         const meta = [session.model, session.linked_request_count ? `${session.linked_request_count} request${session.linked_request_count === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ');
         row.innerHTML = `
             <div class="font-medium text-sm truncate">${escapeHtml(title)}</div>
-            <div class="mt-0.5 text-[11px] text-gray-400 truncate">${escapeHtml(meta || 'No messages yet')}</div>`;
+            ${projectName ? `<div class="mt-1"><span class="session-project-badge"><svg class="h-2.5 w-2.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg><span>${escapeHtml(projectName)}</span></span></div>` : ''}
+            ${meta ? `<div class="mt-0.5 text-[11px] text-gray-400 truncate">${escapeHtml(meta)}</div>` : `<div class="mt-0.5 text-[11px] text-gray-400 truncate">No messages yet</div>`}`;
+        const moveButton = document.createElement('button');
+        moveButton.type = 'button';
+        moveButton.dataset.projectMenuFor = session.id;
+        moveButton.className = 'session-delete-button mr-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 focus:opacity-100 focus:outline-none';
+        moveButton.title = 'Move to project';
+        moveButton.setAttribute('aria-label', `Move to project: ${title}`);
+        moveButton.setAttribute('aria-haspopup', 'menu');
+        moveButton.innerHTML = '<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg>';
         const deleteButton = document.createElement('button');
         deleteButton.type = 'button';
         deleteButton.dataset.archiveSessionId = session.id;
@@ -997,9 +1056,69 @@ function renderSessionList() {
         deleteButton.title = 'Delete conversation';
         deleteButton.setAttribute('aria-label', `Delete conversation: ${title}`);
         deleteButton.innerHTML = '<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.108 48.108 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0Z" /></svg>';
-        item.append(row, deleteButton);
+        item.append(row, moveButton, deleteButton);
         list.appendChild(item);
     }
+}
+
+function closeProjectMenu() {
+    if (state.projectMenuOpen) {
+        state.projectMenuOpen.remove();
+        state.projectMenuOpen = null;
+    }
+}
+
+function toggleProjectMenu(anchor, sessionId) {
+    const existing = state.projectMenuOpen;
+    closeProjectMenu();
+    if (existing && existing.dataset.forSession === sessionId) return;
+    const session = state.sessions.find(s => s.id === sessionId);
+    if (!session) return;
+    const menu = document.createElement('div');
+    menu.dataset.forSession = sessionId;
+    menu.setAttribute('role', 'menu');
+    menu.className = 'absolute right-2 top-full z-40 mt-1 w-60 rounded-xl border border-gray-200 bg-white p-1 shadow-xl';
+    menu.innerHTML = '<div class="px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Move to project</div>';
+    if (!state.projects.length) {
+        menu.innerHTML += '<div class="px-2.5 py-2 text-xs text-gray-400">No projects yet</div>';
+    } else {
+        for (const project of state.projects) {
+            if (project.id === session.project_id) continue;
+            const option = document.createElement('button');
+            option.type = 'button';
+            option.setAttribute('role', 'menuitem');
+            option.dataset.moveToProject = project.id;
+            option.className = 'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-gray-700 hover:bg-gray-50';
+            option.innerHTML = `<svg class="h-3.5 w-3.5 shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg><span class="truncate">${escapeHtml(project.name)}</span>`;
+            menu.appendChild(option);
+        }
+        if (session.project_id) {
+            const unfile = document.createElement('button');
+            unfile.type = 'button';
+            unfile.setAttribute('role', 'menuitem');
+            unfile.dataset.unfileSession = '1';
+            unfile.className = 'flex w-full items-center rounded-lg px-2.5 py-2 text-left text-sm text-gray-500 hover:bg-gray-50 border-t border-gray-100 mt-1';
+            unfile.textContent = 'No project';
+            menu.appendChild(unfile);
+        }
+    }
+    anchor.closest('.group').appendChild(menu);
+    state.projectMenuOpen = menu;
+}
+
+async function moveSessionToProject(sessionId, projectId) {
+    const response = await fetch(`/api/chat/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(projectId ? { project_id: projectId } : { project_id: null }),
+    });
+    if (!response.ok) throw new Error('Unable to move conversation');
+    const session = state.sessions.find(s => s.id === sessionId);
+    if (session) {
+        session.project_id = projectId || null;
+        session.project_name = projectId ? ((state.projects.find(p => p.id === projectId) || {}).name || null) : null;
+    }
+    renderSessionList();
 }
 
 async function archiveSession(sessionId) {
@@ -1028,11 +1147,14 @@ async function createSession(firstMessage) {
             model: selectedModel || null,
             reasoning_effort: selectedReasoning || null,
             agent_id: selectedAgent || null,
+            project_id: state.activeProjectId || null,
         }),
     });
     if (!resp.ok) throw new Error('Unable to create session');
     const session = await resp.json();
     state.sessionId = session.id;
+    // The chat is now filed; the workspace URL param has done its job.
+    state.activeProjectId = '';
     history.replaceState(null, '', `/chat/${session.id}`);
     await loadSessions();
     return session.id;
@@ -1153,6 +1275,17 @@ async function sendMessage(e) {
     const text = input.value.trim();
     const outgoingAttachments = state.pendingAttachments.slice();
     if ((!text && !outgoingAttachments.length) || state.streaming) return;
+
+    // File the chat up front: ?project=<id> workspaces must land new chats in
+    // the project at creation time, before any streaming begins.
+    if (!state.sessionId) {
+        try {
+            await createSession(text);
+        } catch (err) {
+            // Creation failed — continue unfiled rather than block the send.
+            console.warn('Session creation failed, continuing unfiled', err);
+        }
+    }
     
     // Hide empty state and switch to conversation mode
     const emptyState = document.getElementById('empty-state');
@@ -1873,6 +2006,25 @@ document.getElementById('session-menu-btn').addEventListener('click', function(e
 
 // Session drawer picker
 document.getElementById('session-list').addEventListener('click', function(e) {
+    const menu = state.projectMenuOpen;
+    const moveOption = e.target.closest('[data-move-to-project]');
+    if (moveOption && menu) {
+        closeProjectMenu();
+        moveSessionToProject(menu.dataset.forSession, moveOption.dataset.moveToProject);
+        return;
+    }
+    const unfileOption = e.target.closest('[data-unfile-session]');
+    if (unfileOption && menu) {
+        closeProjectMenu();
+        moveSessionToProject(menu.dataset.forSession, null);
+        return;
+    }
+    const projectButton = e.target.closest('[data-project-menu-for]');
+    if (projectButton) {
+        e.stopPropagation();
+        toggleProjectMenu(projectButton, projectButton.dataset.projectMenuFor);
+        return;
+    }
     const deleteButton = e.target.closest('[data-archive-session-id]');
     if (deleteButton) {
         const dialog = document.getElementById('archive-session-dialog');
@@ -1883,9 +2035,18 @@ document.getElementById('session-list').addEventListener('click', function(e) {
     }
     const row = e.target.closest('[data-session-id]');
     if (row && !state.streaming) {
+        closeProjectMenu();
         loadSession(row.dataset.sessionId);
         toggleSessionDrawer(false);
     }
+});
+
+// Close the move-to-project menu when clicking anywhere else
+document.addEventListener('click', function(e) {
+    if (!state.projectMenuOpen) return;
+    if (e.target.closest('[data-project-menu-for]')) return;
+    if (e.target.closest('[role="menu"]')) return;
+    closeProjectMenu();
 });
 
 document.getElementById('session-drawer-close').addEventListener('click', function() {

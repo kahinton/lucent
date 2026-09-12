@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks you through installing Lucent, creating your first account, and connecting an MCP client.
+This guide gets you from a local Lucent instance to a first human–agent workflow. You will install Lucent, create an account, connect an MCP client, and have a shared place for work that should outlive one chat.
 
 ## Prerequisites
 
@@ -16,7 +16,7 @@ cd lucent
 docker compose up -d
 ```
 
-This starts PostgreSQL, OpenBao (secret storage), the Lucent server, and one daemon worker. All user-facing services run behind a single port (default `8766`).
+This starts PostgreSQL, OpenBao for secret storage, the Lucent server, and one daemon worker. All user-facing services run behind a single port (default `8766`). The default is intentionally a complete but small setup: you can add integrations, more workers, and more structure later.
 
 ## 2. Create Your Account
 
@@ -24,7 +24,7 @@ Open **http://localhost:8766** in your browser. On first run you'll see a setup 
 
 1. Create your user account (username, password)
 2. Select at least one discovered AI model to enable
-3. Receive your MCP API key (shown once — **copy it!**)
+3. Receive your MCP API key (shown once — save it somewhere safe)
 
 Lucent discovers models from configured providers before setup. For a local Ollama installation, make sure Ollama is running and has at least one model installed (`ollama list`) before opening the setup page. If no models are available, setup explains what is missing and waits until one can be selected.
 
@@ -87,13 +87,15 @@ Add to your `claude_desktop_config.json`:
 
 Replace `hs_your_api_key_here` with the API key from the setup page in all examples above.
 
-## 4. Verify It Works
+## 4. Try a First Workflow
 
-Ask your AI assistant something like:
+Ask your connected AI assistant something like:
 
-> "Create a memory about this project"
+> "Create a request to review this project’s onboarding docs. Ask me any question you need before starting, then leave the draft ready for review."
 
-If the assistant can create and retrieve memories, you're set.
+Then open the dashboard’s **Activity** and **Handoffs** pages. You should be able to see the work, its status, and any question or output attached to it. This is the basic Lucent loop: people set direction and review; agents can make progress, surface uncertainty, and leave work ready for the next collaborator.
+
+For a smaller first experiment, ask the assistant to create and retrieve a note about the project. Context can be useful across tasks, but you do not need to organize everything as memory before Lucent becomes useful.
 
 ## Authentication
 
@@ -126,11 +128,11 @@ Once running, the web UI at http://localhost:8766 provides:
 | Page | Purpose |
 |------|---------|
 | `/` | Dashboard overview |
-| `/memories` | Memory management UI |
-| `/activity` | Request/task tracking and event timeline |
-| `/handoffs` | Human-in-the-loop messages, clarifications, decisions, and workflow outputs |
-| `/definitions` | Agent, skill, tool, hook, and external provider management |
-| `/workflows` | Workflow wizard, triggers, actions, and run monitoring |
+| `/memories` | Context you choose to keep and share |
+| `/activity` | Work in progress: requests, tasks, status, and timeline |
+| `/handoffs` | Questions, clarifications, decisions, and outputs between people and agents |
+| `/definitions` | Your agents, skills, tools, hooks, and external providers |
+| `/workflows` | Workflow builder, triggers, actions, and run monitoring |
 | `/sandboxes` | Sandbox template and instance management |
 | `/daemon/review` | Review queue for daemon-generated content |
 | `/audit` | Audit log viewer |
@@ -176,13 +178,13 @@ If you want Lucent to read your GitHub repos for context, the simplest path is t
 
 Already have `GITHUB_TOKEN` set in your environment (e.g. for the daemon)? The same page detects it and lets you claim it as a personal credential in one click.
 
-This is the **simple local / open-source profile** — defaults are already correct, no extra env vars required. For team and enterprise setups (OAuth, GitHub App, strict ACL), see [Connections](connections.md).
+This is the simple local setup: defaults are already correct and no extra environment variables are required. If you later want OAuth, a GitHub App, or stricter access rules for a shared setup, see [Connections](connections.md).
 
 ## Next Steps
 
 - [Architecture](architecture.md) — how Lucent's components fit together
 - [Configuration](configuration.md) — all environment variables and settings
-- [Connections](connections.md) — two-tier connections model, feature flags, setup profiles
+- [Connections](connections.md) — connect services, manage credentials, and choose a setup profile
 - [API Reference](api-reference.md) — REST API documentation
 - [Deployment Guide](deployment-guide.md) — production deployment
 - [Troubleshooting](troubleshooting.md) — common issues and fixes

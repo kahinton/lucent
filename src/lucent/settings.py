@@ -184,6 +184,16 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         max_value=10,
     ),
     RuntimeSettingDefinition(
+        key="projects.context_enabled",
+        env_var="LUCENT_PROJECT_CONTEXT_ENABLED",
+        value_type="boolean",
+        default=True,
+        title="Project context injection",
+        section="Projects",
+        description="Inject project instructions and files into chats that belong to the project.",
+        help_text="Turn off to disable project context injection without moving chats.",
+    ),
+    RuntimeSettingDefinition(
         key="requests.daemon_auto_approve",
         env_var="LUCENT_AUTO_APPROVE",
         value_type="boolean",
@@ -1677,6 +1687,16 @@ def message_inject_max_memories(*, organization_id: Any | None = None) -> int:
     return int(
         get_runtime_setting(
             "memory.inject_max_memories",
+            organization_id=organization_id,
+        )
+    )
+
+
+def project_context_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether chats file into a project inject that project's context."""
+    return bool(
+        get_runtime_setting(
+            "projects.context_enabled",
             organization_id=organization_id,
         )
     )

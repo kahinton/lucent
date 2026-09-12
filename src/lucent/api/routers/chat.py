@@ -145,11 +145,13 @@ class CreateChatSession(BaseModel):
     reasoning_effort: str | None = Field(default=None, max_length=64)
     agent_id: str | None = None
     initial_message: str | None = Field(default=None, max_length=1000)
+    project_id: UUID | None = None  # file the new chat into a project up front
 
 
 class UpdateChatSession(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=256)
     status: str | None = Field(default=None, pattern=r"^(active|idle|archived|deleted)$")
+    project_id: UUID | None = None
 
 
 @dataclass
@@ -682,6 +684,17 @@ async def _prepare_persistent_chat_session(
             session = await repo.get_session(session_id, org_id, user_id=user_id)
             if not session:
                 raise HTTPException(status_code=404, detail="Chat session not found")
+            if not session.get("title") and last_message:
+                # Empty-shell session (e.g. created by the project page's
+                # New Chat POST before any message existed): backfill the
+                # title from this turn's first message.
+                await repo.update_session(
+                    session_id,
+                    org_id,
+                    user_id=user_id,
+                    title=_title_from_message(last_message),
+                )
+                session = await repo.get_session(session_id, org_id, user_id=user_id) or session
             await repo.update_session(
                 session_id,
                 org_id,
@@ -1159,6 +1172,34 @@ async def _load_agent_hooks(pool, agent_id: str | None) -> list[dict[str, Any]]:
         return []
 
 
+async def _load_project_chat_context(
+    user: dict, pool, session_id: str | None
+) -> dict[str, Any] | None:
+    """Load the chat's project context for system-prompt injection (Projects).
+
+    One fail-closed, (org, user)-scoped repository read; ``None`` for unfiled
+    chats (and for chats that do not belong to the caller). The result is
+    threaded to the engine via ``session_state["_project_context"]``; the
+    engine renders the metadata-only project block into the system prompt
+    (lucent.llm.project_context) — refreshed every turn because this loader
+    runs every turn.
+    """
+    if not session_id:
+        return None
+    try:
+        from lucent.db import ProjectRepository
+
+        context = await ProjectRepository(pool).get_context_for_session(
+            session_id,
+            org_id=str(user["organization_id"]),
+            user_id=str(user["id"]),
+        )
+        return context or None
+    except Exception:
+        logger.debug("Failed to load project context for chat", exc_info=True)
+        return None
+
+
 def _hook_event_payload(event: Any) -> dict[str, Any]:
     raw = event.raw if isinstance(event.raw, dict) else {}
     payload = {
@@ -1181,6 +1222,16 @@ def _hook_event_payload(event: Any) -> dict[str, Any]:
         payload["memory_count"] = raw["memory_count"]
     if isinstance(raw.get("memories"), list):
         payload["injected"] = raw["memories"]
+    # Project-context injection (Projects v2): name/file_count/bytes describe
+    # the standing block the engine appended to the system prompt. Promote
+    # them like the other structured fields so the chip renders the summary
+    # identically on the live SSE payload and on replayed persisted rows.
+    if raw.get("name"):
+        payload["name"] = raw["name"]
+    if isinstance(raw.get("file_count"), int):
+        payload["file_count"] = raw["file_count"]
+    if isinstance(raw.get("bytes"), int):
+        payload["bytes"] = raw["bytes"]
     return payload
 
 
@@ -1214,6 +1265,20 @@ async def create_chat_session(request: Request, body: CreateChatSession):
     from lucent.db.llm_sessions import LLMSessionRepository
 
     repo = LLMSessionRepository(pool)
+    # Validate the project BEFORE creating the session shell: fail-closed on
+    # unknown/foreign projects, never a filed shell pointing at nothing.
+    # get_owned returns None (never raises) for foreign/missing ids, so the
+    # emptiness check — not an exception handler — is the actual wall.
+    if body.project_id is not None:
+        from lucent.db.projects import ProjectRepository
+
+        project = await ProjectRepository(pool).get_owned(
+            body.project_id,
+            org_id=str(user["organization_id"]),
+            user_id=str(user["id"]),
+        )
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
     session = await repo.create_session(
         org_id=str(user["organization_id"]),
         user_id=str(user["id"]),
@@ -1223,6 +1288,21 @@ async def create_chat_session(request: Request, body: CreateChatSession):
         reasoning_effort=body.reasoning_effort,
         agent_definition_id=body.agent_id,
     )
+    if body.project_id is not None:
+        from lucent.db.projects import ProjectRepository
+
+        await ProjectRepository(pool).set_session_project(
+            session["id"],
+            body.project_id,
+            org_id=str(user["organization_id"]),
+            user_id=str(user["id"]),
+        )
+        session = await repo.get_session_detail(
+            session["id"],
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+            include_events=False,
+        )
     return session
 
 
@@ -1264,6 +1344,28 @@ async def update_chat_session(
     )
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found")
+    if "project_id" in body.model_fields_set:
+        from lucent.db.projects import ProjectNotFoundError, ProjectRepository
+
+        try:
+            moved = await ProjectRepository(pool).set_session_project(
+                session_id,
+                body.project_id,
+                org_id=str(user["organization_id"]),
+                user_id=str(user["id"]),
+            )
+        except ProjectNotFoundError as exc:
+            # Unknown/foreign project — fail loudly, never silently unfile.
+            raise HTTPException(status_code=404, detail="Project not found") from exc
+        if not moved:
+            # Session row vanished concurrently — fail loudly, never silently unfile.
+            raise HTTPException(status_code=404, detail="Chat session not found")
+        session = await repo.get_session_detail(
+            session_id,
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+            include_events=False,
+        )
     return session
 
 
@@ -1373,6 +1475,12 @@ async def chat_stream(
         if session_token
         else {}
     )
+    # Projects: load the chat's project context (fail-closed repo read) so the
+    # engine can render the project's standing block into the system prompt
+    # this turn. Unfiled chats get None and everything no-ops.
+    project_chat_context = await _load_project_chat_context(
+        user, pool, chat_session.session_id
+    )
     logger.info(
         "Chat session: engine=%s, model=%s, mcp=%s",
         engine.name,
@@ -1416,6 +1524,12 @@ async def chat_stream(
     )
     if session_state_for_engine is not None:
         session_state_for_engine["_latest_user_text"] = last_message
+        # Projects: the engine renders the project block into the system
+        # prompt from this fail-closed-loaded snapshot (re-read every turn).
+        if project_chat_context:
+            session_state_for_engine["_project_context"] = project_chat_context
+        else:
+            session_state_for_engine.pop("_project_context", None)
 
     # Run the LLM session via the engine abstraction
     try:
@@ -1786,6 +1900,12 @@ async def chat_stream_v2(
         for tool in ("list_tool_definitions", "get_tool_definition", "run_managed_tool"):
             if tool not in allowed_tools:
                 allowed_tools.append(tool)
+    # Projects: load the chat's project context (fail-closed repo read) so the
+    # engine can render the project's standing block into the system prompt
+    # this turn. Unfiled chats get None and everything no-ops.
+    project_chat_context = await _load_project_chat_context(
+        user, pool, chat_session.session_id
+    )
     mcp_config = (
         _build_mcp_config(
             session_token,
@@ -1987,6 +2107,12 @@ async def chat_stream_v2(
     )
     if session_state_for_engine is not None:
         session_state_for_engine["_latest_user_text"] = last_message
+        # Projects: the engine renders the project block into the system
+        # prompt from this fail-closed-loaded snapshot (re-read every turn).
+        if project_chat_context:
+            session_state_for_engine["_project_context"] = project_chat_context
+        else:
+            session_state_for_engine.pop("_project_context", None)
 
     # Run the streaming session in a background task
     async def run_llm():

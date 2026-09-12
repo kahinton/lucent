@@ -1,53 +1,45 @@
 # Lucent
 
-Lucent is an enterprise AI agent that can learn how your organization works, take on long-running work, and improve from experience.
+Lucent is a self-hostable workspace where people and AI agents can take useful work from a loose idea to a finished result—together.
 
-It is closer to a supervised digital teammate than a one-off chat tool: you can assign it work, give it access to approved systems, let it operate across model providers, review what it did, and preserve what it learned for the next task.
+Bring the models, tools, and working style that make sense for you. Lucent gives them a shared home for requests, tasks, handoffs, reviews, schedules, and the context worth carrying forward. Use it as a personal command center, a project hub for a small team, or the foundation for a fleet of specialized agents.
 
-> **Project Status:** Active development (v0.4.0). Core features are stable. APIs may change before 1.0.
+> **Project status:** Active development (v0.4.0). Core features are stable; APIs may evolve before 1.0.
 
 ## Why Lucent exists
 
-Enterprise AI is moving from chat assistance to delegated work. That shift changes what organizations need.
+Most AI tools are excellent at a single conversation. Real work is messier: it moves between people and agents, takes more than one sitting, needs feedback, and rarely fits one model or one vendor.
 
-A useful AI teammate needs more than a prompt and a model. It needs:
+Lucent is built for that reality. It is deliberately flexible rather than prescriptive:
 
-- **Organizational memory** — context survives across projects, teams, model providers, and time.
-- **Work ownership** — requests can be planned, executed, reviewed, reworked, and completed.
-- **Permissioned action** — agents only use the tools, credentials, sandboxes, and integrations they are allowed to use.
-- **Operational visibility** — leaders and operators can see what happened, why it happened, and what changed.
-- **Deployment flexibility** — teams can run Lucent locally, self-host it, connect hosted models, or use self-hosted model providers.
-- **Compounding efficiency** — every completed task can leave behind reusable knowledge instead of spending tokens rediscovering the same context.
+- **Make it yours** — run it locally or self-host it; use hosted models, local models, or both; connect the tools and services your work actually needs.
+- **Work in the open** — turn an idea into a request, break it into tasks, follow the timeline, and keep the useful artifacts close to the work.
+- **Collaborate across the human–agent boundary** — people can assign, clarify, review, redirect, and approve; agents can plan, execute, hand work off, and ask for help.
+- **Build on shared context** — notes, decisions, procedures, and prior outcomes can be available when they help, without making every interaction start from scratch.
+- **Choose the right amount of autonomy** — start with a chat-connected assistant, add background work or schedules when you want them, and keep review points where they matter.
+- **Stay portable** — Lucent speaks MCP and REST, supports several model providers, and does not require you to commit to one client or one model stack.
 
-Lucent brings those pieces together behind a Model Context Protocol (MCP) server, REST API, autonomous agent process, and web dashboard.
+The result is less like a chatbot with a long memory and more like a workshop: a place where humans and agents can pick up a piece of work, make progress, and leave it in better shape for the next collaborator.
 
-## What Lucent does
+## What you can do with it
 
-| Capability | What it enables |
-|------------|-----------------|
-| **Learns the organization** | Builds durable knowledge about people, projects, goals, procedures, decisions, and technical systems. |
-| **Works between conversations** | Keeps planning, scheduling, dispatching, and background learning going without requiring an open chat session. |
-| **Takes assigned work** | Turns requests into tracked tasks with ownership, status, event history, review, and rework paths. |
-| **Plans work immediately** | Wakes the daemon when a request is created and decomposes eligible work into tasks without waiting for the periodic cognitive cycle. |
-| **Acts safely** | Runs code in isolated sandboxes, stores credentials securely, and keeps agent capabilities behind approval gates. |
-| **Uses the right model for the job** | Orchestrates across GitHub Copilot, OpenAI, Anthropic, Google, Ollama, and other LangChain-backed providers. |
-| **Avoids vendor lock-in** | Exposes capabilities through MCP and REST while supporting both hosted and self-hosted model paths. |
-| **Scales with demand** | Supports parallel workers, shared work queues, scheduled work, and Kubernetes-oriented deployment paths. |
-| **Shows its work** | Preserves memory versions, request timelines, audit logs, review decisions, and operational dashboards. |
+| Build or use | Lucent provides |
+|---|---|
+| A personal AI workbench | MCP tools, a web dashboard, durable requests, and optional background help. |
+| A shared project room | Task ownership, handoffs, review queues, timelines, and space for the decisions behind the work. |
+| A team of specialists | Agent definitions, skills, managed tools, schedules, and parallel workers. |
+| A private or hybrid AI stack | Local deployment, self-hosted model paths, and hosted providers through GitHub Copilot, OpenAI, Anthropic, Google, Ollama, and LangChain-backed providers. |
+| Careful automation | Sandboxed execution, secret storage, approval gates, and audit trails when an agent needs to take action. |
 
-## The long-term consequence
+## A workspace, not a workflow you have to adopt
 
-Lucent helps turn AI from an expense line into an accumulating organizational capability.
+Lucent can be as lightweight or as structured as you need it to be. A solo developer might connect it to an MCP client and keep project notes and recurring maintenance in one place. An open-source group might use requests and handoffs to let maintainers and agents collaborate on issues, docs, and release work. A larger team can add roles, integrations, separate workers, and stronger controls without changing the basic way work moves through the system.
 
-Without durable context, every model call starts too close to zero. Teams spend tokens re-explaining the same codebase, policies, preferences, goals, and prior decisions. Lucent changes that pattern: useful context becomes reusable, work becomes traceable, and each completed task can improve the next one.
-
-That means higher return on token use. Expensive frontier models can be reserved for complex judgment, cheaper or self-hosted models can handle routine work, and the context generated by either can remain available to the organization rather than trapped in a single chat thread or vendor silo.
-
-The goal is not unchecked autonomy. It is **accountable autonomy**: an AI teammate that can act with continuity, scale across teams, respect organizational boundaries, and stay reviewable by the people responsible for the outcome.
+Memory is part of that story, but it is not the center of it. Save context when it will help the next person or agent; skip it when a task should stay ephemeral. Lucent is there to support your practice, not impose one.
 
 ## How it works
 
-Lucent runs as an application server plus a long-running agent process. The default Docker Compose stack starts one agent process; additional workers remain opt-in.
+Lucent runs as an application server plus a long-running agent process. The default Docker Compose stack starts one agent process; extra workers are opt-in.
 
 ```text
 ┌─────────────────────────────────────────────────────┐
@@ -55,55 +47,43 @@ Lucent runs as an application server plus a long-running agent process. The defa
 │                                                     │
 │  MCP /mcp  ·  REST API /api/*  ·  Web Dashboard      │
 │                                                     │
-│  Memory · Requests · Schedules · Definitions         │
-│  Sandboxes · Secrets · Integrations · Audit          │
+│  Requests · Tasks · Handoffs · Reviews · Schedules   │
+│  Context · Definitions · Tools · Sandboxes · Secrets │
 │                                                     │
-│  PostgreSQL durability and access control            │
+│  PostgreSQL keeps the shared workspace durable       │
 └─────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────┐
 │                Lucent Agent Process                  │
 │                                                     │
 │  Planning · Task dispatch · Scheduling · Learning    │
-│  Sandboxed execution · Review handoff                │
+│  Sandboxed execution · Human handoff                 │
 └─────────────────────────────────────────────────────┘
 ```
 
-The server keeps durable state and exposes the dashboard, API, and MCP interface. The agent process plans work, dispatches tasks, runs schedules, validates outputs, and records what it learns back into Lucent. New requests notify the agent process immediately for focused task decomposition, while periodic cognitive cycles handle broader planning and maintenance.
-Built-in daemon schedules run cheap pre-flight eligibility checks first, so an idle maintenance cycle records a `schedule.skipped` no-work event instead of creating empty model-backed work.
+The server keeps the workspace state and exposes the dashboard, API, and MCP interface. The agent process can plan work, dispatch tasks, run schedules, validate outputs, and add useful context back to Lucent. New requests can wake it immediately for focused task decomposition, while periodic cycles handle broader planning and maintenance. When there is nothing to do, maintenance cycles record a lightweight no-op rather than manufacturing work.
 
-## Enterprise operating model
+## Working together
 
-Lucent is designed for teams that need AI work to fit existing enterprise expectations.
+1. **Start with a request.** A person or an agent creates a piece of work with the goal, context, and desired outcome.
+2. **Let the right collaborator pick it up.** Lucent can track ownership and status, split eligible work into tasks, or wait for a human to decide what comes next.
+3. **Keep the conversation attached to the work.** Handoffs make room for questions, clarifications, decisions, and deliverables instead of hiding them in a one-off chat.
+4. **Review and iterate.** Route outputs through review when appropriate, ask for rework, and retain the history that explains how a result came to be.
 
-| Enterprise need | Lucent approach |
-|-----------------|-----------------|
-| **Work like a member of the team** | Lucent can carry context forward, accept assigned work, report status, and incorporate feedback over time. |
-| **Scale beyond one chat session** | Multiple workers can process queued work in parallel while preserving shared state and task ownership. |
-| **Choose your model strategy** | Use hosted providers, self-hosted models, or a mix; route work by task complexity, cost, data sensitivity, and latency. |
-| **Reduce repeated context spend** | Durable memory, procedures, goals, and prior outcomes help avoid paying repeatedly for the same discovery work. |
-| **Control who can do what** | Roles, groups, ownership, model audiences, permissions, and approval workflows keep access aligned with organizational policy. |
-| **Prevent arbitrary agent action** | Agent capabilities, connected tools, integrations, and sandbox templates can require review before use. |
-| **Protect credentials and code** | Secrets are encrypted, code runs in isolated sandboxes, and execution can be constrained by resource and network policy. |
-| **Operate with visibility** | Dashboards, timelines, handoffs, logs, reviews, and audit records make agent work inspectable after the fact. |
+This supports high-autonomy workflows, but it also works beautifully as a coordination layer around thoughtful human judgment.
 
-## Quick Start
+## Quick start
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) v2+.
 
 ```bash
-# 1. Clone and start the server plus one daemon worker
+# Clone and start Lucent with one daemon worker
 git clone https://github.com/kahinton/lucent.git
 cd lucent
 docker compose up -d
-
-# 2. Open http://localhost:8766 — create your account, select at least one
-#    discovered model, and copy the API key
-
-# 3. Add Lucent to your MCP client
 ```
 
-VS Code MCP configuration example:
+Open http://localhost:8766, create an account, choose at least one discovered model, and copy the API key shown during setup. Then add Lucent to your MCP client:
 
 ```json
 {
@@ -119,49 +99,49 @@ VS Code MCP configuration example:
 }
 ```
 
-For other clients and setup paths, see [Getting Started](docs/getting-started.md).
+For a guided setup and configurations for other clients, see [Getting Started](docs/getting-started.md).
 
-## Core components
+## Core pieces
 
-- **MCP server** — exposes memory, requests, schedules, definitions, reviews, models, import/export, and operational tools to AI clients.
-- **REST API** — provides programmatic access to Lucent resources, admin operations, integrations, sandboxes, secrets, audit, and web UI backing endpoints.
-- **Web dashboard** — manages memories, requests, review queues, agent definitions, workflow and agent wizards, sandboxes, runtime settings, users, groups, audit logs, secrets, and integrations.
-- **Autonomous daemon** — runs cognitive, dispatch, scheduler, and autonomic loops for long-running work.
-- **PostgreSQL persistence** — stores durable state, access controls, versions, audit logs, request/task history, and operational metadata.
-- **Sandbox manager** — provisions isolated Docker execution environments for code and tool work, with opt-in reuse across sequential tasks in the same request.
-- **LLM engine layer** — supports GitHub Copilot SDK and LangChain-backed providers including OpenAI, Anthropic, Google, and Ollama.
+- **MCP server** — brings Lucent's requests, tasks, handoffs, reviews, schedules, context, definitions, and tools into compatible AI clients.
+- **REST API** — lets you build your own interfaces and integrations around the same workspace.
+- **Web dashboard** — a home for work in progress, reviews, agent and workflow definitions, sandboxes, settings, and activity history.
+- **Autonomous daemon** — optional background planning, dispatch, scheduling, and maintenance.
+- **PostgreSQL persistence** — durable shared state, versions, access controls, and task history.
+- **Sandbox manager** — isolated Docker environments for code and tool work, with optional reuse across sequential tasks in a request.
+- **LLM engine layer** — provider flexibility through the GitHub Copilot SDK and LangChain-backed providers.
 
-## Example use cases
+## Ideas to try
 
-- Maintain institutional memory across teams, projects, and model providers.
-- Queue work for AI agents with tracked status, review, and rework instead of ad hoc chat follow-ups.
-- Run scheduled audits, dependency checks, documentation reviews, or release-prep tasks.
-- Draft workflows and agent definitions through guided chat wizards before approving them for use.
-- Let agents inspect and modify code inside controlled sandboxes rather than on host machines.
-- Govern which agent definitions, skills, MCP servers, integrations, and secrets are available.
-- Give engineering leaders visibility into AI activity, decisions, and outcomes over time.
+- Give your coding agent a shared place to track a feature from research through review.
+- Coordinate issue triage, documentation cleanup, or release preparation with a mix of maintainers and agents.
+- Build specialized agents for research, testing, code review, design notes, or any workflow your community needs.
+- Schedule recurring chores—dependency checks, docs reviews, or project health checks—and review the results on your terms.
+- Run a local-first setup with Ollama, or combine private infrastructure with the hosted models you prefer.
+- Connect tools and services gradually, keeping credentials and execution boundaries under your control.
 
 ## Documentation
 
 | Guide | Description |
 |-------|-------------|
-| **[Getting Started](docs/getting-started.md)** | Full setup walkthrough, MCP client configuration, authentication |
-| **[Architecture](docs/architecture.md)** | System design, components, daemon, MCP tools, source layout |
-| **[Configuration](docs/configuration.md)** | Environment variables, Docker Compose options, feature flags |
-| **[Development](docs/development.md)** | Contributing guide, local dev setup, testing, CI/CD |
+| **[Getting Started](docs/getting-started.md)** | Start locally, connect an MCP client, and try your first shared workflow |
+| **[Architecture](docs/architecture.md)** | How the server, daemon, MCP tools, and source tree fit together |
+| **[Configuration](docs/configuration.md)** | Environment variables, Docker Compose options, and feature flags |
+| **[Development](docs/development.md)** | Local setup, tests, and contributing |
+| [Agent Integration](docs/agent-integration.md) | Bring another agent into a Lucent workflow |
 | [API Reference](docs/api-reference.md) | REST API endpoints and parameters |
-| [Connections](docs/connections.md) | Enterprise connection model and credential profiles |
+| [Connections](docs/connections.md) | Connect services and manage credentials for local, team, or managed setups |
 | [Deployment Guide](docs/deployment-guide.md) | Production deployment with Docker Compose |
-| [Security Model](docs/security-model.md) | Authentication, authorization, multi-tenancy, auditability |
-| [Secret Storage](docs/secret-storage.md) | Pluggable encryption providers and secret references |
+| [Security Model](docs/security-model.md) | Authentication, authorization, tenancy, and auditability |
+| [Secret Storage](docs/secret-storage.md) | Encryption providers and secret references |
 | [Sandboxes](docs/sandboxes.md) | Docker sandbox configuration and lifecycle |
-| [Observability](docs/observability.md) | OpenTelemetry, Prometheus, Jaeger, Grafana |
+| [Observability](docs/observability.md) | OpenTelemetry, Prometheus, Jaeger, and Grafana |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues and fixes |
 | [Kubernetes](docs/kubernetes-deployment.md) | Helm chart and operator deployment |
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Development Guide](docs/development.md).
+Lucent gets more interesting when people bring their own workflows, integrations, agent ideas, and sharp edges. Bug reports, documentation improvements, experiments, and focused pull requests are all welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [Development Guide](docs/development.md).
 
 ## Security
 
