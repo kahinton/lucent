@@ -109,6 +109,12 @@ DEFAULT_MESSAGE_MEMORY_HOOK: dict[str, Any] = {
 # this byte budget is spent; remaining results keep the search-preview line.
 MESSAGE_LOOKUP_FULL_CONTENT_BUDGET_BYTES = 6144
 
+# Keep the first lookup compatible with the original message hook, then use
+# shorter windows for the rest of a long request. Four-term follow-up windows
+# work with the search endpoint's 67%-term match gate without requiring a
+# memory to repeat every qualifier from a verbose user message.
+MESSAGE_LOOKUP_PRIMARY_QUERY_TERMS = 8
+
 INJECT_DECISIONS = frozenset({"inject", "allow", "replace_args"})
 
 
@@ -371,7 +377,7 @@ def append_hook_context(tool_result: str, executions: list[HookExecution] | Hook
     return "\n".join(chunks).strip()
 
 
-def extract_semantic_terms(text: str) -> list[str]:
+def extract_semantic_terms(text: str, *, cap: int | None = None) -> list[str]:
     """Extract deterministic retrieval terms from a user message.
 
     Message-phase pipeline design (``docs/design/living-memory-inject-pipeline.md``
@@ -385,7 +391,7 @@ def extract_semantic_terms(text: str) -> list[str]:
     """
     survivors: list[str] = []
     seen: set[str] = set()
-    cap = _message_lookup_max_terms()
+    term_cap = _message_lookup_max_terms() if cap is None else cap
     for token in re.split(r"\W+", (text or "").lower()):
         if not token:
             continue
@@ -401,7 +407,7 @@ def extract_semantic_terms(text: str) -> list[str]:
             continue
         seen.add(token)
         survivors.append(token)
-        if len(survivors) >= cap:
+        if len(survivors) >= term_cap:
             break
     return survivors
 
@@ -513,6 +519,18 @@ def _message_lookup_max_terms() -> int:
         return 8
 
 
+def _message_lookup_max_score_drop() -> float:
+    """Largest allowed gap from a query window's highest score."""
+    try:
+        return float(
+            runtime_settings.message_inject_max_score_drop(
+                organization_id=_message_lookup_organization_id(),
+            )
+        )
+    except Exception:
+        return 0.15
+
+
 def _message_lookup_max_memories() -> int:
     """Maximum memories injected per message (design §4.3)."""
     try:
@@ -523,6 +541,211 @@ def _message_lookup_max_memories() -> int:
         )
     except Exception:
         return 3
+
+
+def _message_lookup_max_queries() -> int:
+    """Maximum bounded memory searches for one user message."""
+    try:
+        return int(
+            runtime_settings.message_inject_max_queries(
+                organization_id=_message_lookup_organization_id(),
+            )
+        )
+    except Exception:
+        return 5
+
+
+def _message_lookup_followup_query_terms() -> int:
+    """Terms in each long-message follow-up search window."""
+    try:
+        return int(
+            runtime_settings.message_inject_followup_query_terms(
+                organization_id=_message_lookup_organization_id(),
+            )
+        )
+    except Exception:
+        return 4
+
+
+def build_message_lookup_queries(terms: list[str]) -> list[str]:
+    """Build bounded, coverage-oriented queries for proactive retrieval.
+
+    The original hook submitted one query made from the first eight terms.
+    That works well for concise requests but makes long requests both less
+    recall-friendly (later topics disappear) and overly strict under the
+    search endpoint's all-term match gate. Keep that first, broad lookup for
+    continuity, then cover later terms in smaller windows. The entire plan is
+    bounded by runtime settings and does not change the shared search API.
+    """
+    if not terms:
+        return []
+    max_queries = max(1, min(_message_lookup_max_queries(), 8))
+    followup_width = max(2, min(_message_lookup_followup_query_terms(), 8))
+    first_width = min(MESSAGE_LOOKUP_PRIMARY_QUERY_TERMS, len(terms))
+    queries = [" ".join(terms[:first_width])]
+    remainder = terms[first_width:]
+    followup_slots = max_queries - 1
+    if len(remainder) <= followup_slots * followup_width:
+        starts = range(0, len(remainder), followup_width)
+    elif followup_slots == 1:
+        starts = [max(0, len(remainder) - followup_width)]
+    else:
+        # Spread follow-ups across a sprawling sentence instead of using the
+        # entire budget on its opening terms.
+        max_start = len(remainder) - followup_width
+        starts = [
+            round(index * max_start / (followup_slots - 1))
+            for index in range(followup_slots)
+        ]
+    for start in starts:
+        if len(queries) >= max_queries:
+            break
+        query_terms = remainder[start:start + followup_width]
+        if query_terms:
+            queries.append(" ".join(query_terms))
+    return queries
+
+
+def _message_lookup_sentence_spans(text: str) -> list[str]:
+    """Return compact, ordered sentence-like spans from a user message."""
+    spans: list[str] = []
+    for paragraph in re.split(r"\n\s*\n+", text or ""):
+        for sentence in re.split(r"(?<=[.!?])\s+", paragraph):
+            sentence = sentence.strip()
+            if sentence and extract_semantic_terms(sentence, cap=1):
+                spans.append(sentence)
+    return spans
+
+
+def _message_lookup_anchor_spans(text: str) -> list[str]:
+    """Find small, high-signal phrases worth querying independently.
+
+    This is intentionally lexical and conservative: quoted text, inline-code
+    text, path-like identifiers, and multi-word capitalized names are useful
+    anchors without introducing a model call or a separate NER dependency.
+    """
+    matches: list[str] = []
+    patterns = (
+        r"`([^`\n]{3,160})`",
+        r"[\"“]([^\"”\n]{3,160})[\"”]",
+        r"(?:[A-Za-z0-9_.-]+[/\\]){1,}[A-Za-z0-9_.-]+",
+        r"\b[A-Z][A-Za-z0-9_-]+(?:\s+[A-Z][A-Za-z0-9_-]+){1,3}\b",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text or ""):
+            value = match.group(1) if match.lastindex else match.group(0)
+            terms = extract_semantic_terms(value, cap=8)
+            if len(terms) >= 2:
+                matches.append(" ".join(terms))
+    return _dedupe_strings(matches)[:4]
+
+
+def build_message_lookup_plan(text: str) -> list[dict[str, str]]:
+    """Build a fixed-cost retrieval plan that covers a long message.
+
+    A user usually puts the actionable request near the end, so the final
+    meaningful sentence leads. The plan then reserves budget for explicit
+    anchors and samples the middle and beginning of the message. A long
+    sentence is split into the same broad-plus-follow-up windows used by the
+    prior implementation. This keeps the search API unchanged while avoiding
+    the old "first N terms decide everything" failure mode.
+    """
+    max_queries = max(1, min(_message_lookup_max_queries(), 8))
+    sentence_spans = _message_lookup_sentence_spans(text)
+    if not sentence_spans:
+        return []
+
+    selected: list[tuple[str, str]] = [("latest_request", sentence_spans[-1])]
+    selected.extend(("anchor", anchor) for anchor in _message_lookup_anchor_spans(text))
+    for index, label in ((len(sentence_spans) // 2, "middle"), (0, "opening")):
+        span = sentence_spans[index]
+        if span != sentence_spans[-1]:
+            selected.append((label, span))
+
+    chunk_sets = [
+        (source, build_message_lookup_queries(extract_semantic_terms(span)))
+        for source, span in selected
+    ]
+    plan: list[dict[str, str]] = []
+    seen_queries: set[str] = set()
+    # Use every span's primary query before returning to its follow-up chunks.
+    # A sprawling final sentence must not starve anchors or surrounding context.
+    max_chunks = max((len(queries) for _source, queries in chunk_sets), default=0)
+    for chunk_index in range(max_chunks):
+        for source, queries in chunk_sets:
+            if chunk_index >= len(queries):
+                continue
+            query = queries[chunk_index]
+            if query in seen_queries:
+                continue
+            seen_queries.add(query)
+            plan.append({"source": source, "query": query})
+            if len(plan) >= max_queries:
+                return plan
+    return plan
+
+
+async def _search_message_memory_candidates(
+    memory_bridge: Any,
+    *,
+    queries: list[str],
+    limit: int,
+    include_archived: bool,
+) -> list[dict[str, Any]]:
+    """Search bounded query windows and merge candidates by best score.
+
+    Searches are concurrent to keep a long-message lookup near the latency of
+    one search. Results retain server order for ties, while a memory returned
+    by more than one window keeps its best similarity score.
+    """
+    payloads = [
+        {
+            "query": query,
+            "limit": limit,
+            "include_archived": include_archived,
+        }
+        for query in queries
+    ]
+    results = await asyncio.gather(*[
+        memory_bridge.call_tool("search_memories_full", payload)
+        for payload in payloads
+    ])
+    merged: dict[str, tuple[dict[str, Any], float, float, int]] = {}
+    for result_index, raw in enumerate(results):
+        ranked = _parse_memory_search_result(raw)
+        scored: list[tuple[dict[str, Any], float]] = []
+        for memory in ranked:
+            try:
+                score = float(memory.get("similarity_score") or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            scored.append((memory, score))
+        best_score = max((score for _memory, score in scored), default=0.0)
+        for memory_index, (memory, score) in enumerate(scored):
+            memory_id = str(memory.get("id") or "")
+            if not memory_id:
+                continue
+            order = result_index * limit + memory_index
+            score_drop = max(0.0, best_score - score)
+            existing = merged.get(memory_id)
+            if existing is None:
+                candidate = dict(memory)
+                candidate["_injection_min_query_score_drop"] = score_drop
+                merged[memory_id] = (candidate, score, score_drop, order)
+            elif score > existing[1]:
+                candidate = dict(memory)
+                candidate["_injection_min_query_score_drop"] = min(existing[2], score_drop)
+                merged[memory_id] = (candidate, score, min(existing[2], score_drop), order)
+            elif score_drop < existing[2]:
+                existing[0]["_injection_min_query_score_drop"] = score_drop
+                merged[memory_id] = (existing[0], existing[1], score_drop, existing[3])
+    return [
+        item[0]
+        for item in sorted(
+            merged.values(),
+            key=lambda item: (-item[1], item[3]),
+        )
+    ]
 
 
 def _is_first_model_call_after_user_message(
@@ -717,18 +940,16 @@ async def _run_message_memory_lookup_hook(
         # match-all when every token is a stopword (§3.5).
         return None
 
-    query = " ".join(terms)
+    query_plan = build_message_lookup_plan(source_text)
+    queries = [entry["query"] for entry in query_plan]
     limit = max(10, _message_lookup_max_memories() * 3)
     include_archived = bool(config.get("include_archived", False))
-    raw = await memory_bridge.call_tool(
-        "search_memories_full",
-        {
-            "query": query,
-            "limit": limit,
-            "include_archived": include_archived,
-        },
+    candidates = await _search_message_memory_candidates(
+        memory_bridge,
+        queries=queries,
+        limit=limit,
+        include_archived=include_archived,
     )
-    candidates = _parse_memory_search_result(raw)
     # Project-attached memory boost (Projects round 2): when the chat is
     # filed into a project, memories attached to that project rank first
     # among the candidates the search already returned. The search itself is
@@ -762,7 +983,9 @@ async def _run_message_memory_lookup_hook(
             text="memory-lookup: 0 injected (0 deduped, 0 below threshold)",
             metadata={
                 "terms": terms,
-                "query": query,
+                "query": queries[0],
+                "queries": queries,
+                "query_plan": query_plan,
                 "min_similarity": min_similarity,
                 "memory_count": 0,
                 "deduped": 0,
@@ -783,8 +1006,10 @@ async def _run_message_memory_lookup_hook(
     # Skips are counted by reason so a no-injection turn can state why
     # (hook-UX silence line) instead of looking identical to a didn't-run turn.
     below_threshold = 0
+    below_score_spread = 0
     deduped = 0
     injected: list[tuple[dict[str, Any], float]] = []
+    max_score_drop = max(0.0, min(_message_lookup_max_score_drop(), 1.0))
     for memory in candidates:
         try:
             score = float(memory.get("similarity_score") or 0.0)
@@ -792,6 +1017,13 @@ async def _run_message_memory_lookup_hook(
             score = 0.0
         if score < min_similarity:
             below_threshold += 1
+            continue
+        try:
+            score_drop = float(memory.get("_injection_min_query_score_drop") or 0.0)
+        except (TypeError, ValueError):
+            score_drop = 0.0
+        if score_drop > max_score_drop:
+            below_score_spread += 1
             continue
         memory_id = str(memory.get("id") or "")
         if memory_id and memory_id in injected_memory_ids:
@@ -809,12 +1041,16 @@ async def _run_message_memory_lookup_hook(
             ),
             metadata={
                 "terms": terms,
-                "query": query,
+                "query": queries[0],
+                "queries": queries,
+                "query_plan": query_plan,
                 "min_similarity": min_similarity,
                 "memory_count": 0,
                 "deduped": deduped,
                 "below_threshold": below_threshold,
-                "skipped": deduped + below_threshold,
+                "below_score_spread": below_score_spread,
+                "max_score_drop": max_score_drop,
+                "skipped": deduped + below_threshold + below_score_spread,
             },
         )
     injected_memory_ids.update(str(memory.get("id") or "") for memory, _ in injected)
@@ -858,12 +1094,16 @@ async def _run_message_memory_lookup_hook(
         text="\n".join(lines),
         metadata={
             "terms": terms,
-            "query": query,
+            "query": queries[0],
+            "queries": queries,
+            "query_plan": query_plan,
             "min_similarity": min_similarity,
             "memory_count": len(injected),
             "deduped": deduped,
             "below_threshold": below_threshold,
-            "skipped": deduped + below_threshold,
+            "below_score_spread": below_score_spread,
+            "max_score_drop": max_score_drop,
+            "skipped": deduped + below_threshold + below_score_spread,
             "full_content_count": len(full_ids),
             "full_content_bytes": used_bytes,
             "memory_ids": [str(memory.get("id", ""))[:8] for memory, _ in injected],

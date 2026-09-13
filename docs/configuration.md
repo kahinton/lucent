@@ -121,6 +121,24 @@ Runtime mappings:
 Leave `reasoning_effort` unset to use the provider default. Choose higher
 levels only for complex analysis where extra latency/cost is justified.
 
+### Proactive Memory Injection
+
+The message hook can look up relevant accessible memories before the first
+model call of a user turn. Its defaults favor a bounded search plan: it starts
+with the latest meaningful sentence, then uses quoted/code/path/name anchors
+and samples the middle and opening of a long message. The shared memory search
+API is unchanged; these settings only control the hook's retrieval plan and
+final injection filter.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LUCENT_INJECT_MIN_SIMILARITY` | `0.30` | Absolute minimum search similarity score for injection. |
+| `LUCENT_INJECT_MAX_SCORE_DROP` | `0.15` | Maximum score gap from a query window's best hit. Lower values favor precision; higher values favor recall. |
+| `LUCENT_INJECT_MAX_TERMS` | `64` | Maximum meaningful terms retained from each selected message span. |
+| `LUCENT_INJECT_MAX_QUERIES` | `5` | Maximum bounded searches for one message. Each extra search adds memory-server work. |
+| `LUCENT_INJECT_FOLLOWUP_QUERY_TERMS` | `4` | Terms in each follow-up window after the initial eight-term lookup. |
+| `LUCENT_INJECT_MAX_MEMORIES` | `3` | Maximum memories inserted into the model context per user message. |
+
 ## Daemon Configuration
 
 | Variable | Default | Description |

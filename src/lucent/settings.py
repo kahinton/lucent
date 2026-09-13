@@ -156,18 +156,68 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         max_value=1.0,
     ),
     RuntimeSettingDefinition(
+        key="memory.inject_max_score_drop",
+        env_var="LUCENT_INJECT_MAX_SCORE_DROP",
+        value_type="float",
+        default=0.15,
+        title="Message injection relevance spread",
+        section="Memory lifecycle",
+        description=(
+            "Maximum similarity-score drop from a query window's best result "
+            "for a memory to be injected."
+        ),
+        help_text=(
+            "Use a smaller value for higher precision or a larger value for "
+            "higher recall. The absolute similarity threshold still applies."
+        ),
+        min_value=0.0,
+        max_value=1.0,
+    ),
+    RuntimeSettingDefinition(
         key="memory.inject_max_terms",
         env_var="LUCENT_INJECT_MAX_TERMS",
         value_type="integer",
-        default=8,
+        default=64,
         title="Message injection term cap",
         section="Memory lifecycle",
         description=(
             "Maximum terms extracted from a user message for the proactive "
-            "memory search."
+            "memory search. The hook draws bounded queries from the full "
+            "message rather than reducing it to its opening terms."
         ),
         min_value=1,
-        max_value=32,
+        max_value=64,
+    ),
+    RuntimeSettingDefinition(
+        key="memory.inject_max_queries",
+        env_var="LUCENT_INJECT_MAX_QUERIES",
+        value_type="integer",
+        default=5,
+        title="Message injection search cap",
+        section="Memory lifecycle",
+        description="Maximum bounded memory searches run for one user message.",
+        help_text=(
+            "The hook gives priority to the latest request, then samples other "
+            "parts of a long message and its anchors. Raise carefully: "
+            "each additional search adds memory-server work."
+        ),
+        min_value=1,
+        max_value=8,
+    ),
+    RuntimeSettingDefinition(
+        key="memory.inject_followup_query_terms",
+        env_var="LUCENT_INJECT_FOLLOWUP_QUERY_TERMS",
+        value_type="integer",
+        default=4,
+        title="Message injection follow-up window",
+        section="Memory lifecycle",
+        description="Terms per follow-up search window for a long user message.",
+        help_text=(
+            "Smaller windows make retrieval less dependent on matching every "
+            "detail in a long request."
+        ),
+        min_value=2,
+        max_value=8,
     ),
     RuntimeSettingDefinition(
         key="memory.inject_max_memories",
@@ -1672,11 +1722,41 @@ def message_inject_min_similarity(*, organization_id: Any | None = None) -> floa
     )
 
 
+def message_inject_max_score_drop(*, organization_id: Any | None = None) -> float:
+    """Largest allowed score gap from a query window's best result."""
+    return float(
+        get_runtime_setting(
+            "memory.inject_max_score_drop",
+            organization_id=organization_id,
+        )
+    )
+
+
 def message_inject_max_terms(*, organization_id: Any | None = None) -> int:
     """Maximum terms extracted from a user message for proactive injection."""
     return int(
         get_runtime_setting(
             "memory.inject_max_terms",
+            organization_id=organization_id,
+        )
+    )
+
+
+def message_inject_max_queries(*, organization_id: Any | None = None) -> int:
+    """Maximum bounded memory searches for one message injection pass."""
+    return int(
+        get_runtime_setting(
+            "memory.inject_max_queries",
+            organization_id=organization_id,
+        )
+    )
+
+
+def message_inject_followup_query_terms(*, organization_id: Any | None = None) -> int:
+    """Terms per follow-up search window for a long user message."""
+    return int(
+        get_runtime_setting(
+            "memory.inject_followup_query_terms",
             organization_id=organization_id,
         )
     )

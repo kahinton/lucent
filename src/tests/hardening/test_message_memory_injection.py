@@ -30,6 +30,8 @@ import pytest
 from lucent.llm.hooks import (
     FILE_ARGUMENT_KEYS,
     HookManager,
+    build_message_lookup_plan,
+    build_message_lookup_queries,
     extract_file_references,
     extract_semantic_terms,
     _is_first_model_call_after_user_message,
@@ -98,13 +100,45 @@ def test_extract_terms_drops_path_url_code_shaped_tokens() -> None:
     assert extract_semantic_terms("file:///etc/passwd") == ["file", "etc", "passwd"]
 
 
-def test_extract_terms_caps_at_default_eight_terms() -> None:
+def test_extract_terms_caps_at_default_sixty_four_terms() -> None:
     terms = extract_semantic_terms(
-        "memory consolidation pipeline injection threshold similarity dedup session engine"
+        "memory consolidation pipeline injection threshold similarity dedup session engine "
+        "retrieval ranking context handoff review workflow project dashboard"
     )
-    assert len(terms) == 8
+    assert len(terms) == 17
     assert terms[0] == "memory"
-    assert terms[-1] == "session"
+    assert terms[-1] == "dashboard"
+
+
+def test_long_messages_keep_later_topics_in_bounded_followup_queries() -> None:
+    terms = [f"topic{index}" for index in range(16)]
+    assert build_message_lookup_queries(terms) == [
+        "topic0 topic1 topic2 topic3 topic4 topic5 topic6 topic7",
+        "topic8 topic9 topic10 topic11",
+        "topic12 topic13 topic14 topic15",
+    ]
+
+
+def test_sprawling_sentence_query_windows_include_its_tail() -> None:
+    queries = build_message_lookup_queries([f"topic{index}" for index in range(64)])
+    assert len(queries) == 5
+    assert queries[0].startswith("topic0")
+    assert queries[-1].endswith("topic63")
+
+
+def test_lookup_plan_covers_latest_request_anchors_and_message_positions() -> None:
+    plan = build_message_lookup_plan(
+        "Opening context about migration safety. "
+        "The middle discusses service boundaries. "
+        "Please investigate `src/auth/session.py` and fix Project Aurora."
+    )
+    assert plan[0] == {
+        "source": "latest_request",
+        "query": "investigate src auth session fix project aurora",
+    }
+    assert any(entry["source"] == "anchor" for entry in plan)
+    assert any(entry["source"] == "middle" for entry in plan)
+    assert any(entry["source"] == "opening" for entry in plan)
 
 
 def test_extract_terms_empty_input() -> None:
@@ -162,6 +196,56 @@ async def test_message_hook_injects_qualifying_memories_as_system_message_source
     # Full content came from ONE batched get_memories call (hook-UX).
     assert [name for name, _payload in bridge.calls if name == "get_memories"] == ["get_memories"]
     assert state["injected_memory_ids"] == {"11111111-1111-1111-1111-111111111111"}
+
+
+@pytest.mark.asyncio
+async def test_message_hook_searches_later_long_message_topics() -> None:
+    class QueryBridge(FakeBridge):
+        async def call_tool(self, name: str, payload: dict[str, Any]) -> str:
+            self.calls.append((name, payload))
+            if name == "get_memories":
+                return json.dumps({"memories": []})
+            if payload["query"] == "later topic detail final":
+                return json.dumps({"memories": [
+                    _memory("12121212-1212-1212-1212-121212121212", 0.72, "later-topic memory"),
+                ]})
+            return json.dumps({"memories": []})
+
+    bridge = QueryBridge([])
+    manager = HookManager(session_state={})
+    outcome = await manager.before_model_call(
+        messages=[{
+            "role": "user",
+            "content": (
+                "first second third fourth fifth sixth seventh eighth "
+                "later topic detail final"
+            ),
+        }],
+        memory_bridge=bridge,
+    )
+    execution = outcome.injectable_executions[0]
+    assert "later-topic memory" in execution.text
+    assert execution.metadata["queries"] == [
+        "first second third fourth fifth sixth seventh eighth",
+        "later topic detail final",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_message_hook_rejects_results_far_below_their_query_winner() -> None:
+    bridge = FakeBridge([
+        _memory("11111111-1111-1111-1111-111111111111", 0.72, "strong match"),
+        _memory("22222222-2222-2222-2222-222222222222", 0.45, "weak match"),
+    ])
+    manager = HookManager(session_state={})
+    outcome = await manager.before_model_call(
+        messages=[{"role": "user", "content": "injection threshold question"}],
+        memory_bridge=bridge,
+    )
+    execution = outcome.injectable_executions[0]
+    assert "strong match" in execution.text
+    assert "weak match" not in execution.text
+    assert execution.metadata["below_score_spread"] == 1
 
 
 @pytest.mark.asyncio
