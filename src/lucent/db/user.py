@@ -17,6 +17,7 @@ import asyncpg
 from asyncpg import Pool
 
 from lucent.logging import get_logger
+from lucent.db.pool import scoped_acquire
 
 logger = get_logger("db.user")
 
@@ -84,7 +85,7 @@ class UserRepository:
         if role:
             params.append(role)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(query, *params)
 
         user = self._row_to_dict(row)
@@ -141,7 +142,7 @@ class UserRepository:
         """
 
         try:
-            async with self.pool.acquire() as conn:
+            async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
                 row = await conn.fetchrow(
                     query,
                     name,  # username
@@ -163,7 +164,9 @@ class UserRepository:
 
         return None
 
-    async def _get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
+    async def _get_individual_memory_for_user(
+        self, user_id: UUID, organization_id: UUID | str | None = None
+    ) -> dict[str, Any] | None:
         """Get the individual memory associated with a user.
 
         Args:
@@ -182,7 +185,7 @@ class UserRepository:
               AND user_id = $1
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(query, str(user_id))
 
         if row is None:
@@ -190,7 +193,9 @@ class UserRepository:
 
         return dict(row)
 
-    async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
+    async def get_individual_memory_for_user(
+        self, user_id: UUID, organization_id: UUID | str | None = None
+    ) -> dict[str, Any] | None:
         """Public method to get the individual memory associated with a user.
 
         Args:
@@ -199,9 +204,11 @@ class UserRepository:
         Returns:
             The memory record, or None if not found.
         """
-        return await self._get_individual_memory_for_user(user_id)
+        return await self._get_individual_memory_for_user(user_id, organization_id)
 
-    async def _soft_delete_individual_memory_for_user(self, user_id: UUID) -> bool:
+    async def _soft_delete_individual_memory_for_user(
+        self, user_id: UUID, organization_id: UUID | str | None = None
+    ) -> bool:
         """Soft delete the individual memory associated with a user.
 
         Args:
@@ -219,7 +226,7 @@ class UserRepository:
             RETURNING id
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             result = await conn.fetchrow(query, str(user_id))
 
         return result is not None
@@ -240,6 +247,7 @@ class UserRepository:
             WHERE id = $1
         """
 
+        # rls: users is on migration 116's global-exempt list.
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(user_id))
 
@@ -265,6 +273,7 @@ class UserRepository:
             WHERE external_id = $1 AND provider = $2
         """
 
+        # rls: users is on migration 116's global-exempt list.
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, external_id, provider)
 
@@ -380,6 +389,7 @@ class UserRepository:
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
 
+        # rls: users is on migration 116's global-exempt list.
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
 
@@ -437,7 +447,7 @@ class UserRepository:
         """
 
         try:
-            async with self.pool.acquire() as conn:
+            async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
                 await conn.execute(
                     query,
                     content,
@@ -460,6 +470,10 @@ class UserRepository:
             WHERE id = $1
         """
 
+        # rls: users is on migration 116's global-exempt list and this write
+        # touches nothing else — a raw acquire keeps login working on
+        # scope-less sessions (member-scoped acquire without org would
+        # fail closed and 500 every login/api-key auth post-cutover).
         async with self.pool.acquire() as conn:
             await conn.execute(query, str(user_id))
 
@@ -485,7 +499,7 @@ class UserRepository:
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(query, new_role, str(user_id))
 
         if row is None:
@@ -520,7 +534,7 @@ class UserRepository:
                 WHERE organization_id = $1 AND role = $2
                 ORDER BY display_name
             """
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id) as conn:
                 rows = await conn.fetch(query, str(organization_id), role)
         else:
             query = """
@@ -530,7 +544,7 @@ class UserRepository:
                 WHERE organization_id = $1
                 ORDER BY display_name
             """
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id) as conn:
                 rows = await conn.fetch(query, str(organization_id))
 
         return [self._row_to_dict(row) for row in rows]
@@ -556,7 +570,7 @@ class UserRepository:
             RETURNING id
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             result = await conn.fetchrow(query, str(user_id))
 
         return result is not None

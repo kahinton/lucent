@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
+from lucent.db.pool import scoped_acquire
 
 
 class RuntimeSettingsRepository:
@@ -42,7 +43,7 @@ class RuntimeSettingsRepository:
             """
             params = []
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(query, *params)
         return [dict(row) for row in rows]
 
@@ -58,7 +59,7 @@ class RuntimeSettingsRepository:
             FROM runtime_settings
             WHERE organization_id = $1 AND key = $2
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(query, UUID(str(organization_id)), key)
         return dict(row) if row else None
 
@@ -97,7 +98,7 @@ class RuntimeSettingsRepository:
             RETURNING id, organization_id, key, value, value_type,
                       created_by, updated_by, created_at, updated_at
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 query,
                 UUID(str(organization_id)),
@@ -120,6 +121,6 @@ class RuntimeSettingsRepository:
             RETURNING id, organization_id, key, value, value_type,
                       created_by, updated_by, created_at, updated_at
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(query, UUID(str(organization_id)), key)
         return dict(row) if row else None

@@ -98,7 +98,12 @@ async def _create_task_sandbox(
             )
 
             pool = await get_pool()
-            async with pool.acquire() as conn:
+            # rls: enterprise_credentials is RLS-bound (org-keyed shape b).
+            # The task's org is in scope here — bind it for the credential
+            # read (fail-closed empty when the org is unset).
+            from lucent.db.pool import scoped_acquire
+
+            async with scoped_acquire(organization_id=org_id) as conn:
                 credential = await conn.fetchrow(
                     """
                     SELECT id, encrypted_secret_payload
@@ -241,13 +246,18 @@ async def _create_task_sandbox(
 
 
 async def _request_has_later_reusable_sandbox_task(
-    self, request_id: str, task_id: str, sequence_order: int
+    self, request_id: str, task_id: str, sequence_order: int, org_id: str | None = None
 ) -> bool:
-    """Return whether a later unfinished task will reuse this request sandbox."""
+    """Return whether a later unfinished task will reuse this request sandbox.
+
+    org_id binds the RLS tenant GUC (tasks is shape-b bound); without it the
+    read is fail-closed empty under RLS.
+    """
     from lucent.db import get_pool
+    from lucent.db.pool import scoped_acquire
 
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=org_id) as conn:
         return bool(
             await conn.fetchval(
                 """
@@ -384,7 +394,7 @@ async def _resolve_sandbox_template(
             # "host-gateway"); to_sandbox_config only includes the key when
             # the template row has it, so inject defensively for older rows.
             config["extra_hosts"] = dict(template["extra_hosts"] or {})
-        await repository.mark_used(template_id)
+        await repository.mark_used(template_id, org_id)
         runtime.log(
             f"Resolved sandbox template '{template.get('name', template_id[:8])}' "
             "for dispatch"

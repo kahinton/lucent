@@ -18,11 +18,25 @@ class RuntimeLoopsMixin:
         """Return claimed or running tasks owned by this daemon instance."""
         import asyncpg
 
+        from daemon.db_scope import connect_scoped
         from daemon.runtime.module_proxy import runtime
 
         connection = None
         try:
-            connection = await asyncpg.connect(runtime.DATABASE_URL)
+            # rls: tasks is bound by p_tasks_tenant (shape b) — org GUC or
+            # 'system' role. The daemon role with empty org is fail-closed
+            # denied, so resolve the daemon org first (exempt-table read)
+            # and bind it; on unbound orgs the count stays 0 (safe defer).
+            connection = await connect_scoped(runtime.DATABASE_URL)
+            bound = await runtime._resolve_daemon_org(connection)
+            if not bound:
+                # No org to bind: treat as "no owned tasks" — fail-closed
+                # under RLS either way, and the reload proceeds safely.
+                return 0
+            await connection.execute(
+                "SELECT set_config('app.org_id', $1, false);",
+                bound[0],
+            )
             return int(
                 await connection.fetchval(
                     """SELECT COUNT(*) FROM tasks
@@ -57,7 +71,7 @@ class RuntimeLoopsMixin:
                         runtime.log("Failed to close stale PG LISTEN connection", "DEBUG")
                     self._listen_conn = None
             try:
-                self._listen_conn = await asyncpg.connect(runtime.DATABASE_URL)
+                self._listen_conn = await connect_scoped(runtime.DATABASE_URL)  # rls: plumbing-only LISTEN (no row reads)
                 await self._listen_conn.add_listener("task_ready", self._on_task_ready)
                 await self._listen_conn.add_listener("request_ready", self._on_request_ready)
                 runtime.log("PG LISTEN established on 'task_ready' and 'request_ready' channels")
@@ -257,7 +271,7 @@ class RuntimeLoopsMixin:
         if cached := getattr(self, "_cached_daemon_org_id", None):
             return cached
         try:
-            connection = await asyncpg.connect(runtime.DATABASE_URL)
+            connection = await connect_scoped(runtime.DATABASE_URL)
         except Exception:
             return None
         try:

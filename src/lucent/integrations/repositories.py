@@ -14,6 +14,7 @@ from uuid import UUID
 
 import asyncpg
 
+from lucent.db.pool import scoped_acquire
 from lucent.integrations.models import (
     IntegrationStatus,
     UserLinkStatus,
@@ -62,7 +63,7 @@ class IntegrationRepo:
         allowed_channels: list[str] | None = None,
     ) -> dict[str, Any]:
         """Insert a new integration (status defaults to ``active``)."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO integrations
@@ -91,7 +92,7 @@ class IntegrationRepo:
         self, integration_id: str, organization_id: str,
     ) -> dict[str, Any] | None:
         """Get a single integration by ID (org-scoped)."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM integrations WHERE id = $1 AND organization_id = $2",
                 UUID(integration_id),
@@ -127,7 +128,7 @@ class IntegrationRepo:
             """
             params = [UUID(organization_id), type]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(query, *params)
         return self._row_to_dict(row) if row else None
 
@@ -151,7 +152,7 @@ class IntegrationRepo:
         params.append(limit)
         where = " AND ".join(conditions)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 f"SELECT * FROM integrations WHERE {where}"
                 f" ORDER BY created_at DESC LIMIT ${idx}",
@@ -191,7 +192,7 @@ class IntegrationRepo:
             idx += 1
             sets.append("config_version = config_version + 1")
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 f"UPDATE integrations SET {', '.join(sets)}"
                 f" WHERE id = $1 AND organization_id = $2 RETURNING *",
@@ -296,7 +297,7 @@ class IntegrationRepo:
 
         from_clause = ", ".join(f"'{s}'" for s in valid_from)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 f"UPDATE integrations SET {', '.join(placeholders)}"
                 f" WHERE id = $1 AND organization_id = $2"
@@ -335,7 +336,7 @@ class IntegrationRepo:
         ``integrations_health_status_check`` constraint added in
         migration 069: ``unknown``, ``healthy``, ``degraded``, ``failed``.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE integrations
@@ -381,7 +382,9 @@ class UserLinkRepo:
         external_workspace_id: str | None = None,
     ) -> dict[str, Any]:
         """Insert a new user link (status defaults to ``pending``)."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO user_links
@@ -410,7 +413,7 @@ class UserLinkRepo:
         self, link_id: str, organization_id: str,
     ) -> dict[str, Any] | None:
         """Get a single user link by ID (org-scoped)."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM user_links WHERE id = $1 AND organization_id = $2",
                 UUID(link_id),
@@ -438,7 +441,7 @@ class UserLinkRepo:
         params.append(limit)
         where = " AND ".join(conditions)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 f"SELECT * FROM user_links WHERE {where}"
                 f" ORDER BY created_at DESC LIMIT ${idx}",
@@ -460,7 +463,9 @@ class UserLinkRepo:
             idx += 1
 
         where = " AND ".join(conditions)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
             rows = await conn.fetch(
                 f"SELECT * FROM user_links WHERE {where} ORDER BY created_at DESC",
                 *params,
@@ -481,7 +486,7 @@ class UserLinkRepo:
             idx += 1
 
         where = " AND ".join(conditions)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 f"SELECT * FROM user_links WHERE {where} ORDER BY created_at DESC",
                 *params,
@@ -493,10 +498,16 @@ class UserLinkRepo:
         provider: str,
         external_user_id: str,
         external_workspace_id: str | None = None,
+        organization_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Find the active link for an external identity tuple.
 
         Uses the partial unique index ``idx_user_links_active_identity``.
+
+        organization_id is the tenant GUC binding for the RLS-bound
+        user_links table (shape a). Callers in the webhook pipeline pass the
+        integration's org; None keeps the pre-RLS lookup shape, which under
+        RLS returns zero rows (fail-closed) rather than cross-tenant data.
         """
         if external_workspace_id is not None:
             query = """
@@ -517,7 +528,7 @@ class UserLinkRepo:
             """
             params = [provider, external_user_id]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(query, *params)
         return dict(row) if row else None
 
@@ -594,7 +605,7 @@ class UserLinkRepo:
 
         Returns the number of rows affected.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             result = await conn.execute(
                 """
                 UPDATE user_links
@@ -648,7 +659,7 @@ class UserLinkRepo:
 
         from_clause = ", ".join(f"'{s}'" for s in valid_from)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 f"UPDATE user_links SET {', '.join(placeholders)}"
                 f" WHERE id = $1 AND organization_id = $2"
@@ -692,7 +703,7 @@ class PairingChallengeRepo:
         max_attempts: int = 5,
     ) -> dict[str, Any]:
         """Insert a new pairing challenge."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO pairing_challenges
@@ -714,9 +725,15 @@ class PairingChallengeRepo:
 
     # -- Read -----------------------------------------------------------------
 
-    async def get_by_id(self, challenge_id: str) -> dict[str, Any] | None:
-        """Get a single pairing challenge by ID."""
-        async with self.pool.acquire() as conn:
+    async def get_by_id(
+        self, challenge_id: str, user_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Get a single pairing challenge by ID.
+
+        user_id binds the RLS tenant GUC (pairing_challenges policy is
+        user_id-keyed). Without it the read is fail-closed empty under RLS.
+        """
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM pairing_challenges WHERE id = $1",
                 UUID(challenge_id),
@@ -727,7 +744,7 @@ class PairingChallengeRepo:
         self, user_id: str, integration_id: str,
     ) -> list[dict[str, Any]]:
         """Get all pending, non-expired challenges for a user+integration."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM pairing_challenges
@@ -746,7 +763,7 @@ class PairingChallengeRepo:
         self, user_id: str, since: datetime,
     ) -> int:
         """Count challenges created since a given time (for rate limiting)."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """
                 SELECT COUNT(*) AS cnt FROM pairing_challenges
@@ -759,12 +776,17 @@ class PairingChallengeRepo:
 
     # -- Lifecycle operations -------------------------------------------------
 
-    async def increment_attempts(self, challenge_id: str) -> dict[str, Any] | None:
+    async def increment_attempts(
+        self, challenge_id: str, user_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Bump ``attempt_count``; transition to ``exhausted`` if limit hit.
 
         Returns the updated row, or None if the challenge is not pending.
+
+        user_id binds the RLS tenant GUC; without it the UPDATE is
+        fail-closed denied under RLS (0 rows).
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE pairing_challenges
@@ -781,13 +803,20 @@ class PairingChallengeRepo:
         return dict(row) if row else None
 
     async def redeem(
-        self, challenge_id: str, *, claimed_by_external_id: str,
+        self,
+        challenge_id: str,
+        *,
+        claimed_by_external_id: str,
+        user_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Transition ``pending → used`` and record the claiming external user.
 
         Only succeeds if the challenge is still pending and not expired.
+
+        user_id binds the RLS tenant GUC; without it the UPDATE is
+        fail-closed denied under RLS (0 rows).
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE pairing_challenges
@@ -814,7 +843,25 @@ class PairingChallengeRepo:
 
         Returns the number of rows affected.
         """
+        # rls: pairing_challenges is RLS-bound (user_id-keyed policy). This
+        # maintenance sweep targets every pending expired challenge across
+        # tenants by design, so it binds the permissive 'system' session
+        # branch (the enumerated system-infra class) and scrubs on release;
+        # without the branch the update is fail-closed (0 rows).
+        from lucent.db.pool import runner_guc_preamble, tenant_guc_scrub
+
         async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                result = await conn.execute(
+                    """
+                    UPDATE pairing_challenges
+                    SET status = 'expired'
+                    WHERE status = 'pending' AND expires_at <= NOW()
+                    """
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
             result = await conn.execute(
                 """
                 UPDATE pairing_challenges

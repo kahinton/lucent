@@ -19,6 +19,7 @@ from math import ceil, exp
 from typing import Any
 from uuid import UUID
 
+from lucent.db.pool import scoped_acquire
 from lucent.db import AccessRepository, MemoryRepository
 
 # Relation statuses considered "active" work where linked memories should be protected.
@@ -483,7 +484,10 @@ async def run_memory_decay_maintenance_cycle(
     )
     raw_memories = result["memories"]
     memory_ids = [m["id"] for m in raw_memories]
-    full_memories = await _fetch_full_memories(memory_repo, memory_ids)
+    full_memories = await _fetch_full_memories(
+        memory_repo, memory_ids,
+        requesting_user_id=requesting_user_id, requesting_org_id=requesting_org_id,
+    )
 
     # Match design: frequency is based on accesses in the last 90 days and
     # normalized by a run-level p75 baseline.
@@ -492,6 +496,8 @@ async def run_memory_decay_maintenance_cycle(
         memory_ids=memory_ids,
         days=90,
         now=_utc(now),
+        requesting_user_id=requesting_user_id,
+        requesting_org_id=requesting_org_id,
     )
     frequency_baseline = _compute_p75_baseline(
         counts=[recent_access_counts.get(memory_id, 0) for memory_id in memory_ids],
@@ -546,6 +552,8 @@ async def _get_recent_access_counts(
     *,
     days: int,
     now: datetime,
+    requesting_user_id: UUID | None = None,
+    requesting_org_id: UUID | None = None,
 ) -> dict[UUID, int]:
     """Get access counts for specific memories over the last N days."""
     if not memory_ids:
@@ -562,7 +570,9 @@ async def _get_recent_access_counts(
         GROUP BY memory_id
     """
 
-    async with access_repo.pool.acquire() as conn:
+    async with scoped_acquire(
+        organization_id=requesting_org_id, user_id=requesting_user_id
+    ) as conn:
         rows = await conn.fetch(query, *[str(mid) for mid in memory_ids], cutoff)
 
     counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}
@@ -588,6 +598,9 @@ def _compute_p75_baseline(*, counts: list[int], default: int) -> int:
 async def _get_active_goal_linked_map(
     memory_repo: MemoryRepository,
     memory_ids: list[UUID],
+    *,
+    requesting_user_id: UUID | None = None,
+    requesting_org_id: UUID | None = None,
 ) -> dict[UUID, bool]:
     """Return whether each memory is linked to active request work on a goal relation."""
     if not memory_ids:
@@ -603,7 +616,9 @@ async def _get_active_goal_linked_map(
           AND r.status = ANY(${"%d" % (len(memory_ids) + 1)})
     """
     # Uses repository pool, keeping all DB access behind repository objects.
-    async with memory_repo.pool.acquire() as conn:
+    async with scoped_acquire(
+        organization_id=requesting_org_id, user_id=requesting_user_id
+    ) as conn:
         rows = await conn.fetch(query, *memory_ids, list(_ACTIVE_REQUEST_STATUSES))
 
     linked: dict[UUID, bool] = {memory_id: False for memory_id in memory_ids}
@@ -615,6 +630,9 @@ async def _get_active_goal_linked_map(
 async def _fetch_full_memories(
     memory_repo: MemoryRepository,
     memory_ids: list[UUID],
+    *,
+    requesting_user_id: UUID | None = None,
+    requesting_org_id: UUID | None = None,
 ) -> dict[UUID, dict[str, Any]]:
     """Fetch full memory records for IDs already ACL-filtered by caller."""
     if not memory_ids:
@@ -627,7 +645,9 @@ async def _fetch_full_memories(
         WHERE id IN ({placeholders})
           AND deleted_at IS NULL
     """
-    async with memory_repo.pool.acquire() as conn:
+    async with scoped_acquire(
+        organization_id=requesting_org_id, user_id=requesting_user_id
+    ) as conn:
         rows = await conn.fetch(query, *memory_ids)
     return {
         row["id"]: memory_repo._row_to_dict(row)  # noqa: SLF001 - intentional repository reuse

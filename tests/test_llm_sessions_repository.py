@@ -4,6 +4,8 @@ import pytest
 import pytest_asyncio
 
 from lucent.db.llm_sessions import LLMSessionRepository
+from lucent.db.memory import MemoryRepository
+from lucent.db.memory import MemoryRepository
 from lucent.db.requests import RequestRepository
 
 
@@ -57,18 +59,21 @@ async def test_llm_session_messages_events_and_request_origin(db_pool, test_user
     user_message = await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="user",
         content="Please persist this chat.",
     )
     assistant_message = await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="assistant",
         content="Persisted.",
     )
     event = await session_repo.add_event(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         message_id=user_message["id"],
         event_type="tool_call",
         tool_name="create_request",
@@ -85,6 +90,7 @@ async def test_llm_session_messages_events_and_request_origin(db_pool, test_user
         session["id"],
         req["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         message_id=user_message["id"],
         event_id=event["id"],
     )
@@ -106,6 +112,16 @@ async def test_llm_session_messages_events_and_request_origin(db_pool, test_user
     assert detail["messages"][1]["id"] == assistant_message["id"]
     assert detail["events"][0]["tool_name"] == "create_request"
     assert detail["requests"][0]["request_title"] == "Persist chats"
+
+    # A privileged detail loader may omit the owning user, but must still
+    # carry its privileged role into scoped RLS context.
+    privileged_detail = await session_repo.get_session_detail(
+        session["id"],
+        test_user["organization_id"],
+        user_id=None,
+        requester_role="owner",
+    )
+    assert [m["role"] for m in privileged_detail["messages"]] == ["user", "assistant"]
 
     # clean_test_data predates request tracking, so clean request/session rows
     # explicitly to keep teardown focused on the assertions above.
@@ -137,6 +153,7 @@ async def test_llm_session_events_append_across_turns(db_pool, test_user):
         await session_repo.add_event(
             session["id"],
             org_id=test_user["organization_id"],
+            user_id=test_user["id"],
             turn_id=turn_id,
             event_type="tool_call",
             tool_name=tool_name,
@@ -144,6 +161,7 @@ async def test_llm_session_events_append_across_turns(db_pool, test_user):
         await session_repo.add_event(
             session["id"],
             org_id=test_user["organization_id"],
+            user_id=test_user["id"],
             turn_id=turn_id,
             event_type="tool_result",
             tool_name=tool_name,
@@ -180,12 +198,14 @@ async def test_session_experience_capture_skips_trivial_chat(db_pool, test_user)
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="user",
         content="Can you crack a joke?",
     )
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="assistant",
         content="Why did the database cross the road? To join the other table.",
     )
@@ -225,18 +245,21 @@ async def test_session_experience_capture_creates_and_links_request_memory(
     user_message = await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="user",
         content="Please implement output artifacts for requests and tasks.",
     )
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="assistant",
         content="Implemented task_outputs, API endpoints, MCP tooling, and UI cards.",
     )
     event = await session_repo.add_event(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         message_id=user_message["id"],
         event_type="tool_call",
         tool_name="create_request",
@@ -252,6 +275,7 @@ async def test_session_experience_capture_creates_and_links_request_memory(
         session["id"],
         req["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         message_id=user_message["id"],
         event_id=event["id"],
     )
@@ -265,7 +289,11 @@ async def test_session_experience_capture_creates_and_links_request_memory(
     assert result["status"] == "created"
     memory_id = result["memory_id"]
     async with db_pool.acquire() as conn:
-        memory = await conn.fetchrow("SELECT * FROM memories WHERE id = $1", memory_id)
+        memory = await MemoryRepository(db_pool).get(
+            memory_id,
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
         link_count = await conn.fetchval(
             """SELECT COUNT(*) FROM request_memories
                WHERE request_id = $1 AND memory_id = $2 AND relation = 'context'""",
@@ -293,18 +321,21 @@ async def test_session_experience_capture_updates_existing_memory(db_pool, test_
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="user",
         content="Let's design a session experience capture system with criteria.",
     )
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="assistant",
         content="We can score linked requests, mutating tools, and transcript size.",
     )
     await session_repo.add_event(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         event_type="tool_call",
         tool_name="update_memory",
         tool_input={"memory_id": "example"},
@@ -316,12 +347,14 @@ async def test_session_experience_capture_updates_existing_memory(db_pool, test_
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="user",
         content="Add tests so the capture updates instead of duplicating.",
     )
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="assistant",
         content="Added update-path tests for the auto-captured experience memory.",
     )
@@ -332,16 +365,14 @@ async def test_session_experience_capture_updates_existing_memory(db_pool, test_
     assert first["status"] == "created"
     assert second["status"] == "updated"
     assert second["memory_id"] == first["memory_id"]
-    async with db_pool.acquire() as conn:
-        count = await conn.fetchval(
-            """SELECT COUNT(*) FROM memories
-               WHERE organization_id = $1
-                 AND type = 'experience'
-                 AND metadata->>'session_id' = $2""",
-            test_user["organization_id"],
-            str(session["id"]),
-        )
-    assert count == 1
+    memory = await MemoryRepository(db_pool).get(
+        second["memory_id"],
+        organization_id=test_user["organization_id"],
+        user_id=test_user["id"],
+    )
+    assert memory is not None
+    assert memory["type"] == "experience"
+    assert memory["metadata"]["session_id"] == str(session["id"])
 
 
 @pytest.mark.asyncio
@@ -357,18 +388,21 @@ async def test_session_experience_capture_uses_model_content_override(db_pool, t
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="user",
         content="Let's implement model-written session summaries.",
     )
     await session_repo.add_message(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         role="assistant",
         content="I added a configurable summary model call and fallback path.",
     )
     await session_repo.add_event(
         session["id"],
         org_id=test_user["organization_id"],
+        user_id=test_user["id"],
         event_type="tool_call",
         tool_name="update_memory",
         tool_input={"memory_id": "example"},
@@ -395,9 +429,10 @@ async def test_session_experience_capture_uses_model_content_override(db_pool, t
 
     assert result["status"] == "created"
     async with db_pool.acquire() as conn:
-        memory = await conn.fetchrow(
-            "SELECT content, metadata FROM memories WHERE id = $1",
+        memory = await MemoryRepository(db_pool).get(
             result["memory_id"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
         )
     assert memory["content"] == summary
     assert memory["metadata"]["summary_mode"] == "model"

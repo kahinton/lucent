@@ -140,8 +140,11 @@ async def _find_review_agent_type(daemon, org_id: str, requesting_user_id: str) 
 async def _resolve_review_requesting_user_id(daemon, *, org_id: str, requester_user_id: str) -> str:
     """Route daemon-owned review work to a human owner/admin for Handoffs."""
     import asyncpg
+
+    from daemon.db_scope import connect_scoped
+
     try:
-        conn = await asyncpg.connect(runtime.DATABASE_URL)
+        conn = await connect_scoped(runtime.DATABASE_URL, organization_id=org_id, user_id=requester_user_id)
     except Exception as e:
         runtime.log(f'Review requester resolution DB connect failed: {e}', 'WARN')
         return requester_user_id

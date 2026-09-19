@@ -14,6 +14,7 @@ from uuid import UUID
 import asyncpg
 from cryptography.fernet import Fernet, InvalidToken
 
+from lucent.db.pool import scoped_acquire_on
 from lucent.secrets.base import SecretProvider, SecretScope
 
 
@@ -85,7 +86,9 @@ class BuiltinSecretProvider(SecretProvider):
         where, params = self._scope_filter(scope)
         query = f"SELECT encrypted_value FROM secrets WHERE key = ${len(params) + 1} AND {where}"
         params.append(key)
-        async with self._pool.acquire() as conn:
+        # Context binds from the SecretScope's org: correct under RLS both
+        # at boot (no request/task scope exists yet) and at runtime.
+        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
             row = await conn.fetchrow(query, *params)
         if row is None:
             return None
@@ -98,7 +101,7 @@ class BuiltinSecretProvider(SecretProvider):
         org_id = UUID(scope.organization_id)
 
         # Upsert: try update first, then insert
-        async with self._pool.acquire() as conn:
+        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
             async with conn.transaction():
                 where, params = self._scope_filter(scope)
                 update_q = (
@@ -125,14 +128,14 @@ class BuiltinSecretProvider(SecretProvider):
         where, params = self._scope_filter(scope)
         query = f"DELETE FROM secrets WHERE key = ${len(params) + 1} AND {where}"
         params.append(key)
-        async with self._pool.acquire() as conn:
+        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
             result = await conn.execute(query, *params)
         return result != "DELETE 0"
 
     async def list_keys(self, scope: SecretScope) -> list[str]:
         where, params = self._scope_filter(scope)
         query = f"SELECT key FROM secrets WHERE {where} ORDER BY key"
-        async with self._pool.acquire() as conn:
+        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
             rows = await conn.fetch(query, *params)
         return [r["key"] for r in rows]
 
@@ -141,6 +144,6 @@ class BuiltinSecretProvider(SecretProvider):
         where, params = self._scope_filter(scope)
         query = f"SELECT id FROM secrets WHERE key = ${len(params) + 1} AND {where}"
         params.append(key)
-        async with self._pool.acquire() as conn:
+        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
             row = await conn.fetchrow(query, *params)
         return str(row["id"]) if row else None

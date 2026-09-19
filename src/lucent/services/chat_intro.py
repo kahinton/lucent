@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from lucent.db.pool import scoped_acquire
 from lucent.logging import get_logger
 
 logger = get_logger("chat.intro")
@@ -179,7 +180,7 @@ async def gather_work_context(user) -> dict[str, Any]:
     from lucent.db.memory import MemoryRepository
 
     memory_access = MemoryRepository.user_memory_access_condition("$2", "$1")
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
         goal_rows = await conn.fetch(
             _goal_rollup_sql(memory_access),
             UUID(user_id),

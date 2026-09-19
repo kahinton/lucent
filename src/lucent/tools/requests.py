@@ -9,6 +9,7 @@ from uuid import UUID
 import httpx
 from mcp.server import MCPServer as FastMCP
 
+from lucent.db.pool import scoped_acquire
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import get_llm_context
 from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
@@ -192,7 +193,7 @@ async def _handoff_lineage_references(
     request: dict[str, Any] | None = None
     workflow: dict[str, Any] | None = None
 
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=org_id) as conn:
         if task_id:
             task_row = await conn.fetchrow(
                 """SELECT id::text, request_id::text, title, agent_type, model, reasoning_effort
@@ -431,7 +432,7 @@ async def _create_handoff_interaction_response(
     )
 
 
-async def _memory_access_service(*, is_admin: bool = False):
+async def _memory_access_service(*, is_admin: bool = False, organization_id: str | None = None):
     from lucent.db import MemoryRepository
     from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
     from lucent.services.memory_access_service import MemoryAccessService
@@ -440,6 +441,7 @@ async def _memory_access_service(*, is_admin: bool = False):
     return MemoryAccessService(
         MemoryRepository(pool),
         GitHubRepoAccessService(pool),
+        organization_id=organization_id,
         is_admin=is_admin,
     )
 
@@ -456,7 +458,7 @@ async def _get_accessible_memory(
         memory_uuid = UUID(str(memory_id))
     except ValueError:
         return None
-    access = await _memory_access_service(is_admin=is_admin)
+    access = await _memory_access_service(is_admin=is_admin, organization_id=org_id)
     memory = await access.get_accessible(
         memory_uuid,
         user_id,
@@ -1177,7 +1179,7 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
             bounded_timeout = 300
 
         pool = await _get_pool()
-        async with pool.acquire() as conn:
+        async with scoped_acquire(organization_id=str(org_id)) as conn:
             if task_id:
                 task_row = await conn.fetchrow(
                     """SELECT id::text
@@ -1927,7 +1929,8 @@ Returns: JSON with request details, task breakdown, events timeline, memory link
             return json.dumps({"error": "Request not found"})
 
         memory_access = await _memory_access_service(
-            is_admin=user_role in ("admin", "owner") and memory_scope is None
+            is_admin=user_role in ("admin", "owner") and memory_scope is None,
+            organization_id=str(org_id) if org_id else None,
         )
         req = await memory_access.filter_request_detail_memory_links(
             req,

@@ -157,7 +157,7 @@ class ManagedToolExecutor:
             raise ManagedToolBlockedError("Caller role is not allowed to use this managed tool")
 
         if agent_id and enforce_agent_grant:
-            granted = await self.repo.is_managed_tool_granted_to_agent(agent_id, str(tool["id"]))
+            granted = await self.repo.is_managed_tool_granted_to_agent(agent_id, str(tool["id"]), org_id)
             if not granted:
                 raise ManagedToolBlockedError("Managed tool is not granted to this agent")
 
@@ -207,6 +207,7 @@ class ManagedToolExecutor:
                     error=error,
                     sandbox_id=sandbox_id,
                     duration_ms=duration_ms,
+                    org_id=org_id,
                 )
                 return ManagedToolExecutionResult(
                     ok=False,
@@ -227,6 +228,7 @@ class ManagedToolExecutor:
                 output_payload=output,
                 sandbox_id=sandbox_id,
                 duration_ms=duration_ms,
+                org_id=org_id,
             )
             return ManagedToolExecutionResult(
                 ok=True,
@@ -245,6 +247,7 @@ class ManagedToolExecutor:
                 error="Execution blocked by policy",
                 sandbox_id=sandbox_id,
                 duration_ms=duration_ms,
+                org_id=org_id,
             )
             raise
         except Exception as exc:
@@ -255,6 +258,7 @@ class ManagedToolExecutor:
                 error=str(exc),
                 sandbox_id=sandbox_id,
                 duration_ms=duration_ms,
+                org_id=org_id,
             )
             raise
         finally:

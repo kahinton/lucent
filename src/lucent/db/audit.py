@@ -10,6 +10,7 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 # Integration event type constants (Section 9 of integration design).
 # Security events get dedicated action_types for direct queryability.
@@ -136,7 +137,7 @@ class AuditRepository:
                       version, snapshot
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 query,
                 str(memory_id),
@@ -159,6 +160,8 @@ class AuditRepository:
         memory_id: UUID,
         limit: int = 50,
         offset: int = 0,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Get all audit entries for a specific memory.
 
@@ -185,7 +188,7 @@ class AuditRepository:
             WHERE memory_id = $1
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             count_row = await conn.fetchrow(count_query, str(memory_id))
             total_count = count_row["total"] if count_row else 0
 
@@ -223,7 +226,8 @@ class AuditRepository:
             Dict with entries list and pagination info.
         """
         return await self._get_filtered_entries(
-            "user_id", user_id, action_type, since, limit, offset
+            "user_id", user_id, action_type, since, limit, offset,
+            organization_id=None, user_id=user_id,
         )
 
     async def get_by_organization_id(
@@ -247,7 +251,8 @@ class AuditRepository:
             Dict with entries list and pagination info.
         """
         return await self._get_filtered_entries(
-            "organization_id", organization_id, action_type, since, limit, offset
+            "organization_id", organization_id, action_type, since, limit, offset,
+            organization_id=organization_id, user_id=None,
         )
 
     async def _get_filtered_entries(
@@ -258,6 +263,8 @@ class AuditRepository:
         since: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Get paginated audit entries filtered by a primary column.
 
@@ -310,7 +317,7 @@ class AuditRepository:
 
         params.extend([limit, offset])
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             count_row = await conn.fetchrow(count_query, *params[:-2])
             total_count = count_row["total"] if count_row else 0
 
@@ -330,6 +337,7 @@ class AuditRepository:
         action_types: list[str] | None = None,
         since: datetime | None = None,
         limit: int = 100,
+        user_id: UUID | None = None,
     ) -> list[dict[str, Any]]:
         """Get recent audit entries, optionally filtered.
 
@@ -379,7 +387,7 @@ class AuditRepository:
 
         params.append(limit)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_dict(row) for row in rows]
@@ -389,6 +397,8 @@ class AuditRepository:
         memory_id: UUID,
         limit: int = 50,
         offset: int = 0,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Get version history for a specific memory.
 
@@ -419,7 +429,7 @@ class AuditRepository:
             WHERE memory_id = $1 AND version IS NOT NULL
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             count_row = await conn.fetchrow(count_query, str(memory_id))
             total_count = count_row["total"] if count_row else 0
 
@@ -437,6 +447,8 @@ class AuditRepository:
         self,
         memory_id: UUID,
         version: int,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> dict[str, Any] | None:
         """Get the snapshot for a specific version of a memory.
 
@@ -456,7 +468,7 @@ class AuditRepository:
             LIMIT 1
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(query, str(memory_id), version)
 
         if row is None:

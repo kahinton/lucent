@@ -42,6 +42,7 @@ import httpx
 
 from lucent.mcp_config import build_internal_mcp_server, build_scoped_internal_mcp_server
 from lucent.prompts.memory_usage import render_active_user_context
+from daemon.db_scope import connect_scoped
 from daemon.observability.tools import (
     _BASE_TASK_MEMORY_SERVER_TOOLS,
     _CAPABILITY_ACTIVATION_AGENT_TYPES,
@@ -1626,7 +1627,7 @@ async def _load_request_owner_context(user_id: str, org_id: str) -> str:
     try:
         import asyncpg
 
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await connect_scoped(DATABASE_URL, organization_id=org_id, user_id=user_id)
         try:
             user_row = await conn.fetchrow(
                 """
@@ -1809,20 +1810,43 @@ class LucentDaemon(
             # init, which would silently strand runtime settings, the model registry,
             # and role parsing on hardcoded defaults.
             _pool = await _init_db(database_url=DATABASE_URL, run_migrations=False)
-            try:
-                from lucent.settings import load_runtime_settings_from_db
+            # Boot tenant context: post-cutover the pool connects as the
+            # RLS-bound lucent_daemon role, and the startup reads below run
+            # before any org context exists. Bind the daemon session role
+            # (the org-wide branch every migration-116 policy carries) and
+            # clear it before the daemon's polling/loop paths start so no
+            # background task inherits boot context through ContextVar copy.
+            # The boot reads target exempt tables (runtime_settings, models);
+            # the org GUC is bound only when the operator binding is already
+            # a UUID — a name would make policy ::uuid casts error instead
+            # of failing closed, and boot reads need no org GUC at all.
+            from lucent.db.pool import clear_tenant_scope, set_tenant_scope
+            from uuid import UUID as _UUID
 
-                await load_runtime_settings_from_db(_pool)
-                _refresh_config_from_runtime_settings()
-                self.roles = self._parse_roles(DAEMON_ROLES_STR)
-            except Exception as settings_exc:
-                log(f"Failed to load runtime settings from DB: {settings_exc}", "WARN")
+            _boot_org = DAEMON_ORG or None
+            if _boot_org:
+                try:
+                    _UUID(_boot_org)
+                except ValueError:
+                    _boot_org = None
+            set_tenant_scope(organization_id=_boot_org, role="daemon")
             try:
-                from lucent.model_registry import load_models_from_db
+                try:
+                    from lucent.settings import load_runtime_settings_from_db
 
-                await load_models_from_db(_pool)
-            except Exception as model_exc:
-                log(f"Failed to load model registry from DB: {model_exc}", "WARN")
+                    await load_runtime_settings_from_db(_pool)
+                    _refresh_config_from_runtime_settings()
+                    self.roles = self._parse_roles(DAEMON_ROLES_STR)
+                except Exception as settings_exc:
+                    log(f"Failed to load runtime settings from DB: {settings_exc}", "WARN")
+                try:
+                    from lucent.model_registry import load_models_from_db
+
+                    await load_models_from_db(_pool)
+                except Exception as model_exc:
+                    log(f"Failed to load model registry from DB: {model_exc}", "WARN")
+            finally:
+                clear_tenant_scope()
             log("Lucent DB pool initialized")
         except Exception as e:
             log(f"Failed to initialize Lucent DB pool: {e}", "WARN")
@@ -1935,6 +1959,13 @@ class LucentDaemon(
             conn = await asyncpg.connect(DATABASE_URL)
             try:
                 bound = await _resolve_daemon_org(conn)
+                if bound:
+                    await conn.execute(
+                        "SELECT set_config('app.user_id', '', false), "
+                        "set_config('app.org_id', $1, false), "
+                        "set_config('app.role', 'daemon', false);",
+                        bound[0],
+                    )
                 if not bound:
                     log(
                         "Cannot seed system schedules — no organization to bind to "
@@ -2168,7 +2199,7 @@ class LucentDaemon(
         import asyncpg
 
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
         except Exception as e:
             log(f"Cognitive fan-out DB connect failed: {e}", "WARN")
             return []
@@ -2221,7 +2252,7 @@ class LucentDaemon(
         import asyncpg
 
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
         except Exception as e:
             log(f"{schedule_title} fan-out DB connect failed: {e}", "WARN")
             return []
@@ -2472,7 +2503,7 @@ class LucentDaemon(
         import asyncpg
 
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = await connect_scoped(DATABASE_URL, organization_id=org_id, user_id=user_id)
         except Exception:
             return 0
 
@@ -2588,7 +2619,7 @@ class LucentDaemon(
             return "skipped", req
 
         try:
-            async with pool.acquire() as conn:
+            async with pool.acquire() as conn:  # rls: plumbing-only pg_notify (no row reads)
                 await conn.execute("SELECT pg_notify('request_ready', $1)", str(req["id"]))
         except Exception as notify_err:
             log(
@@ -2619,7 +2650,7 @@ class LucentDaemon(
         import asyncpg
 
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = await connect_scoped(DATABASE_URL, organization_id=org_id, user_id=user_id)
         except Exception as e:
             log(f"Rejection processing DB connect failed: {e}", "WARN")
             return 0
@@ -2881,7 +2912,7 @@ class LucentDaemon(
         import asyncpg
 
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
         except Exception as e:
             log(f"Decomp backfill DB connect failed: {e}", "WARN")
             return []
@@ -3088,7 +3119,7 @@ class LucentDaemon(
             lock_conn: asyncpg.Connection | None = None
             try:
                 try:
-                    lock_conn = await asyncpg.connect(DATABASE_URL)
+                    lock_conn = await connect_scoped(DATABASE_URL)
                 except Exception as e:
                     log(f"Decomp lock connect failed for {request_id[:8]}: {e}", "WARN")
                     continue
@@ -3346,7 +3377,7 @@ class LucentDaemon(
         import asyncpg
 
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
+            conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
         except Exception:
             return 0
         try:
@@ -3425,7 +3456,7 @@ class LucentDaemon(
             return context
 
         pool = await get_pool()
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn:  # rls: daemon-identity self-heal (system-infra class)
             daemon_user = await _ensure_daemon_service_user(conn, organization_id)
         if not daemon_user or not daemon_user.get("id"):
             raise ModelAccessDeniedError(
@@ -5003,6 +5034,7 @@ class LucentDaemon(
                             request_id,
                             task_id,
                             int(task.get("sequence_order") or 0),
+                            org_id=str(task.get("organization_id") or "") or None,
                         )
                     )
                     if retain_sandbox:

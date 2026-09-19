@@ -14,10 +14,21 @@ from typing import Any
 
 from lucent.db import get_pool
 from lucent.db.memory import MemoryRepository
+from lucent.db.pool import runner_guc_preamble, tenant_guc_scrub
 from lucent.db.requests import RequestRepository
 from lucent.db.schedules import ScheduleRepository
 from lucent.logging import get_logger
 from lucent.settings import daemon_vitality_scoring_minutes
+
+
+def _system_guc_preamble() -> str:
+    """Session-local GUC preamble binding app.role='system' (system-infra)."""
+    return runner_guc_preamble()
+
+
+def _system_guc_scrub() -> str:
+    """Session-local scrub clearing tenant GUCs after a system-infra block."""
+    return tenant_guc_scrub()
 
 logger = get_logger("api.system_schedules")
 
@@ -62,36 +73,50 @@ _last_vitality_scoring_at_by_org: dict[str, datetime] = {}
 
 
 async def retire_vitality_scoring_workflow_schedules() -> int:
-    """Remove retired built-in vitality workflows from the visible workflow table."""
+    """Remove retired built-in vitality workflows from the visible workflow table.
+
+    System-infra path: runs under the RLS ``app.role='system'`` session
+    branch (the permissive branch every migration-116 policy carries), so it
+    reaches every org's system schedules without per-org context. The scope
+    is deliberately session-local with an explicit scrub on release.
+    """
     pool = await get_pool()
     if pool is None:
         return 0
 
     async with pool.acquire() as conn:
-        schedule_ids = [
-            str(row["id"])
-            for row in await conn.fetch(
-                """SELECT id FROM schedules
-                   WHERE title = $1
-                     AND is_system = true""",
-                VITALITY_SCORING_TITLE,
+        # rls: system-infra (evaluation §1.4/§4.3) — session-local
+        # app.role='system' bound below, scrubbed on release; audited
+        # system-schedules class. The preamble at the next line is the
+        # binding mechanism.
+        await conn.execute(_system_guc_preamble())
+        try:
+            schedule_ids = [
+                str(row["id"])
+                for row in await conn.fetch(
+                    """SELECT id FROM schedules
+                       WHERE title = $1
+                         AND is_system = true""",
+                    VITALITY_SCORING_TITLE,
+                )
+            ]
+            if not schedule_ids:
+                return 0
+            await conn.execute(
+                "DELETE FROM schedule_runs WHERE schedule_id = ANY($1::uuid[])",
+                schedule_ids,
             )
-        ]
-        if not schedule_ids:
-            return 0
-        await conn.execute(
-            "DELETE FROM schedule_runs WHERE schedule_id = ANY($1::uuid[])",
-            schedule_ids,
-        )
-        deleted = await conn.fetchval(
-            """WITH deleted AS (
-                   DELETE FROM schedules
-                   WHERE id = ANY($1::uuid[])
-                   RETURNING id
-               )
-               SELECT COUNT(*) FROM deleted""",
-            schedule_ids,
-        )
+            deleted = await conn.fetchval(
+                """WITH deleted AS (
+                       DELETE FROM schedules
+                       WHERE id = ANY($1::uuid[])
+                       RETURNING id
+                   )
+                   SELECT COUNT(*) FROM deleted""",
+                schedule_ids,
+            )
+        finally:
+            await conn.execute(_system_guc_scrub())
 
     count = int(deleted or 0)
     if count:
@@ -100,7 +125,12 @@ async def retire_vitality_scoring_workflow_schedules() -> int:
 
 
 async def ensure_server_system_schedules() -> int:
-    """Ensure built-in server-side schedules exist for each organization."""
+    """Ensure built-in server-side schedules exist for each organization.
+
+    System-infra path: iterates ALL organizations by design (the org list
+    itself is the workload). Each connection block binds the RLS
+    ``app.role='system'`` session branch and scrubs it on release.
+    """
     pool = await get_pool()
     if pool is None:
         return 0
@@ -108,20 +138,25 @@ async def ensure_server_system_schedules() -> int:
     await retire_vitality_scoring_workflow_schedules()
 
     async with pool.acquire() as conn:
-        repo = ScheduleRepository(pool)
-        created = 0
-        rows = await conn.fetch(
-            """
-            SELECT o.id::text AS organization_id,
-                   u.id::text AS daemon_user_id
-            FROM organizations o
-            LEFT JOIN users u
-              ON u.organization_id = o.id
-             AND (u.external_id = 'daemon-service'
-                  OR u.external_id = 'daemon-service:' || o.id::text)
-             AND u.is_active = true
-            """
-        )
+        # rls: system-infra exemption (evaluation §1.4/§4.3)
+        await conn.execute(_system_guc_preamble())
+        try:
+            repo = ScheduleRepository(pool)
+            created = 0
+            rows = await conn.fetch(
+                """
+                SELECT o.id::text AS organization_id,
+                       u.id::text AS daemon_user_id
+                FROM organizations o
+                LEFT JOIN users u
+                  ON u.organization_id = o.id
+                 AND (u.external_id = 'daemon-service'
+                      OR u.external_id = 'daemon-service:' || o.id::text)
+                 AND u.is_active = true
+                """
+            )
+        finally:
+            await conn.execute(_system_guc_scrub())
 
     schedule_specs = [
         {
@@ -145,14 +180,20 @@ async def ensure_server_system_schedules() -> int:
     for row in rows:
         for spec in schedule_specs:
             async with pool.acquire() as conn:
-                existing = await conn.fetchval(
-                    """SELECT 1 FROM schedules
-                       WHERE title = $1
-                         AND organization_id = $2::uuid
-                         AND is_system = true""",
-                    spec["title"],
-                    row["organization_id"],
-                )
+                # rls: system-infra (evaluation §1.4/§4.3) — preamble below
+                # binds app.role='system' session-local, scrubbed on release.
+                await conn.execute(_system_guc_preamble())
+                try:
+                    existing = await conn.fetchval(
+                        """SELECT 1 FROM schedules
+                           WHERE title = $1
+                             AND organization_id = $2::uuid
+                             AND is_system = true""",
+                        spec["title"],
+                        row["organization_id"],
+                    )
+                finally:
+                    await conn.execute(_system_guc_scrub())
             sched = await repo.ensure_system_schedule(
                 title=spec["title"],
                 org_id=row["organization_id"],
@@ -215,6 +256,7 @@ async def execute_stale_task_reaper_schedule(
         schedule_id,
         force=force,
         advance_schedule=advance_schedule,
+        org_id=org_id,
     )
     if not run:
         return {"schedule": sched, "already_fired": True}
@@ -234,6 +276,7 @@ async def execute_stale_task_reaper_schedule(
             await sched_repo.complete_run(
                 str(run["id"]),
                 result=json.dumps(skip_event),
+                org_id=org_id,
             )
             logger.info(json.dumps(skip_event, sort_keys=True))
             return {"schedule": sched, "run": run, "skipped": True, "event": skip_event}
@@ -245,6 +288,7 @@ async def execute_stale_task_reaper_schedule(
         await sched_repo.complete_run(
             str(run["id"]),
             result=f"released={released}",
+            org_id=org_id,
         )
         if released:
             logger.info(
@@ -254,7 +298,7 @@ async def execute_stale_task_reaper_schedule(
             )
         return {"schedule": sched, "run": run, "released": released}
     except Exception as exc:
-        await sched_repo.fail_run(str(run["id"]), error=str(exc)[:1000])
+        await sched_repo.fail_run(str(run["id"]), error=str(exc)[:1000], org_id=org_id)
         logger.exception("Server stale-task reaper failed for schedule %s", schedule_id)
         raise
 
@@ -271,7 +315,12 @@ async def run_vitality_scoring_background_once(*, force: bool = False) -> int:
     executed = 0
 
     async with pool.acquire() as conn:
-        org_ids = [str(row["id"]) for row in await conn.fetch("SELECT id FROM organizations")]
+        # rls: system-infra exemption (evaluation §1.4/§4.3) — org enumeration
+        await conn.execute(_system_guc_preamble())
+        try:
+            org_ids = [str(row["id"]) for row in await conn.fetch("SELECT id FROM organizations")]
+        finally:
+            await conn.execute(_system_guc_scrub())
 
     for org_id in org_ids:
         last_run_at = _last_vitality_scoring_at_by_org.get(org_id)
@@ -343,6 +392,8 @@ async def run_server_system_schedules_once() -> int:
 
 async def _server_system_schedule_loop() -> None:
     """Poll and execute due server-side built-in schedules."""
+    from lucent.db.pool import clear_tenant_scope, set_tenant_scope
+
     await asyncio.sleep(SYSTEM_SCHEDULE_STARTUP_DELAY_SECONDS)
     logger.info(
         "Server system schedule runner started (check=%ss, reaper interval=%ss)",
@@ -352,7 +403,15 @@ async def _server_system_schedule_loop() -> None:
 
     while True:
         try:
-            await run_server_system_schedules_once()
+            # System-infra scope for the due-schedule enumeration
+            # (get_due_schedules has no per-org context). Bound inside the
+            # loop task — this task was created from unbound context, so
+            # the scope never leaks into request/daemon task handling.
+            set_tenant_scope(role="system")
+            try:
+                await run_server_system_schedules_once()
+            finally:
+                clear_tenant_scope()
             await run_vitality_scoring_background_once()
         except asyncio.CancelledError:
             break

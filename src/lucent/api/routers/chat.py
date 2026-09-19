@@ -36,6 +36,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from lucent.db.pool import scoped_acquire
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import UserRepository, get_pool
 from lucent.logging import get_logger
@@ -733,6 +734,7 @@ async def _prepare_persistent_chat_session(
         previous_messages = await repo.list_messages(
             session_id,
             org_id,
+            user_id=user_id,
             roles={"user", "assistant"},
             limit=200,
         )
@@ -753,6 +755,7 @@ async def _prepare_persistent_chat_session(
                 role="user",
                 content=last_message,
                 org_id=org_id,
+                user_id=user_id,
                 turn_id=turn_id,
                 metadata=user_metadata,
             )
@@ -842,7 +845,7 @@ async def _mirror_handoff_user_turn(
     if not content.strip():
         return
     try:
-        async with pool.acquire() as conn:
+        async with scoped_acquire(organization_id=user["organization_id"], user_id=user["id"]) as conn:
             exists = await conn.fetchval(
                 """SELECT 1
                    FROM user_interaction_messages
@@ -1571,6 +1574,7 @@ async def chat_stream(
                 role="assistant",
                 content=result_text,
                 org_id=str(user["organization_id"]),
+                user_id=str(user["id"]),
                 turn_id=chat_session.turn_id,
                 metadata={"model": selected_model, "engine": engine.name},
             )
@@ -1578,6 +1582,7 @@ async def chat_stream(
                 await chat_session.repo.mark_provider_initialized(
                     chat_session.session_id,
                     str(user["organization_id"]),
+                    user_id=str(user["id"]),
                     provider_session_id=chat_session.provider_session_id,
                 )
             await _maybe_capture_session_experience(user=user, chat_session=chat_session)
@@ -1778,12 +1783,12 @@ async def chat_stream_v2(
             agent_name = agent.get("name", "Lucent")
             # Skills are listed (name/id/description); the agent loads full
             # instructions on demand via get_skill_definition.
-            skills = await repo.get_agent_skills(effective_agent_id)
+            skills = await repo.get_agent_skills(effective_agent_id, str(user["organization_id"]))
             agent_skill_names = [str(s["name"]) for s in skills if s.get("name")]
             skills_section = render_skills_section(skills)
             if skills_section:
                 system_prompt_parts.append(skills_section)
-            agent_managed_tools = await repo.get_agent_managed_tools(effective_agent_id)
+            agent_managed_tools = await repo.get_agent_managed_tools(effective_agent_id, str(user["organization_id"]))
             tools_section = render_managed_tools_section(agent_managed_tools)
             if tools_section:
                 system_prompt_parts.append(tools_section)
@@ -1972,6 +1977,7 @@ async def chat_stream_v2(
         row = await chat_session.repo.add_event(
             chat_session.session_id,
             org_id=str(user["organization_id"]),
+            user_id=str(user["id"]),
             turn_id=chat_session.turn_id,
             message_id=chat_session.user_message_id,
             event_type=payload.get("type", event.type.value),
@@ -2161,6 +2167,7 @@ async def chat_stream_v2(
                     role="assistant",
                     content=result,
                     org_id=str(user["organization_id"]),
+                    user_id=str(user["id"]),
                     turn_id=chat_session.turn_id,
                     metadata={"model": selected_model, "engine": engine.name},
                 )
@@ -2168,6 +2175,7 @@ async def chat_stream_v2(
                     await chat_session.repo.mark_provider_initialized(
                         chat_session.session_id,
                         str(user["organization_id"]),
+                        user_id=str(user["id"]),
                         provider_session_id=chat_session.provider_session_id,
                     )
             # If we got no deltas from streaming, send the full result

@@ -102,7 +102,7 @@ async def _get_access_managed_memory(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Scoped credentials cannot manage memory access",
         )
-    memory = await repo.get(memory_id)
+    memory = await repo.get(memory_id, organization_id=user.organization_id, user_id=user.id)
     if memory is None or memory.get("organization_id") != user.organization_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
     if memory.get("user_id") != _effective_memory_user_id(user) and not _memory_admin_override(user):
@@ -353,7 +353,7 @@ async def get_memory(
     if result is None:
         # Check if admin can see it
         if user.has_permission(Permission.MEMORY_READ_ALL) and not user.is_memory_scoped:
-            result = await repo.get(memory_id)
+            result = await repo.get(memory_id, organization_id=user.organization_id, user_id=user.id)
             if result and result.get("organization_id") == user.organization_id:
                 result = await memory_access.filter_memory(result, _effective_memory_user_id(user))
             else:
@@ -597,6 +597,7 @@ async def update_goal_milestone(
             milestone_index,
             data.status.value,
             data.expected_version,
+            org_id=str(user.organization_id),
         )
     except VersionConflictError as exc:
         raise HTTPException(
@@ -693,7 +694,7 @@ async def delete_memory(
             detail="You can only delete your own memories",
         )
 
-    success = await repo.delete(memory_id)
+    success = await repo.delete(memory_id, organization_id=user.organization_id, user_id=user.id)
 
     if not success:
         raise HTTPException(

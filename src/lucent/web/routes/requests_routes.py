@@ -6,6 +6,7 @@ from math import ceil
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from lucent.db.pool import scoped_acquire
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.rbac import Role
@@ -20,7 +21,7 @@ ALLOWED_PER_PAGE = {10, 25, 50, 100}
 def request_visibility_context(user) -> tuple[str, bool]:
     """Return requester identity and whether daemon system work is visible."""
     role = user.role if isinstance(user.role, Role) else Role.from_string(str(user.role))
-    return str(user.id), role in (Role.ADMIN, Role.OWNER)
+    return str(user.id), role in (Role.ADMIN, Role.OWNER, Role.DAEMON)
 
 
 def can_review_request(user, req: dict) -> bool:
@@ -83,7 +84,7 @@ async def _get_mutable_task_request(repo, task_id: str, user) -> tuple[dict, dic
 async def _notify_request_ready(pool, *, request_id: str, action: str) -> None:
     """Best-effort wake notification for daemon request/review state changes."""
     try:
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn:  # rls: pg_notify plumbing — no row access
             await conn.execute(
                 "SELECT pg_notify('request_ready', $1)",
                 f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
@@ -117,8 +118,7 @@ async def _record_rejection_lesson(pool, *, user, req: dict, request_id: str, co
             "source": req.get("source", "unknown"),
         },
         user_id=user.id,
-        organization_id=user.organization_id,
-    )
+       )
 
 
 def _needs_prework_approval(req: dict) -> bool:
@@ -285,6 +285,7 @@ async def request_detail(request: Request, request_id: str):
     """Full request detail with task tree, events, memory links, and reviews."""
     user = await get_user_context(request)
     pool = await get_pool()
+    org_id = str(user.organization_id)
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
@@ -309,12 +310,13 @@ async def request_detail(request: Request, request_id: str):
     memory_access = MemoryAccessService(
         MemoryRepository(pool),
         GitHubRepoAccessService(pool),
+        organization_id=org_id,
         is_admin=role_value in ("admin", "owner"),
     )
     req = await memory_access.filter_request_detail_memory_links(
         req,
         user_id=user.id,
-        organization_id=user.organization_id,
+        organization_id=org_id,
     )
 
     # Resolve linked goal + milestone for the request banner. Best-effort:
@@ -379,7 +381,7 @@ async def request_detail(request: Request, request_id: str):
         if origin_session_id:
             session_relations[str(origin_session_id)] = "origin"
 
-        async with pool.acquire() as conn:
+        async with scoped_acquire(organization_id=str(user.organization_id), user_id=str(user.id)) as conn:
             linked_rows = await conn.fetch(
                 """SELECT session_id, relation
                    FROM llm_session_requests
@@ -395,6 +397,8 @@ async def request_detail(request: Request, request_id: str):
             loaded_session = await session_repo.get_session_detail(
                 session_id,
                 str(user.organization_id),
+                user_id=None if role_value in ("admin", "owner") else str(user.id),
+                requester_role=role_value,
                 include_events=True,
             )
             if not loaded_session:

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import get_pool
+from lucent.db.pool import scoped_acquire
 from lucent.db.user_interactions import UserInteractionRepository
 
 from ._shared import (
@@ -146,7 +147,10 @@ async def _get_or_create_interaction_chat_session(pool, user, interaction: dict)
         "source": interaction.get("source"),
         "agent_name": agent_name,
     }
-    async with pool.acquire() as conn:
+    # rls: llm_sessions is RLS-bound (shape a). The interaction's org and
+    # user are threaded in so the embedded-chat session lookup is tenant-
+    # scoped rather than relying on the session-infra role branch.
+    async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
         existing = await conn.fetchrow(
             """SELECT * FROM llm_sessions
                WHERE organization_id = $1::uuid
@@ -201,6 +205,7 @@ async def _get_or_create_interaction_chat_session(pool, user, interaction: dict)
             role=role,
             content=message.get("body") or "",
             org_id=org_id,
+            user_id=user_id,
             metadata={
                 "source": "user_interaction_seed",
                 "interaction_id": interaction_id,

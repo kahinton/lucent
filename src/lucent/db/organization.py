@@ -8,6 +8,7 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 
 class OrganizationRepository:
@@ -43,7 +44,7 @@ class OrganizationRepository:
             RETURNING id, name, status, suspended_at, created_at, updated_at
         """
 
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             async with conn.transaction():
                 row = await conn.fetchrow(query, name)
                 org = self._row_to_dict(row)
@@ -82,7 +83,7 @@ class OrganizationRepository:
             WHERE id = $1
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(query, str(org_id))
 
         if row is None:
@@ -105,7 +106,7 @@ class OrganizationRepository:
             WHERE name = $1
         """
 
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             row = await conn.fetchrow(query, name)
 
         if row is None:
@@ -146,7 +147,7 @@ class OrganizationRepository:
             RETURNING id, name, status, suspended_at, created_at, updated_at
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(query, name, str(org_id))
 
         if row is None:
@@ -169,7 +170,7 @@ class OrganizationRepository:
             RETURNING id, name, status, suspended_at, created_at, updated_at
         """
         new_status = "suspended" if suspended else "active"
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(query, new_status, str(org_id))
 
         return self._row_to_dict(row) if row else None
@@ -191,7 +192,7 @@ class OrganizationRepository:
             RETURNING id
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             result = await conn.fetchrow(query, str(org_id))
 
         return result is not None
@@ -220,7 +221,7 @@ class OrganizationRepository:
                 ORDER BY name ASC
                 LIMIT $2 OFFSET $3
             """
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id) as conn:
                 rows = await conn.fetch(query, str(organization_id), limit, offset)
         else:
             query = """
@@ -229,7 +230,7 @@ class OrganizationRepository:
                 ORDER BY name ASC
                 LIMIT $1 OFFSET $2
             """
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id) as conn:
                 rows = await conn.fetch(query, limit, offset)
 
         return [self._row_to_dict(row) for row in rows]
@@ -256,7 +257,7 @@ class OrganizationRepository:
             LIMIT $1 OFFSET $2
         """
 
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             count_row = await conn.fetchrow(count_query)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, limit, offset)

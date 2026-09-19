@@ -482,10 +482,10 @@ async def agent_detail_page(request: Request, agent_id: str):
             requester_role=role_value,
         )
     )["items"]
-    assigned_skills = await repo.get_agent_skills(agent_id)
-    assigned_mcp = await repo.get_agent_mcp_servers(agent_id)
-    assigned_hooks = await repo.get_agent_hooks(agent_id)
-    assigned_tools = await repo.get_agent_managed_tools(agent_id)
+    assigned_skills = await repo.get_agent_skills(agent_id, org_id)
+    assigned_mcp = await repo.get_agent_mcp_servers(agent_id, org_id)
+    assigned_hooks = await repo.get_agent_hooks(agent_id, org_id)
+    assigned_tools = await repo.get_agent_managed_tools(agent_id, org_id)
 
     # Get assigned skill/mcp IDs for easier template logic
     assigned_skill_ids = {str(s["id"]) for s in assigned_skills}

@@ -27,6 +27,13 @@ async def provision_daemon_api_key(instance_id: str) -> str | None:
             )
             return None
         organization_id, _organization_name = bound_organization
+        # rls: bind the daemon org branch once the org identity is known
+        await connection.execute(
+            "SELECT set_config('app.user_id', '', false), "
+            "set_config('app.org_id', $1, false), "
+            "set_config('app.role', 'daemon', false);",
+            organization_id,
+        )
         user = await runtime._ensure_daemon_service_user(connection, organization_id)
         if not user:
             return None
@@ -96,6 +103,16 @@ async def revoke_current_key() -> None:
     try:
         connection = await asyncpg.connect(runtime.DATABASE_URL)
         try:
+            # rls: daemon-owned flow — resolve + bind the daemon org branch;
+            # on failure the PK-bound revoke stays fail-closed (safe no-op).
+            bound = await runtime._resolve_daemon_org(connection)
+            if bound:
+                await connection.execute(
+                    "SELECT set_config('app.user_id', '', false), "
+                    "set_config('app.org_id', $1, false), "
+                    "set_config('app.role', 'daemon', false);",
+                    bound[0],
+                )
             await connection.execute(
                 "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
                 "WHERE id = $1 AND revoked_at IS NULL",

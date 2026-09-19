@@ -57,6 +57,8 @@ async def get_memory_audit_log(
         memory_id=memory_id,
         offset=offset,
         limit=limit,
+        organization_id=user.organization_id,
+        user_id=user.id,
     )
 
     # Filter to only entries the user can see
@@ -112,6 +114,7 @@ async def get_user_audit_log(
         since=since,
         offset=offset,
         limit=limit,
+        organization_id=user.organization_id,
     )
 
     return AuditLogResponse(
@@ -153,6 +156,7 @@ async def get_organization_audit_log(
         since=since,
         offset=offset,
         limit=limit,
+        user_id=user.id,
     )
 
     return AuditLogResponse(
@@ -186,6 +190,7 @@ async def get_recent_audit_entries(
         action_types=action_types,
         since=since,
         limit=limit,
+        user_id=user.id,
     )
 
     return [_entry_to_response(e) for e in entries]

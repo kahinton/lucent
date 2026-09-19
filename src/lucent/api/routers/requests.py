@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, Field
 
+from lucent.db.pool import scoped_acquire
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_PATTERN
 from lucent.rbac import Role
@@ -435,7 +436,7 @@ async def request_memories(request_id: UUID, user: AuthenticatedUser, pool=Depen
     req = await _get_visible_request(repo, str(request_id), user)
     if not req:
         raise HTTPException(404, "Request not found")
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=user.organization_id, user_id=user.id) as conn:
         rows = await conn.fetch(
             """SELECT rm.memory_id, rm.relation, rm.created_at,
                       m.content, m.type AS memory_type, m.tags,
@@ -542,7 +543,7 @@ async def approve_request_review(
     from lucent.db.reviews import ReviewRepository
 
     review_repo = ReviewRepository(pool)
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=str(user.organization_id)) as conn:
         async with conn.transaction():
             await review_repo.create_review(
                 request_id=str(request_id),
@@ -605,7 +606,7 @@ async def reject_request_review(
     from lucent.db.reviews import ReviewRepository
 
     review_repo = ReviewRepository(pool)
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=str(user.organization_id)) as conn:
         async with conn.transaction():
             await review_repo.create_review(
                 request_id=str(request_id),
@@ -822,9 +823,13 @@ async def update_task_model(
     if effort_error:
         raise HTTPException(422, effort_error)
 
-    result = await repo.update_task_model(str(task_id), body.model)
+    result = await repo.update_task_model(
+        str(task_id), body.model, org_id=str(user.organization_id)
+    )
     if result:
-        result = await repo.update_task_reasoning_effort(str(task_id), body.reasoning_effort)
+        result = await repo.update_task_reasoning_effort(
+            str(task_id), body.reasoning_effort, org_id=str(user.organization_id)
+        )
     if not result:
         raise HTTPException(404, "Task not found")
     return result

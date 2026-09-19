@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from lucent.db.pool import scoped_acquire
 from lucent.db import AuditRepository, MemoryRepository, get_pool
 from lucent.logging import get_logger
 from lucent.metrics import metrics
@@ -205,7 +206,7 @@ async def daemon_review_action(
 
         # Notify daemon
         try:
-            async with pool.acquire() as conn:
+            async with pool.acquire() as conn:  # rls: pg_notify plumbing — no row access
                 await conn.execute(
                     "SELECT pg_notify('request_ready', $1)",
                     f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
@@ -246,7 +247,7 @@ async def daemon_review_action(
         review_repo = ReviewRepository(pool)
 
         status = "approved" if action == "approve" else "rejected"
-        async with pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 await review_repo.create_review(
                     request_id=str(request_id),
@@ -292,7 +293,7 @@ async def daemon_review_action(
 
         # Notify daemon
         try:
-            async with pool.acquire() as conn:
+            async with pool.acquire() as conn:  # rls: pg_notify plumbing — no row access
                 await conn.execute(
                     "SELECT pg_notify('request_ready', $1)",
                     f'{{"type": "review", "action": "{action}", "request_id": "{request_id}"}}',
@@ -486,7 +487,7 @@ async def daemon_feedback(
 
     # Return the partial HTML for HTMX swap
     # Re-fetch memory to get updated state
-    updated_memory = await repo.get(memory_id)
+    updated_memory = await repo.get(memory_id, organization_id=user.organization_id, user_id=user.id)
     return templates.TemplateResponse(
         request,
         "partials/feedback_actions.html",

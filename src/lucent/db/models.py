@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import asyncpg
+from lucent.db.pool import scoped_acquire
 
 
 def _jsonb_param(value):
@@ -59,6 +60,7 @@ class ModelRepository:
         query = f"SELECT *{base} ORDER BY provider, name LIMIT ${idx} OFFSET ${idx + 1}"
         params_with_page = [*params, limit, offset]
 
+        # rls: models is on migration 116's global-exempt list — no tenant GUCs needed.
         async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
@@ -103,7 +105,7 @@ class ModelRepository:
             {enabled_clause}
         """
         params = [UUID(org_id), UUID(user_id), requester_role]
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             count_row = await conn.fetchrow(f"SELECT COUNT(*) AS total{base}", *params)
             rows = await conn.fetch(
                 f"SELECT *{base} ORDER BY provider, name LIMIT $4 OFFSET $5",
@@ -121,6 +123,7 @@ class ModelRepository:
         }
 
     async def get_model(self, model_id: str) -> dict | None:
+        # rls: models exempt (116 global-exempt list).
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM models WHERE id = $1", model_id)
         return dict(row) if row else None
@@ -133,6 +136,7 @@ class ModelRepository:
         configured models are safe to present, along with anything already
         enabled by an operator before setup.
         """
+        # rls: models exempt (116 global-exempt list) — pre-auth setup path.
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT * FROM models
@@ -151,6 +155,7 @@ class ModelRepository:
         if not model_ids:
             return set()
         now = datetime.now(timezone.utc)
+        # rls: models exempt (116 global-exempt list).
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """UPDATE models
@@ -185,7 +190,7 @@ class ModelRepository:
         owner_group_id: str | None = None,
     ) -> dict:
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO models (id, provider, name, category, api_model_id,
                    context_window, supports_tools, supports_vision, notes, tags,
@@ -248,6 +253,7 @@ class ModelRepository:
         params.append(model_id)
         query = f"UPDATE models SET {', '.join(set_parts)} WHERE id = ${len(params)} RETURNING *"
 
+        # rls: models exempt (116 global-exempt list).
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
         return dict(row) if row else None
@@ -270,7 +276,7 @@ class ModelRepository:
         now = datetime.now(timezone.utc)
         upserted = 0
         discovered_ids = [m["model_id"] for m in models]
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 for m in models:
                     await conn.fetchrow(
@@ -403,7 +409,7 @@ class ModelRepository:
         Lets discovery skip re-fetching provider details for models whose
         catalog digest has not changed since the last sync.
         """
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             rows = await conn.fetch("SELECT id, discovery_metadata FROM models")
         return {
             str(row["id"]): row["discovery_metadata"] or {}
@@ -419,7 +425,7 @@ class ModelRepository:
         """
         if not model_ids:
             return
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             await conn.execute(
                 """
                 UPDATE models
@@ -434,12 +440,12 @@ class ModelRepository:
         return await self.update_model(model_id, is_enabled=enabled)
 
     async def delete_model(self, model_id: str) -> bool:
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             result = await conn.execute("DELETE FROM models WHERE id = $1", model_id)
         return result == "DELETE 1"
 
     async def get_enabled_model_ids(self) -> set[str]:
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             rows = await conn.fetch(
                 "SELECT id FROM models WHERE is_enabled = true"
             )

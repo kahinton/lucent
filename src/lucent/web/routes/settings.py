@@ -445,7 +445,9 @@ async def settings_api_keys(
     user = await get_user_context(request)
     pool = await get_pool()
     api_key_repo = ApiKeyRepository(pool)
-    api_keys = (await api_key_repo.list_by_user(user.id))["items"]
+    api_keys = (
+        await api_key_repo.list_by_user(user.id, organization_id=user.organization_id)
+    )["items"]
 
     new_api_key = None
     new_key_name = None
@@ -518,8 +520,10 @@ async def revoke_api_key(request: Request, key_id: UUID):
     api_key_repo = ApiKeyRepository(pool)
     audit_repo = AdminAuditRepository(pool)
 
-    existing = await api_key_repo.get_by_id(key_id, user.id)
-    success = await api_key_repo.revoke(key_id, user.id)
+    existing = await api_key_repo.get_by_id(key_id, user.id, organization_id=user.organization_id)
+    success = await api_key_repo.revoke(
+        key_id, user.id, organization_id=user.organization_id
+    )
     if not success:
         raise HTTPException(status_code=404, detail="API key not found")
 
@@ -581,7 +585,11 @@ async def settings_organization(
         # org-level method, so we sum across users. This is fine for typical org
         # sizes during launch; a dedicated method can come later.
         for m in members:
-            keys = await api_key_repo.list_by_user(m["id"], limit=1000)
+            keys = await api_key_repo.list_by_user(
+                m["id"],
+                limit=1000,
+                organization_id=user.organization_id,
+            )
             api_keys_total += sum(1 for k in keys["items"] if k.get("is_active"))
     except Exception:
         pass

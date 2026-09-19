@@ -9,6 +9,8 @@ from uuid import UUID
 
 import asyncpg
 
+from lucent.db.pool import scoped_acquire
+
 
 class CredentialRepository:
     """CRUD and token lifecycle operations for enterprise credentials."""
@@ -33,7 +35,7 @@ class CredentialRepository:
         refresh_token_expires_at: datetime | None,
         created_by: str,
     ) -> dict[str, Any]:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO enterprise_credentials (
@@ -65,7 +67,7 @@ class CredentialRepository:
     async def get_credential(
         self, credential_id: str, organization_id: str
     ) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM enterprise_credentials WHERE id = $1 AND organization_id = $2",
                 UUID(credential_id),
@@ -115,7 +117,7 @@ class CredentialRepository:
             f"ORDER BY created_at DESC LIMIT ${idx}"
         )
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(query, *params)
         return [self._row_to_dict(row) for row in rows]
 
@@ -170,7 +172,7 @@ class CredentialRepository:
             params.append(status)
             idx += 1
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 f"UPDATE enterprise_credentials SET {', '.join(sets)} "
                 f"WHERE id = $1 AND organization_id = $2 RETURNING *",
@@ -189,7 +191,7 @@ class CredentialRepository:
         refresh_token_expires_at: datetime | None,
         rotated_refresh_token: bool,
     ) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE enterprise_credentials
@@ -218,7 +220,7 @@ class CredentialRepository:
         return self._row_to_dict(row) if row else None
 
     async def delete_credential(self, credential_id: str, organization_id: str) -> bool:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             result = await conn.execute(
                 "DELETE FROM enterprise_credentials WHERE id = $1 AND organization_id = $2",
                 UUID(credential_id),
@@ -241,7 +243,7 @@ class CredentialRepository:
         created_by: str,
         expires_at: datetime,
     ) -> dict[str, Any]:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO oauth2_state_challenges (
@@ -273,7 +275,7 @@ class CredentialRepository:
         provider: str,
         state_hash: str,
     ) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE oauth2_state_challenges

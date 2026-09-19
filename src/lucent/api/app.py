@@ -134,13 +134,24 @@ async def _start_model_discovery_task(pool) -> None:
     global _model_discovery_task
 
     async def _run() -> None:
-        await _sync_configured_model_providers(pool)
-        try:
-            from lucent.model_registry import load_models_from_db
+        # System-infra boot context for the DB reads/writes (models is
+        # RLS-exempt but its repository acquires through scoped_acquire,
+        # which refuses scope-less sessions post-cutover). Bound inside
+        # this task's own context — the task was created from unbound
+        # context, so the scope cannot leak into request handling.
+        from lucent.db.pool import clear_tenant_scope, set_tenant_scope
 
-            await load_models_from_db(pool)
-        except Exception:
-            pass  # Registry keeps its current state (hardcoded fallback)
+        set_tenant_scope(role="system")
+        try:
+            await _sync_configured_model_providers(pool)
+            try:
+                from lucent.model_registry import load_models_from_db
+
+                await load_models_from_db(pool)
+            except Exception:
+                pass  # Registry keeps its current state (hardcoded fallback)
+        finally:
+            clear_tenant_scope()
         logger.info("Background model discovery complete")
 
     _model_discovery_task = asyncio.create_task(_run())
@@ -224,20 +235,43 @@ async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL")
     started_system_schedule_runner = False
     if database_url:
-        await init_db(database_url)
-        from lucent.web.live_events import live_event_broker
+        # Zero-touch tenant cutover: bootstrap migrations (through 114) run
+        # on the bootstrap superuser, the lucent_app credential is
+        # provisioned in OpenBao-backed secret storage, and every pool and
+        # LISTEN connection below is created from the post-cutover URL
+        # (lucent_app — the role RLS policies bind). Idempotent: on an
+        # already-cut-over deployment this verifies and returns in one
+        # round-trip. init_db also re-checks internally as a backstop.
+        from lucent.startup.tenant_chain import run_tenant_cutover_chain
 
-        await live_event_broker.start(database_url)
-        from lucent.db import get_pool as _get_pool_for_secrets
+        cutover_url = await run_tenant_cutover_chain(database_url)
 
-        _secret_pool = await _get_pool_for_secrets()
-        await initialize_secret_provider(_secret_pool)
-        from lucent.auth_providers import initialize_signing_secret
+        # Boot tenant context: the startup queries below run before any
+        # request context exists. Bind the system-infra session role (the
+        # permissive branch every migration-116 policy carries) so
+        # boot-time reads on RLS-bound tables are not fail-closed-empty.
+        # Cleared in finally — background tasks spawned later must not
+        # inherit boot context through ContextVar copy.
+        from lucent.db.pool import clear_tenant_scope, set_tenant_scope
 
-        await initialize_signing_secret(_secret_pool)
-        from lucent.settings import load_runtime_settings_from_db
+        set_tenant_scope(role="system")
+        try:
+            await init_db(cutover_url)
+            from lucent.web.live_events import live_event_broker
 
-        await load_runtime_settings_from_db(_secret_pool)
+            await live_event_broker.start(cutover_url)
+            from lucent.db import get_pool as _get_pool_for_secrets
+
+            _secret_pool = await _get_pool_for_secrets()
+            await initialize_secret_provider(_secret_pool)
+            from lucent.auth_providers import initialize_signing_secret
+
+            await initialize_signing_secret(_secret_pool)
+            from lucent.settings import load_runtime_settings_from_db
+
+            await load_runtime_settings_from_db(_secret_pool)
+        finally:
+            clear_tenant_scope()
 
     # Load model registry from database, then refresh it from providers in the
     # background so network discovery never blocks first-request serving.
@@ -246,9 +280,20 @@ async def lifespan(app: FastAPI):
 
         _pool = await _get_pool()
         if _pool:
-            from lucent.model_registry import load_models_from_db
+            # System-infra boot context: models is RLS-exempt but its
+            # repository acquires through scoped_acquire, which refuses
+            # scope-less sessions; the background discovery task spawned
+            # below must NOT inherit this scope (ContextVar copy), so the
+            # scope is cleared around it.
+            from lucent.db.pool import clear_tenant_scope, set_tenant_scope
 
-            await load_models_from_db(_pool)
+            set_tenant_scope(role="system")
+            try:
+                from lucent.model_registry import load_models_from_db
+
+                await load_models_from_db(_pool)
+            finally:
+                clear_tenant_scope()
             await _start_model_discovery_task(_pool)
     except Exception:
         pass  # Fall back to hardcoded registry
@@ -256,7 +301,10 @@ async def lifespan(app: FastAPI):
     # Sync built-in skills from .github/skills/ into the DB
     await _sync_built_in_definitions()
 
-    # Start daemon-independent server-side system schedule runner.
+    # Start daemon-independent server-side system schedule runner. Boot
+    # tenant context for the seeding/runner paths is managed inside
+    # system_schedules (system-infra scope around DB work, cleared before
+    # the runner task is created so background tasks never inherit it).
     if database_url:
         await start_server_system_schedule_runner()
         started_system_schedule_runner = True

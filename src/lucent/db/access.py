@@ -9,6 +9,7 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 
 class AccessRepository:
@@ -58,7 +59,7 @@ class AccessRepository:
             WHERE id = $1 AND deleted_at IS NULL
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             async with conn.transaction():
                 await conn.execute(
                     log_query,
@@ -94,7 +95,7 @@ class AccessRepository:
         org_id_str = str(organization_id) if organization_id else None
         ctx = context or {}
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             async with conn.transaction():
                 # Batch insert access logs using executemany
                 log_query = """
@@ -130,6 +131,8 @@ class AccessRepository:
         memory_id: UUID,
         limit: int = 50,
         offset: int = 0,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Get the access history for a specific memory.
 
@@ -156,7 +159,7 @@ class AccessRepository:
             WHERE memory_id = $1
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             count_row = await conn.fetchrow(count_query, str(memory_id))
             total_count = count_row["total"] if count_row else 0
 
@@ -174,6 +177,8 @@ class AccessRepository:
         self,
         memory_id: UUID,
         limit: int = 50,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
     ) -> list[dict[str, Any]]:
         """Get the search queries that returned this memory.
 
@@ -193,7 +198,7 @@ class AccessRepository:
             LIMIT $2
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             rows = await conn.fetch(query, str(memory_id), limit)
 
         return [self._row_to_dict(row) for row in rows]
@@ -236,7 +241,7 @@ class AccessRepository:
 
         params.append(limit)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_dict(row) for row in rows]
@@ -291,7 +296,7 @@ class AccessRepository:
 
         params.append(limit)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             rows = await conn.fetch(query, *params)
 
         return [
@@ -373,7 +378,7 @@ class AccessRepository:
 
         params = [*memory_params, *access_params, limit]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             rows = await conn.fetch(query, *params)
 
         return [
@@ -443,7 +448,7 @@ class AccessRepository:
 
         params.append(limit)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             rows = await conn.fetch(query, *params)
 
         return [
@@ -467,7 +472,7 @@ class AccessRepository:
             GROUP BY memory_id
         """
 
-        async with self.pool.acquire() as conn:
+        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
             rows = await conn.fetch(query, *[str(mid) for mid in memory_ids])
 
         counts: dict[UUID, int] = {}

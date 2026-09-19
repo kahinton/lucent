@@ -12,6 +12,7 @@ from uuid import UUID
 
 from asyncpg import Connection
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class ReviewRepository:
             raise ValueError(f"Invalid review source '{source}'. Must be 'human', 'daemon', or 'agent'.")
 
         if conn is None:
-            async with self.pool.acquire() as acquired:
+            async with scoped_acquire(organization_id=organization_id) as acquired:
                 row = await acquired.fetchrow(
                     """INSERT INTO reviews
                        (request_id, task_id, organization_id, reviewer_user_id,
@@ -114,7 +115,7 @@ class ReviewRepository:
                    WHERE id = $1 AND organization_id = $3 AND status = 'review'
                    RETURNING *"""
         if conn is None:
-            async with self.pool.acquire() as acquired:
+            async with scoped_acquire(organization_id=organization_id) as acquired:
                 row = await acquired.fetchrow(query, *params)
         else:
             row = await conn.fetchrow(query, *params)
@@ -141,7 +142,7 @@ class ReviewRepository:
                    WHERE id = $1 AND organization_id = $2 AND status = 'review'
                    RETURNING *"""
         if conn is None:
-            async with self.pool.acquire() as acquired:
+            async with scoped_acquire(organization_id=organization_id) as acquired:
                 row = await acquired.fetchrow(query, *params)
         else:
             row = await conn.fetchrow(query, *params)
@@ -159,6 +160,7 @@ class ReviewRepository:
                 await RequestRepository(self.pool)._mark_milestone_completed(
                     str(row["goal_memory_id"]),
                     int(row["goal_milestone_index"]),
+                    org_id=organization_id,
                 )
             except Exception as e:
                 logger.warning(
@@ -176,7 +178,7 @@ class ReviewRepository:
         self, review_id: str, organization_id: str
     ) -> dict | None:
         """Get a single review by ID, scoped to organization."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """SELECT r.*, req.title as request_title
                    FROM reviews r
@@ -229,7 +231,7 @@ class ReviewRepository:
         )
         params_with_page = [*params, limit, offset]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -246,7 +248,7 @@ class ReviewRepository:
         self, request_id: str, organization_id: str
     ) -> list[dict]:
         """Get all reviews for a request, ordered by creation time."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM reviews
                    WHERE request_id = $1 AND organization_id = $2
@@ -260,7 +262,7 @@ class ReviewRepository:
         self, task_id: str, organization_id: str
     ) -> list[dict]:
         """Get all reviews for a specific task."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM reviews
                    WHERE task_id = $1 AND organization_id = $2
@@ -274,7 +276,7 @@ class ReviewRepository:
         self, organization_id: str
     ) -> dict:
         """Get aggregate review statistics for the organization."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """SELECT
                      COUNT(*) AS total,

@@ -247,7 +247,10 @@ async def _get_memory_access_service(user_role: str | None = None) -> MemoryAcce
         pool = await init_db(database_url)
     is_admin = (user_role or "").lower() in {"admin", "owner"}
     return MemoryAccessService(
-        repo, GitHubRepoAccessService(pool), is_admin=is_admin
+        repo,
+        GitHubRepoAccessService(pool),
+        organization_id=org_id,
+        is_admin=is_admin,
     )
 
 
@@ -1031,6 +1034,8 @@ Returns:
                 related_memory_ids=update_input.related_memory_ids,
                 metadata=update_input.metadata,
                 expected_version=expected_version,
+                organization_id=org_id,
+                user_id=user_id,
             )
 
             if result is None:
@@ -1138,7 +1143,7 @@ Returns:
                 return _error_response("Permission denied: only the owner can update this memory")
 
             result = await repo.update_goal_milestone(
-                uuid_id, milestone_index, status, expected_version
+                uuid_id, milestone_index, status, expected_version, org_id=str(org_id)
             )
             if result is None:
                 return _error_response(f"Memory not found: {memory_id}")
@@ -1350,6 +1355,8 @@ Returns:
                 uuid_id,
                 ldr_canonical_id=_extract_ldr_canonical_id(old_memory),
                 force_delete_compliance=False,
+                organization_id=org_id,
+                user_id=user_id,
             )
 
             if not success:
@@ -1524,6 +1531,8 @@ Returns:
                 memory_id=uuid_id,
                 limit=min(limit, 50),
                 offset=offset,
+                organization_id=org_id,
+                user_id=user_id,
             )
 
             versions = []
@@ -1603,7 +1612,7 @@ Returns:
                 return _error_response(f"Memory is already at version {version}")
 
             # Get the target version's snapshot
-            version_entry = await audit_repo.get_version_snapshot(uuid_id, version)
+            version_entry = await audit_repo.get_version_snapshot(uuid_id, version, organization_id=org_id, user_id=user_id)
             if version_entry is None:
                 return _error_response(f"Version {version} not found for this memory")
 
@@ -1936,6 +1945,7 @@ Returns:
             result = await repo.claim_task(
                 memory_id=uuid_id,
                 instance_id=instance_id,
+                org_id=str(org_id),
             )
 
             if result is None:
@@ -2006,6 +2016,7 @@ Returns:
             result = await repo.release_claim(
                 memory_id=uuid_id,
                 instance_id=instance_id,
+                org_id=str(org_id),
             )
 
             if result is None:

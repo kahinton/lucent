@@ -54,6 +54,8 @@ async def get_memory_access_history(
         memory_id=memory_id,
         offset=offset,
         limit=limit,
+        organization_id=user.organization_id,
+        user_id=user.id,
     )
 
     # Filter based on permissions
@@ -93,6 +95,8 @@ async def get_memory_search_history(
     entries = await access_repo.get_search_history(
         memory_id=memory_id,
         limit=limit,
+        organization_id=user.organization_id,
+        user_id=user.id,
     )
 
     # Filter based on permissions

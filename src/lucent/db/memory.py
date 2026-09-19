@@ -23,6 +23,7 @@ from lucent.settings import (
     search_vitality_boost_enabled,
     shadow_forget_enabled,
 )
+from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,8 @@ class MemoryRepository:
         owner_id = memory.get("user_id")
         if owner_id is None:
             return False
+        # rls: users is on migration 116's global-exempt list — this daemon
+        # identity resolution needs no tenant GUC binding.
         async with self.pool.acquire() as conn:
             return bool(
                 await conn.fetchval(
@@ -380,7 +383,7 @@ class MemoryRepository:
         # per-user with scoped keys, so it doesn't need org-wide visibility.
         effective_shared = shared
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             # Validate related memory IDs exist and are not deleted
             if related_memory_ids:
                 await self._validate_related_ids(related_memory_ids, conn=conn)
@@ -523,7 +526,7 @@ class MemoryRepository:
         """
         params.append(str(requesting_user_id))
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
             row = await conn.fetchrow(query, *params)
 
         return self._row_to_dict(row) if row else None
@@ -580,11 +583,18 @@ class MemoryRepository:
             return None
         return filename.rsplit("/", 1)[0] + "/"
 
-    async def get(self, memory_id: UUID) -> dict[str, Any] | None:
+    async def get(
+        self,
+        memory_id: UUID,
+        organization_id: UUID | str | None = None,
+        user_id: UUID | str | None = None,
+    ) -> dict[str, Any] | None:
         """Get a memory by ID (no access control).
 
         Args:
             memory_id: The UUID of the memory to retrieve.
+            organization_id: Caller org — required for tenant scoping under RLS.
+            user_id: Caller user id — the memories policy's ownership arm.
 
         Returns:
             The memory record, or None if not found or deleted.
@@ -595,7 +605,7 @@ class MemoryRepository:
             WHERE id = $1 AND deleted_at IS NULL
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(query, str(memory_id))
 
         if row is None:
@@ -651,7 +661,7 @@ class MemoryRepository:
               )
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 query,
                 str(memory_id),
@@ -682,7 +692,7 @@ class MemoryRepository:
               AND user_id = $1
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(query, str(user_id))
 
         if row is None:
@@ -708,7 +718,7 @@ class MemoryRepository:
         Returns:
             The updated memory record, or None if not found or not owned by user.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     f"""
@@ -763,7 +773,7 @@ class MemoryRepository:
         if grantee_type != "organization" and grantee_id is None:
             raise ValueError(f"{grantee_type} grants require a grantee_id")
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             async with conn.transaction():
                 memory_exists = await conn.fetchval(
                     """SELECT EXISTS(
@@ -845,7 +855,7 @@ class MemoryRepository:
         if grantee_type != "organization" and grantee_id is None:
             raise ValueError(f"{grantee_type} grants require a grantee_id")
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             async with conn.transaction():
                 result = await conn.execute(
                     """DELETE FROM memory_access_grants
@@ -873,7 +883,7 @@ class MemoryRepository:
         self, memory_id: UUID, organization_id: UUID
     ) -> list[dict[str, Any]]:
         """List configured read grants with safe display names for the UI/API."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 """SELECT grant_row.id, grant_row.memory_id, grant_row.organization_id,
                           grant_row.grantee_type, grant_row.grantee_user_id,
@@ -899,6 +909,8 @@ class MemoryRepository:
         related_memory_ids: list[UUID] | None = None,
         metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
+        organization_id: str | None = None,
+        user_id: UUID | None = None,
     ) -> dict[str, Any] | None:
         """Update an existing memory.
 
@@ -911,6 +923,10 @@ class MemoryRepository:
             metadata: Optional new metadata.
             expected_version: If provided, the update only succeeds if the memory's
                 current version matches. Raises VersionConflictError on mismatch.
+            organization_id: Tenant GUC binding (memories is RLS-bound).
+            user_id: Owner GUC for member-branch visibility. Callers that
+                already authorize the target memory (ownership verified in
+                the product rule) may omit it.
 
         Returns:
             The updated memory record, or None if not found.
@@ -1019,8 +1035,13 @@ class MemoryRepository:
             RETURNING {self._FULL_COLUMNS}
         """
 
-        # Use a single connection for validation and update
-        async with self.pool.acquire() as conn:
+        # Use a single connection for validation and update.
+        # rls: memories is RLS-bound (shape c). Bind the caller's org; the
+        # user GUC carries member visibility, with owner authorization
+        # already enforced by the product layer before this call.
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
             if related_memory_ids is not None:
                 await self._validate_related_ids(
                     related_memory_ids, exclude_id=memory_id, conn=conn
@@ -1048,6 +1069,7 @@ class MemoryRepository:
         milestone_index: int,
         status: str,
         expected_version: int | None = None,
+        org_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Update one indexed goal milestone without replacing goal metadata."""
         if milestone_index < 1:
@@ -1055,7 +1077,7 @@ class MemoryRepository:
         if status not in {"active", "paused", "completed", "abandoned"}:
             raise ValueError(f"Invalid goal milestone status: {status}")
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     f"""SELECT {self._FULL_COLUMNS}
@@ -1126,6 +1148,7 @@ class MemoryRepository:
         self,
         memory_id: UUID,
         instance_id: str,
+        org_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Atomically claim a pending daemon task for a specific instance.
 
@@ -1136,6 +1159,8 @@ class MemoryRepository:
         Args:
             memory_id: The UUID of the task memory to claim.
             instance_id: The unique identifier of the claiming daemon instance.
+            org_id: Tenant GUC binding (memories is RLS-bound); without it
+                the claim is fail-closed empty under RLS.
 
         Returns:
             The updated memory record if claimed successfully, or None if the
@@ -1143,7 +1168,7 @@ class MemoryRepository:
         """
         claim_tag = f"claimed-by-{instance_id}"
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 # Lock the row and verify it's still pending
                 row = await conn.fetchrow(
@@ -1189,6 +1214,7 @@ class MemoryRepository:
         self,
         memory_id: UUID,
         instance_id: str | None = None,
+        org_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Release a claimed task back to pending state.
 
@@ -1198,11 +1224,13 @@ class MemoryRepository:
         Args:
             memory_id: The UUID of the task memory to release.
             instance_id: Optional — only release if claimed by this instance.
+            org_id: Tenant GUC binding (memories is RLS-bound); without it
+                the release is fail-closed empty under RLS.
 
         Returns:
             The updated memory record, or None if not found/not claimed.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 if instance_id:
                     claim_tag = f"claimed-by-{instance_id}"
@@ -1263,6 +1291,8 @@ class MemoryRepository:
         *,
         ldr_canonical_id: UUID | None = None,
         force_delete_compliance: bool = False,
+        organization_id: UUID | str | None = None,
+        user_id: UUID | str | None = None,
     ) -> bool:
         """Soft delete a memory by setting deleted_at timestamp.
 
@@ -1283,7 +1313,7 @@ class MemoryRepository:
             RETURNING id
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             await self._record_ldr_observation(
                 source_id=memory_id,
                 canonical_id=ldr_canonical_id,
@@ -1630,7 +1660,12 @@ class MemoryRepository:
 
         params.extend([limit, offset])
 
-        async with self.pool.acquire() as conn:
+        # rls: memories is RLS-bound (shape c). Bind the requester's org
+        # (and user when a scope is threaded) so the search sees only the
+        # tenant slice the product-rule WHERE clause already targets.
+        async with scoped_acquire(
+            organization_id=requesting_org_id, user_id=requesting_user_id
+        ) as conn:
             # Get total count
             count_params = params[:-2]  # Exclude limit and offset
             count_row = await conn.fetchrow(count_query, *count_params)
@@ -1868,7 +1903,10 @@ class MemoryRepository:
 
         params.extend([limit, offset])
 
-        async with self.pool.acquire() as conn:
+        # rls: memories is RLS-bound (shape c) — same requester binding as search().
+        async with scoped_acquire(
+            organization_id=requesting_org_id, user_id=requesting_user_id
+        ) as conn:
             count_params = params[:-2]
             count_row = await conn.fetchrow(count_query, *count_params)
             total_count = count_row["total"] if count_row else 0
@@ -1957,7 +1995,7 @@ class MemoryRepository:
         """
         params.append(limit)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
             rows = await conn.fetch(query, *params)
 
         return [{"tag": row["tag"], "count": row["count"]} for row in rows]
@@ -2031,7 +2069,7 @@ class MemoryRepository:
         """
         params.append(limit)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
             rows = await conn.fetch(sql, *params)
 
         return [
@@ -2141,7 +2179,7 @@ class MemoryRepository:
             ORDER BY created_at ASC
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_dict(row) for row in rows]
@@ -2175,7 +2213,7 @@ class MemoryRepository:
         skipped = 0
         errors: list[dict[str, str]] = []
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
             # Build set of existing content hashes for this user
             existing_rows = await conn.fetch(
                 "SELECT md5(content || type || username) AS hash FROM memories "
@@ -2323,7 +2361,7 @@ class MemoryRepository:
                 org_condition = "AND organization_id = $3::uuid"
                 params.append(organization_id)
 
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id) as conn:
                 rows = await conn.fetch(
                     f"""
                     SELECT {self._FULL_COLUMNS}
@@ -2342,7 +2380,10 @@ class MemoryRepository:
 
             memory_dicts = [self._row_to_dict(row) for row in rows]
             memory_ids = [item["id"] for item in memory_dicts]
-            access_counts = await self._get_access_counts_last_n_days(memory_ids, days=90, now=now)
+            access_counts = await self._get_access_counts_last_n_days(
+                memory_ids, days=90, now=now,
+                organization_id=str(organization_id) if organization_id else None,
+            )
             frequency_baseline = self._compute_p75_baseline(
                 counts=[access_counts.get(memory_id, 0) for memory_id in memory_ids],
                 default=cfg.frequency_baseline,
@@ -2370,7 +2411,7 @@ class MemoryRepository:
                 )
                 computed_stage = self._map_action_to_lifecycle_stage(score_result.action)
 
-                async with self.pool.acquire() as conn:
+                async with scoped_acquire(organization_id=organization_id) as conn:
                     await conn.execute(
                         """
                         UPDATE memories
@@ -2434,7 +2475,7 @@ class MemoryRepository:
         cfg = GcpConfig()
 
         while True:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id) as conn:
                 rows = await conn.fetch(
                     f"""
                     SELECT {self._FULL_COLUMNS}
@@ -2457,9 +2498,10 @@ class MemoryRepository:
             graph_signals = await self._get_graph_connectedness_signals(
                 memory_ids=memory_ids,
                 now=now,
+                organization_id=str(organization_id) if organization_id else None,
             )
 
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id) as conn:
                 for mem in memory_dicts:
                     signals = graph_signals.get(mem["id"], {})
                     signals["out_degree"] = len(mem.get("related_memory_ids") or [])
@@ -2543,7 +2585,7 @@ class MemoryRepository:
         limit = max(1, min(limit, 500))
         cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             latest_rows = await conn.fetch(
                 """
                 SELECT DISTINCT ON (ms.memory_id)
@@ -2706,6 +2748,7 @@ class MemoryRepository:
         *,
         memory_ids: list[UUID],
         now: datetime,
+        organization_id: str | None = None,
     ) -> dict[UUID, dict[str, int]]:
         """Collect graph and usage signals for Candidate-A scoring."""
         if not memory_ids:
@@ -2713,7 +2756,10 @@ class MemoryRepository:
 
         cutoff = now - timedelta(days=90)
 
-        async with self.pool.acquire() as conn:
+        # rls: memories / request_memories / memory_access_log are RLS-bound;
+        # bind the vitality-scorer's org so the signal reads see the same
+        # tenant slice the candidate query did (fail-closed empty otherwise).
+        async with scoped_acquire(organization_id=organization_id) as conn:
             in_degree_rows = await conn.fetch(
                 """
                 SELECT rel_id::uuid AS memory_id, COUNT(*)::BIGINT AS in_degree
@@ -2824,7 +2870,7 @@ class MemoryRepository:
             org_filter = "AND organization_id = $1"
             params.append(str(organization_id))
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             stage_rows = await conn.fetch(
                 f"""
                 SELECT lifecycle_stage, COUNT(*) AS count
@@ -2909,13 +2955,16 @@ class MemoryRepository:
         shadow_action: str | None = None,
         computed_at: datetime | None = None,
         divergence_tag: str | None = None,
+        org_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Insert a single shadow score sidecar row (feature-flag gated)."""
         if not shadow_forget_enabled():
             return None
 
         effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
-        async with self.pool.acquire() as conn:
+        # rls: memory_shadow_scores is RLS-bound (EXISTS-to-memories, org-keyed);
+        # bind the org so the sidecar insert shares the scorer's tenant slice.
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO memory_shadow_scores (
@@ -2947,13 +2996,14 @@ class MemoryRepository:
         shadow_action: str | None = None,
         computed_at: datetime | None = None,
         divergence_tag: str | None = None,
+        org_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Upsert a shadow score sidecar row keyed by (memory_id, strategy, computed_at)."""
         if not shadow_forget_enabled():
             return None
 
         effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO memory_shadow_scores (
@@ -2986,12 +3036,13 @@ class MemoryRepository:
         *,
         memory_id: UUID,
         strategy: str,
+        org_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Fetch latest sidecar row for a memory+strategy (feature-flag gated)."""
         if not shadow_forget_enabled():
             return None
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 f"""
                 SELECT {self._SHADOW_SCORE_COLUMNS}
@@ -3013,6 +3064,8 @@ class MemoryRepository:
         related_ids: list[UUID],
         exclude_id: UUID | None = None,
         conn: asyncpg.Connection | None = None,
+        organization_id: UUID | str | None = None,
+        user_id: UUID | str | None = None,
     ) -> None:
         """Validate that related memory IDs exist and are not deleted.
 
@@ -3042,7 +3095,9 @@ class MemoryRepository:
         if conn is not None:
             rows = await conn.fetch(query, *str_ids)
         else:
-            async with self.pool.acquire() as pool_conn:
+            async with scoped_acquire(
+                organization_id=organization_id, user_id=user_id
+            ) as pool_conn:
                 rows = await pool_conn.fetch(query, *str_ids)
 
         # Convert found IDs to strings for comparison
@@ -3180,6 +3235,7 @@ class MemoryRepository:
         *,
         days: int,
         now: datetime,
+        organization_id: str | None = None,
     ) -> dict[UUID, int]:
         if not memory_ids:
             return {}
@@ -3194,7 +3250,9 @@ class MemoryRepository:
               AND accessed_at >= ${cutoff_param}
             GROUP BY memory_id
         """
-        async with self.pool.acquire() as conn:
+        # rls: memory_access_log is RLS-bound — bind the vitality-scorer's
+        # org so the access-count slice matches the candidate query.
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(query, *[str(mid) for mid in memory_ids], cutoff)
 
         counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}

@@ -12,6 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
+from lucent.db.pool import scoped_acquire
 from lucent.access_control import AccessControlService
 from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import GroupRepository, get_pool
@@ -249,7 +250,7 @@ async def migrate_plaintext_configs(user: AdminUser):
     migrated_integrations = 0
     redacted_sandbox_runtime_configs = 0
 
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=user.organization_id) as conn:
         mcp_rows = await conn.fetch(
             """
             SELECT id, organization_id, owner_user_id, owner_group_id, env_vars

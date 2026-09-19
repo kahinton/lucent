@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from asyncpg import Pool
 
+from lucent.db.pool import scoped_acquire
 from lucent.db.files import UserFileRepository
 from lucent.storage.providers import FileStorageRegistry
 
@@ -62,7 +63,7 @@ class UserFileService:
         )
 
         if task_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
                 task = await conn.fetchrow(
                     """SELECT t.id, t.request_id, r.created_by
                        FROM tasks t JOIN requests r ON r.id = t.request_id
@@ -74,7 +75,7 @@ class UserFileService:
                 raise ValueError("Task not found")
             request_id = str(task["request_id"])
         elif request_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
                 owns_request = await conn.fetchval(
                     """SELECT EXISTS(
                            SELECT 1 FROM requests
@@ -204,7 +205,7 @@ class UserFileService:
     ) -> None:
         if not session_id:
             return
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             owns_session = await conn.fetchval(
                 """SELECT EXISTS(
                        SELECT 1 FROM llm_sessions
@@ -226,7 +227,7 @@ class UserFileService:
         org_id: str,
         user_id: str,
     ) -> str | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             if task_id:
                 task = await conn.fetchrow(
                     """SELECT t.request_id

@@ -31,6 +31,7 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 
 class ProjectNotFoundError(LookupError):
@@ -80,7 +81,7 @@ class ProjectRepository:
         instructions: str | None = None,
     ) -> dict[str, Any]:
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO projects (organization_id, user_id, name, instructions)
                    VALUES ($1, $2, $3, $4)
@@ -96,7 +97,7 @@ class ProjectRepository:
         self, project_id: str | UUID, *, org_id: str | UUID, user_id: str | UUID
     ) -> dict[str, Any] | None:
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """SELECT * FROM projects
                    WHERE id = $1 AND organization_id = $2 AND user_id = $3""",
@@ -111,7 +112,7 @@ class ProjectRepository:
     ) -> dict[str, Any] | None:
         """One owned project plus its member counts (single query)."""
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """SELECT p.*,
                           (SELECT COUNT(*) FROM llm_sessions s
@@ -134,7 +135,7 @@ class ProjectRepository:
         name: str,
     ) -> dict[str, Any] | None:
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE projects
                    SET name = $4, updated_at = NOW()
@@ -152,7 +153,7 @@ class ProjectRepository:
         instructions: str | None,
     ) -> dict[str, Any] | None:
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE projects
                    SET instructions = $4, updated_at = NOW()
@@ -170,7 +171,7 @@ class ProjectRepository:
     ) -> bool:
         """Delete the project; member chats/files un-file via ON DELETE SET NULL."""
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """DELETE FROM projects
                    WHERE id = $1 AND organization_id = $2 AND user_id = $3
@@ -186,7 +187,7 @@ class ProjectRepository:
         limit: int = 100, offset: int = 0,
     ) -> dict[str, Any]:
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM projects
                    WHERE organization_id = $1 AND user_id = $2""",
@@ -267,7 +268,7 @@ class ProjectRepository:
         llm_messages (the denormalized copy message-phase scoping reads).
         """
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 if project_id is not None:
                     await self._require_project(conn, project_id, org, user)
@@ -311,7 +312,7 @@ class ProjectRepository:
         if not session_ids:
             return 0
         session_uuids = [_uuid(s) for s in session_ids]
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 moved = await conn.fetchval(
                     """WITH moved AS (
@@ -352,7 +353,7 @@ class ProjectRepository:
         (org, user)-scoped on llm_sessions itself.
         """
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             await self._require_project(conn, project_id, org, user)
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM llm_sessions
@@ -407,7 +408,7 @@ class ProjectRepository:
         metadata, never file content.
         """
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """SELECT p.id, p.name, p.instructions, p.updated_at
                    FROM llm_sessions s
@@ -460,7 +461,7 @@ class ProjectRepository:
     ) -> dict[str, Any] | None:
         """File one durable file into (or out of, project_id=None) a project."""
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 if project_id is not None:
                     await self._require_project(conn, project_id, org, user)
@@ -490,7 +491,7 @@ class ProjectRepository:
         if not file_ids:
             return 0
         file_uuids = [_uuid(f) for f in file_ids]
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             moved = await conn.fetchval(
                 """WITH moved AS (
                        UPDATE user_files
@@ -519,7 +520,7 @@ class ProjectRepository:
     ) -> dict[str, Any]:
         """Durable files filed into a project, newest first."""
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             await self._require_project(conn, project_id, org, user)
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM user_files
@@ -558,7 +559,7 @@ class ProjectRepository:
     ) -> dict[str, Any]:
         """Active non-archived chats with project_id IS NULL, for move pickers."""
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM llm_sessions
                    WHERE organization_id = $1 AND user_id = $2
@@ -596,7 +597,7 @@ class ProjectRepository:
     ) -> dict[str, Any]:
         """Non-deleted durable files with project_id IS NULL, for move pickers."""
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM user_files
                    WHERE organization_id = $1 AND user_id = $2
@@ -650,7 +651,7 @@ class ProjectRepository:
         if not memory_ids:
             return 0
         memory_uuids = [_uuid(m) for m in memory_ids]
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             moved = await conn.fetchval(
                 """WITH moved AS (
                        UPDATE memories
@@ -684,7 +685,7 @@ class ProjectRepository:
         private to its owner, so this never crosses the caller boundary.
         """
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             await self._require_project(conn, project_id, org, user)
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM memories
@@ -722,7 +723,7 @@ class ProjectRepository:
     ) -> dict[str, Any]:
         """Active memories with project_id IS NULL, for the attach picker."""
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM memories
                    WHERE organization_id = $1 AND user_id = $2
@@ -773,7 +774,7 @@ class ProjectRepository:
         if not interaction_ids:
             return 0
         interaction_uuids = [_uuid(i) for i in interaction_ids]
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             moved = await conn.fetchval(
                 """WITH moved AS (
                            UPDATE user_interactions
@@ -806,7 +807,7 @@ class ProjectRepository:
         inside the same project.
         """
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             await self._require_project(conn, project_id, org, user)
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM user_interactions
@@ -850,7 +851,7 @@ class ProjectRepository:
         changes visibility; the listing visibility rule above is unchanged.
         """
         org, user = _require_scope(org_id, user_id)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM user_interactions
                    WHERE organization_id = $1

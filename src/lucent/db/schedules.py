@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from asyncpg import Pool
 
 from lucent.secrets.utils import validate_sandbox_config_references
+from lucent.db.pool import scoped_acquire
 
 ALLOWED_SCHEDULE_COLUMNS = frozenset(
     {
@@ -367,7 +368,7 @@ class ScheduleRepository:
         """
         if requester_role != "daemon":
             return
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             is_sys = await conn.fetchval(
                 "SELECT is_system FROM schedules "
                 "WHERE id = $1::uuid AND organization_id = $2::uuid",
@@ -428,7 +429,7 @@ class ScheduleRepository:
                 )
             ]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             existing = await conn.fetchrow(
                 """SELECT * FROM schedules
                    WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
@@ -593,7 +594,7 @@ class ScheduleRepository:
                 )
             ]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO schedules
                    (title, organization_id, description, agent_type, model, task_template,
@@ -645,7 +646,7 @@ class ScheduleRepository:
         created_by: str | None = None,
         include_daemon_created: bool = False,
     ) -> dict | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             creator_clause = ""
             params = [schedule_id, org_id]
             if created_by:
@@ -678,9 +679,12 @@ class ScheduleRepository:
 
         This is only used for unauthenticated webhook ingress where the shared
         secret check happens immediately after lookup. Authenticated API/UI paths
-        should continue using get_schedule(schedule_id, org_id).
+        should continue using get_schedule(schedule_id, org_id). The system
+        branch is required because schedules is RLS-bound (shape b) and this
+        lookup runs before any tenant context exists; the shared-secret check
+        immediately after is the actual access control.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(role="system") as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM schedules WHERE id = $1::uuid",
                 schedule_id,
@@ -688,7 +692,7 @@ class ScheduleRepository:
             return dict(row) if row else None
 
     async def record_webhook_received(self, schedule_id: str) -> None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(role="system") as conn:
             await conn.execute(
                 """UPDATE schedules
                    SET webhook_last_received_at = NOW(), updated_at = NOW()
@@ -706,7 +710,7 @@ class ScheduleRepository:
         limit: int = 25,
         offset: int = 0,
     ) -> dict:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             conditions = ["organization_id = $1::uuid"]
             params: list[Any] = [org_id]
             idx = 2
@@ -814,7 +818,7 @@ class ScheduleRepository:
         idx += 1
 
         params.extend([schedule_id, org_id])
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 f"""UPDATE schedules SET {", ".join(sets)}
                     WHERE id = ${idx}::uuid AND organization_id = ${idx + 1}::uuid
@@ -832,7 +836,7 @@ class ScheduleRepository:
         )
 
     async def delete_schedule(self, schedule_id: str, org_id: str) -> bool:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             # System schedules cannot be deleted — only modified or disabled
             is_sys = await conn.fetchval(
                 (
@@ -859,7 +863,7 @@ class ScheduleRepository:
 
     async def get_due_schedules(self, org_id: str | None = None) -> list[dict]:
         """Return schedules whose next_run_at is in the past and are active."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             conditions = [
                 "enabled = true",
                 "status = 'active'",
@@ -923,7 +927,7 @@ class ScheduleRepository:
 
     async def experience_compression_has_work(self, org_id: str) -> bool:
         """True when there are compressible experience memories before today."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             memory_count = await conn.fetchval(
                 """
                 SELECT COUNT(*)
@@ -952,7 +956,7 @@ class ScheduleRepository:
         schedule_id: str | None = None,
     ) -> bool:
         """True when recent results/feedback/rejection lessons need extraction."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             memory_count = await conn.fetchval(
                 """
                 WITH last_run AS (
@@ -1032,7 +1036,7 @@ class ScheduleRepository:
 
     async def procedural_consolidation_has_work(self, org_id: str) -> bool:
         """True when legacy procedural/skill entries need consolidation."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count = await conn.fetchval(
                 """
                 WITH procedural_memories AS (
@@ -1096,7 +1100,7 @@ class ScheduleRepository:
 
     async def memory_vitality_scoring_has_work(self, org_id: str) -> bool:
         """True when a non-forgotten memory needs missing or stale vitality."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count = await conn.fetchval(
                 """
                 SELECT COUNT(*)
@@ -1120,7 +1124,7 @@ class ScheduleRepository:
 
         if not shadow_forget_enabled():
             return False
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count = await conn.fetchval(
                 """
                 SELECT COUNT(*)
@@ -1155,7 +1159,7 @@ class ScheduleRepository:
         requests that immediately discover ``targets=0``.  Keep this predicate
         aligned with ``LucentDaemon._run_cognitive_planning_fanout``.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             signal_count = await conn.fetchval(
                 """
                 SELECT COUNT(*)
@@ -1180,13 +1184,14 @@ class ScheduleRepository:
         *,
         force: bool = False,
         advance_schedule: bool = True,
+        org_id: str | None = None,
     ) -> dict | None:
         """Record a run and advance the schedule's next_run_at.
 
         Returns None if the schedule was already advanced (idempotency guard).
         Pass force=True to bypass the time check (e.g. manual trigger via API).
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 sched = await conn.fetchrow(
                     "SELECT * FROM schedules WHERE id = $1::uuid FOR UPDATE",
@@ -1260,8 +1265,10 @@ class ScheduleRepository:
 
                 return dict(run)
 
-    async def complete_run(self, run_id: str, result: str | None = None) -> dict | None:
-        async with self.pool.acquire() as conn:
+    async def complete_run(
+        self, run_id: str, result: str | None = None, org_id: str | None = None
+    ) -> dict | None:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE schedule_runs SET
                    status = 'completed', completed_at = now(), result = $2
@@ -1271,8 +1278,10 @@ class ScheduleRepository:
             )
             return dict(row) if row else None
 
-    async def fail_run(self, run_id: str, error: str | None = None) -> dict | None:
-        async with self.pool.acquire() as conn:
+    async def fail_run(
+        self, run_id: str, error: str | None = None, org_id: str | None = None
+    ) -> dict | None:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE schedule_runs SET
                    status = 'failed', completed_at = now(), error = $2
@@ -1282,9 +1291,11 @@ class ScheduleRepository:
             )
             return dict(row) if row else None
 
-    async def link_run_to_request(self, run_id: str, request_id: str) -> None:
+    async def link_run_to_request(
+        self, run_id: str, request_id: str, org_id: str | None = None
+    ) -> None:
         """Set the request_id on a schedule run after the request is created."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             await conn.execute(
                 "UPDATE schedule_runs SET request_id = $2::uuid WHERE id = $1::uuid",
                 run_id,
@@ -1293,8 +1304,14 @@ class ScheduleRepository:
 
     # ── Run history ───────────────────────────────────────────────────────
 
-    async def list_runs(self, schedule_id: str, limit: int = 25, offset: int = 0) -> dict:
-        async with self.pool.acquire() as conn:
+    async def list_runs(
+        self,
+        schedule_id: str,
+        limit: int = 25,
+        offset: int = 0,
+        org_id: str | None = None,
+    ) -> dict:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 "SELECT COUNT(*) AS total FROM schedule_runs WHERE schedule_id = $1::uuid",
                 schedule_id,
@@ -1343,7 +1360,7 @@ class ScheduleRepository:
         created_by: str | None = None,
         include_daemon_created: bool = False,
     ) -> dict:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             creator_clause = ""
             params = [org_id]
             if created_by:

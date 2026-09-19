@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+TEST_ORG_ID = uuid4()
+
 import pytest
 
 from lucent.db.api_key import ApiKeyRepository
@@ -232,7 +234,7 @@ class TestCreateEdgeCases:
         with patch("lucent.db.api_key.bcrypt.hashpw", return_value=b"$2b$12$hash"):
             _, plain_key = await repo.create(
                 user_id=uuid4(),
-                organization_id=None,
+                organization_id=TEST_ORG_ID,
                 name="test-key",
             )
 
@@ -255,7 +257,7 @@ class TestCreateEdgeCases:
         with patch("lucent.db.api_key.bcrypt.hashpw", return_value=b"$2b$12$hash"):
             await repo.create(
                 user_id=uuid4(),
-                organization_id=None,
+                organization_id=TEST_ORG_ID,
                 name="test-key",
                 scopes=["read"],
             )
@@ -272,7 +274,7 @@ class TestCreateEdgeCases:
         with pytest.raises(ValueError, match="already exists"):
             await repo.create(
                 user_id=uuid4(),
-                organization_id=None,
+                organization_id=TEST_ORG_ID,
                 name="existing",
             )
 
@@ -290,7 +292,7 @@ class TestCreateEdgeCases:
         with patch("lucent.db.api_key.bcrypt.hashpw", return_value=b"$2b$12$hash"):
             _, plain_key = await repo.create(
                 user_id=uuid4(),
-                organization_id=None,
+                organization_id=TEST_ORG_ID,
                 name="test-key",
             )
 
@@ -310,7 +312,7 @@ class TestRevokeEdgeCases:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.revoke(uuid4(), uuid4())
+        result = await repo.revoke(uuid4(), uuid4(), organization_id=TEST_ORG_ID)
 
         assert result is False
 
@@ -322,7 +324,7 @@ class TestRevokeEdgeCases:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.revoke(uuid4(), uuid4())
+        result = await repo.revoke(uuid4(), uuid4(), organization_id=TEST_ORG_ID)
 
         assert result is False
 
@@ -338,7 +340,7 @@ class TestGetByName:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.get_by_name(uuid4(), "nonexistent")
+        result = await repo.get_by_name(uuid4(), "nonexistent", TEST_ORG_ID)
 
         assert result is None
 
@@ -351,7 +353,7 @@ class TestGetByName:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.get_by_name(uuid4(), "test-key")
+        result = await repo.get_by_name(uuid4(), "test-key", TEST_ORG_ID)
 
         assert result is not None
         assert result["name"] == "test-key"
@@ -369,7 +371,7 @@ class TestListByUser:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.list_by_user(uuid4())
+        result = await repo.list_by_user(uuid4(), organization_id=TEST_ORG_ID)
 
         assert result["items"] == []
         assert result["total_count"] == 0
@@ -385,7 +387,7 @@ class TestListByUser:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.list_by_user(uuid4())
+        result = await repo.list_by_user(uuid4(), organization_id=TEST_ORG_ID)
 
         assert len(result["items"]) == 2
         names = [r["name"] for r in result["items"]]
@@ -404,6 +406,11 @@ class TestUpdateName:
         pool = _make_mock_pool(mock_conn)
 
         repo = ApiKeyRepository(pool)
-        result = await repo.update_name(uuid4(), uuid4(), "new-name")
+        result = await repo.update_name(
+            uuid4(),
+            uuid4(),
+            "new-name",
+            organization_id=TEST_ORG_ID,
+        )
 
         assert result is None

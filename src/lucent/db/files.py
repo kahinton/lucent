@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 
 class UserFileRepository:
@@ -27,7 +28,12 @@ class UserFileRepository:
         return item
 
     async def create(self, **values: Any) -> dict[str, Any]:
-        async with self.pool.acquire() as conn:
+        # rls: user_files / user_file_revisions are RLS-bound (shape a).
+        # The row's own org+user stamp is available in values — bind it so
+        # the INSERT satisfies the policy's WITH-CHECK.
+        async with scoped_acquire(
+            organization_id=values["org_id"], user_id=values["user_id"]
+        ) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """INSERT INTO user_files (
@@ -86,7 +92,7 @@ class UserFileRepository:
         return self._to_dict(row)
 
     async def get_owned(self, file_id: str, org_id: str, user_id: str) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """SELECT * FROM user_files
                    WHERE id = $1::uuid AND organization_id = $2::uuid
@@ -101,7 +107,7 @@ class UserFileRepository:
         self, filename: str, org_id: str, user_id: str
     ) -> list[dict[str, Any]]:
         """Find current files by an exact owner-scoped filename."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM user_files
                    WHERE filename = $1 AND organization_id = $2::uuid
@@ -115,7 +121,11 @@ class UserFileRepository:
         return [self._to_dict(row) for row in rows]
 
     async def append_revision(self, **values: Any) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        # rls: bind the file row's org+user (shape a) — the ownership
+        # SELECT ... FOR UPDATE and the revision INSERT both need it.
+        async with scoped_acquire(
+            organization_id=values["org_id"], user_id=values["user_id"]
+        ) as conn:
             async with conn.transaction():
                 file_row = await conn.fetchrow(
                     """SELECT * FROM user_files
@@ -191,7 +201,7 @@ class UserFileRepository:
     async def list_revisions_owned(
         self, file_id: str, org_id: str, user_id: str
     ) -> list[dict[str, Any]]:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             rows = await conn.fetch(
                 """SELECT r.*, s.title AS session_title,
                           req.title AS request_title, t.title AS task_title
@@ -217,7 +227,7 @@ class UserFileRepository:
         org_id: str,
         user_id: str,
     ) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """SELECT r.*, s.title AS session_title,
                           req.title AS request_title, t.title AS task_title
@@ -239,7 +249,7 @@ class UserFileRepository:
     async def list_storage_keys_owned(
         self, file_id: str, org_id: str, user_id: str
     ) -> list[tuple[str, str]]:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             rows = await conn.fetch(
                 """SELECT DISTINCT r.provider, r.storage_key
                    FROM user_file_revisions r
@@ -255,7 +265,7 @@ class UserFileRepository:
     async def list_owned(
         self, org_id: str, user_id: str, *, limit: int = 50, offset: int = 0
     ) -> dict[str, Any]:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(
                 """SELECT COUNT(*) FROM user_files
                    WHERE organization_id = $1::uuid AND user_id = $2::uuid
@@ -304,7 +314,7 @@ class UserFileRepository:
 
     async def count_unseen_current_revisions(self, org_id: str, user_id: str) -> int:
         """Count owner-visible files whose latest revision has not been viewed."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             count = await conn.fetchval(
                 """SELECT COUNT(*)
                    FROM user_files f
@@ -324,7 +334,7 @@ class UserFileRepository:
         self, file_id: str, org_id: str, user_id: str
     ) -> bool:
         """Record that the owner viewed the current revision, if the file is accessible."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO user_file_views (
                        file_id, organization_id, user_id, last_viewed_revision
@@ -348,7 +358,7 @@ class UserFileRepository:
         return row is not None
 
     async def soft_delete(self, file_id: str, org_id: str, user_id: str) -> dict | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE user_files SET deleted_at = NOW(), updated_at = NOW()
                    WHERE id = $1::uuid AND organization_id = $2::uuid

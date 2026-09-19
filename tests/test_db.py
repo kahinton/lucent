@@ -1167,7 +1167,9 @@ class TestApiKeyRepository:
             name="Revoke Test Key",
         )
 
-        revoked = await repo.revoke(key_record["id"], test_user["id"])
+        revoked = await repo.revoke(
+            key_record["id"], test_user["id"], organization_id=test_user["organization_id"]
+        )
 
         assert revoked is True
 
@@ -1207,7 +1209,9 @@ class TestApiKeyRepository:
             name="List Key 2",
         )
 
-        result = await repo.list_by_user(test_user["id"])
+        result = await repo.list_by_user(
+            test_user["id"], organization_id=test_user["organization_id"]
+        )
         keys = result["items"]
 
         names = [k["name"] for k in keys]
@@ -1242,7 +1246,12 @@ class TestApiKeyRepository:
             name="Original Name",
         )
 
-        updated = await repo.update_name(key_record["id"], test_user["id"], "New Name")
+        updated = await repo.update_name(
+            key_record["id"],
+            test_user["id"],
+            "New Name",
+            organization_id=test_user["organization_id"],
+        )
         assert updated is not None
         assert updated["name"] == "New Name"
 
@@ -1263,9 +1272,13 @@ class TestApiKeyRepository:
             name="Soon Revoked",
         )
 
-        await repo.revoke(key_record["id"], test_user["id"])
+        await repo.revoke(
+            key_record["id"], test_user["id"], organization_id=test_user["organization_id"]
+        )
 
-        result = await repo.list_by_user(test_user["id"])
+        result = await repo.list_by_user(
+            test_user["id"], organization_id=test_user["organization_id"]
+        )
         key_ids = [k["id"] for k in result["items"]]
         assert key_record["id"] not in key_ids
 

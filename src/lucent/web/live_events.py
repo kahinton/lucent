@@ -39,6 +39,8 @@ class LiveEventBroker:
         if not database_url:
             return
         try:
+            # rls: plumbing-only LISTEN connection (no row reads) — the
+            # empty tenant context keeps it fail-closed by construction.
             connection = await asyncpg.connect(database_url)
             await connection.add_listener(LIVE_EVENT_CHANNEL, self._on_notification)
             self._connection = connection

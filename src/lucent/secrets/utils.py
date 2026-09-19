@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
+from lucent.db.pool import scoped_acquire
 from lucent.auth import get_current_user
 from lucent.db import get_pool
 from lucent.secrets.base import SecretProvider, SecretScope
@@ -84,7 +85,9 @@ async def _candidate_scopes(organization_id: str, user_id: str) -> list[SecretSc
         return scopes
 
     try:
-        async with pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
             rows = await conn.fetch(
                 "SELECT group_id FROM user_groups WHERE user_id = $1",
                 user_id,
@@ -122,7 +125,12 @@ async def resolve_secret_reference(
 async def _get_connection_access_token(integration_type: str, user_id: str) -> str | None:
     """Return the latest active user connection access token for an integration."""
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    user = get_current_user() or {}
+    async with scoped_acquire(
+        organization_id=user.get("organization_id") or "",
+        user_id=user.get("id") or "",
+        role="system" if not user.get("organization_id") else None,
+    ) as conn:
         rows = await conn.fetch(
             """
             SELECT encrypted_secret_payload, access_token_expires_at

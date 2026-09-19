@@ -195,12 +195,24 @@ async def receive_webhook(
     async def _process_webhook() -> None:
         """Background task: parse event, resolve integration, dispatch."""
         try:
-            # Find all active integrations of this type
+            # Find all active integrations of this type.
+            # rls: integrations is RLS-bound (shape b, org-keyed). Webhook
+            # fan-out is cross-org by design (no org is known until a match
+            # is found), so this enumeration runs under the system session
+            # branch — the same class as the other system-infra paths — and
+            # scrubs on release. Every downstream per-org operation is
+            # org-scoped from the matched integration row.
+            from lucent.db.pool import runner_guc_preamble, tenant_guc_scrub
+
             async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT * FROM integrations WHERE type = $1 AND status = 'active'",
-                    provider,
-                )
+                await conn.execute(runner_guc_preamble())
+                try:
+                    rows = await conn.fetch(
+                        "SELECT * FROM integrations WHERE type = $1 AND status = 'active'",
+                        provider,
+                    )
+                finally:
+                    await conn.execute(tenant_guc_scrub())
 
             if not rows:
                 logger.warning(

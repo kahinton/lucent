@@ -460,7 +460,9 @@ async def schedule_detail(
     page = max(1, page)
     per_page = 10
     run_offset = (page - 1) * per_page
-    runs_result = await repo.list_runs(schedule_id, limit=per_page, offset=run_offset)
+    runs_result = await repo.list_runs(
+        schedule_id, limit=per_page, offset=run_offset, org_id=org_id
+    )
     sched["runs"] = runs_result["items"]
     run_total_count = runs_result["total_count"]
     run_total_pages = ceil(run_total_count / per_page) if run_total_count > 0 else 1

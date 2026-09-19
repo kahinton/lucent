@@ -21,6 +21,7 @@ from lucent.db.admin_audit import (
 )
 from lucent.secrets.utils import validate_env_var_references
 from lucent.sandbox.models import validate_extra_hosts
+from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +181,7 @@ class SandboxTemplateRepository:
             and scope != "built-in"
         ):
             owner_user_id = created_by
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO sandbox_templates
                    (name, organization_id, description, image, repo_url, branch,
@@ -232,7 +233,7 @@ class SandboxTemplateRepository:
             return self._parse_row(row)
 
     async def get(self, template_id: str, organization_id: str | None = None) -> dict | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             if organization_id:
                 row = await conn.fetchrow(
                     "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
@@ -255,7 +256,7 @@ class SandboxTemplateRepository:
     ) -> dict | None:
         """Get template only if user can access it."""
         role = user_role or "member"
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """
                 SELECT *
@@ -277,7 +278,7 @@ class SandboxTemplateRepository:
         return self._parse_row(row) if row else None
 
     async def get_by_name(self, name: str, organization_id: str) -> dict | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE name = $1 AND organization_id = $2",
                 name,
@@ -286,7 +287,7 @@ class SandboxTemplateRepository:
             return self._parse_row(row) if row else None
 
     async def list_all(self, organization_id: str, limit: int = 25, offset: int = 0) -> dict:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             count_row = await conn.fetchrow(
                 "SELECT COUNT(*) AS total FROM sandbox_templates WHERE organization_id = $1",
                 UUID(organization_id),
@@ -365,7 +366,7 @@ class SandboxTemplateRepository:
         if len(sets) == 1:  # Only updated_at
             return await self.get(template_id, organization_id)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             before = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
                 UUID(template_id),
@@ -397,7 +398,7 @@ class SandboxTemplateRepository:
 
     async def delete(self, template_id: str, organization_id: str, *,
                      audit: bool | None = None) -> bool:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             before = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
                 UUID(template_id),
@@ -459,7 +460,7 @@ class SandboxTemplateRepository:
                 OR $3 IN ('admin', 'owner')
             )
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
                 UUID(organization_id), UUID(user_id), role,
@@ -481,7 +482,7 @@ class SandboxTemplateRepository:
         """Return all approved templates in the org — those a planner is
         allowed to reference when creating a task. Excludes proposed and
         rejected templates."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM sandbox_templates
                    WHERE organization_id = $1
@@ -493,7 +494,7 @@ class SandboxTemplateRepository:
 
     async def list_proposed(self, organization_id: str) -> list[dict]:
         """Return templates awaiting human approval."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM sandbox_templates
                    WHERE organization_id = $1
@@ -505,7 +506,7 @@ class SandboxTemplateRepository:
 
     async def count_proposed(self, organization_id: str) -> int:
         """Return the number of templates awaiting human approval."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             return await conn.fetchval(
                 """SELECT COUNT(*) FROM sandbox_templates
                    WHERE organization_id = $1 AND status = 'proposed'""",
@@ -523,7 +524,7 @@ class SandboxTemplateRepository:
     ) -> dict | None:
         if status not in {"approved", "proposed", "rejected"}:
             raise ValueError(f"Invalid status: {status}")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             before = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
                 UUID(template_id),
@@ -557,10 +558,10 @@ class SandboxTemplateRepository:
                 )
             return self._parse_row(row) if row else None
 
-    async def mark_used(self, template_id: str) -> None:
+    async def mark_used(self, template_id: str, organization_id: str | None = None) -> None:
         """Record that a template was just dispatched. Best-effort."""
         try:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=organization_id, role="system" if not organization_id else None) as conn:
                 await conn.execute(
                     "UPDATE sandbox_templates SET last_used_at = NOW() WHERE id = $1",
                     UUID(template_id),
@@ -617,7 +618,7 @@ class SandboxTemplateRepository:
 
             if existing:
                 # Refresh fields and ensure built-in/approved status.
-                async with self.pool.acquire() as conn:
+                async with scoped_acquire(organization_id=organization_id) as conn:
                     await conn.execute(
                         """UPDATE sandbox_templates
                            SET description = $3, image = $4, repo_url = $5, branch = $6,

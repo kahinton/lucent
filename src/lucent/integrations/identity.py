@@ -14,6 +14,7 @@ from typing import Any
 
 import bcrypt
 
+from lucent.db.pool import scoped_acquire
 from lucent.integrations.models import (
     PairingChallengeStatus,
     UserLinkStatus,
@@ -136,15 +137,21 @@ class PairingChallengeService:
         *,
         code: str,
         integration_id: str,
+        organization_id: str | None = None,
     ) -> VerifyResult:
         """Check a plaintext code against all pending challenges for an integration.
 
         Increments ``attempt_count`` on every candidate checked. Returns a
         ``VerifyResult`` indicating success or the reason for failure.
+
+        organization_id binds the RLS tenant GUCs for the pairing_challenges
+        scan (fail-closed empty when omitted).
         """
         # Fetch all pending, non-expired challenges for this integration
         # We need to scan because the code is bcrypt-hashed (no direct lookup).
-        challenges = await self._pending_for_integration(integration_id)
+        challenges = await self._pending_for_integration(
+            integration_id, organization_id=organization_id,
+        )
 
         if not challenges:
             return VerifyResult(valid=False, error="no_pending_challenges")
@@ -153,7 +160,9 @@ class PairingChallengeService:
             challenge_id = str(ch["id"])
 
             # Increment attempt counter (returns None if already exhausted/expired)
-            updated = await self._repo.increment_attempts(challenge_id)
+            updated = await self._repo.increment_attempts(
+                challenge_id, user_id=str(ch["user_id"]),
+            )
             if updated is None:
                 continue
 
@@ -184,7 +193,11 @@ class PairingChallengeService:
     # -- Internal helpers -----------------------------------------------------
 
     async def _pending_for_integration(
-        self, integration_id: str,
+        self,
+        integration_id: str,
+        *,
+        organization_id: str | None = None,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return all pending, non-expired challenges for an integration.
 
@@ -193,7 +206,9 @@ class PairingChallengeService:
         """
         from uuid import UUID
 
-        async with self._repo.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM pairing_challenges
@@ -304,7 +319,7 @@ class IdentityResolver:
         and returns the resolved identity.
         """
         vr = await self._challenges.verify(
-            code=code, integration_id=integration_id,
+            code=code, integration_id=integration_id, organization_id=organization_id,
         )
         if not vr.valid or vr.user_id is None or vr.challenge_id is None:
             logger.warning(
@@ -315,7 +330,9 @@ class IdentityResolver:
 
         # Redeem the challenge (marks it as used + records external claimant)
         redeemed = await self._challenges._repo.redeem(
-            vr.challenge_id, claimed_by_external_id=external_user_id,
+            vr.challenge_id,
+            claimed_by_external_id=external_user_id,
+            user_id=vr.user_id,
         )
         if redeemed is None:
             return IdentityResult(resolved=False)

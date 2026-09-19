@@ -26,6 +26,7 @@ from lucent.constants import (
     VALID_REQUEST_SOURCES,
     VALID_REQUEST_STATUSES,
 )
+from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
 
@@ -618,7 +619,7 @@ class RequestRepository:
         now = datetime.now(timezone.utc)
         roles = roles or []
         metadata_json = json.dumps(metadata or {})
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO daemon_instances
                    (instance_id, organization_id, hostname, pid, roles, status,
@@ -656,7 +657,7 @@ class RequestRepository:
         now = datetime.now(timezone.utc)
         metadata_json = json.dumps(metadata or {})
         expires_at = now + timedelta(seconds=lease_seconds)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """UPDATE daemon_instances
@@ -715,7 +716,7 @@ class RequestRepository:
     async def mark_instance_stopped(self, *, org_id: str, instance_id: str) -> dict | None:
         """Mark daemon instance as stopped."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE daemon_instances
                    SET status = 'stopped',
@@ -771,7 +772,7 @@ class RequestRepository:
             else APPROVAL_AUTO
         )
         now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             # === STRUCTURED GOAL/MILESTONE VALIDATION ===
             # When the caller passes goal_id (the new structured path),
             # validate the goal and milestone here in one shot. This is the
@@ -959,7 +960,7 @@ class RequestRepository:
         if requester_user_id is not None:
             access_clause = " AND " + self._request_visibility_condition("$3", "$4")
             params.extend([UUID(requester_user_id), include_system])
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 "SELECT r.* FROM requests r "
                 "WHERE r.id = $1 AND r.organization_id = $2" + access_clause,
@@ -974,7 +975,7 @@ class RequestRepository:
         user_id: str,
     ) -> dict | None:
         """Record that a user opened a request detail page."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO request_views (
                        request_id, user_id, organization_id, first_viewed_at, last_viewed_at
@@ -1105,7 +1106,7 @@ class RequestRepository:
         )
         params_with_page = [*query_params, limit, offset]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -1133,7 +1134,7 @@ class RequestRepository:
         reviewed_at = (
             now if status in (REQUEST_STATUS_REVIEW, REQUEST_STATUS_NEEDS_REWORK) else None
         )
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 if org_id:
                     row = await conn.fetchrow(
@@ -1199,7 +1200,7 @@ class RequestRepository:
             REQUEST_STATUS_CANCELLED,
         ):
             try:
-                async with self.pool.acquire() as conn:
+                async with scoped_acquire(organization_id=org_id) as conn:
                     if status == REQUEST_STATUS_COMPLETED:
                         await conn.execute(
                             """UPDATE schedule_runs
@@ -1239,6 +1240,7 @@ class RequestRepository:
                 await self._mark_milestone_completed(
                     str(row["goal_memory_id"]),
                     int(row["goal_milestone_index"]),
+                    org_id=org_id,
                 )
             except Exception as e:
                 logger.warning(
@@ -1253,7 +1255,10 @@ class RequestRepository:
         return dict(row) if row else None
 
     async def _mark_milestone_completed(
-        self, goal_memory_id: str, milestone_index: int
+        self,
+        goal_memory_id: str,
+        milestone_index: int,
+        org_id: str | None = None,
     ) -> None:
         """Set metadata.milestones[i-1].status = 'completed' on a goal.
 
@@ -1265,7 +1270,7 @@ class RequestRepository:
         milestone is now completed/abandoned, since otherwise the next
         planning cycle would still consider the goal active.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """SELECT metadata FROM memories
@@ -1343,7 +1348,7 @@ class RequestRepository:
         memory links afterward. Without dedup here, those paths can produce
         duplicate goal-linked requests every cognitive cycle.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 # Serialize concurrent linkers for the same memory so two
                 # parallel callers can't both pass the dedup check before
@@ -1472,7 +1477,7 @@ class RequestRepository:
     ) -> dict | None:
         """Approve a pending_approval request so work can begin."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE requests
                    SET approval_status = 'approved',
@@ -1504,7 +1509,7 @@ class RequestRepository:
         Rejected requests enter rejection_processing for the daemon feedback loop.
         """
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE requests
                    SET approval_status = 'rejected',
@@ -1532,7 +1537,7 @@ class RequestRepository:
         base = """FROM requests
                    WHERE organization_id = $1
                      AND approval_status = 'pending_approval'"""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
                 UUID(org_id),
@@ -1573,7 +1578,7 @@ class RequestRepository:
         if requester_user_id is not None:
             params.extend([UUID(requester_user_id), include_system])
             base += " AND " + self._request_visibility_condition("$2", "$3")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
                 *params,
@@ -1613,7 +1618,7 @@ class RequestRepository:
         )
         if not req:
             return None
-        req["tasks"] = (await self.list_tasks(request_id))["items"]
+        req["tasks"] = (await self.list_tasks(request_id, org_id=org_id))["items"]
 
         # asyncpg returns jsonb columns as strings unless a codec is registered
         # at the connection level. Parse the columns the UI cares about so
@@ -1642,7 +1647,7 @@ class RequestRepository:
         # Batch-load events, memory links, and outputs for ALL tasks (avoids N+1)
         task_ids = [task["id"] for task in req["tasks"]]
         if task_ids:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 event_rows = await conn.fetch(
                     "SELECT * FROM task_events WHERE task_id = ANY($1) ORDER BY created_at",
                     task_ids,
@@ -1702,7 +1707,7 @@ class RequestRepository:
             req["outputs"] = []
 
         # Load reviews for this request (batch, no N+1)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             review_rows = await conn.fetch(
                 """SELECT * FROM reviews
                    WHERE request_id = $1 AND organization_id = $2
@@ -1713,7 +1718,7 @@ class RequestRepository:
         req["reviews"] = [dict(r) for r in review_rows]
 
         # Load request-level memory links
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             mem_rows = await conn.fetch(
                 """SELECT rm.memory_id, rm.relation, rm.created_at,
                           m.content, m.type AS memory_type, m.tags,
@@ -1774,7 +1779,7 @@ class RequestRepository:
     ) -> dict:
         """Create a user-facing output artifact for a task."""
         normalized = _normalize_task_output(output)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             task = await conn.fetchrow(
                 """SELECT id, request_id, organization_id
                    FROM tasks
@@ -1825,7 +1830,7 @@ class RequestRepository:
 
     async def list_request_outputs(self, request_id: str, org_id: str) -> list[dict]:
         """List all outputs for a request, newest/primary first."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM task_outputs
                    WHERE request_id = $1::uuid AND organization_id = $2::uuid
@@ -1860,7 +1865,7 @@ class RequestRepository:
 
         validate_sandbox_config_references(sandbox_config)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
@@ -1898,14 +1903,14 @@ class RequestRepository:
 
     async def get_task(self, task_id: str, org_id: str | None = None) -> dict | None:
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     "SELECT * FROM tasks WHERE id = $1 AND organization_id = $2",
                     UUID(task_id),
                     UUID(org_id),
                 )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     "SELECT * FROM tasks WHERE id = $1", UUID(task_id)
                 )
@@ -1935,7 +1940,7 @@ class RequestRepository:
         )
         params_with_page = [*params, limit, offset]
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -1963,7 +1968,7 @@ class RequestRepository:
         if requester_user_id is not None:
             params.extend([UUID(requester_user_id), include_system])
             base += " AND " + self._request_visibility_condition("$2", "$3")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(DISTINCT r.id) AS total {base}",
                 *params,
@@ -2033,7 +2038,7 @@ class RequestRepository:
         ``user_id`` filters to a single user's goals (used by per-user
         cognitive fan-out). Otherwise returns goals for the whole org.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             params: list = [UUID(org_id)]
             user_clause = ""
             if user_id:
@@ -2188,7 +2193,7 @@ class RequestRepository:
         if requester_user_id is not None:
             params.extend([UUID(requester_user_id), include_system])
             base += " AND " + self._request_visibility_condition("$2", "$3")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(DISTINCT r.id) AS total {base}",
                 *params,
@@ -2245,7 +2250,7 @@ class RequestRepository:
             params.extend([UUID(requester_user_id), include_system])
             visibility = " AND " + self._request_visibility_condition("$3", "$4")
         params.append(limit)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             rows = await conn.fetch(
                 """SELECT r.id, r.title, r.source, r.status, r.completed_at
                    FROM requests r
@@ -2320,7 +2325,7 @@ class RequestRepository:
         if requester_user_id is not None:
             params.extend([UUID(requester_user_id), include_system])
             base += " AND " + self._request_visibility_condition("$2", "$3")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
                 *params,
@@ -2373,7 +2378,7 @@ class RequestRepository:
         if requester_user_id is not None:
             params.extend([UUID(requester_user_id), include_system])
             base += " AND " + self._request_visibility_condition("$2", "$3")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
                 *params,
@@ -2419,7 +2424,7 @@ class RequestRepository:
         now = datetime.now(timezone.utc)
         claim_expires_at = now + timedelta(seconds=lease_seconds)
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'claimed', claimed_by = $2,
                        claimed_at = $3, last_heartbeat_at = $3,
@@ -2440,7 +2445,7 @@ class RequestRepository:
                     UUID(org_id),
                 )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'claimed', claimed_by = $2,
                        claimed_at = $3, last_heartbeat_at = $3,
@@ -2467,14 +2472,18 @@ class RequestRepository:
                 metadata={"instance_id": instance_id},
             )
             # Update parent request to in_progress if still pending/planned
-            await self._ensure_request_in_progress(str(task["request_id"]))
+            await self._ensure_request_in_progress(
+                str(task["request_id"]), org_id=str(task["organization_id"])
+            )
             return task
         return None
 
-    async def update_task_model(self, task_id: str, model: str) -> dict | None:
+    async def update_task_model(
+        self, task_id: str, model: str, org_id: str | None = None
+    ) -> dict | None:
         """Write the resolved model back to the task record."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 "UPDATE tasks SET model = $1, updated_at = $2 WHERE id = $3 RETURNING *",
                 model,
@@ -2487,10 +2496,11 @@ class RequestRepository:
         self,
         task_id: str,
         reasoning_effort: str | None,
+        org_id: str | None = None,
     ) -> dict | None:
         """Write the resolved reasoning effort back to the task record."""
         now = datetime.now(timezone.utc)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE tasks SET reasoning_effort = $1, updated_at = $2
                    WHERE id = $3 RETURNING *""",
@@ -2568,7 +2578,7 @@ class RequestRepository:
             f"  AND status NOT IN ({non_editable}) "
             "RETURNING *"
         )
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(sql, *params)
         if row:
             edited_fields = sorted(s.split(" = ")[0] for s in sets if "updated_at" not in s)
@@ -2588,7 +2598,7 @@ class RequestRepository:
         """Mark a claimed task as running."""
         now = datetime.now(timezone.utc)
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'running', updated_at = $2
@@ -2612,7 +2622,7 @@ class RequestRepository:
                         UUID(org_id),
                     )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'running', updated_at = $2
@@ -2666,7 +2676,7 @@ class RequestRepository:
         output_candidates = _dedupe_task_outputs(output_candidates)
         now = datetime.now(timezone.utc)
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'completed', result = $2,
@@ -2712,7 +2722,7 @@ class RequestRepository:
                         UUID(org_id),
                     )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'completed', result = $2,
@@ -2776,7 +2786,9 @@ class RequestRepository:
                 f"Completed ({len(result)} chars output)",
             )
             # Check if all tasks in request are done
-            await self._check_request_completion(str(task["request_id"]))
+            await self._check_request_completion(
+                str(task["request_id"]), org_id=str(task["organization_id"])
+            )
             return task
         return None
 
@@ -2795,7 +2807,7 @@ class RequestRepository:
         """
         now = datetime.now(timezone.utc)
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
@@ -2835,7 +2847,7 @@ class RequestRepository:
                         result,
                     )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
@@ -2878,7 +2890,9 @@ class RequestRepository:
                 f"Failed: {error[:200]}",
                 {"rejected_output_chars": len(result or "")},
             )
-            await self._check_request_completion(str(task["request_id"]))
+            await self._check_request_completion(
+                str(task["request_id"]), org_id=str(task["organization_id"])
+            )
             return task
         return None
 
@@ -2908,7 +2922,7 @@ class RequestRepository:
             query += f" AND claimed_by = ${len(params) + 1}"
             params.append(instance_id)
         query += " RETURNING *"
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(query, *params)
         if not row:
             return None
@@ -2930,7 +2944,7 @@ class RequestRepository:
         """Release a claimed/running task back to pending (for retry/stale recovery)."""
         now = datetime.now(timezone.utc)
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'pending', claimed_by = NULL,
@@ -2958,7 +2972,7 @@ class RequestRepository:
                         UUID(org_id),
                     )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 if instance_id:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'pending', claimed_by = NULL,
@@ -2990,7 +3004,7 @@ class RequestRepository:
         """Reset a failed or manually reviewed task back to pending for retry."""
         now = datetime.now(timezone.utc)
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'pending', claimed_by = NULL,
                        claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
@@ -3003,7 +3017,7 @@ class RequestRepository:
                     UUID(org_id),
                 )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'pending', claimed_by = NULL,
                        claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
@@ -3017,7 +3031,9 @@ class RequestRepository:
             task = dict(row)
             await self.add_task_event(task_id, "retried", "Task queued for retry")
             # If parent request was marked failed, set it back to in_progress
-            await self._ensure_request_in_progress(str(task["request_id"]))
+            await self._ensure_request_in_progress(
+                str(task["request_id"]), org_id=str(task["organization_id"])
+            )
             return task
         return None
 
@@ -3035,7 +3051,7 @@ class RequestRepository:
             query += " AND organization_id = $3"
             params.append(UUID(org_id))
         query += " RETURNING *"
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(query, *params)
         if not row:
             return None
@@ -3053,7 +3069,7 @@ class RequestRepository:
 
         now = datetime.now(timezone.utc)
         request_id = str(task["request_id"])
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             if org_id:
                 await conn.execute(
                     """UPDATE requests
@@ -3097,7 +3113,7 @@ class RequestRepository:
         """Reopen a completed task that a request review explicitly rejected."""
         now = datetime.now(timezone.utc)
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'pending', claimed_by = NULL,
                        claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
@@ -3111,7 +3127,7 @@ class RequestRepository:
                     UUID(org_id),
                 )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 row = await conn.fetchrow(
                     """UPDATE tasks SET status = 'pending', claimed_by = NULL,
                        claimed_at = NULL, claim_expires_at = NULL, last_heartbeat_at = NULL,
@@ -3127,7 +3143,7 @@ class RequestRepository:
 
         task = dict(row)
         request_id = str(task["request_id"])
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             if org_id:
                 await conn.execute(
                     """UPDATE requests SET status = $2,
@@ -3181,7 +3197,7 @@ class RequestRepository:
         """
         stale_seconds = max(60, int(stale_minutes * 60))
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 rows = await conn.fetch(
                     """WITH stale AS (
                            SELECT t.id, t.claimed_by
@@ -3241,7 +3257,7 @@ AND (
                     instance_stale_seconds,
                 )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 rows = await conn.fetch(
                     """WITH stale AS (
                            SELECT t.id, t.claimed_by
@@ -3322,7 +3338,7 @@ AND (
         """
         stale_seconds = max(60, int(stale_minutes * 60))
         if org_id:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 count = await conn.fetchval(
                     """
                     SELECT COUNT(*)
@@ -3367,7 +3383,7 @@ AND (
                     instance_stale_seconds,
                 )
         else:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 count = await conn.fetchval(
                     """
                     SELECT COUNT(*)
@@ -3421,7 +3437,7 @@ AND (
         metadata: dict | None = None,
         org_id: str | None = None,
     ) -> dict:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             if org_id:
                 task_exists = await conn.fetchval(
                     "SELECT 1 FROM tasks WHERE id = $1 AND organization_id = $2",
@@ -3447,7 +3463,7 @@ AND (
         offset: int = 0,
         org_id: str | None = None,
     ) -> dict:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             if org_id:
                 count_row = await conn.fetchrow(
                     """SELECT COUNT(*) AS total FROM task_events te
@@ -3497,7 +3513,7 @@ AND (
         relation: str = "created",
         org_id: str | None = None,
     ) -> None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             if org_id:
                 task_exists = await conn.fetchval(
                     "SELECT 1 FROM tasks WHERE id = $1 AND organization_id = $2",
@@ -3514,13 +3530,28 @@ AND (
                 )
                 if not memory_exists:
                     raise ValueError("Memory not found")
-            await conn.execute(
-                """INSERT INTO task_memories (task_id, memory_id, relation)
-                   VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
-                UUID(task_id),
-                UUID(memory_id),
-                relation,
-            )
+                await conn.execute(
+                    """INSERT INTO task_memories (task_id, memory_id, relation)
+                       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
+                    UUID(task_id),
+                    UUID(memory_id),
+                    relation,
+                )
+            else:
+                # rls: task_memories policy is EXISTS-to-parent on tasks.
+                # Without an org GUC the INSERT is fail-closed denied
+                # (p_task_memories_tenant), so the unscoped branch cannot
+                # persist cross-tenant links. Keep the statement for callers
+                # running under a pre-cutover/daemon role with explicit org
+                # context in scope; no org-conditional stamps exist on this
+                # table by schema (015_request_tracking.sql).
+                await conn.execute(
+                    """INSERT INTO task_memories (task_id, memory_id, relation)
+                       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
+                    UUID(task_id),
+                    UUID(memory_id),
+                    relation,
+                )
         await self.add_task_event(
             task_id,
             f"memory_{relation}",
@@ -3536,7 +3567,7 @@ AND (
         limit: int = 25,
         offset: int = 0,
     ) -> dict:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             if org_id:
                 count_row = await conn.fetchrow(
                     """SELECT COUNT(*) AS total
@@ -3595,19 +3626,32 @@ AND (
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
-    async def _ensure_request_in_progress(self, request_id: str) -> None:
+    async def _ensure_request_in_progress(
+        self, request_id: str, org_id: str | None = None
+    ) -> None:
         """Move request to in_progress if it's not already active.
 
         Handles pending/planned states AND failed (for retry recovery).
         """
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """UPDATE requests SET status = 'in_progress', updated_at = NOW()
-                   WHERE id = $1 AND status IN ('pending', 'planned', 'failed', 'needs_rework')""",
-                UUID(request_id),
-            )
+        async with scoped_acquire(organization_id=org_id) as conn:
+            if org_id:
+                await conn.execute(
+                    """UPDATE requests SET status = 'in_progress', updated_at = NOW()
+                       WHERE id = $1 AND status IN ('pending', 'planned', 'failed', 'needs_rework')
+                         AND organization_id = $2""",
+                    UUID(request_id),
+                    UUID(org_id),
+                )
+            else:
+                await conn.execute(
+                    """UPDATE requests SET status = 'in_progress', updated_at = NOW()
+                       WHERE id = $1 AND status IN ('pending', 'planned', 'failed', 'needs_rework')""",
+                    UUID(request_id),
+                )
 
-    async def _check_request_completion(self, request_id: str) -> None:
+    async def _check_request_completion(
+        self, request_id: str, org_id: str | None = None
+    ) -> None:
         """If all work tasks are done, move request to review (or failed).
 
         Excludes request-review meta-tasks from the completion check. We
@@ -3619,7 +3663,7 @@ AND (
         work tasks and re-trigger another review task on completion,
         producing an infinite loop.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """SELECT
                      COUNT(*) as total,
@@ -3632,7 +3676,7 @@ AND (
             )
         if row and row["total"] > 0 and row["total"] == row["done"]:
             # Check if any failed
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 failed = await conn.fetchval(
                     """SELECT COUNT(*) FROM tasks
                        WHERE request_id = $1 AND status = 'failed'
@@ -3650,7 +3694,7 @@ AND (
                 )
                 else REQUEST_STATUS_COMPLETED
             )
-            await self.update_request_status(request_id, status)
+            await self.update_request_status(request_id, status, org_id=org_id)
 
     async def reconcile_request_statuses(self, org_id: str | None = None) -> int:
         """Fix request statuses that got out of sync with their tasks.
@@ -3665,10 +3709,10 @@ AND (
         org_filter = "AND r.organization_id = $1" if org_id else ""
         params: list = [UUID(org_id)] if org_id else []
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             # Case 1: in_progress requests where all tasks are done
             rows = await conn.fetch(
-                     f"""SELECT r.id FROM requests r
+                     f"""SELECT r.id, r.organization_id FROM requests r
                          WHERE r.status = 'in_progress' {org_filter}
                    AND NOT EXISTS (
                        SELECT 1 FROM tasks t
@@ -3679,21 +3723,25 @@ AND (
                 *params,
             )
             for row in rows:
-                await self._check_request_completion(str(row["id"]))
+                await self._check_request_completion(
+                    str(row["id"]), org_id=str(row["organization_id"])
+                )
                 fixed += 1
 
                  # Case 2: pending/planned requests with active/completed tasks.
                  # Needs-rework waits for an explicit task claim, which already
                  # moves the parent request back to in_progress.
             rows = await conn.fetch(
-                f"""SELECT DISTINCT r.id FROM requests r
+                f"""SELECT DISTINCT r.id, r.organization_id FROM requests r
                    JOIN tasks t ON t.request_id = r.id
                      WHERE r.status IN ('pending', 'planned') {org_filter}
                    AND t.status IN ('claimed', 'running', 'completed')""",
                 *params,
             )
             for row in rows:
-                await self._ensure_request_in_progress(str(row["id"]))
+                await self._ensure_request_in_progress(
+                    str(row["id"]), org_id=str(row["organization_id"])
+                )
                 fixed += 1
 
         return fixed
@@ -3712,7 +3760,7 @@ AND (
         if requester_user_id is not None:
             params.extend([UUID(requester_user_id), include_system])
             visibility = " AND " + self._request_visibility_condition("$2", "$3")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             req_stats = await conn.fetchrow(
                 f"""SELECT
                      COUNT(*) as total,
@@ -3754,7 +3802,7 @@ AND (
             params.extend([UUID(requester_user_id), include_system])
             visibility = " AND " + self._request_visibility_condition("$2", "$3")
         params.append(limit)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             rows = await conn.fetch(
                 f"""SELECT te.*, t.title as task_title, t.agent_type,
                           r.title as request_title, r.id as request_id
@@ -3775,7 +3823,7 @@ AND (
     ) -> int:
         """Count visible requests waiting at the pre-work approval gate."""
         visibility = self._request_visibility_condition("$2", "$3")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             return int(
                 await conn.fetchval(
                     f"""SELECT COUNT(*) FROM requests r

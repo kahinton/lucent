@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from lucent.db.pool import scoped_acquire
 from lucent.db import MemoryRepository, get_pool
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.rbac import Role
@@ -177,6 +178,7 @@ async def load_chat_overview(user) -> dict:
     memory_access = MemoryAccessService(
         memory_repo,
         GitHubRepoAccessService(pool),
+        organization_id=user.organization_id,
         is_admin=is_admin_or_owner,
     )
     goal_result = await memory_access.search(
@@ -212,7 +214,7 @@ async def load_chat_overview(user) -> dict:
     ][:3]
 
     heartbeat_row = None
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=user.organization_id) as conn:
         goal_requests = await _load_goal_requests(conn, user.organization_id, goal_ids)
         heartbeat_row = await conn.fetchrow(
             """SELECT last_seen_at
@@ -286,6 +288,7 @@ async def dashboard(request: Request):
     memory_access = MemoryAccessService(
         memory_repo,
         GitHubRepoAccessService(pool),
+        organization_id=user.organization_id,
         is_admin=is_admin_or_owner,
     )
 
@@ -346,7 +349,7 @@ async def dashboard(request: Request):
     pending_proposals: dict = {"agents": [], "skills": [], "mcp_servers": [], "total": 0}
     proposed_sandbox_templates: list[dict] = []
 
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=user.organization_id) as conn:
         goal_requests_by_id = await _load_goal_requests(conn, user.organization_id, goal_ids)
 
         summary_row = await conn.fetchrow(
@@ -547,7 +550,7 @@ async def dashboard(request: Request):
 
     heartbeat_row = None
     if user.organization_id:
-        async with pool.acquire() as conn:
+        async with scoped_acquire(organization_id=user.organization_id) as conn:
             heartbeat_row = await conn.fetchrow(
                 """SELECT instance_id, hostname, pid, roles, status,
                           last_seen_at, metadata

@@ -7,6 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from lucent.db.pool import scoped_acquire
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_SCHEDULE
 from lucent.rbac import Role
@@ -42,7 +43,7 @@ async def _schedule_owner_context(
     if sched.get("is_system"):
         from lucent.daemon_identity import ensure_daemon_service_user
 
-        async with pool.acquire() as conn:
+        async with pool.acquire() as conn:  # rls: users exempt — daemon-service identity resolution
             daemon_user = await ensure_daemon_service_user(
                 conn, str(sched["organization_id"])
             )
@@ -65,7 +66,7 @@ async def _schedule_owner_context(
             if not sched.get("is_system") and owner_is_daemon:
                 if fallback_user is not None and not _is_daemon_user(fallback_user):
                     return str(fallback_user.id), str(fallback_user.role)
-                async with pool.acquire() as conn:
+                async with pool.acquire() as conn:  # rls: users exempt
                     human_owner = await conn.fetchrow(
                         """SELECT id::text, role
                            FROM users
@@ -515,6 +516,7 @@ async def _trigger_schedule_execution(
         schedule_id,
         force=force,
         advance_schedule=advance_schedule,
+        org_id=org_id,
     )
     if run is None:
         return {"schedule": sched, "workflow": sched, "already_fired": True}
@@ -526,7 +528,7 @@ async def _trigger_schedule_execution(
 
     try:
         if task_actions and not _workflow_allows_concurrent(sched):
-            async with pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 active_request = await conn.fetchval(
                     """SELECT id FROM requests
                        WHERE title = $1
@@ -544,6 +546,7 @@ async def _trigger_schedule_execution(
                 await sched_repo.complete_run(
                     str(run["id"]),
                     result=f"Skipped: active request {str(active_request)} already exists",
+                    org_id=org_id,
                 )
                 return {
                     "schedule": sched,
@@ -567,7 +570,9 @@ async def _trigger_schedule_execution(
                     "candidate_count": 0,
                 }
                 logger.info(json.dumps(skip_event, sort_keys=True))
-                await sched_repo.complete_run(str(run["id"]), result=json.dumps(skip_event))
+                await sched_repo.complete_run(
+                    str(run["id"]), result=json.dumps(skip_event), org_id=org_id
+                )
                 return {
                     "schedule": sched,
                     "workflow": sched,
@@ -701,7 +706,7 @@ async def _trigger_schedule_execution(
                 )
                 created_tasks.append(task)
 
-            await sched_repo.link_run_to_request(str(run["id"]), str(req["id"]))
+            await sched_repo.link_run_to_request(str(run["id"]), str(req["id"]), org_id=org_id)
 
         created_interactions = []
         for action in interaction_actions:
@@ -725,10 +730,11 @@ async def _trigger_schedule_execution(
             await sched_repo.complete_run(
                 str(run["id"]),
                 result=f"Sent {len(created_interactions)} Handoff interaction(s)",
+                org_id=org_id,
             )
     except Exception as e:
         logger.error("Workflow %s triggered but task creation failed: %s", schedule_id, e)
-        await sched_repo.fail_run(str(run["id"]), str(e))
+        await sched_repo.fail_run(str(run["id"]), str(e), org_id=org_id)
         raise HTTPException(500, f"Workflow advanced but task creation failed: {e}")
 
     return {
@@ -982,7 +988,7 @@ async def list_runs(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_
     )
     if not sched:
         raise HTTPException(404, "Schedule not found")
-    return await repo.list_runs(schedule_id)
+    return await repo.list_runs(schedule_id, org_id=str(user.organization_id))
 
 
 @router.post("/{schedule_id}/trigger")

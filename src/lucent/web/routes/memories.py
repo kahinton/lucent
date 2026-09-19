@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from lucent.db.pool import scoped_acquire
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import (
     AccessRepository,
@@ -33,6 +34,7 @@ def _build_memory_access(pool, user) -> MemoryAccessService:
     return MemoryAccessService(
         MemoryRepository(pool),
         GitHubRepoAccessService(pool),
+        organization_id=user.organization_id,
         is_admin=user.role in (Role.ADMIN, Role.OWNER),
     )
 
@@ -396,15 +398,14 @@ async def memory_detail(request: Request, memory_id: UUID):
         memory_id=memory_id,
         access_type="view",
         user_id=user.id,
-        organization_id=user.organization_id,
-    )
+       )
 
     # Keep the detail page readable. Dedicated audit/version APIs can expose
     # deeper history when needed; the page should show a compact recent trail.
-    audit = await audit_repo.get_by_memory_id(memory_id, limit=6)
+    audit = await audit_repo.get_by_memory_id(memory_id, limit=6, organization_id=user.organization_id, user_id=user.id)
 
     # Get version history
-    versions = await audit_repo.get_versions(memory_id, limit=8)
+    versions = await audit_repo.get_versions(memory_id, limit=8, organization_id=user.organization_id, user_id=user.id)
 
     # Access count (includes this view)
     counts = await access_repo.get_access_counts([memory_id])
@@ -679,7 +680,7 @@ async def _get_web_access_managed_memory(
     repo: MemoryRepository, memory_id: UUID, user
 ) -> dict:
     """Return a memory when the current web user may administer its grants."""
-    memory = await repo.get(memory_id)
+    memory = await repo.get(memory_id, organization_id=user.organization_id, user_id=user.id)
     if memory is None or memory.get("organization_id") != user.organization_id:
         raise HTTPException(status_code=404, detail="Memory not found")
     if memory.get("user_id") != user.id and user.role not in (Role.ADMIN, Role.OWNER):
@@ -869,7 +870,7 @@ async def memory_delete(request: Request, memory_id: UUID):
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only delete your own memories")
 
-    await repo.delete(memory_id)
+    await repo.delete(memory_id, organization_id=user.organization_id, user_id=user.id)
 
     await audit_repo.log(
         memory_id=memory_id,
@@ -920,7 +921,7 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
         return RedirectResponse(f"/memories/{memory_id}", status_code=303)
 
     # Get the snapshot for the target version
-    version_entry = await audit_repo.get_version_snapshot(memory_id, version)
+    version_entry = await audit_repo.get_version_snapshot(memory_id, version, organization_id=user.organization_id, user_id=user.id)
     if version_entry is None:
         raise HTTPException(status_code=404, detail=f"Version {version} not found")
 
@@ -1004,7 +1005,7 @@ async def knowledge_tree(request: Request):
                                  metadata->>'directory' NULLS FIRST,
                                  metadata->>'filename' NULLS FIRST
     """
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=user.organization_id, user_id=user.id) as conn:
         rows = await conn.fetch(query, str(user.id), str(user.organization_id))
 
     # Validate repo existence — batch check unique repos in parallel
@@ -1193,7 +1194,7 @@ async def scan_repo(request: Request):
     req_repo = RequestRepository(pool)
 
     # Check if there's already an active scan for this repo
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=user.organization_id) as conn:
         existing = await conn.fetchval(
             """SELECT id FROM requests
                WHERE target_repo = $1

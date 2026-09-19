@@ -59,6 +59,7 @@ async def audit_logs(
             action_type=action_type,
             offset=offset,
             limit=limit,
+            user_id=user.id,
         )
         action_types = ["create", "update", "delete", "share", "unshare"]
         entries = result["entries"]

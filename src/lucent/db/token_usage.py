@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 
 def _uuid(value: str | UUID | None) -> UUID | None:
@@ -41,7 +42,7 @@ class TokenUsageRepository:
                 "reasoning_tokens",
             )
         }
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO llm_token_usage (
                        organization_id, user_id, session_id, turn_id, message_id,
@@ -101,7 +102,7 @@ class TokenUsageRepository:
             ORDER BY created_at DESC
             LIMIT 1
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(sql, *params)
         return dict(row) if row else {}
 
@@ -169,7 +170,7 @@ class TokenUsageRepository:
             ) u LEFT JOIN users ON users.id = u.user_id
             ORDER BY u.input_tokens + u.output_tokens DESC, user_name, u.model
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             summary = await conn.fetchrow(summary_sql, *params)
             models = await conn.fetch(model_sql, *params)
             user_models = await conn.fetch(user_model_sql, *params)

@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 _SECRET_KEY_RE = re.compile(
     r"(authorization|api[_-]?key|token|secret|password|cookie|credential)",
@@ -106,6 +107,8 @@ class ToolAuditRepository:
         error_code: str | None = None,
         context: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        organization_id: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         """Insert one audit row, enriching from linked session/task when possible."""
         if status not in {"success", "failed", "blocked"}:
@@ -114,8 +117,12 @@ class ToolAuditRepository:
         session_id = _uuid_or_none(ctx.get("session_id"))
         task_id = _uuid_or_none(ctx.get("task_id"))
         request_id = _uuid_or_none(ctx.get("request_id"))
+        if organization_id is None:
+            organization_id = ctx.get("organization_id")
+        if user_id is None:
+            user_id = ctx.get("user_id")
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id, role="daemon" if not organization_id else None) as conn:
             if session_id:
                 row = await conn.fetchrow(
                     """SELECT organization_id, user_id, agent_definition_id,
@@ -227,7 +234,7 @@ class ToolAuditRepository:
         since_days = max(1, min(int(since_days or 7), 90))
         min_failures = max(2, min(int(min_failures or 3), 100))
         limit = max(1, min(int(limit or 20), 100))
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             rows = await conn.fetch(
                 """SELECT id, created_at, organization_id, user_id, session_id,
                           request_id, task_id, agent_definition_id, agent_type,

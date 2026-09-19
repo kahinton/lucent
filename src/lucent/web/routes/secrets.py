@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from lucent.access_control import AccessControlService
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import GroupRepository, get_pool
+from lucent.db.pool import scoped_acquire
 from lucent.secrets import SecretRegistry, SecretScope
 
 from ._shared import _check_csrf, get_user_context, templates
@@ -39,7 +40,10 @@ async def secrets_page(
     org_id = UUID(str(user.organization_id))
     user_id = UUID(str(user.id))
 
-    async with pool.acquire() as conn:
+    # rls: secrets is RLS-bound (shape b). The authenticated user's org is
+    # threaded in; the role GUC carries member-level visibility, with the
+    # admin/owner override preserved in the query predicate itself.
+    async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
         count_row = await conn.fetchrow(
             """
             SELECT COUNT(*) AS total

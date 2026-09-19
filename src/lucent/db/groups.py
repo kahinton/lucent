@@ -11,6 +11,7 @@ from uuid import UUID
 from asyncpg import Pool
 
 from lucent.access_control import AccessControlService
+from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class GroupRepository:
         created_by: str | None = None,
     ) -> dict:
         """Create a new group within an organization."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO groups (name, description, organization_id, created_by)
                    VALUES ($1, $2, $3, $4)
@@ -45,7 +46,7 @@ class GroupRepository:
 
     async def get_group(self, group_id: str, org_id: str) -> dict | None:
         """Get a group by ID, scoped to organization."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM groups WHERE id = $1 AND organization_id = $2",
                 UUID(group_id),
@@ -57,7 +58,7 @@ class GroupRepository:
         self, org_id: str, limit: int = 25, offset: int = 0
     ) -> dict:
         """List groups in an organization with pagination."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             count_row = await conn.fetchrow(
                 "SELECT COUNT(*) AS total FROM groups WHERE organization_id = $1",
                 UUID(org_id),
@@ -104,12 +105,13 @@ class GroupRepository:
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(query, *params)
         return dict(row) if row else None
 
     async def delete_group(self, group_id: str, org_id: str) -> bool:
         """Delete a group. Returns True if deleted, False if not found."""
+        # rls: groups is on migration 116's global-exempt list.
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 "DELETE FROM groups WHERE id = $1 AND organization_id = $2",
@@ -126,7 +128,7 @@ class GroupRepository:
         """Add a user to a group. Raises on duplicate or invalid role."""
         if role not in ("member", "admin"):
             raise ValueError(f"Invalid role '{role}'. Must be 'member' or 'admin'.")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO user_groups (user_id, group_id, role)
                    VALUES ($1, $2, $3)
@@ -140,7 +142,7 @@ class GroupRepository:
 
     async def remove_member(self, group_id: str, user_id: str) -> bool:
         """Remove a user from a group. Returns True if removed."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             result = await conn.execute(
                 "DELETE FROM user_groups WHERE group_id = $1 AND user_id = $2",
                 UUID(group_id),
@@ -156,7 +158,7 @@ class GroupRepository:
         """Update a member's role in a group."""
         if role not in ("member", "admin"):
             raise ValueError(f"Invalid role '{role}'. Must be 'member' or 'admin'.")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """UPDATE user_groups SET role = $1
                    WHERE group_id = $2 AND user_id = $3
@@ -171,7 +173,7 @@ class GroupRepository:
 
     async def list_members(self, group_id: str, org_id: str) -> list[dict]:
         """List members of a group with user details."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             # Verify group belongs to org
             group = await conn.fetchrow(
                 "SELECT id FROM groups WHERE id = $1 AND organization_id = $2",
@@ -193,7 +195,7 @@ class GroupRepository:
 
     async def get_user_groups(self, user_id: str, org_id: str) -> list[dict]:
         """Get all groups a user belongs to within an organization."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             rows = await conn.fetch(
                 """SELECT g.id, g.name, g.description, ug.role, ug.created_at AS joined_at
                    FROM user_groups ug
@@ -207,7 +209,7 @@ class GroupRepository:
 
     async def get_user_group_ids(self, user_id: str) -> list[str]:
         """Get all group IDs a user belongs to (across all orgs)."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             rows = await conn.fetch(
                 "SELECT group_id FROM user_groups WHERE user_id = $1",
                 UUID(user_id),
@@ -216,7 +218,7 @@ class GroupRepository:
 
     async def is_member(self, user_id: str, group_id: str) -> bool:
         """Check if a user is a member of a group."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 "SELECT 1 FROM user_groups WHERE user_id = $1 AND group_id = $2",
                 UUID(user_id),
@@ -226,7 +228,7 @@ class GroupRepository:
 
     async def is_group_admin(self, user_id: str, group_id: str) -> bool:
         """Check if a user is an admin of a group."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(user_id=user_id) as conn:
             row = await conn.fetchrow(
                 "SELECT 1 FROM user_groups WHERE user_id = $1 AND group_id = $2 AND role = 'admin'",
                 UUID(user_id),

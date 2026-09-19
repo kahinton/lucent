@@ -13,6 +13,7 @@ import bcrypt
 from asyncpg import Pool
 
 from lucent.logging import get_logger
+from lucent.db.pool import preauth_guc_preamble, scoped_acquire, scoped_acquire_on, tenant_guc_scrub
 
 logger = get_logger(__name__)
 
@@ -50,7 +51,7 @@ class ApiKeyRepository:
             ValueError: If a key with this name already exists for this user.
         """
         # Check for existing active key with this name
-        existing = await self.get_by_name(user_id, name)
+        existing = await self.get_by_name(user_id, name, organization_id=organization_id)
         if existing:
             raise ValueError(f"An API key named '{name}' already exists")
 
@@ -72,7 +73,9 @@ class ApiKeyRepository:
                       memory_scope_user_id, memory_scope
         """
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             row = await conn.fetchrow(
                 query,
                 str(user_id),
@@ -90,7 +93,12 @@ class ApiKeyRepository:
         logger.info("API key created: name=%s, user=%s, prefix=%s", name, user_id, key_prefix)
         return result
 
-    async def get_by_name(self, user_id: UUID, name: str) -> dict[str, Any] | None:
+    async def get_by_name(
+        self,
+        user_id: UUID,
+        name: str,
+        organization_id: UUID | None,
+    ) -> dict[str, Any] | None:
         """Get an active API key by name for a user.
 
         Args:
@@ -105,11 +113,16 @@ class ApiKeyRepository:
                    last_used_at, use_count, expires_at, is_active, created_at, updated_at,
                    memory_scope_user_id, memory_scope
             FROM api_keys
-            WHERE user_id = $1 AND name = $2 AND revoked_at IS NULL
+            WHERE user_id = $1 AND name = $2 AND organization_id = $3 AND revoked_at IS NULL
         """
 
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, str(user_id), name)
+        # rls: api_keys is RLS-bound (shape a). verify() runs pre-auth (no
+        # tenant context exists yet), so it reverts to raw; these lookup
+        # helpers run post-auth with the caller's org threaded in.
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
+            row = await conn.fetchrow(query, str(user_id), name, str(organization_id))
 
         if row is None:
             return None
@@ -143,11 +156,15 @@ class ApiKeyRepository:
               AND ak.is_active = true
               AND ak.revoked_at IS NULL
               AND u.is_active = true
-                            AND ak.organization_id = u.organization_id
+              AND ak.organization_id = u.organization_id
         """
 
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(query, key_prefix)
+            await conn.execute(preauth_guc_preamble())
+            try:
+                rows = await conn.fetch(query, key_prefix)
+            finally:
+                await conn.execute(tenant_guc_scrub())
 
         if not rows:
             return None
@@ -176,8 +193,15 @@ class ApiKeyRepository:
             SET last_used_at = NOW(), use_count = use_count + 1
             WHERE id = $1
         """
-        async with self.pool.acquire() as conn:
-            await conn.execute(update_query, matched_row["id"])
+        organization_id = matched_row["organization_id"]
+        if organization_id:
+            async with scoped_acquire_on(
+                self.pool,
+                organization_id=organization_id,
+                user_id=matched_row["user_id"],
+                role=matched_row["user_role"],
+            ) as conn:
+                await conn.execute(update_query, matched_row["id"])
 
         result = self._row_to_dict(matched_row)
         result["user_email"] = matched_row["user_email"]
@@ -187,7 +211,14 @@ class ApiKeyRepository:
         result["memory_scope"] = matched_row["memory_scope"]
         return result
 
-    async def list_by_user(self, user_id: UUID, limit: int = 25, offset: int = 0) -> dict:
+    async def list_by_user(
+        self,
+        user_id: UUID,
+        limit: int = 25,
+        offset: int = 0,
+        *,
+        organization_id: UUID | None = None,
+    ) -> dict:
         """List all API keys for a user.
 
         Args:
@@ -200,22 +231,24 @@ class ApiKeyRepository:
         """
         count_query = """
             SELECT COUNT(*) AS total FROM api_keys
-            WHERE user_id = $1 AND revoked_at IS NULL
+            WHERE user_id = $1 AND organization_id = $2 AND revoked_at IS NULL
         """
         query = """
             SELECT id, user_id, organization_id, name, key_prefix, scopes,
                    last_used_at, use_count, expires_at, is_active, created_at, updated_at,
                    memory_scope_user_id, memory_scope
             FROM api_keys
-            WHERE user_id = $1 AND revoked_at IS NULL
+            WHERE user_id = $1 AND organization_id = $2 AND revoked_at IS NULL
             ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
+            LIMIT $3 OFFSET $4
         """
 
-        async with self.pool.acquire() as conn:
-            count_row = await conn.fetchrow(count_query, str(user_id))
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
+            count_row = await conn.fetchrow(count_query, str(user_id), str(organization_id))
             total_count = count_row["total"] if count_row else 0
-            rows = await conn.fetch(query, str(user_id), limit, offset)
+            rows = await conn.fetch(query, str(user_id), str(organization_id), limit, offset)
 
         return {
             "items": [self._row_to_dict(row) for row in rows],
@@ -225,7 +258,9 @@ class ApiKeyRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
-    async def get_by_id(self, key_id: UUID, user_id: UUID) -> dict[str, Any] | None:
+    async def get_by_id(
+        self, key_id: UUID, user_id: UUID, organization_id: UUID | None = None
+    ) -> dict[str, Any] | None:
         """Get an API key by ID (must belong to user).
 
         Args:
@@ -240,18 +275,26 @@ class ApiKeyRepository:
                    last_used_at, use_count, expires_at, is_active, created_at, updated_at,
                    memory_scope_user_id, memory_scope
             FROM api_keys
-            WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+            WHERE id = $1 AND user_id = $2 AND organization_id = $3 AND revoked_at IS NULL
         """
 
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, str(key_id), str(user_id))
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
+            row = await conn.fetchrow(query, str(key_id), str(user_id), str(organization_id))
 
         if row is None:
             return None
 
         return self._row_to_dict(row)
 
-    async def revoke(self, key_id: UUID, user_id: UUID) -> bool:
+    async def revoke(
+        self,
+        key_id: UUID,
+        user_id: UUID,
+        *,
+        organization_id: UUID | None = None,
+    ) -> bool:
         """Revoke an API key.
 
         Args:
@@ -264,18 +307,27 @@ class ApiKeyRepository:
         query = """
             UPDATE api_keys
             SET is_active = false, revoked_at = NOW()
-            WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+            WHERE id = $1 AND user_id = $2 AND organization_id = $3 AND revoked_at IS NULL
             RETURNING id
         """
 
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchrow(query, str(key_id), str(user_id))
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
+            result = await conn.fetchrow(query, str(key_id), str(user_id), str(organization_id))
 
         if result is not None:
             logger.info("API key revoked: id=%s, user=%s", key_id, user_id)
         return result is not None
 
-    async def update_name(self, key_id: UUID, user_id: UUID, name: str) -> dict[str, Any] | None:
+    async def update_name(
+        self,
+        key_id: UUID,
+        user_id: UUID,
+        name: str,
+        *,
+        organization_id: UUID | None = None,
+    ) -> dict[str, Any] | None:
         """Update an API key's name.
 
         Args:
@@ -289,14 +341,16 @@ class ApiKeyRepository:
         query = """
             UPDATE api_keys
             SET name = $1, updated_at = NOW()
-            WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL
+            WHERE id = $2 AND user_id = $3 AND organization_id = $4 AND revoked_at IS NULL
             RETURNING id, user_id, organization_id, name, key_prefix, scopes,
                       last_used_at, use_count, expires_at, is_active, created_at, updated_at,
                       memory_scope_user_id, memory_scope
         """
 
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, name, str(key_id), str(user_id))
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
+            row = await conn.fetchrow(query, name, str(key_id), str(user_id), str(organization_id))
 
         if row is None:
             return None

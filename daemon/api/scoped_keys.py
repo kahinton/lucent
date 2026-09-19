@@ -18,11 +18,13 @@ async def mint_scoped_api_key(
     import secrets
 
     import asyncpg
+
+    from daemon.db_scope import connect_scoped
     import bcrypt
     from daemon.runtime.module_proxy import runtime
 
     try:
-        connection = await asyncpg.connect(runtime.DATABASE_URL)
+        connection = await connect_scoped(runtime.DATABASE_URL, organization_id=org_id)
     except Exception as error:
         runtime.log(f"DB connect failed minting scoped key: {error}", "WARN")
         return None

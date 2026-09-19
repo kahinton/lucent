@@ -20,6 +20,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from lucent.db.pool import scoped_acquire
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.rbac import Role
 
@@ -146,7 +147,7 @@ async def create_review(
         resolved_source = "agent"
 
     repo = ReviewRepository(pool)
-    async with pool.acquire() as conn:
+    async with scoped_acquire(organization_id=org_id) as conn:
         async with conn.transaction():
             review = await repo.create_review(
                 request_id=body.request_id,

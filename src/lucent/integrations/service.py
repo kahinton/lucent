@@ -32,6 +32,7 @@ from lucent.db.audit import (
     RESOLUTION_FAILED,
     AuditRepository,
 )
+from lucent.db.pool import scoped_acquire
 from lucent.db.user import UserRepository
 from lucent.integrations.base import IntegrationAdapter, IntegrationError
 from lucent.integrations.identity import IdentityResolver, PairingChallengeService
@@ -130,17 +131,22 @@ class IntegrationService:
         integration_id: str,
         external_user_id: str,
         external_workspace_id: str | None = None,
+        organization_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Look up the Lucent user linked to an external platform identity.
 
         Finds the active user_link matching the integration and external user,
         then loads the full user record.
 
+        organization_id binds the RLS tenant GUC for the user_links read
+        (shape a policy); callers in the webhook pipeline pass the
+        integration's org. Without it the lookup is fail-closed empty.
+
         Returns:
             The user record dict, or None if no active link exists.
         """
         # Query user_links by integration + external_user_id
-        async with self._pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 SELECT * FROM user_links
@@ -620,7 +626,9 @@ class IntegrationService:
         finally:
             await bridge.close()
             if key_id:
-                await self._revoke_mcp_key(key_id)
+                await self._revoke_mcp_key(
+                    key_id, org_id=str(user["organization_id"])
+                )
 
     async def _create_user_scoped_mcp_key(
         self,
@@ -648,9 +656,9 @@ class IntegrationService:
             logger.exception("Failed to create integration MCP scoped key")
             return None, None
 
-    async def _revoke_mcp_key(self, key_id: UUID) -> None:
+    async def _revoke_mcp_key(self, key_id: UUID, org_id: str | None = None) -> None:
         try:
-            async with self._pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id) as conn:
                 await conn.execute(
                     """
                     UPDATE api_keys

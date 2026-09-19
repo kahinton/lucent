@@ -21,6 +21,7 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 VALID_INTERACTION_SOURCES = {
     "daemon",
@@ -206,7 +207,7 @@ class UserInteractionRepository:
         normalized_refs = _normalize_references(references)
         metadata = _json_dict(metadata)
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 if dedupe_key:
                     existing = await conn.fetchrow(
@@ -378,7 +379,7 @@ class UserInteractionRepository:
                 i.created_at DESC
             LIMIT ${limit_idx} OFFSET ${offset_idx}
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(count_query, *params)
             rows = await conn.fetch(query, *params_for_query)
         return {
@@ -395,7 +396,7 @@ class UserInteractionRepository:
         org_id: str | UUID,
         user_id: str | UUID,
     ) -> int:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             count = await conn.fetchval(
                 """SELECT COUNT(*)
                    FROM user_interactions i
@@ -431,7 +432,7 @@ class UserInteractionRepository:
         *,
         user_id: str | UUID | None = None,
     ) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             return await self._get_interaction_detail_locked(
                 conn,
                 str(interaction_id),
@@ -496,7 +497,7 @@ class UserInteractionRepository:
             raise ValueError("Message body is required")
         now = datetime.now(timezone.utc)
         metadata = _json_dict(metadata)
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 existing = await conn.fetchrow(
                     """SELECT * FROM user_interactions
@@ -566,7 +567,7 @@ class UserInteractionRepository:
         org_id: str | UUID,
         user_id: str | UUID,
     ) -> dict[str, Any] | None:
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO user_interaction_views (
                        interaction_id, user_id, organization_id,
@@ -638,7 +639,7 @@ class UserInteractionRepository:
         if user_id is not None:
             params.append(str(user_id))
             user_clause = f" AND user_id = ${len(params)}::uuid"
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 updated = await conn.fetchrow(
                     f"""UPDATE user_interactions

@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
+from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class SandboxRepository:
         created_by: str | None = None,
     ) -> dict:
         """Insert a new sandbox record."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO sandboxes
@@ -79,6 +80,7 @@ class SandboxRepository:
         ready_at: datetime | None = None,
         stopped_at: datetime | None = None,
         destroyed_at: datetime | None = None,
+        organization_id: str | None = None,
     ) -> dict | None:
         """Update sandbox status and optional metadata."""
         sets = ["status = $2", "updated_at = NOW()"]
@@ -106,16 +108,20 @@ class SandboxRepository:
             params.append(destroyed_at)
             idx += 1
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=organization_id, role="system" if not organization_id else None
+        ) as conn:
             row = await conn.fetchrow(
                 f"UPDATE sandboxes SET {', '.join(sets)} WHERE id = $1 RETURNING *",
                 *params,
             )
             return dict(row) if row else None
 
-    async def get(self, sandbox_id: str) -> dict | None:
+    async def get(self, sandbox_id: str, organization_id: str | None = None) -> dict | None:
         """Get a sandbox by ID."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=organization_id, role="system" if not organization_id else None
+        ) as conn:
             row = await conn.fetchrow("SELECT * FROM sandboxes WHERE id = $1", UUID(sandbox_id))
             return dict(row) if row else None
 
@@ -132,7 +138,7 @@ class SandboxRepository:
         Requiring an earlier sequence level prevents two parallel tasks in the
         same batch from accidentally sharing a mutable workspace.
         """
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(
                 """SELECT * FROM sandboxes
                    WHERE request_id = $1
@@ -172,7 +178,7 @@ class SandboxRepository:
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total FROM sandboxes {where}",
                 *params,
@@ -193,7 +199,7 @@ class SandboxRepository:
 
     async def list_active(self, organization_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
         """List non-destroyed sandboxes."""
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             if organization_id:
                 count_row = await conn.fetchrow(
                     "SELECT COUNT(*) AS total FROM sandboxes WHERE status != 'destroyed' AND organization_id = $1",

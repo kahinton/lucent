@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class LLMSessionRepository:
     ) -> dict:
         if kind not in _VALID_SESSION_KINDS:
             raise ValueError(f"Invalid LLM session kind: {kind}")
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO llm_sessions (
                        organization_id, user_id, kind, status, title, summary,
@@ -211,6 +212,7 @@ class LLMSessionRepository:
         org_id: str | UUID,
         *,
         user_id: str | UUID | None = None,
+        requester_role: str | None = None,
         include_archived: bool = False,
     ) -> dict | None:
         clauses = ["id = $1", "organization_id = $2"]
@@ -221,7 +223,11 @@ class LLMSessionRepository:
         if not include_archived:
             clauses.append("status <> 'deleted'")
         query = f"SELECT * FROM llm_sessions WHERE {' AND '.join(clauses)}"
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=org_id,
+            user_id=user_id,
+            role=requester_role,
+        ) as conn:
             row = await conn.fetchrow(query, *params)
         return dict(row) if row else None
 
@@ -267,7 +273,7 @@ class LLMSessionRepository:
             "ORDER BY COALESCE(s.last_message_at, s.updated_at, s.created_at) DESC "
             f"LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
         )
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             total = await conn.fetchval(count_query, *params)
             rows = await conn.fetch(query, *params, limit, offset)
         return {
@@ -343,7 +349,7 @@ class LLMSessionRepository:
             f"UPDATE llm_sessions SET {', '.join(sets)} "
             f"WHERE {' AND '.join(clauses)} RETURNING *"
         )
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(query, *params)
         return dict(row) if row else None
 
@@ -352,10 +358,16 @@ class LLMSessionRepository:
         session_id: str | UUID,
         org_id: str | UUID,
         *,
+        user_id: str | UUID | None = None,
         provider_session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict | None:
-        existing = await self.get_session(session_id, org_id, include_archived=True)
+        existing = await self.get_session(
+            session_id,
+            org_id,
+            user_id=user_id,
+            include_archived=True,
+        )
         if not existing:
             return None
         merged = dict(existing.get("provider_metadata") or {})
@@ -364,6 +376,7 @@ class LLMSessionRepository:
         return await self.update_session(
             session_id,
             org_id,
+            user_id=user_id,
             provider_session_id=provider_session_id or existing.get("provider_session_id"),
             provider_metadata=merged,
             status="idle",
@@ -376,20 +389,25 @@ class LLMSessionRepository:
         role: str,
         content: str,
         org_id: str | UUID,
+        user_id: str | UUID | None = None,
         turn_id: str | UUID | None = None,
         provider_message_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
         if role not in _VALID_MESSAGE_ROLES:
             raise ValueError(f"Invalid LLM message role: {role}")
-        async with self.pool.acquire() as conn:
+        clauses = ["id = $1", "organization_id = $2"]
+        params: list[Any] = [_uuid(session_id), _uuid(org_id)]
+        if user_id is not None:
+            params.append(_uuid(user_id))
+            clauses.append(f"user_id = ${len(params)}")
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 session = await conn.fetchrow(
-                    """SELECT id, title, project_id FROM llm_sessions
-                       WHERE id = $1 AND organization_id = $2
+                    f"""SELECT id, title, project_id FROM llm_sessions
+                       WHERE {' AND '.join(clauses)}
                        FOR UPDATE""",
-                    _uuid(session_id),
-                    _uuid(org_id),
+                    *params,
                 )
                 if not session:
                     raise ValueError("LLM session not found")
@@ -435,12 +453,17 @@ class LLMSessionRepository:
         session_id: str | UUID,
         org_id: str | UUID,
         *,
+        user_id: str | UUID | None = None,
+        requester_role: str | None = None,
         roles: set[str] | None = None,
         limit: int = 200,
         before_sequence: int | None = None,
     ) -> list[dict]:
         params: list[Any] = [_uuid(session_id), _uuid(org_id)]
         clauses = ["m.session_id = $1", "s.organization_id = $2"]
+        if user_id is not None:
+            params.append(_uuid(user_id))
+            clauses.append(f"s.user_id = ${len(params)}")
         if roles:
             invalid = roles - _VALID_MESSAGE_ROLES
             if invalid:
@@ -458,7 +481,11 @@ class LLMSessionRepository:
             "ORDER BY m.sequence "
             f"LIMIT ${len(params)}"
         )
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=org_id,
+            user_id=user_id,
+            role=requester_role,
+        ) as conn:
             rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
 
@@ -468,6 +495,7 @@ class LLMSessionRepository:
         *,
         event_type: str,
         org_id: str | UUID,
+        user_id: str | UUID | None = None,
         message_id: str | UUID | None = None,
         turn_id: str | UUID | None = None,
         sequence: int | None = None,
@@ -478,14 +506,18 @@ class LLMSessionRepository:
         raw: dict[str, Any] | None = None,
         visible: bool = True,
     ) -> dict:
-        async with self.pool.acquire() as conn:
+        clauses = ["id = $1", "organization_id = $2"]
+        params: list[Any] = [_uuid(session_id), _uuid(org_id)]
+        if user_id is not None:
+            params.append(_uuid(user_id))
+            clauses.append(f"user_id = ${len(params)}")
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 session_exists = await conn.fetchval(
-                    """SELECT 1 FROM llm_sessions
-                       WHERE id = $1 AND organization_id = $2
+                    f"""SELECT 1 FROM llm_sessions
+                       WHERE {' AND '.join(clauses)}
                        FOR UPDATE""",
-                    _uuid(session_id),
-                    _uuid(org_id),
+                    *params,
                 )
                 if not session_exists:
                     raise ValueError("LLM session not found")
@@ -540,12 +572,17 @@ class LLMSessionRepository:
         session_id: str | UUID,
         org_id: str | UUID,
         *,
+        user_id: str | UUID | None = None,
+        requester_role: str | None = None,
         limit: int = 500,
         visible_only: bool = False,
         newest_first: bool = False,
     ) -> list[dict]:
         params: list[Any] = [_uuid(session_id), _uuid(org_id)]
         clauses = ["e.session_id = $1", "s.organization_id = $2"]
+        if user_id is not None:
+            params.append(_uuid(user_id))
+            clauses.append(f"s.user_id = ${len(params)}")
         if visible_only:
             clauses.append("e.visible = TRUE")
         params.append(limit)
@@ -559,7 +596,11 @@ class LLMSessionRepository:
             f"ORDER BY e.sequence {order} "
             f"LIMIT ${len(params)}"
         )
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=org_id,
+            user_id=user_id,
+            role=requester_role,
+        ) as conn:
             rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
 
@@ -569,6 +610,7 @@ class LLMSessionRepository:
         request_id: str | UUID,
         *,
         org_id: str | UUID,
+        user_id: str | UUID | None = None,
         message_id: str | UUID | None = None,
         event_id: str | UUID | None = None,
         relation: str = "created",
@@ -576,12 +618,16 @@ class LLMSessionRepository:
     ) -> dict | None:
         if relation not in _VALID_REQUEST_RELATIONS:
             raise ValueError(f"Invalid LLM session request relation: {relation}")
-        async with self.pool.acquire() as conn:
+        clauses = ["s.id = $1", "s.organization_id = $2"]
+        params: list[Any] = [_uuid(session_id), _uuid(org_id)]
+        if user_id is not None:
+            params.append(_uuid(user_id))
+            clauses.append(f"s.user_id = ${len(params)}")
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             async with conn.transaction():
                 session_exists = await conn.fetchval(
-                    "SELECT 1 FROM llm_sessions WHERE id = $1 AND organization_id = $2",
-                    _uuid(session_id),
-                    _uuid(org_id),
+                    f"SELECT 1 FROM llm_sessions s WHERE {' AND '.join(clauses)}",
+                    *params,
                 )
                 request_exists = await conn.fetchval(
                     "SELECT 1 FROM requests WHERE id = $1 AND organization_id = $2",
@@ -629,17 +675,25 @@ class LLMSessionRepository:
         org_id: str | UUID,
         *,
         user_id: str | UUID | None = None,
+        requester_role: str | None = None,
         include_events: bool = True,
     ) -> dict | None:
         session = await self.get_session(
             session_id,
             org_id,
             user_id=user_id,
+            requester_role=requester_role,
             include_archived=True,
         )
         if not session:
             return None
-        session["messages"] = await self.list_messages(session_id, org_id, limit=500)
+        session["messages"] = await self.list_messages(
+            session_id,
+            org_id,
+            user_id=user_id,
+            requester_role=requester_role,
+            limit=500,
+        )
         # Replay window: visible events only, newest-first, sized to the
         # 500-message turn window. Live rendering rides the full SSE stream,
         # so reload must return the events for the same recent turns — an
@@ -649,12 +703,18 @@ class LLMSessionRepository:
         events = await self.list_events(
             session_id,
             org_id,
+            user_id=user_id,
+            requester_role=requester_role,
             limit=2000,
             visible_only=True,
             newest_first=True,
         )
         session["events"] = list(reversed(events)) if include_events else []
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(
+            organization_id=org_id,
+            user_id=user_id,
+            role=requester_role,
+        ) as conn:
             rows = await conn.fetch(
                 """SELECT lsr.*, r.title AS request_title, r.status AS request_status
                    FROM llm_session_requests lsr
@@ -750,12 +810,16 @@ class LLMSessionRepository:
         existing_memory = None
         if existing_memory_id:
             try:
-                existing_memory = await memory_repo.get(UUID(str(existing_memory_id)))
+                existing_memory = await memory_repo.get(
+                    UUID(str(existing_memory_id)),
+                    organization_id=org_id,
+                    user_id=user_id,
+                )
             except ValueError:
                 existing_memory = None
 
         if not existing_memory:
-            async with self.pool.acquire() as conn:
+            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
                 row = await conn.fetchrow(
                     """SELECT id
                        FROM memories
@@ -769,7 +833,11 @@ class LLMSessionRepository:
                     str(session_id),
                 )
             if row:
-                existing_memory = await memory_repo.get(row["id"])
+                existing_memory = await memory_repo.get(
+                    row["id"],
+                    organization_id=org_id,
+                    user_id=user_id,
+                )
 
         normalized_override = (content_override or "").strip()
         if normalized_override == "NO_EXPERIENCE_NEEDED":
@@ -806,6 +874,8 @@ class LLMSessionRepository:
                 tags=tags,
                 importance=importance,
                 metadata={**existing_meta, **memory_metadata},
+                organization_id=org_id,
+                user_id=user_id,
             )
             status = "updated"
         else:
@@ -825,11 +895,15 @@ class LLMSessionRepository:
         if not memory:
             return {"status": "skipped", "reason": "memory_write_failed"}
 
-        await self._link_session_experience_to_requests(
-            memory_id=memory["id"],
-            org_id=org_id,
-            request_ids=evaluation["request_ids"],
-        )
+        try:
+            await self._link_session_experience_to_requests(
+                memory_id=memory["id"],
+                org_id=org_id,
+                user_id=user_id,
+                request_ids=evaluation["request_ids"],
+            )
+        except Exception:
+            logger.exception("Failed to link session experience memory to requests")
 
         merged = {
             **metadata,
@@ -846,6 +920,7 @@ class LLMSessionRepository:
             await self.add_event(
                 session_id,
                 org_id=org_id,
+                user_id=user_id,
                 event_type="experience_memory_captured",
                 detail=f"Session experience memory {status}: {memory['id']}",
                 raw={"memory_id": str(memory["id"]), "status": status},
@@ -919,11 +994,12 @@ class LLMSessionRepository:
         *,
         memory_id: str | UUID,
         org_id: str | UUID,
+        user_id: str | UUID | None = None,
         request_ids: list[str],
     ) -> None:
         if not request_ids:
             return
-        async with self.pool.acquire() as conn:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             for request_id in request_ids:
                 try:
                     await conn.execute(
