@@ -10,7 +10,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from starlette.requests import Request
 
-from lucent.integrations.models import IntegrationEvent
+from lucent.db.integrations_models import IntegrationEvent
 
 
 @runtime_checkable

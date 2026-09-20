@@ -6,8 +6,8 @@ import asyncio
 from typing import Any
 from uuid import UUID
 
-from lucent.db.pool import scoped_acquire
 from lucent.db.memory import MemoryRepository
+from lucent.db.github_repo_access import GitHubRepoAccessRepository
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 
 
@@ -198,13 +198,10 @@ class MemoryAccessService:
         # entries (expires_at < now) are excluded so revoked access takes
         # effect on the next page load.
         try:
-            async with scoped_acquire(organization_id=self._org_id, user_id=user_id) as conn:
-                rows = await conn.fetch(
-                    """SELECT repo_full_name FROM github_repo_access_cache
-                       WHERE user_id = $1 AND has_access = true
-                         AND expires_at > NOW()""",
-                    user_id,
-                )
+            repository = GitHubRepoAccessRepository(self.github_repo_access.pool)
+            rows = await repository.list_accessible_repo_full_names(
+                user_id=user_id, organization_id=self._org_id
+            )
         except Exception:
             # If the cache lookup fails for any reason, fall back to the
             # safest answer (no repo-tagged memories accessible).

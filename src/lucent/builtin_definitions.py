@@ -86,22 +86,17 @@ async def sync_built_in_definitions_for_all_real_orgs(pool) -> None:
     first user's registration seeds their org directly — so built-ins always
     land in the org the user actually uses, not an arbitrary first row.
     """
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT DISTINCT o.id
-            FROM organizations o
-            JOIN users u ON u.organization_id = o.id
-            WHERE o.name <> $1
-            """,
-            SYSTEM_ORG_NAME,
-        )
-    for row in rows:
+    from lucent.db.organization import OrganizationRepository
+
+    org_ids = await OrganizationRepository(pool).list_real_organization_ids(
+        system_org_name=SYSTEM_ORG_NAME
+    )
+    for org_id in org_ids:
         try:
-            await sync_built_in_definitions_for_org(pool, str(row["id"]))
+            await sync_built_in_definitions_for_org(pool, org_id)
         except Exception:
             logger.warning(
                 "Failed to sync built-in definitions for org %s",
-                row["id"],
+                org_id,
                 exc_info=True,
             )

@@ -27,7 +27,7 @@ from uuid import UUID
 import bcrypt
 from asyncpg import Pool
 
-from lucent.db import ApiKeyRepository, UserRepository, get_pool
+from lucent.db import ApiKeyRepository, AuthRepository, UserRepository, get_pool
 from lucent.logging import get_logger
 
 logger = get_logger("auth.providers")
@@ -231,21 +231,7 @@ class BasicAuthProvider(AuthProvider):
 
     async def _find_user(self, username: str) -> dict[str, Any] | None:
         """Find a user by email or display_name."""
-        query = """
-            SELECT id, external_id, provider, organization_id, email, display_name,
-                   avatar_url, provider_metadata, is_active, created_at, updated_at,
-                   last_login_at, role, password_hash, force_password_change
-            FROM users
-            WHERE (LOWER(email) = LOWER($1) OR LOWER(display_name) = LOWER($1))
-              AND is_active = true
-        """
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, username)
-
-        if row is None:
-            return None
-
-        return dict(row)
+        return await AuthRepository(self.pool).find_user_by_login(username)
 
     def get_login_fields(self) -> list[dict[str, str]]:
         return [
@@ -336,12 +322,7 @@ async def create_session(pool: Pool, user_id: UUID) -> str:
     token_hash = hash_session_token(token)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
 
-    query = """
-        INSERT INTO user_sessions (token_hash, user_id, expires_at, last_seen_at)
-        VALUES ($1, $2, $3, NOW())
-    """
-    async with pool.acquire() as conn:
-        await conn.execute(query, token_hash, str(user_id), expires_at)
+    await AuthRepository(pool).create_session(token_hash, user_id, expires_at)
 
     return token
 
@@ -365,15 +346,8 @@ async def rotate_session(pool: Pool, token: str) -> str | None:
     new_hash = hash_session_token(new_token)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
 
-    query = """
-        UPDATE user_sessions
-        SET token_hash = $1, expires_at = $2, last_seen_at = NOW()
-        WHERE token_hash = $3
-    """
-    async with pool.acquire() as conn:
-        status = await conn.execute(query, new_hash, expires_at, token_hash)
-
-    if status == "UPDATE 0":
+    rotated = await AuthRepository(pool).rotate_session(token_hash, new_hash, expires_at)
+    if not rotated:
         return None
     return new_token
 
@@ -393,31 +367,12 @@ async def validate_session(pool: Pool, token: str) -> dict[str, Any] | None:
 
     token_hash = hash_session_token(token)
 
-    query = """
-        SELECT u.id, u.external_id, u.provider, u.organization_id, u.email,
-               u.display_name, u.avatar_url, u.provider_metadata, u.is_active,
-               u.created_at, u.updated_at, u.last_login_at, u.role,
-               u.force_password_change, s.expires_at AS session_expires_at
-        FROM user_sessions s
-        JOIN users u ON u.id = s.user_id
-        WHERE s.token_hash = $1
-          AND s.expires_at > NOW()
-          AND u.is_active = true
-    """
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(query, token_hash)
-        if row is not None:
-            # Touch activity so expiry-side cleanup can use last_seen_at.
-            await conn.execute(
-                "UPDATE user_sessions SET last_seen_at = NOW() WHERE token_hash = $1",
-                token_hash,
-            )
-
-    if row is None:
+    repository = AuthRepository(pool)
+    user = await repository.validate_session(token_hash)
+    if user is None:
         return None
 
-    user = dict(row)
-    if not await organization_allows_access(pool, user):
+    if not await repository.organization_allows_access(user):
         return None
     return user
 
@@ -431,12 +386,7 @@ async def organization_allows_access(pool: Pool, user: dict[str, Any]) -> bool:
     if organization_id is None:
         return True
 
-    async with pool.acquire() as conn:
-        status = await conn.fetchval(
-            "SELECT status FROM organizations WHERE id = $1",
-            str(organization_id),
-        )
-    return status == "active"
+    return await AuthRepository(pool).organization_allows_access(user)
 
 
 async def destroy_session(pool: Pool, token: str) -> bool:
@@ -452,12 +402,7 @@ async def destroy_session(pool: Pool, token: str) -> bool:
     Returns:
         True if a session row was deleted.
     """
-    token_hash = hash_session_token(token)
-    async with pool.acquire() as conn:
-        status = await conn.execute(
-            "DELETE FROM user_sessions WHERE token_hash = $1", token_hash
-        )
-    return status != "DELETE 0"
+    return await AuthRepository(pool).destroy_session(hash_session_token(token))
 
 
 async def destroy_all_user_sessions(
@@ -474,17 +419,10 @@ async def destroy_all_user_sessions(
         user_id: The user whose sessions to destroy.
         except_token: Raw token of a session to leave intact.
     """
-    if except_token:
-        query = """
-            DELETE FROM user_sessions
-            WHERE user_id = $1 AND token_hash != $2
-        """
-        params: tuple[Any, ...] = (str(user_id), hash_session_token(except_token))
-    else:
-        query = "DELETE FROM user_sessions WHERE user_id = $1"
-        params = (str(user_id),)
-    async with pool.acquire() as conn:
-        await conn.execute(query, *params)
+    await AuthRepository(pool).destroy_all_user_sessions(
+        user_id,
+        except_token_hash=hash_session_token(except_token) if except_token else None,
+    )
 
 
 # --- Password Utilities ---
@@ -538,9 +476,7 @@ async def set_user_password(
     if error:
         raise ValueError(error)
     pw_hash = hash_password(password)
-    query = "UPDATE users SET password_hash = $1, force_password_change = $2 WHERE id = $3"
-    async with pool.acquire() as conn:
-        await conn.execute(query, pw_hash, force_change, str(user_id))
+    await AuthRepository(pool).set_user_password(user_id, pw_hash, force_change=force_change)
 
 
 async def admin_reset_password(pool: Pool, user_id: UUID) -> str:
@@ -564,9 +500,7 @@ async def admin_reset_password(pool: Pool, user_id: UUID) -> str:
 
 async def clear_force_password_change(pool: Pool, user_id: UUID) -> None:
     """Clear the force_password_change flag after user sets a new password."""
-    query = "UPDATE users SET force_password_change = false WHERE id = $1"
-    async with pool.acquire() as conn:
-        await conn.execute(query, str(user_id))
+    await AuthRepository(pool).clear_force_password_change(user_id)
 
 
 # --- Provider Factory ---
@@ -627,19 +561,7 @@ async def is_first_run(pool: Pool) -> bool:
     Returns:
         True if no active human users exist in the database.
     """
-    query = """
-        SELECT EXISTS(
-            SELECT 1
-            FROM users
-            WHERE is_active = TRUE
-              AND role <> 'daemon'
-              AND COALESCE(external_id, '') NOT LIKE '%-service%'
-              AND COALESCE(email, '') NOT LIKE '%@lucent.local'
-            LIMIT 1
-        )
-    """
-    async with pool.acquire() as conn:
-        return not await conn.fetchval(query)
+    return not await AuthRepository(pool).has_active_human_user()
 
 
 async def create_initial_user(

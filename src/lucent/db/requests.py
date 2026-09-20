@@ -602,6 +602,37 @@ class RequestRepository:
     def __init__(self, pool: Pool):
         self.pool = pool
 
+    async def get_active_goal_linked_memory_ids(
+        self,
+        memory_ids: list[UUID],
+        *,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
+        statuses: list[str],
+    ) -> set[UUID]:
+        """Return memories currently linked to active request work as goals."""
+        if not memory_ids:
+            return set()
+
+        placeholders = ", ".join(f"${idx + 1}" for idx in range(len(memory_ids)))
+        status_param = len(memory_ids) + 1
+        query = f"""
+            SELECT DISTINCT rm.memory_id
+            FROM request_memories rm
+            JOIN requests r ON r.id = rm.request_id
+            WHERE rm.memory_id IN ({placeholders})
+              AND rm.relation = 'goal'
+              AND r.status = ANY(${status_param})
+        """
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
+            rows = await conn.fetch(query, *memory_ids, statuses)
+        return {
+            row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
+            for row in rows
+        }
+
     # ── Daemon Instance Registry ───────────────────────────────────────────
 
     async def register_instance(

@@ -445,12 +445,7 @@ class SandboxManager:
     async def _revoke_api_key(self, key_id: UUID) -> None:
         pool = await self._pool()
         try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
-                    "WHERE id = $1 AND revoked_at IS NULL",
-                    key_id,
-                )
+            await ApiKeyRepository(pool).revoke_by_id(key_id)
         except Exception as e:
             logger.warning("Failed to revoke sandbox API key %s: %s", str(key_id)[:8], e)
 

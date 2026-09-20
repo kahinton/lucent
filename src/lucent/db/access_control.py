@@ -1,0 +1,254 @@
+"""Access-control queries for ownership and group-based resource visibility."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
+
+import asyncpg
+
+
+RESOURCE_TABLE_MAP: dict[str, str] = {
+    "agent": "agent_definitions",
+    "agents": "agent_definitions",
+    "skill": "skill_definitions",
+    "skills": "skill_definitions",
+    "mcp_server": "mcp_server_configs",
+    "mcp_servers": "mcp_server_configs",
+    "mcp": "mcp_server_configs",
+    "hook": "hook_definitions",
+    "hooks": "hook_definitions",
+    "managed_tool": "managed_tool_definitions",
+    "managed_tools": "managed_tool_definitions",
+    "tool": "managed_tool_definitions",
+    "tools": "managed_tool_definitions",
+    "sandbox_template": "sandbox_templates",
+    "sandbox_templates": "sandbox_templates",
+    "model": "models",
+    "models": "models",
+    "secret": "secrets",
+    "secrets": "secrets",
+}
+
+_TABLES_WITH_SCOPE = {
+    "agent_definitions", "skill_definitions", "mcp_server_configs",
+    "hook_definitions", "managed_tool_definitions", "sandbox_templates",
+}
+
+_TABLES_WITH_TEXT_IDS = {"models"}
+_TABLES_WITH_GLOBAL_ROWS = {"models"}
+
+
+def normalize_resource_type(resource_type: str) -> str:
+    key = (resource_type or "").strip().lower()
+    if key not in RESOURCE_TABLE_MAP:
+        raise ValueError(f"Unsupported resource_type: {resource_type}")
+    return key
+
+
+class AccessControlRepository:
+    """Resolve resource access by built-in, ownership, group, and org sharing."""
+
+    _GROUP_CACHE_TTL = timedelta(seconds=5)
+    _group_cache: dict[str, tuple[datetime, list[str]]] = {}
+
+    def __init__(self, pool: asyncpg.Pool):
+        self.pool = pool
+
+    @classmethod
+    def invalidate_user_groups(cls, user_id: str) -> None:
+        cls._group_cache.pop(user_id, None)
+
+    async def _get_user_role(self, user_id: str, org_id: str) -> str | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT role FROM users WHERE id = $1 AND organization_id = $2",
+                UUID(user_id),
+                UUID(org_id),
+            )
+        return str(row["role"]) if row else None
+
+    async def get_user_group_ids(self, user_id: str) -> list[str]:
+        now = datetime.now(UTC)
+        cached = self._group_cache.get(user_id)
+        if cached and cached[0] > now:
+            return list(cached[1])
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT group_id FROM user_groups WHERE user_id = $1",
+                UUID(user_id),
+            )
+        group_ids = [str(row["group_id"]) for row in rows]
+        self._group_cache[user_id] = (now + self._GROUP_CACHE_TTL, group_ids)
+        return group_ids
+
+    async def can_access(
+        self, user_id: str, resource_type: str, resource_id: str, org_id: str
+    ) -> bool:
+        """Resolve access without exposing private definition resources to org roles."""
+        normalized = normalize_resource_type(resource_type)
+        table = RESOURCE_TABLE_MAP[normalized]
+        role = await self._get_user_role(user_id, org_id)
+        if role is None:
+            return False
+
+        group_ids = [UUID(group_id) for group_id in await self.get_user_group_ids(user_id)]
+        resource_id_param = (
+            resource_id if table in _TABLES_WITH_TEXT_IDS else UUID(resource_id)
+        )
+        org_clause = (
+            "(organization_id IS NULL OR organization_id = $2)"
+            if table in _TABLES_WITH_GLOBAL_ROWS
+            else "organization_id = $2"
+        )
+        builtin_clause = "scope = 'built-in' OR " if table in _TABLES_WITH_SCOPE else ""
+        org_shared_clause = (
+            "OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL) "
+            if table in _TABLES_WITH_SCOPE
+            else ""
+        )
+        if table == "models":
+            org_shared_clause = "OR (owner_user_id IS NULL AND owner_group_id IS NULL) "
+        role_override_clause = ""
+        if table not in _TABLES_WITH_SCOPE:
+            role_override_clause = "OR $5 IN ('admin', 'owner')"
+        query_params: list[object] = [
+            resource_id_param,
+            UUID(org_id),
+            UUID(user_id),
+            group_ids,
+        ]
+        if role_override_clause:
+            query_params.append(role)
+        query = f"""
+            SELECT EXISTS(
+                SELECT 1
+                FROM {table}
+                WHERE id = $1
+                  AND {org_clause}
+                  AND (
+                      {builtin_clause}owner_user_id = $3
+                      OR owner_group_id = ANY($4::uuid[])
+                      {org_shared_clause}
+                      {role_override_clause}
+                  )
+            ) AS allowed
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, *query_params)
+        return bool(row["allowed"]) if row else False
+
+    async def can_modify(
+        self, user_id: str, resource_type: str, resource_id: str, org_id: str
+    ) -> bool:
+        """Check write access without granting org roles private definition control."""
+        normalized = normalize_resource_type(resource_type)
+        table = RESOURCE_TABLE_MAP[normalized]
+        role = await self._get_user_role(user_id, org_id)
+        if role is None:
+            return False
+        if role in ("admin", "owner") and table not in _TABLES_WITH_SCOPE:
+            async with self.pool.acquire() as conn:
+                resource_id_param = (
+                    resource_id if table in _TABLES_WITH_TEXT_IDS else UUID(resource_id)
+                )
+                org_clause = (
+                    "(organization_id IS NULL OR organization_id = $2)"
+                    if table in _TABLES_WITH_GLOBAL_ROWS
+                    else "organization_id = $2"
+                )
+                row = await conn.fetchrow(
+                    f"SELECT EXISTS("
+                    f"SELECT 1 FROM {table} WHERE id = $1 AND {org_clause}"
+                    f") AS e",
+                    resource_id_param,
+                    UUID(org_id),
+                )
+            return bool(row["e"]) if row else False
+
+        group_ids = [UUID(group_id) for group_id in await self.get_user_group_ids(user_id)]
+        resource_id_param = (
+            resource_id if table in _TABLES_WITH_TEXT_IDS else UUID(resource_id)
+        )
+        org_clause = (
+            "(organization_id IS NULL OR organization_id = $2)"
+            if table in _TABLES_WITH_GLOBAL_ROWS
+            else "organization_id = $2"
+        )
+        org_shared_write_clause = ""
+        if table in _TABLES_WITH_SCOPE:
+            org_shared_write_clause = (
+                " OR ($5 IN ('admin', 'owner')"
+                " AND scope = 'instance'"
+                " AND owner_user_id IS NULL"
+                " AND owner_group_id IS NULL)"
+            )
+        query_params: list[object] = [
+            resource_id_param,
+            UUID(org_id),
+            UUID(user_id),
+            group_ids,
+        ]
+        if org_shared_write_clause:
+            query_params.append(role)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT EXISTS("
+                f"SELECT 1 FROM {table}"
+                f" WHERE id = $1 AND {org_clause}"
+                f" AND (owner_user_id = $3 OR owner_group_id IN ("
+                f"SELECT group_id FROM user_groups"
+                f" WHERE user_id = $3 AND role = 'admin'"
+                f" AND group_id = ANY($4::uuid[]))"
+                f"{org_shared_write_clause})"
+                f") AS e",
+                *query_params,
+            )
+        return bool(row["e"]) if row else False
+
+    async def list_accessible(
+        self, user_id: str, resource_type: str, org_id: str
+    ) -> list[str]:
+        """Return IDs of all resources of this type the user can access."""
+        normalized = normalize_resource_type(resource_type)
+        table = RESOURCE_TABLE_MAP[normalized]
+        role = await self._get_user_role(user_id, org_id)
+        if role is None:
+            return []
+
+        group_ids = [UUID(group_id) for group_id in await self.get_user_group_ids(user_id)]
+        org_clause = (
+            "(organization_id IS NULL OR organization_id = $1)"
+            if table in _TABLES_WITH_GLOBAL_ROWS
+            else "organization_id = $1"
+        )
+        builtin_clause = "scope = 'built-in' OR " if table in _TABLES_WITH_SCOPE else ""
+        org_shared_clause = (
+            "OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL) "
+            if table in _TABLES_WITH_SCOPE
+            else ""
+        )
+        if table == "models":
+            org_shared_clause = "OR (owner_user_id IS NULL AND owner_group_id IS NULL) "
+        role_override_clause = ""
+        if table not in _TABLES_WITH_SCOPE:
+            role_override_clause = "OR $4 IN ('admin', 'owner')"
+        query_params: list[object] = [UUID(org_id), UUID(user_id), group_ids]
+        if role_override_clause:
+            query_params.append(role)
+        query = f"""
+            SELECT id
+            FROM {table}
+            WHERE {org_clause}
+              AND (
+                  {builtin_clause}owner_user_id = $2
+                  OR owner_group_id = ANY($3::uuid[])
+                  {org_shared_clause}
+                  {role_override_clause}
+              )
+            ORDER BY id
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *query_params)
+        return [str(row["id"]) for row in rows]

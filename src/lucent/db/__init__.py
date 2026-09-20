@@ -19,6 +19,7 @@ from lucent.db.access import AccessRepository
 from lucent.db.admin_audit import AdminAuditRepository
 from lucent.db.api_key import ApiKeyRepository
 from lucent.db.audit import AuditRepository
+from lucent.db.auth import AuthRepository
 
 # Repositories
 from lucent.db.definitions import DefinitionRepository
@@ -80,6 +81,7 @@ __all__ = [
     "UserRepository",
     "ApiKeyRepository",
     "OrganizationRepository",
+    "AuthRepository",
     "AuditRepository",
     "AdminAuditRepository",
     "AccessRepository",

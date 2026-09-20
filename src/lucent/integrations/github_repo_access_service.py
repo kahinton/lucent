@@ -35,7 +35,7 @@ from uuid import UUID
 import asyncpg
 import httpx
 
-from lucent.db.pool import scoped_acquire
+from lucent.db.github_repo_access import GitHubRepoAccessRepository
 from lucent.integrations.encryption import (
     BackendCredentialEncryptor,
     CredentialEncryptor,
@@ -79,6 +79,7 @@ class GitHubRepoAccessService:
         timeout_seconds: float = 10.0,
     ) -> None:
         self.pool = pool
+        self._repository = GitHubRepoAccessRepository(pool)
         self._encryptor = encryptor
         self.timeout_seconds = timeout_seconds
 
@@ -171,19 +172,9 @@ class GitHubRepoAccessService:
         )
 
     async def _get_cached(self, *, user_id: UUID, repo_full_name: str) -> dict[str, Any] | None:
-        # rls: github_repo_access_cache is RLS-bound (user_id-keyed policy);
-        # the cache row belongs to the checked user, so bind that identity.
-        async with scoped_acquire(user_id=user_id) as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT has_access, checked_at, expires_at
-                FROM github_repo_access_cache
-                WHERE user_id = $1 AND repo_full_name = $2
-                """,
-                user_id,
-                repo_full_name,
-            )
-        return dict(row) if row else None
+        return await self._repository.get_cached(
+            user_id=user_id, repo_full_name=repo_full_name
+        )
 
     async def _upsert_cache(
         self,
@@ -194,50 +185,21 @@ class GitHubRepoAccessService:
         checked_at: datetime,
         expires_at: datetime,
     ) -> None:
-        # rls: bind the cache row's owner user identity (user_id-keyed policy).
-        async with scoped_acquire(user_id=user_id) as conn:
-            await conn.execute(
-                """
-                INSERT INTO github_repo_access_cache (
-                    user_id, repo_full_name, has_access, checked_at, expires_at
-                )
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (user_id, repo_full_name)
-                DO UPDATE SET
-                    has_access = EXCLUDED.has_access,
-                    checked_at = EXCLUDED.checked_at,
-                    expires_at = EXCLUDED.expires_at
-                """,
-                user_id,
-                repo_full_name,
-                has_access,
-                checked_at,
-                expires_at,
-            )
+        await self._repository.upsert_cache(
+            user_id=user_id,
+            repo_full_name=repo_full_name,
+            has_access=has_access,
+            checked_at=checked_at,
+            expires_at=expires_at,
+        )
 
     async def _get_user_github_token(self, user_id: UUID) -> str | None:
         # rls: enterprise_credentials is RLS-bound (org-keyed shape b).
         # Resolve the user's org from the exempt users table first, then
         # bind it for the credential read — fail-closed empty when the
         # user (or their org) cannot be resolved.
-        org_id = await self._resolve_user_org(user_id)
-        if not org_id:
-            return None
-        async with scoped_acquire(organization_id=org_id) as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT encrypted_secret_payload
-                FROM enterprise_credentials
-                WHERE integration_type = 'github'
-                  AND scope_type = 'user'
-                  AND owner_user_id = $1
-                  AND status = 'active'
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                user_id,
-            )
-        if not row:
+        payload = await self._repository.get_user_credential_payload(user_id=user_id)
+        if not payload:
             return None
 
         encryptor = self._get_encryptor()
@@ -245,7 +207,7 @@ class GitHubRepoAccessService:
             return None
 
         try:
-            secret_payload = encryptor.decrypt(row["encrypted_secret_payload"])
+            secret_payload = encryptor.decrypt(payload)
         except Exception:
             logger.warning(
                 "Failed to decrypt GitHub credential for user %s",
@@ -257,6 +219,9 @@ class GitHubRepoAccessService:
         token = secret_payload.get("access_token")
         return str(token) if token else None
 
+    async def _resolve_user_org(self, user_id: UUID) -> UUID | None:
+        return await self._repository.resolve_user_org(user_id)
+
     def _get_encryptor(self) -> CredentialEncryptor | None:
         if self._encryptor is not None:
             return self._encryptor
@@ -266,19 +231,6 @@ class GitHubRepoAccessService:
             logger.warning("Credential encryptor unavailable for GitHub repo ACL checks")
             return None
         return self._encryptor
-
-    async def _resolve_user_org(self, user_id: UUID) -> UUID | None:
-        """Resolve the organization a user belongs to.
-
-        ``users`` is on migration 116's global-exempt list, so this read
-        needs no tenant GUC binding. Returns None when the user is unknown.
-        """
-        async with self.pool.acquire() as conn:  # rls: users exempt — identity-to-org resolution
-            row = await conn.fetchrow(
-                "SELECT organization_id FROM users WHERE id = $1",
-                user_id,
-            )
-        return row["organization_id"] if row else None
 
     async def _check_github_repo(self, *, token: str, repo_full_name: str) -> bool:
         url = f"https://api.github.com/repos/{repo_full_name}"
@@ -380,30 +332,14 @@ class GitHubRepoAccessService:
                 return env_token
         # Try any stored credential (existence check only — caller is
         # responsible for never treating this as a user-ACL signal).
-        # rls: enterprise_credentials is RLS-bound (org-keyed shape b).
-        # This existence-check sweep is cross-org by design ("any active
-        # token in the deployment") — the same system-infra class as the
-        # other no-scope sites: it binds the permissive 'system' session
-        # branch and scrubs on release, never reaching a user ACL path.
-        from lucent.db.pool import runner_guc_preamble, tenant_guc_scrub
-
-        async with self.pool.acquire() as conn:
-            await conn.execute(runner_guc_preamble())
-            try:
-                row = await conn.fetchrow(
-                    """SELECT encrypted_secret_payload FROM enterprise_credentials
-                       WHERE integration_type = 'github' AND status = 'active'
-                       ORDER BY updated_at DESC LIMIT 1""",
-                )
-            finally:
-                await conn.execute(tenant_guc_scrub())
-        if not row:
+        payload = await self._repository.get_any_credential_payload()
+        if not payload:
             return None
         encryptor = self._get_encryptor()
         if not encryptor:
             return None
         try:
-            payload = encryptor.decrypt(row["encrypted_secret_payload"])
+            payload = encryptor.decrypt(payload)
             return str(payload.get("access_token", "")) or None
         except Exception:
             return None
@@ -454,19 +390,9 @@ class GitHubRepoAccessService:
 
         # rls: integrations is RLS-bound (org-keyed shape b) and the org is
         # a parameter here — bind it.
-        async with scoped_acquire(organization_id=organization_id) as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT id, install_id
-                  FROM integrations
-                 WHERE organization_id = $1
-                   AND type = 'github_app'
-                   AND status = 'active'
-                 ORDER BY updated_at DESC
-                 LIMIT 1
-                """,
-                organization_id,
-            )
+        row = await self._repository.get_active_app_installation(
+            organization_id=organization_id
+        )
         if not row:
             return None
 
@@ -485,4 +411,3 @@ class GitHubRepoAccessService:
             normalized,
         )
         return None
-

@@ -257,7 +257,7 @@ async def build_connections_view_model(
     }
 
     # Personal section — current user's enterprise credentials.
-    from lucent.integrations.credential_repository import CredentialRepository
+    from lucent.db.credentials import CredentialRepository
     cred_repo = CredentialRepository(pool)
     credentials = await cred_repo.list_credentials(
         organization_id=str(user.organization_id),
@@ -271,7 +271,7 @@ async def build_connections_view_model(
     # "don't even show this part of the page".
     workspace_connections: list[dict[str, object]] = []
     if flags["workspace_integrations_enabled"]:
-        from lucent.integrations.repositories import IntegrationRepo
+        from lucent.db.integrations_repositories import IntegrationRepo
         int_repo = IntegrationRepo(pool)
         integrations_rows = await int_repo.list_by_org(str(user.organization_id))
         workspace_connections = [
@@ -395,7 +395,7 @@ async def save_pat_web(request: Request):
 
     pool = await get_pool()
     from lucent.integrations.credential_models import CredentialCreate, CredentialKind
-    from lucent.integrations.credential_repository import CredentialRepository
+    from lucent.db.credentials import CredentialRepository
     from lucent.integrations.credential_service import CredentialService
 
     repo = CredentialRepository(pool)
@@ -455,7 +455,7 @@ async def claim_env_token(request: Request):
     # Store as a proper user credential
     pool = await get_pool()
     from lucent.integrations.credential_models import CredentialCreate, CredentialKind
-    from lucent.integrations.credential_repository import CredentialRepository
+    from lucent.db.credentials import CredentialRepository
     from lucent.integrations.credential_service import CredentialService
 
     repo = CredentialRepository(pool)
@@ -512,7 +512,7 @@ async def oauth_start_web(request: Request):
 
     pool = await get_pool()
     from lucent.integrations.credential_models import OAuthStartRequest
-    from lucent.integrations.credential_repository import CredentialRepository
+    from lucent.db.credentials import CredentialRepository
     from lucent.integrations.credential_service import CredentialService
 
     repo = CredentialRepository(pool)
@@ -547,7 +547,7 @@ async def oauth_callback_web(request: Request):
 
     pool = await get_pool()
     from lucent.integrations.credential_models import OAuthCallbackRequest
-    from lucent.integrations.credential_repository import CredentialRepository
+    from lucent.db.credentials import CredentialRepository
     from lucent.integrations.credential_service import CredentialService
 
     repo = CredentialRepository(pool)
@@ -594,7 +594,7 @@ async def revoke_connection_web(request: Request, credential_id: str):
 
     pool = await get_pool()
 
-    from lucent.integrations.credential_repository import CredentialRepository
+    from lucent.db.credentials import CredentialRepository
     repo = CredentialRepository(pool)
 
     await repo.delete_credential(credential_id, str(user.organization_id))

@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from lucent.db.pool import scoped_acquire
 from lucent.logging import get_logger
 
 logger = get_logger("chat.intro")
@@ -99,32 +98,6 @@ def _fingerprint_component(label: str, *values: Any) -> str:
     return f"{label}=" + ",".join(str(v) for v in values)
 
 
-def _goal_rollup_sql(memory_access: str) -> str:
-    """Goal-milestone rollup SQL composed with the requester's access condition.
-
-    MemoryRepository's condition builders hard-code the bare ``memories``
-    table name, so this query must not alias the table. Parameter layout is
-    the repo's composition convention (web/routes/memories.py): $1 = user_id,
-    $2 = organization_id, $3 = limit.
-    """
-    return f"""SELECT memories.id,
-                      COALESCE(memories.content, '') AS title,
-                      COALESCE(memories.metadata->>'status', 'active') AS status,
-                      CASE
-                          WHEN jsonb_typeof(memories.metadata) = 'object'
-                               AND jsonb_typeof(memories.metadata->'milestones') = 'array'
-                          THEN memories.metadata->'milestones'
-                          ELSE '[]'::jsonb
-                      END AS milestones
-               FROM memories
-               WHERE memories.type = 'goal'
-                 AND memories.deleted_at IS NULL
-                 AND memories.organization_id = $2::uuid
-                 AND {memory_access}
-               ORDER BY COALESCE(memories.updated_at, memories.created_at) DESC
-               LIMIT $3"""
-
-
 async def gather_work_context(user) -> dict[str, Any]:
     """Gather grounded tracked-work data for the intro summary.
 
@@ -177,16 +150,12 @@ async def gather_work_context(user) -> dict[str, Any]:
     # Scoped to the requesting user's memory boundary (own + org-granted +
     # daemon-owner-visible) — NOT org-wide, or one member's private goals
     # would ground another member's summary.
-    from lucent.db.memory import MemoryRepository
-
-    memory_access = MemoryRepository.user_memory_access_condition("$2", "$1")
-    async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-        goal_rows = await conn.fetch(
-            _goal_rollup_sql(memory_access),
-            UUID(user_id),
-            UUID(org_id),
-            MAX_GOALS * 4,
-        )
+    memory_repo = MemoryRepository(pool)
+    goal_rows = await memory_repo.list_recent_goal_milestones(
+        user_id=user_id,
+        organization_id=org_id,
+        limit=MAX_GOALS * 4,
+    )
 
     goals: list[dict[str, Any]] = []
     for row in goal_rows:

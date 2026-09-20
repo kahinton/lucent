@@ -14,6 +14,7 @@ from asyncpg import Pool
 
 from lucent.logging import get_logger
 from lucent.db.pool import preauth_guc_preamble, scoped_acquire, scoped_acquire_on, tenant_guc_scrub
+from lucent.db.pool import runner_guc_preamble
 
 logger = get_logger(__name__)
 
@@ -319,6 +320,23 @@ class ApiKeyRepository:
         if result is not None:
             logger.info("API key revoked: id=%s, user=%s", key_id, user_id)
         return result is not None
+
+    async def revoke_by_id(self, key_id: UUID) -> None:
+        """Revoke a sandbox-owned API key by its ID."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                await conn.execute(
+                    """
+                    UPDATE api_keys
+                    SET is_active = false, revoked_at = NOW()
+                    WHERE id = $1 AND revoked_at IS NULL
+                    """,
+                    key_id,
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
+
 
     async def update_name(
         self,

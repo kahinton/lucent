@@ -1684,6 +1684,58 @@ class MemoryRepository:
             "has_more": offset + len(memories) < total_count,
         }
 
+    async def list_recent_goal_milestones(
+        self, *, user_id: str, organization_id: str, limit: int
+    ) -> list[asyncpg.Record]:
+        """Return recent goal rows with milestone metadata, scoped to user access."""
+        memory_access = self.user_memory_access_condition("$2", "$1")
+        query = f"""
+            SELECT memories.id,
+                   COALESCE(memories.content, '') AS title,
+                   COALESCE(memories.metadata->>'status', 'active') AS status,
+                   CASE
+                       WHEN jsonb_typeof(memories.metadata) = 'object'
+                            AND jsonb_typeof(memories.metadata->'milestones') = 'array'
+                       THEN memories.metadata->'milestones'
+                       ELSE '[]'::jsonb
+                   END AS milestones
+            FROM memories
+            WHERE memories.type = 'goal'
+              AND memories.deleted_at IS NULL
+              AND memories.organization_id = $2::uuid
+              AND {memory_access}
+            ORDER BY COALESCE(memories.updated_at, memories.created_at) DESC
+            LIMIT $3
+        """
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
+            return await conn.fetch(query, UUID(user_id), UUID(organization_id), limit)
+
+    async def get_memories_by_ids(
+        self,
+        memory_ids: list[UUID],
+        *,
+        requesting_user_id: UUID | None = None,
+        requesting_org_id: UUID | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch full memory rows for IDs already filtered by the caller."""
+        if not memory_ids:
+            return []
+
+        placeholders = ", ".join(f"${idx + 1}" for idx in range(len(memory_ids)))
+        query = f"""
+            SELECT {self._FULL_COLUMNS}
+            FROM memories
+            WHERE id IN ({placeholders})
+              AND deleted_at IS NULL
+        """
+        async with scoped_acquire(
+            organization_id=requesting_org_id, user_id=requesting_user_id
+        ) as conn:
+            rows = await conn.fetch(query, *memory_ids)
+        return [self._row_to_dict(row) for row in rows]
+
     async def search_full(
         self,
         query: str,

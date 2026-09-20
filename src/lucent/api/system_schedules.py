@@ -84,41 +84,10 @@ async def retire_vitality_scoring_workflow_schedules() -> int:
     if pool is None:
         return 0
 
-    async with pool.acquire() as conn:
-        # rls: system-infra (evaluation §1.4/§4.3) — session-local
-        # app.role='system' bound below, scrubbed on release; audited
-        # system-schedules class. The preamble at the next line is the
-        # binding mechanism.
-        await conn.execute(_system_guc_preamble())
-        try:
-            schedule_ids = [
-                str(row["id"])
-                for row in await conn.fetch(
-                    """SELECT id FROM schedules
-                       WHERE title = $1
-                         AND is_system = true""",
-                    VITALITY_SCORING_TITLE,
-                )
-            ]
-            if not schedule_ids:
-                return 0
-            await conn.execute(
-                "DELETE FROM schedule_runs WHERE schedule_id = ANY($1::uuid[])",
-                schedule_ids,
-            )
-            deleted = await conn.fetchval(
-                """WITH deleted AS (
-                       DELETE FROM schedules
-                       WHERE id = ANY($1::uuid[])
-                       RETURNING id
-                   )
-                   SELECT COUNT(*) FROM deleted""",
-                schedule_ids,
-            )
-        finally:
-            await conn.execute(_system_guc_scrub())
+    count = await ScheduleRepository(pool).retire_vitality_scoring_workflow_schedules(
+        VITALITY_SCORING_TITLE
+    )
 
-    count = int(deleted or 0)
     if count:
         logger.info("Retired %d Memory Vitality Scoring workflow schedule(s)", count)
     return count
@@ -137,26 +106,9 @@ async def ensure_server_system_schedules() -> int:
 
     await retire_vitality_scoring_workflow_schedules()
 
-    async with pool.acquire() as conn:
-        # rls: system-infra exemption (evaluation §1.4/§4.3)
-        await conn.execute(_system_guc_preamble())
-        try:
-            repo = ScheduleRepository(pool)
-            created = 0
-            rows = await conn.fetch(
-                """
-                SELECT o.id::text AS organization_id,
-                       u.id::text AS daemon_user_id
-                FROM organizations o
-                LEFT JOIN users u
-                  ON u.organization_id = o.id
-                 AND (u.external_id = 'daemon-service'
-                      OR u.external_id = 'daemon-service:' || o.id::text)
-                 AND u.is_active = true
-                """
-            )
-        finally:
-            await conn.execute(_system_guc_scrub())
+    repo = ScheduleRepository(pool)
+    created = 0
+    rows = await repo.list_daemon_service_users()
 
     schedule_specs = [
         {
@@ -179,21 +131,9 @@ async def ensure_server_system_schedules() -> int:
 
     for row in rows:
         for spec in schedule_specs:
-            async with pool.acquire() as conn:
-                # rls: system-infra (evaluation §1.4/§4.3) — preamble below
-                # binds app.role='system' session-local, scrubbed on release.
-                await conn.execute(_system_guc_preamble())
-                try:
-                    existing = await conn.fetchval(
-                        """SELECT 1 FROM schedules
-                           WHERE title = $1
-                             AND organization_id = $2::uuid
-                             AND is_system = true""",
-                        spec["title"],
-                        row["organization_id"],
-                    )
-                finally:
-                    await conn.execute(_system_guc_scrub())
+            existing = await repo.get_system_schedule_id(
+                spec["title"], row["organization_id"]
+            )
             sched = await repo.ensure_system_schedule(
                 title=spec["title"],
                 org_id=row["organization_id"],
@@ -314,13 +254,7 @@ async def run_vitality_scoring_background_once(*, force: bool = False) -> int:
     now = datetime.now(UTC)
     executed = 0
 
-    async with pool.acquire() as conn:
-        # rls: system-infra exemption (evaluation §1.4/§4.3) — org enumeration
-        await conn.execute(_system_guc_preamble())
-        try:
-            org_ids = [str(row["id"]) for row in await conn.fetch("SELECT id FROM organizations")]
-        finally:
-            await conn.execute(_system_guc_scrub())
+    org_ids = await sched_repo.list_organization_ids()
 
     for org_id in org_ids:
         last_run_at = _last_vitality_scoring_at_by_org.get(org_id)

@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from asyncpg import Pool
 
 from lucent.secrets.utils import validate_sandbox_config_references
-from lucent.db.pool import scoped_acquire
+from lucent.db.pool import runner_guc_preamble, scoped_acquire, tenant_guc_scrub
 
 ALLOWED_SCHEDULE_COLUMNS = frozenset(
     {
@@ -378,6 +378,124 @@ class ScheduleRepository:
             raise ValueError(SYSTEM_SCHEDULE_PROTECTION_MSG)
 
     # ── System schedules ──────────────────────────────────────────────────
+
+    async def retire_vitality_scoring_workflow_schedules(self, title: str) -> int:
+        """Remove a retired system schedule and all of its recorded runs."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                schedule_ids = [
+                    str(row["id"])
+                    for row in await conn.fetch(
+                        "SELECT id FROM schedules WHERE title = $1 AND is_system = true",
+                        title,
+                    )
+                ]
+                if not schedule_ids:
+                    return 0
+                await conn.execute(
+                    "DELETE FROM schedule_runs WHERE schedule_id = ANY($1::uuid[])",
+                    schedule_ids,
+                )
+                deleted = await conn.fetchval(
+                    """
+                    WITH deleted AS (
+                        DELETE FROM schedules
+                        WHERE id = ANY($1::uuid[])
+                        RETURNING id
+                    )
+                    SELECT COUNT(*) FROM deleted
+                    """,
+                    schedule_ids,
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
+        return int(deleted or 0)
+
+    async def list_daemon_service_users(self) -> list[dict]:
+        """Return each organization with its optional daemon service identity."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT o.id::text AS organization_id,
+                           u.id::text AS daemon_user_id
+                    FROM organizations o
+                    LEFT JOIN users u
+                      ON u.organization_id = o.id
+                     AND (u.external_id = 'daemon-service'
+                          OR u.external_id = 'daemon-service:' || o.id::text)
+                     AND u.is_active = true
+                    """
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
+        return [dict(row) for row in rows]
+
+    async def get_system_schedule_id(self, title: str, org_id: str) -> str | None:
+        """Return the ID of a system schedule if it already exists."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                existing = await conn.fetchval(
+                    """
+                    SELECT 1
+                    FROM schedules
+                    WHERE title = $1
+                      AND organization_id = $2::uuid
+                      AND is_system = true
+                    """,
+                    title,
+                    org_id,
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
+        return str(existing) if existing else None
+
+    async def list_organization_ids(self) -> list[str]:
+        """Enumerate all organization IDs for system-level background work."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                rows = await conn.fetch("SELECT id FROM organizations")
+            finally:
+                await conn.execute(tenant_guc_scrub())
+        return [str(row["id"]) for row in rows]
+
+    async def list_daemon_service_users(self) -> list[dict]:
+        """Return every organization with its optional daemon service identity."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT o.id::text AS organization_id,
+                           u.id::text AS daemon_user_id
+                    FROM organizations o
+                    LEFT JOIN users u
+                      ON u.organization_id = o.id
+                     AND (u.external_id = 'daemon-service'
+                          OR u.external_id = 'daemon-service:' || o.id::text)
+                     AND u.is_active = true
+                    """
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
+        return [dict(row) for row in rows]
+
+    async def get_organization_id(self, org_id: str) -> str | None:
+        """Resolve an organization ID for system-level infrastructure paths."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                row = await conn.fetchval(
+                    "SELECT id::text FROM organizations WHERE id = $1::uuid",
+                    org_id,
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
+        return row
 
     async def ensure_system_schedule(
         self,

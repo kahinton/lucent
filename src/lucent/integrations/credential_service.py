@@ -18,7 +18,7 @@ from lucent.integrations.credential_models import (
     OAuthStartRequest,
     OAuthStartResponse,
 )
-from lucent.integrations.credential_repository import CredentialRepository
+from lucent.db.credentials import CredentialRepository
 from lucent.integrations.encryption import (
     BackendCredentialEncryptor,
     CredentialEncryptor,

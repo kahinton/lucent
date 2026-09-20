@@ -14,13 +14,12 @@ from typing import Any
 
 import bcrypt
 
-from lucent.db.pool import scoped_acquire
-from lucent.integrations.models import (
+from lucent.db.integrations_models import (
     PairingChallengeStatus,
     UserLinkStatus,
     VerificationMethod,
 )
-from lucent.integrations.repositories import (
+from lucent.db.integrations_repositories import (
     PairingChallengeRepo,
     UserLinkRepo,
 )
@@ -204,23 +203,11 @@ class PairingChallengeService:
         Uses a direct pool query — PairingChallengeRepo doesn't expose
         an integration-scoped pending query, so we go to the DB directly.
         """
-        from uuid import UUID
-
-        async with scoped_acquire(
-            organization_id=organization_id, user_id=user_id
-        ) as conn:
-            rows = await conn.fetch(
-                """
-                SELECT * FROM pairing_challenges
-                WHERE integration_id = $1
-                  AND status = 'pending'
-                  AND expires_at > NOW()
-                  AND attempt_count < max_attempts
-                ORDER BY created_at DESC
-                """,
-                UUID(integration_id),
-            )
-        return [dict(r) for r in rows]
+        return await self._challenge_repo.list_pending_for_integration(
+            integration_id,
+            organization_id=organization_id,
+            user_id=user_id,
+        )
 
 
 # ---------------------------------------------------------------------------

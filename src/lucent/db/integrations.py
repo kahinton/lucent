@@ -4,7 +4,7 @@ Provides a unified IntegrationRepository that wraps the integration, user_link,
 and pairing_challenge repositories with audit logging. Follows the project
 pattern of DB modules in ``src/lucent/db/``.
 
-For lower-level repo operations, see ``lucent.integrations.repositories``.
+For lower-level repo operations, see ``lucent.db.integrations_repositories``.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from uuid import UUID
 import asyncpg
 
 from lucent.db.audit import AuditRepository
-from lucent.integrations.repositories import (
+from lucent.db.integrations_repositories import (
     IntegrationRepo,
     PairingChallengeRepo,
     UserLinkRepo,

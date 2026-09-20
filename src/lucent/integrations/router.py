@@ -29,9 +29,7 @@ from lucent.db.audit import (
     LINK_REVOKED,
     AuditRepository,
 )
-from lucent.db.pool import get_pool
-from lucent.integrations.encryption import BackendCredentialEncryptor, EncryptionError
-from lucent.integrations.models import (
+from lucent.db.integrations_models import (
     IntegrationCreate,
     IntegrationListResponse,
     IntegrationResponse,
@@ -44,11 +42,13 @@ from lucent.integrations.models import (
     UserLinkResponse,
     VerificationMethod,
 )
-from lucent.integrations.repositories import (
+from lucent.db.integrations_repositories import (
     IntegrationRepo,
     PairingChallengeRepo,
     UserLinkRepo,
 )
+from lucent.db.pool import get_pool
+from lucent.integrations.encryption import BackendCredentialEncryptor, EncryptionError
 from lucent.integrations.service import IntegrationService
 from lucent.rbac import Permission
 from lucent.secrets import SecretRegistry, SecretScope
@@ -77,7 +77,10 @@ def _get_encryptor() -> BackendCredentialEncryptor:
         logger.error("Credential encryption not configured: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Secret store (Vault/OpenBao) not configured. Credential encryption requires a running transit backend.",
+            detail=(
+                "Secret store (Vault/OpenBao) not configured. Credential "
+                "encryption requires a running transit backend."
+            ),
         ) from exc
 
 
@@ -202,17 +205,7 @@ async def receive_webhook(
             # branch — the same class as the other system-infra paths — and
             # scrubs on release. Every downstream per-org operation is
             # org-scoped from the matched integration row.
-            from lucent.db.pool import runner_guc_preamble, tenant_guc_scrub
-
-            async with pool.acquire() as conn:
-                await conn.execute(runner_guc_preamble())
-                try:
-                    rows = await conn.fetch(
-                        "SELECT * FROM integrations WHERE type = $1 AND status = 'active'",
-                        provider,
-                    )
-                finally:
-                    await conn.execute(tenant_guc_scrub())
+            rows = await IntegrationRepo(pool).list_active_by_type(provider)
 
             if not rows:
                 logger.warning(

@@ -1191,6 +1191,38 @@ class DefinitionRepository:
 
     # ── Managed Tools ───────────────────────────────────────────────────
 
+    async def list_mcp_server_configs_for_credential_migration(
+        self, organization_id: str
+    ) -> list[dict]:
+        """List MCP server config env rows for credential migration."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, organization_id, owner_user_id, owner_group_id, env_vars
+                FROM mcp_server_configs
+                WHERE organization_id = $1
+                """,
+                organization_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def update_mcp_server_config_env_vars(
+        self, config_id: str, organization_id: str, env_vars: dict
+    ) -> bool:
+        """Replace an MCP server config's environment variables."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            result = await conn.execute(
+                """
+                UPDATE mcp_server_configs
+                SET env_vars = $2::jsonb, updated_at = NOW()
+                WHERE id = $1 AND organization_id = $2
+                """,
+                config_id,
+                organization_id,
+                json.dumps(env_vars),
+            )
+        return result != "UPDATE 0"
+
     async def list_managed_tools(
         self,
         org_id: str,
@@ -1240,7 +1272,39 @@ class DefinitionRepository:
             "offset": offset,
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
-        }
+    }
+
+    async def list_managed_tools_for_credential_migration(
+        self, organization_id: str
+    ) -> list[dict]:
+        """List managed-tool env rows that may contain plaintext credentials."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, organization_id, owner_user_id, owner_group_id, env_vars
+                FROM managed_tool_definitions
+                WHERE organization_id = $1
+                """,
+                organization_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def update_managed_tool_env_vars(
+        self, tool_id: str, organization_id: str, env_vars: dict
+    ) -> bool:
+        """Replace a managed tool's environment variables after migration."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            result = await conn.execute(
+                """
+                UPDATE managed_tool_definitions
+                SET env_vars = $2::jsonb, updated_at = NOW()
+                WHERE id = $1 AND organization_id = $2
+                """,
+                tool_id,
+                organization_id,
+                json.dumps(env_vars),
+            )
+        return result != "UPDATE 0"
 
     async def get_managed_tool(
         self,

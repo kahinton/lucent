@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 import asyncpg
+
 from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
@@ -153,7 +155,79 @@ class SandboxRepository:
                 reuse_key,
                 before_sequence_order,
             )
-            return dict(row) if row else None
+        return dict(row) if row else None
+
+    async def list_for_credential_migration(self, organization_id: str) -> list[dict]:
+        """List sandbox rows that may contain plaintext runtime credentials."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, organization_id, created_by, config
+                FROM sandboxes
+                WHERE organization_id = $1
+                """,
+                organization_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def redact_runtime_configs(self, organization_id: str) -> int:
+        """Replace plaintext runtime env vars with redacted placeholders."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            result = await conn.execute(
+                """
+                WITH normalized_configs AS (
+                    SELECT
+                        id,
+                        CASE
+                            WHEN jsonb_typeof(config) = 'string'
+                            THEN (config #>> '{}')::jsonb
+                            ELSE config
+                        END AS config
+                    FROM sandboxes
+                    WHERE organization_id = $1
+                      AND (
+                          jsonb_typeof(config) = 'object'
+                          OR (
+                              jsonb_typeof(config) = 'string'
+                              AND config #>> '{}' LIKE '{%'
+                          )
+                      )
+                )
+                UPDATE sandboxes AS sandbox
+                SET config = CASE
+                        WHEN jsonb_typeof(normalized.config->'env_vars') = 'object' THEN jsonb_set(
+                            normalized.config - 'git_credentials',
+                            '{env_vars}',
+                            COALESCE(
+                                (
+                                    SELECT jsonb_object_agg(key, to_jsonb('***'::text))
+                                    FROM jsonb_each(normalized.config->'env_vars') AS entry(key, value)
+                                ),
+                                '{}'::jsonb
+                            ),
+                            true
+                        )
+                        ELSE normalized.config - 'git_credentials'
+                    END,
+                    updated_at = NOW()
+                FROM normalized_configs AS normalized
+                WHERE sandbox.id = normalized.id
+                  AND jsonb_typeof(normalized.config) = 'object'
+                  AND (
+                      normalized.config ? 'git_credentials'
+                      OR (
+                          jsonb_typeof(normalized.config->'env_vars') = 'object'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_each_text(normalized.config->'env_vars') AS entry(key, value)
+                              WHERE value <> '***'
+                          )
+                      )
+                  )
+                """,
+                organization_id,
+            )
+        return int(result.rsplit(" ", 1)[-1])
 
     async def list_all(
         self,

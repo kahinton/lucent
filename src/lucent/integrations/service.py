@@ -32,16 +32,15 @@ from lucent.db.audit import (
     RESOLUTION_FAILED,
     AuditRepository,
 )
-from lucent.db.pool import scoped_acquire
-from lucent.db.user import UserRepository
-from lucent.integrations.base import IntegrationAdapter, IntegrationError
-from lucent.integrations.identity import IdentityResolver, PairingChallengeService
-from lucent.integrations.models import EventType, IntegrationEvent
-from lucent.integrations.repositories import (
+from lucent.db.integrations_models import EventType, IntegrationEvent
+from lucent.db.integrations_repositories import (
     IntegrationRepo,
     PairingChallengeRepo,
     UserLinkRepo,
 )
+from lucent.db.user import UserRepository
+from lucent.integrations.base import IntegrationAdapter, IntegrationError
+from lucent.integrations.identity import IdentityResolver, PairingChallengeService
 from lucent.llm.mcp_bridge import MCPToolBridge
 from lucent.memory_scope import MEMORY_SCOPE_USER, build_memory_scope_headers
 from lucent.rate_limit import RateLimiter, get_rate_limiter
@@ -145,18 +144,11 @@ class IntegrationService:
         Returns:
             The user record dict, or None if no active link exists.
         """
-        # Query user_links by integration + external_user_id
-        async with scoped_acquire(organization_id=organization_id) as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT * FROM user_links
-                WHERE integration_id = $1
-                  AND external_user_id = $2
-                  AND status = 'active'
-                """,
-                UUID(integration_id),
-                external_user_id,
-            )
+        row = await self._user_link_repo.resolve_identity(
+            integration_id,
+            external_user_id,
+            organization_id=organization_id,
+        )
 
         if row is None:
             return None
@@ -658,15 +650,7 @@ class IntegrationService:
 
     async def _revoke_mcp_key(self, key_id: UUID, org_id: str | None = None) -> None:
         try:
-            async with scoped_acquire(organization_id=org_id) as conn:
-                await conn.execute(
-                    """
-                    UPDATE api_keys
-                    SET is_active = false, revoked_at = NOW()
-                    WHERE id = $1
-                    """,
-                    key_id,
-                )
+            await ApiKeyRepository(self._pool).revoke_by_id(key_id)
         except Exception:
             logger.debug("Failed to revoke integration MCP key", exc_info=True)
 

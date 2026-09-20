@@ -16,7 +16,7 @@ from typing import Any
 from starlette.requests import Request
 
 from lucent.integrations.base import IntegrationAdapter, IntegrationError
-from lucent.integrations.models import IntegrationEvent
+from lucent.db.integrations_models import IntegrationEvent
 
 # Re-export core types for convenience
 __all__ = [

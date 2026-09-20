@@ -27,7 +27,7 @@ import httpx
 from starlette.requests import Request
 
 from lucent.integrations.base import IntegrationError
-from lucent.integrations.models import EventType, IntegrationEvent
+from lucent.db.integrations_models import EventType, IntegrationEvent
 
 logger = logging.getLogger(__name__)
 

@@ -19,8 +19,8 @@ from math import ceil, exp
 from typing import Any
 from uuid import UUID
 
-from lucent.db.pool import scoped_acquire
 from lucent.db import AccessRepository, MemoryRepository
+from lucent.db.requests import RequestRepository
 
 # Relation statuses considered "active" work where linked memories should be protected.
 _ACTIVE_REQUEST_STATUSES = ("pending", "planned", "in_progress", "review", "needs_rework")
@@ -507,6 +507,8 @@ async def run_memory_decay_maintenance_cycle(
     linked_to_active = await _get_active_goal_linked_map(
         memory_repo=memory_repo,
         memory_ids=memory_ids,
+        requesting_user_id=requesting_user_id,
+        requesting_org_id=requesting_org_id,
     )
 
     profiles = [
@@ -556,32 +558,12 @@ async def _get_recent_access_counts(
     requesting_org_id: UUID | None = None,
 ) -> dict[UUID, int]:
     """Get access counts for specific memories over the last N days."""
-    if not memory_ids:
-        return {}
-
-    cutoff = now - timedelta(days=days)
-    placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
-    cutoff_param = len(memory_ids) + 1
-    query = f"""
-        SELECT memory_id, COUNT(*) AS access_count
-        FROM memory_access_log
-        WHERE memory_id IN ({placeholders})
-          AND accessed_at >= ${cutoff_param}
-        GROUP BY memory_id
-    """
-
-    async with scoped_acquire(
-        organization_id=requesting_org_id, user_id=requesting_user_id
-    ) as conn:
-        rows = await conn.fetch(query, *[str(mid) for mid in memory_ids], cutoff)
-
-    counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}
-    for row in rows:
-        memory_id = (
-            row["memory_id"] if isinstance(row["memory_id"], UUID) else UUID(row["memory_id"])
-        )
-        counts[memory_id] = row["access_count"]
-    return counts
+    return await access_repo.get_access_counts_since(
+        memory_ids,
+        organization_id=requesting_org_id,
+        user_id=requesting_user_id,
+        since=now - timedelta(days=days),
+    )
 
 
 def _compute_p75_baseline(*, counts: list[int], default: int) -> int:
@@ -606,25 +588,14 @@ async def _get_active_goal_linked_map(
     if not memory_ids:
         return {}
 
-    placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
-    query = f"""
-        SELECT DISTINCT rm.memory_id
-        FROM request_memories rm
-        JOIN requests r ON r.id = rm.request_id
-        WHERE rm.memory_id IN ({placeholders})
-          AND rm.relation = 'goal'
-          AND r.status = ANY(${"%d" % (len(memory_ids) + 1)})
-    """
-    # Uses repository pool, keeping all DB access behind repository objects.
-    async with scoped_acquire(
-        organization_id=requesting_org_id, user_id=requesting_user_id
-    ) as conn:
-        rows = await conn.fetch(query, *memory_ids, list(_ACTIVE_REQUEST_STATUSES))
-
-    linked: dict[UUID, bool] = {memory_id: False for memory_id in memory_ids}
-    for row in rows:
-        linked[row["memory_id"]] = True
-    return linked
+    request_repo = RequestRepository(memory_repo.pool)
+    active_ids = await request_repo.get_active_goal_linked_memory_ids(
+        memory_ids,
+        organization_id=requesting_org_id,
+        user_id=requesting_user_id,
+        statuses=list(_ACTIVE_REQUEST_STATUSES),
+    )
+    return {memory_id: memory_id in active_ids for memory_id in memory_ids}
 
 
 async def _fetch_full_memories(
@@ -638,21 +609,12 @@ async def _fetch_full_memories(
     if not memory_ids:
         return {}
 
-    placeholders = ", ".join(f"${i + 1}" for i in range(len(memory_ids)))
-    query = f"""
-        SELECT {memory_repo._FULL_COLUMNS}
-        FROM memories
-        WHERE id IN ({placeholders})
-          AND deleted_at IS NULL
-    """
-    async with scoped_acquire(
-        organization_id=requesting_org_id, user_id=requesting_user_id
-    ) as conn:
-        rows = await conn.fetch(query, *memory_ids)
-    return {
-        row["id"]: memory_repo._row_to_dict(row)  # noqa: SLF001 - intentional repository reuse
-        for row in rows
-    }
+    memories = await memory_repo.get_memories_by_ids(
+        memory_ids,
+        requesting_user_id=requesting_user_id,
+        requesting_org_id=requesting_org_id,
+    )
+    return {memory["id"]: memory for memory in memories}
 
 
 def _build_hard_exempt_result(

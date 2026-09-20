@@ -277,6 +277,36 @@ class SandboxTemplateRepository:
             )
         return self._parse_row(row) if row else None
 
+    async def list_for_credential_migration(self, organization_id: str) -> list[dict]:
+        """List template env rows that may contain plaintext credentials."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, organization_id, owner_user_id, owner_group_id, env_vars
+                FROM sandbox_templates
+                WHERE organization_id = $1
+                """,
+                organization_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def update_env_vars(
+        self, template_id: str, organization_id: str, env_vars: dict
+    ) -> bool:
+        """Replace a template's environment variables after migration."""
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            result = await conn.execute(
+                """
+                UPDATE sandbox_templates
+                SET env_vars = $2::jsonb, updated_at = NOW()
+                WHERE id = $1 AND organization_id = $2
+                """,
+                template_id,
+                organization_id,
+                json.dumps(env_vars),
+            )
+        return result != "UPDATE 0"
+
     async def get_by_name(self, name: str, organization_id: str) -> dict | None:
         async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(

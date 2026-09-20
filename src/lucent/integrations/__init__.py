@@ -19,7 +19,7 @@ from lucent.integrations.identity import (
     VerifyResult,
 )
 from lucent.integrations.middleware import SignatureVerificationMiddleware
-from lucent.integrations.models import (
+from lucent.db.integrations_models import (
     EventType,
     IntegrationCreate,
     IntegrationEvent,
@@ -38,7 +38,7 @@ from lucent.integrations.models import (
     UserLinkStatus,
     VerificationMethod,
 )
-from lucent.integrations.repositories import (
+from lucent.db.integrations_repositories import (
     IntegrationRepo,
     PairingChallengeRepo,
     UserLinkRepo,

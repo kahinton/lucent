@@ -8,7 +8,7 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
-from lucent.db.pool import scoped_acquire
+from lucent.db.pool import runner_guc_preamble, scoped_acquire, tenant_guc_scrub
 
 
 class OrganizationRepository:
@@ -16,6 +16,24 @@ class OrganizationRepository:
 
     def __init__(self, pool: Pool):
         self.pool = pool
+
+    async def list_real_organization_ids(self, *, system_org_name: str) -> list[str]:
+        """Return IDs of user-facing organizations with at least one user."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(runner_guc_preamble())
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT o.id
+                    FROM organizations o
+                    JOIN users u ON u.organization_id = o.id
+                    WHERE o.name <> $1
+                    """,
+                    system_org_name,
+                )
+            finally:
+                await conn.execute(tenant_guc_scrub())
+        return [str(row["id"]) for row in rows]
 
     async def create(self, name: str) -> dict[str, Any]:
         """Create a new organization.

@@ -485,6 +485,40 @@ class AccessRepository:
             counts[memory_id] = row["access_count"]
         return counts
 
+    async def get_access_counts_since(
+        self,
+        memory_ids: list[UUID],
+        *,
+        organization_id: UUID | None = None,
+        user_id: UUID | None = None,
+        since: datetime,
+    ) -> dict[UUID, int]:
+        """Count accesses for explicit memories on or after a cutoff."""
+        if not memory_ids:
+            return {}
+
+        placeholders = ", ".join(f"${idx + 1}" for idx in range(len(memory_ids)))
+        cutoff_param = len(memory_ids) + 1
+        query = f"""
+            SELECT memory_id, COUNT(*) AS access_count
+            FROM memory_access_log
+            WHERE memory_id IN ({placeholders})
+              AND accessed_at >= ${cutoff_param}
+            GROUP BY memory_id
+        """
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
+            rows = await conn.fetch(query, *[str(mid) for mid in memory_ids], since)
+
+        counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}
+        for row in rows:
+            memory_id = row["memory_id"]
+            counts[memory_id if isinstance(memory_id, UUID) else UUID(memory_id)] = row[
+                "access_count"
+            ]
+        return counts
+
     def _row_to_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a database row to a dictionary."""
         user_id = None
