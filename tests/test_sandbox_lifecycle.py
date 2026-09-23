@@ -187,7 +187,9 @@ def _make_manager(backend: AsyncMock | None = None) -> SandboxManager:
     repo.create = AsyncMock()
     repo.update_status = AsyncMock()
     manager._repo.return_value = repo
-    manager._create_task_scoped_api_key = AsyncMock(return_value=(None, "test-bridge-key"))
+    manager._create_task_scoped_api_key = AsyncMock(
+        return_value=(None, "test-bridge-key", None)
+    )
     return manager
 
 
@@ -406,6 +408,95 @@ class TestDockerSandboxLifecycle:
         assert env.get("OTHER") == "world"
 
     @pytest.mark.asyncio
+    async def test_mcp_bridge_is_isolated_sidecar(self):
+        """MCP credentials stay in a trusted sidecar, not the user image."""
+        primary = _make_mock_container("primary")
+        sidecar = _make_mock_container("bridge-sidecar")
+        sidecar.exec_run.return_value = (0, b"ok")
+        client = _make_docker_client(primary)
+        client.containers.run.side_effect = [primary, sidecar]
+        client.containers.list.return_value = [primary]
+        backend = self._backend_with_client(client)
+
+        await backend.create(
+            SandboxConfig(
+                env_vars={
+                    "MY_VAR": "hello",
+                    "LUCENT_API_URL": "http://host.docker.internal:8766/api",
+                    "LUCENT_SANDBOX_MCP_API_KEY": "hs_bridge-key",
+                    "LUCENT_SANDBOX_MCP_ENABLED": "1",
+                    "LUCENT_SANDBOX_TASK_ID": "task-1",
+                },
+                mcp_bridge_port=9123,
+            )
+        )
+
+        primary_kwargs, sidecar_kwargs = client.containers.run.call_args_list[0].kwargs, (
+            client.containers.run.call_args_list[1].kwargs
+        )
+        assert primary_kwargs["environment"]["MY_VAR"] == "hello"
+        assert "LUCENT_SANDBOX_MCP_API_KEY" not in primary_kwargs["environment"]
+        assert primary_kwargs["environment"]["LUCENT_SANDBOX_MCP_ENABLED"] == "1"
+        assert sidecar_kwargs["network_mode"] == f"container:{primary.id}"
+        assert sidecar_kwargs["environment"]["LUCENT_SANDBOX_MCP_API_KEY"] == "hs_bridge-key"
+        assert sidecar_kwargs["read_only"] is True
+        assert sidecar_kwargs["cap_drop"] == ["ALL"]
+
+    @pytest.mark.asyncio
+    async def test_create_overrides_caller_supplied_bridge_controls(self):
+        """Bridge routing and credentials cannot be redirected from config."""
+        backend = _make_backend_mock()
+        manager = _make_manager(backend)
+        supplied_key_id = uuid4()
+        supplied_key = "hs_attacker-controlled"
+        manager._create_task_scoped_api_key = AsyncMock(
+            return_value=(supplied_key_id, "hs_luent-issued", "org-1")
+        )
+
+        await manager.create(
+            SandboxConfig(
+                task_id=str(uuid4()),
+                env_vars={
+                    "LUCENT_API_URL": "http://attacker.example/api",
+                    "LUCENT_SANDBOX_MCP_API_KEY": supplied_key,
+                    "LUCENT_SANDBOX_MCP_ENABLED": "1",
+                    "LUCENT_SANDBOX_TASK_ID": "wrong-task",
+                    "LUCENT_SANDBOX_MCP_PORT": "9999",
+                },
+            )
+        )
+
+        passed_config = backend.create.call_args.args[0]
+        assert passed_config.env_vars["LUCENT_API_URL"] == "http://host.docker.internal:8766/api"
+        assert passed_config.env_vars["LUCENT_SANDBOX_MCP_API_KEY"] == "hs_luent-issued"
+        assert passed_config.env_vars["LUCENT_SANDBOX_MCP_ENABLED"] == "1"
+        assert passed_config.env_vars["LUCENT_SANDBOX_TASK_ID"] == passed_config.task_id
+        assert passed_config.env_vars["LUCENT_SANDBOX_MCP_PORT"] == str(
+            passed_config.mcp_bridge_port
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_does_not_enable_bridge_without_task(self):
+        """A non-task sandbox cannot turn on MCP with caller-supplied settings."""
+        backend = _make_backend_mock()
+        manager = _make_manager(backend)
+
+        await manager.create(
+            SandboxConfig(
+                env_vars={
+                    "LUCENT_API_URL": "http://attacker.example/api",
+                    "LUCENT_SANDBOX_MCP_API_KEY": "hs_attacker-controlled",
+                    "LUCENT_SANDBOX_MCP_ENABLED": "1",
+                }
+            )
+        )
+
+        passed_config = backend.create.call_args.args[0]
+        assert "LUCENT_API_URL" not in passed_config.env_vars
+        assert "LUCENT_SANDBOX_MCP_API_KEY" not in passed_config.env_vars
+        assert "LUCENT_SANDBOX_MCP_ENABLED" not in passed_config.env_vars
+
+    @pytest.mark.asyncio
     async def test_create_labels_container(self):
         """Container is labeled with the Lucent sandbox prefix."""
         client = _make_docker_client()
@@ -551,11 +642,12 @@ class TestDockerSandboxLifecycle:
         manager._revoke_api_key = AsyncMock()
         sandbox_id = "sb-revoke"
         key_id = uuid4()
-        manager._sandbox_bridge_api_keys[sandbox_id] = key_id
+        organization_id = str(uuid4())
+        manager._sandbox_bridge_api_keys[sandbox_id] = (key_id, organization_id)
 
         await manager.destroy(sandbox_id)
 
-        manager._revoke_api_key.assert_called_once_with(key_id)
+        manager._revoke_api_key.assert_called_once_with(key_id, organization_id)
         assert sandbox_id not in manager._sandbox_bridge_api_keys
 
     # --- Timeout / auto-destruction --------------------------------------
@@ -650,7 +742,7 @@ class TestDockerSandboxLifecycle:
             timeout_seconds=1,
         )
 
-        key_id, _plain = await manager._create_task_scoped_api_key(config)
+        key_id, _plain, _organization_id = await manager._create_task_scoped_api_key(config)
         try:
             async with db_pool.acquire() as conn:
                 row = await conn.fetchrow(

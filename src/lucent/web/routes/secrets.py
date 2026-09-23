@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from lucent.access_control import AccessControlService
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import GroupRepository, get_pool
-from lucent.db.pool import scoped_acquire
+from lucent.db.secrets import SecretRepository
 from lucent.secrets import SecretRegistry, SecretScope
 
 from ._shared import _check_csrf, get_user_context, templates
@@ -40,55 +40,14 @@ async def secrets_page(
     org_id = UUID(str(user.organization_id))
     user_id = UUID(str(user.id))
 
-    # rls: secrets is RLS-bound (shape b). The authenticated user's org is
-    # threaded in; the role GUC carries member-level visibility, with the
-    # admin/owner override preserved in the query predicate itself.
-    async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-        count_row = await conn.fetchrow(
-            """
-            SELECT COUNT(*) AS total
-            FROM secrets s
-            WHERE s.organization_id = $1
-              AND (
-                s.owner_user_id = $2
-                OR s.owner_group_id = ANY($3::uuid[])
-                OR $4 IN ('admin', 'owner')
-              )
-            """,
-            org_id,
-            user_id,
-            group_ids,
-            role_value,
-        )
-        total_count = count_row["total"] if count_row else 0
-        rows = await conn.fetch(
-            """
-            SELECT
-                s.key,
-                s.owner_user_id,
-                s.owner_group_id,
-                s.created_at,
-                COALESCE(u.display_name, u.email, 'Unknown user') AS owner_user_name,
-                g.name AS owner_group_name
-            FROM secrets s
-            LEFT JOIN users u ON u.id = s.owner_user_id
-            LEFT JOIN groups g ON g.id = s.owner_group_id
-            WHERE s.organization_id = $1
-              AND (
-                s.owner_user_id = $2
-                OR s.owner_group_id = ANY($3::uuid[])
-                OR $4 IN ('admin', 'owner')
-              )
-            ORDER BY s.created_at DESC, s.key ASC
-            LIMIT $5 OFFSET $6
-            """,
-            org_id,
-            user_id,
-            group_ids,
-            role_value,
-            per_page,
-            offset,
-        )
+    total_count, rows = await SecretRepository(pool).list_scoped(
+        organization_id=str(org_id),
+        user_id=str(user_id),
+        group_ids=[str(group_id) for group_id in group_ids],
+        role=role_value,
+        limit=per_page,
+        offset=offset,
+    )
 
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)

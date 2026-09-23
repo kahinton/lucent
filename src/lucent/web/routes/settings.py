@@ -43,6 +43,7 @@ from lucent.db import (
     UserRepository,
     get_pool,
 )
+from lucent.db.pool import scoped_acquire_on
 from lucent.db import admin_audit as audit_actions
 
 from ._shared import _check_csrf, _set_csrf_cookie, get_user_context, templates
@@ -272,11 +273,8 @@ async def change_password(request: Request):
     if new_password != confirm_password:
         return _err("New passwords do not match.")
 
-    query = "SELECT password_hash FROM users WHERE id = $1"
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(query, str(user.id))
-
-    if not row or not row["password_hash"]:
+    password_hash = await UserRepository(pool).get_password_hash(user.id)
+    if not password_hash:
         await audit_repo.log_for_user(
             user, request,
             action=audit_actions.PASSWORD_CHANGE,
@@ -288,7 +286,7 @@ async def change_password(request: Request):
         return _err("No password set on this account.")
 
     if not bcrypt.checkpw(
-        current_password.encode("utf-8"), row["password_hash"].encode("utf-8")
+        current_password.encode("utf-8"), password_hash.encode("utf-8")
     ):
         await audit_repo.log_for_user(
             user, request,
@@ -347,11 +345,7 @@ async def force_password_change_page(request: Request):
     user = await get_user_context(request, allow_force_password_change=True)
 
     pool = await get_pool()
-    query = "SELECT force_password_change FROM users WHERE id = $1"
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(query, str(user.id))
-
-    if not row or not row["force_password_change"]:
+    if not await UserRepository(pool).is_force_password_change(user.id):
         return RedirectResponse("/", status_code=303)
 
     csrf_token = generate_csrf_token()

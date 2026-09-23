@@ -6,7 +6,7 @@ from math import ceil
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.db.pool import scoped_acquire
+from lucent.db.pool import scoped_acquire, scoped_acquire_on
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.rbac import Role
@@ -81,14 +81,15 @@ async def _get_mutable_task_request(repo, task_id: str, user) -> tuple[dict, dic
     return task, req
 
 
-async def _notify_request_ready(pool, *, request_id: str, action: str) -> None:
+async def _notify_request_ready(pool, *, request_id: str, org_id: str, action: str) -> None:
     """Best-effort wake notification for daemon request/review state changes."""
     try:
-        async with pool.acquire() as conn:  # rls: pg_notify plumbing — no row access
-            await conn.execute(
-                "SELECT pg_notify('request_ready', $1)",
-                f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
-            )
+        from lucent.db.requests import RequestRepository
+
+        await RequestRepository(pool).notify_ready(
+            org_id=org_id,
+            payload=f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
+        )
     except Exception:
         pass
 
@@ -381,14 +382,7 @@ async def request_detail(request: Request, request_id: str):
         if origin_session_id:
             session_relations[str(origin_session_id)] = "origin"
 
-        async with scoped_acquire(organization_id=str(user.organization_id), user_id=str(user.id)) as conn:
-            linked_rows = await conn.fetch(
-                """SELECT session_id, relation
-                   FROM llm_session_requests
-                   WHERE request_id = $1
-                   ORDER BY created_at DESC""",
-                req["id"],
-            )
+        linked_rows = await session_repo.list_request_relations(str(req["id"]))
         for row in linked_rows:
             sid = str(row["session_id"])
             session_relations.setdefault(sid, row["relation"] or "linked")
@@ -579,7 +573,7 @@ async def request_approval_action(
     if not result:
         raise HTTPException(status_code=409, detail="Request already processed")
 
-    await _notify_request_ready(pool, request_id=request_id, action=action)
+    await _notify_request_ready(pool, request_id=request_id, org_id=org_id, action=action)
     if action == "reject":
         await _record_rejection_lesson(
             pool,
@@ -616,7 +610,7 @@ async def cancel_request(request: Request, request_id: str):
     result = await repo.update_request_status(request_id, "cancelled", org_id=org_id)
     if not result:
         raise HTTPException(404, "Request not found")
-    await _notify_request_ready(pool, request_id=request_id, action="cancel")
+    await _notify_request_ready(pool, request_id=request_id, org_id=org_id, action="cancel")
     return RedirectResponse(f"/requests/{request_id}", status_code=303)
 
 

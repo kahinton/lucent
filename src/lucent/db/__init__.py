@@ -20,10 +20,13 @@ from lucent.db.admin_audit import AdminAuditRepository
 from lucent.db.api_key import ApiKeyRepository
 from lucent.db.audit import AuditRepository
 from lucent.db.auth import AuthRepository
+from lucent.db.bootstrap import BootstrapRepository
+from lucent.db.credentials import CredentialRepository
 
 # Repositories
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
+from lucent.db.dashboard import DashboardRepository
 from lucent.db.integrations import IntegrationRepository
 from lucent.db.llm_sessions import LLMSessionRepository
 from lucent.db.memory import (
@@ -37,6 +40,8 @@ from lucent.db.pool import close_db, get_pool, init_db
 from lucent.db.projects import ProjectRepository
 from lucent.db.reviews import ReviewRepository
 from lucent.db.runtime_settings import RuntimeSettingsRepository
+from lucent.db.secrets import SecretRepository
+from lucent.db.secrets import SecretMigrationRepository
 from lucent.db.token_usage import TokenUsageRepository
 from lucent.db.tool_audit import ToolAuditRepository
 
@@ -84,11 +89,16 @@ __all__ = [
     "AuthRepository",
     "AuditRepository",
     "AdminAuditRepository",
+    "BootstrapRepository",
+    "DashboardRepository",
+    "CredentialRepository",
     "AccessRepository",
     "ModelRepository",
     "ReviewRepository",
     "RuntimeSettingsRepository",
     "ToolAuditRepository",
+    "SecretRepository",
+    "SecretMigrationRepository",
     "UserInteractionRepository",
     # TypedDict definitions
     "MemoryRecord",

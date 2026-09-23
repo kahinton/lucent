@@ -1699,6 +1699,54 @@ class TestListPlanningTargets:
         assert target["active_milestone_indexes"] == [3, 4]
         assert target["completed_milestone_count"] == 2
 
+    async def test_daemon_role_returns_org_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(
+            db_pool,
+            org_id,
+            milestones=[{"description": "Do the thing", "status": "active"}],
+        )
+        targets = await repo.list_planning_targets(org_id, role="daemon")
+        assert gid in [target["goal_id"] for target in targets]
+
+    async def test_member_role_does_not_return_unowned_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(
+            db_pool,
+            org_id,
+            milestones=[{"description": "Private", "status": "active"}],
+        )
+        targets = await repo.list_planning_targets(org_id, role="member")
+        assert gid not in [target["goal_id"] for target in targets]
+
+    async def test_daemon_role_returns_org_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(
+            db_pool,
+            org_id,
+            milestones=[{"description": "Do the thing", "status": "active"}],
+        )
+        targets = await repo.list_planning_targets(org_id, role="daemon")
+        assert gid in [target["goal_id"] for target in targets]
+
+    async def test_member_role_does_not_return_unowned_goal(
+        self, repo, test_organization, db_pool
+    ):
+        org_id = str(test_organization["id"])
+        gid = await self._make_goal(
+            db_pool,
+            org_id,
+            milestones=[{"description": "Private", "status": "active"}],
+        )
+        targets = await repo.list_planning_targets(org_id, role="member")
+        assert gid not in [target["goal_id"] for target in targets]
+
     async def test_excludes_completed_goal(
         self, repo, test_organization, db_pool
     ):

@@ -76,14 +76,23 @@ class RuntimeConfigurationMixin:
                 return
             try:
                 from lucent.db import get_pool
+                from lucent.db.pool import clear_tenant_scope, set_tenant_scope
                 from lucent.model_registry import load_models_from_db
                 from lucent.settings import load_runtime_settings_from_db
 
-                pool = await get_pool()
-                await load_runtime_settings_from_db(pool)
-                await load_models_from_db(pool)
-                runtime._refresh_config_from_runtime_settings()
-                self.roles = self._parse_roles(runtime.DAEMON_ROLES_STR)
-                self._settings_reloaded_at = now
+                # Settings and models are exempt from row-level security, but
+                # their repository acquisitions still refuse scope-less work.
+                # System scope is bounded to this reload and preserves the
+                # daemon's normal fail-closed default.
+                set_tenant_scope(role="system")
+                try:
+                    pool = await get_pool()
+                    await load_runtime_settings_from_db(pool)
+                    await load_models_from_db(pool)
+                    runtime._refresh_config_from_runtime_settings()
+                    self.roles = self._parse_roles(runtime.DAEMON_ROLES_STR)
+                    self._settings_reloaded_at = now
+                finally:
+                    clear_tenant_scope()
             except Exception as error:
                 runtime.log(f"Runtime settings reload failed: {error}", "WARN")

@@ -18,6 +18,30 @@ class CredentialRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
 
+    async def get_active_user_tokens(
+        self,
+        *,
+        organization_id: str,
+        user_id: str,
+        integration_type: str,
+    ) -> list[dict[str, Any]]:
+        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+            rows = await conn.fetch(
+                """
+                SELECT encrypted_secret_payload, access_token_expires_at
+                FROM enterprise_credentials
+                WHERE integration_type = $1
+                  AND scope_type = 'user'
+                  AND owner_user_id = $2
+                  AND status = 'active'
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 5
+                """,
+                integration_type,
+                UUID(user_id),
+            )
+        return [self._row_to_dict(row) for row in rows]
+
     async def create_credential(
         self,
         *,

@@ -12,9 +12,14 @@ import asyncpg
 import bcrypt
 from asyncpg import Pool
 
+from lucent.db.pool import (
+    preauth_guc_preamble,
+    runner_guc_preamble,
+    scoped_acquire,
+    scoped_acquire_on,
+    tenant_guc_scrub,
+)
 from lucent.logging import get_logger
-from lucent.db.pool import preauth_guc_preamble, scoped_acquire, scoped_acquire_on, tenant_guc_scrub
-from lucent.db.pool import runner_guc_preamble
 
 logger = get_logger(__name__)
 
@@ -129,6 +134,21 @@ class ApiKeyRepository:
             return None
 
         return self._row_to_dict(row)
+
+    async def get_by_hash(self, key_hash: str) -> dict[str, Any] | None:
+        async with scoped_acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT id, user_id, organization_id, name, key_prefix,
+                          key_hash, scopes, last_used_at, use_count, expires_at,
+                          is_active, created_at, updated_at,
+                          memory_scope_user_id, memory_scope
+                   FROM api_keys
+                   WHERE key_hash = $1
+                     AND revoked_at IS NULL
+                     AND is_active = true""",
+                key_hash,
+            )
+        return self._row_to_dict(row) if row else None
 
     async def verify(self, plain_key: str) -> dict[str, Any] | None:
         """Verify an API key and return the associated record.
@@ -288,6 +308,27 @@ class ApiKeyRepository:
             return None
 
         return self._row_to_dict(row)
+
+    async def revoke_any(
+        self, key_id: UUID, *, organization_id: UUID | str | None
+    ) -> bool:
+        """Revoke an internally-managed key within its organization."""
+        if organization_id is None:
+            raise ValueError("Organization context is required to revoke an API key")
+        query = """
+            UPDATE api_keys
+            SET revoked_at = COALESCE(revoked_at, $2::timestamptz),
+                is_active = false,
+                updated_at = $2::timestamptz
+            WHERE id = $1 AND organization_id = $3::uuid AND revoked_at IS NULL
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, role="daemon"
+        ) as conn:
+            result = await conn.execute(
+                query, str(key_id), datetime.now(timezone.utc), str(organization_id)
+            )
+        return result in ("UPDATE 1",)
 
     async def revoke(
         self,

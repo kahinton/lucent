@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 async def mint_scoped_api_key(
     *,
     memory_scope: str,
@@ -22,6 +21,7 @@ async def mint_scoped_api_key(
     from daemon.db_scope import connect_scoped
     import bcrypt
     from daemon.runtime.module_proxy import runtime
+    from lucent.db.daemon import DaemonRepository
 
     try:
         connection = await connect_scoped(runtime.DATABASE_URL, organization_id=org_id)
@@ -44,21 +44,16 @@ async def mint_scoped_api_key(
             f"scoped-{memory_scope}-{scope_suffix}-{secrets.token_hex(4)}"
         )
 
-        await connection.fetchrow(
-            "INSERT INTO api_keys "
-            "(user_id, organization_id, name, key_prefix, key_hash, scopes, "
-            " expires_at, memory_scope, memory_scope_user_id) "
-            "VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 minute' * $7, $8, $9) "
-            "RETURNING id, expires_at",
+        await DaemonRepository(connection).create_scoped_key(
             daemon_user_id,
             org_id,
             key_name,
             key_prefix,
             key_hash,
-            ["read", "write"],
-            ttl_minutes,
-            memory_scope,
-            memory_scope_user_id,
+            scopes=["read", "write"],
+            ttl_minutes=ttl_minutes,
+            memory_scope=memory_scope,
+            memory_scope_user_id=memory_scope_user_id,
         )
         runtime.log(
             f"Minted {memory_scope} scoped key (prefix: {key_prefix}, "

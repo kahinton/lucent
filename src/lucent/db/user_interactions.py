@@ -153,6 +153,26 @@ class UserInteractionRepository:
         item["metadata"] = _json_dict(item.get("metadata"))
         return item
 
+    async def has_message_with_llm_id(
+        self,
+        *,
+        interaction_id: str | UUID,
+        llm_message_id: str,
+        org_id: str | UUID,
+    ) -> bool:
+        async with scoped_acquire(organization_id=org_id) as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT 1
+                       FROM user_interaction_messages
+                       WHERE interaction_id = $1::uuid
+                         AND metadata->>'llm_message_id' = $2
+                       LIMIT 1""",
+                    str(interaction_id),
+                    llm_message_id,
+                )
+            )
+
     async def create_interaction(
         self,
         *,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lucent.db.daemon import DaemonRepository
 import asyncio
 import contextlib
 import json
@@ -16,8 +17,6 @@ class RuntimeLoopsMixin:
 
     async def _has_owned_active_tasks(self) -> int:
         """Return claimed or running tasks owned by this daemon instance."""
-        import asyncpg
-
         from daemon.db_scope import connect_scoped
         from daemon.runtime.module_proxy import runtime
 
@@ -27,23 +26,20 @@ class RuntimeLoopsMixin:
             # 'system' role. The daemon role with empty org is fail-closed
             # denied, so resolve the daemon org first (exempt-table read)
             # and bind it; on unbound orgs the count stays 0 (safe defer).
-            connection = await connect_scoped(runtime.DATABASE_URL)
+            # Organization resolution is daemon bootstrap infrastructure. The
+            # loop has no tenant context yet, so use the explicit system branch.
+            connection = await connect_scoped(
+                runtime.DATABASE_URL,
+                role="system",
+            )
             bound = await runtime._resolve_daemon_org(connection)
             if not bound:
                 # No org to bind: treat as "no owned tasks" — fail-closed
                 # under RLS either way, and the reload proceeds safely.
                 return 0
-            await connection.execute(
-                "SELECT set_config('app.org_id', $1, false);",
-                bound[0],
-            )
-            return int(
-                await connection.fetchval(
-                    """SELECT COUNT(*) FROM tasks
-                       WHERE claimed_by = $1 AND status IN ('claimed', 'running')""",
-                    self.instance_id,
-                )
-                or 0
+            await DaemonRepository(connection).set_organization_scope(bound[0])
+            return await DaemonRepository(connection).count_owned_active_tasks(
+                self.instance_id
             )
         except Exception as error:
             runtime.log(f"Reload task-state check failed; deferring restart: {error}", "WARN")
@@ -54,14 +50,13 @@ class RuntimeLoopsMixin:
 
     async def _setup_listen(self):
         """Establish the persistent PostgreSQL LISTEN connection."""
-        import asyncpg
-
+        from daemon.db_scope import connect_scoped
         from daemon.runtime.module_proxy import runtime
 
         async with self._listen_lock:
             if self._listen_conn and not self._listen_conn.is_closed():
                 try:
-                    await self._listen_conn.fetchval("SELECT 1")
+                    await DaemonRepository(self._listen_conn).listen_connection_alive()
                     return True
                 except Exception:
                     runtime.log("PG LISTEN connection stale, will reconnect", "WARN")
@@ -264,19 +259,25 @@ class RuntimeLoopsMixin:
 
     async def _get_daemon_org_id(self) -> str | None:
         """Return the daemon's bound organization id."""
-        import asyncpg
-
+        from daemon.db_scope import connect_scoped
         from daemon.runtime.module_proxy import runtime
 
         if cached := getattr(self, "_cached_daemon_org_id", None):
             return cached
         try:
-            connection = await connect_scoped(runtime.DATABASE_URL)
-        except Exception:
+            # Organization resolution is daemon bootstrap infrastructure. The
+            # loop has no tenant context yet, so use the explicit system branch.
+            connection = await connect_scoped(
+                runtime.DATABASE_URL,
+                role="system",
+            )
+        except Exception as error:
+            runtime.log(f"Daemon org resolution connection failed: {error}", "ERROR")
             return None
         try:
             bound = await runtime._resolve_daemon_org(connection)
             if not bound:
+                runtime.log("Daemon org resolution returned none", "ERROR")
                 return None
             self._cached_daemon_org_id = bound[0]
             return bound[0]

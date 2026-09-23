@@ -6,7 +6,6 @@ from uuid import UUID
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from lucent.db.pool import scoped_acquire
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import (
     AccessRepository,
@@ -984,29 +983,11 @@ async def knowledge_tree(request: Request):
     user = await get_user_context(request)
     pool = await get_pool()
 
-    # Query technical memories with repo metadata, grouped into tree structure
-    memory_access = MemoryRepository.user_memory_access_condition("$2", "$1")
-    query = f"""
-        SELECT id, metadata->>'repo' as repo,
-               metadata->>'directory' as directory,
-               metadata->>'filename' as filename,
-               LEFT(content, 200) as preview,
-               importance, tags,
-               vitality_score, lifecycle_stage,
-               updated_at, created_at
-        FROM memories
-        WHERE deleted_at IS NULL
-          AND type = 'technical'
-                    AND COALESCE(lifecycle_stage, 'active') IN ('active', 'consolidating')
-                    AND NOT ('superseded' = ANY(tags))
-          AND metadata->>'repo' IS NOT NULL
-          AND {memory_access}
-                ORDER BY metadata->>'repo',
-                                 metadata->>'directory' NULLS FIRST,
-                                 metadata->>'filename' NULLS FIRST
-    """
-    async with scoped_acquire(organization_id=user.organization_id, user_id=user.id) as conn:
-        rows = await conn.fetch(query, str(user.id), str(user.organization_id))
+    rows = await MemoryRepository(pool).list_knowledge_tree(
+        org_id=str(user.organization_id),
+        user_id=str(user.id),
+        user_clause=MemoryRepository.user_memory_access_condition("$2", "$1"),
+    )
 
     # Validate repo existence — batch check unique repos in parallel
     # Uses cached results (15min positive, 5min negative TTL) so repeat loads are instant
@@ -1193,17 +1174,10 @@ async def scan_repo(request: Request):
     from lucent.db.requests import RequestRepository
     req_repo = RequestRepository(pool)
 
-    # Check if there's already an active scan for this repo
-    async with scoped_acquire(organization_id=user.organization_id) as conn:
-        existing = await conn.fetchval(
-            """SELECT id FROM requests
-               WHERE target_repo = $1
-                 AND organization_id = $2
-                 AND status NOT IN ('completed', 'failed', 'cancelled')
-               LIMIT 1""",
-            repo_full_name,
-            str(user.organization_id),
-        )
+    existing = await req_repo.active_scan_request_id(
+        repo_full_name,
+        str(user.organization_id),
+    )
     if existing:
         return JSONResponse({
             "status": "already_scanning",

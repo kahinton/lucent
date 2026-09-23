@@ -8,8 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.db.pool import scoped_acquire
-from lucent.db import MemoryRepository, get_pool
+from lucent.db import DashboardRepository, MemoryRepository, get_pool
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.rbac import Role
 from lucent.services.memory_access_service import MemoryAccessService
@@ -133,41 +132,13 @@ def _goal_summary(goal: dict, linked_requests: list[dict]) -> dict:
     }
 
 
-async def _load_goal_requests(conn, org_id: UUID, goal_ids: list[UUID]) -> dict[str, list[dict]]:
+async def _load_goal_requests(repo: DashboardRepository, org_id: UUID, goal_ids: list[UUID]) -> dict[str, list[dict]]:
     """Load requests linked to visible goal memories."""
     requests_by_goal = {str(goal_id): [] for goal_id in goal_ids}
     if not goal_ids:
         return requests_by_goal
 
-    rows = await conn.fetch(
-        """SELECT DISTINCT ON (goal_link.linked_goal_id, r.id)
-                  goal_link.linked_goal_id,
-                  r.id,
-                  r.title,
-                  r.status,
-                  r.approval_status,
-                  r.priority,
-                  r.source,
-                  r.goal_milestone_index,
-                  r.created_at,
-                  r.updated_at,
-                  r.completed_at
-           FROM requests r
-           LEFT JOIN request_memories rm
-             ON rm.request_id = r.id AND rm.relation = 'goal'
-           CROSS JOIN LATERAL (
-             SELECT COALESCE(r.goal_memory_id, rm.memory_id) AS linked_goal_id
-           ) goal_link
-           WHERE r.organization_id = $1
-             AND goal_link.linked_goal_id = ANY($2::uuid[])
-           ORDER BY goal_link.linked_goal_id, r.id, r.updated_at DESC""",
-        org_id,
-        goal_ids,
-    )
-
-    for row in rows:
-        requests_by_goal.setdefault(str(row["linked_goal_id"]), []).append(dict(row))
-    return requests_by_goal
+    return await repo.list_goal_requests(org_id, goal_ids)
 
 
 async def load_chat_overview(user) -> dict:
@@ -214,16 +185,13 @@ async def load_chat_overview(user) -> dict:
     ][:3]
 
     heartbeat_row = None
-    async with scoped_acquire(organization_id=user.organization_id) as conn:
-        goal_requests = await _load_goal_requests(conn, user.organization_id, goal_ids)
-        heartbeat_row = await conn.fetchrow(
-            """SELECT last_seen_at
-               FROM daemon_instances
-               WHERE organization_id = $1::uuid
-               ORDER BY last_seen_at DESC
-               LIMIT 1""",
-            user.organization_id,
-        )
+    dashboard_repo = DashboardRepository(pool)
+    goal_requests = await _load_goal_requests(
+        dashboard_repo,
+        user.organization_id,
+        goal_ids,
+    )
+    heartbeat_row = await dashboard_repo.get_latest_heartbeat(user.organization_id)
 
     active_goals = [
         summary
@@ -349,168 +317,45 @@ async def dashboard(request: Request):
     pending_proposals: dict = {"agents": [], "skills": [], "mcp_servers": [], "total": 0}
     proposed_sandbox_templates: list[dict] = []
 
-    async with scoped_acquire(organization_id=user.organization_id) as conn:
-        goal_requests_by_id = await _load_goal_requests(conn, user.organization_id, goal_ids)
-
-        summary_row = await conn.fetchrow(
-            """WITH current_requests AS (
-                   SELECT id, status
-                   FROM requests
-                   WHERE organization_id = $1
-                     AND status = ANY($2::text[])
-                     AND approval_status = ANY($3::text[])
-                 )
-                 SELECT
-                   (SELECT COUNT(*) FROM current_requests) AS open_requests,
-                   (SELECT COUNT(*) FROM current_requests
-                    WHERE status IN ('pending', 'planned')) AS pending_requests,
-                   (SELECT COUNT(*) FROM current_requests
-                    WHERE status IN ('in_progress', 'review', 'needs_rework'))
-                    AS active_requests,
-                   COUNT(t.id) FILTER (WHERE t.status IN ('claimed', 'running'))
-                    AS running_tasks,
-                   COUNT(t.id) FILTER (WHERE t.status IN ('pending', 'planned'))
-                    AS queued_tasks,
-                   COUNT(t.id) FILTER (WHERE t.status = 'completed')
-                    AS completed_tasks,
-                   COUNT(t.id) FILTER (WHERE t.status = 'failed') AS failed_tasks
-                 FROM current_requests cr
-                 LEFT JOIN tasks t ON t.request_id = cr.id""",
-            user.organization_id,
-            list(CURRENT_WORK_STATUSES),
-            list(APPROVED_APPROVAL_STATUSES),
-        )
-        if summary_row:
-            activity_summary = {
-                "requests": {
-                    "open": summary_row["open_requests"] or 0,
-                    "pending": summary_row["pending_requests"] or 0,
-                    "active": summary_row["active_requests"] or 0,
-                },
-                "tasks": {
-                    "running": summary_row["running_tasks"] or 0,
-                    "queued": summary_row["queued_tasks"] or 0,
-                    "ready": ready_tasks["total_count"],
-                    "completed": summary_row["completed_tasks"] or 0,
-                    "failed": summary_row["failed_tasks"] or 0,
-                },
-            }
-
-        active_count_row = await conn.fetchrow(
-            """SELECT COUNT(*) AS total
-               FROM requests
-               WHERE organization_id = $1
-                 AND status = ANY($2::text[])
-                 AND approval_status = ANY($3::text[])""",
-            user.organization_id,
-            list(CURRENT_WORK_STATUSES),
-            list(APPROVED_APPROVAL_STATUSES),
-        )
-        active_rows = await conn.fetch(
-            """SELECT r.id, r.title, r.description, r.status, r.priority,
-                      r.source, r.created_at, r.updated_at,
-                      COUNT(t.id) FILTER (WHERE t.status = 'pending')
-                        AS tasks_pending,
-                      COUNT(t.id) FILTER (WHERE t.status = 'planned')
-                        AS tasks_planned,
-                      COUNT(t.id) FILTER (WHERE t.status IN ('claimed', 'running'))
-                        AS tasks_running,
-                      COUNT(t.id) FILTER (WHERE t.status = 'completed')
-                        AS tasks_completed,
-                      COUNT(t.id) FILTER (WHERE t.status = 'failed') AS tasks_failed,
-                      COUNT(t.id) AS tasks_total
-               FROM requests r
-               LEFT JOIN tasks t ON t.request_id = r.id
-               WHERE r.organization_id = $1
-                 AND r.status = ANY($2::text[])
-                 AND r.approval_status = ANY($3::text[])
-               GROUP BY r.id
-               ORDER BY
-                 CASE r.status
-                   WHEN 'in_progress' THEN 0
-                   WHEN 'needs_rework' THEN 1
-                   WHEN 'review' THEN 2
-                   WHEN 'pending' THEN 3
-                   WHEN 'planned' THEN 4
-                   ELSE 5
-                 END,
-                 CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
-                                 WHEN 'medium' THEN 2 ELSE 3 END,
-                 r.updated_at DESC
-               LIMIT 5""",
-            user.organization_id,
-            list(CURRENT_WORK_STATUSES),
-            list(APPROVED_APPROVAL_STATUSES),
-        )
-        active_work = {
-            "items": [dict(row) for row in active_rows],
-            "total_count": active_count_row["total"] if active_count_row else 0,
+    dashboard_repo = DashboardRepository(pool)
+    goal_requests_by_id = await _load_goal_requests(
+        dashboard_repo,
+        user.organization_id,
+        goal_ids,
+    )
+    summary_row = await dashboard_repo.get_work_summary(
+        user.organization_id,
+        statuses=list(CURRENT_WORK_STATUSES),
+        approval_statuses=list(APPROVED_APPROVAL_STATUSES),
+    )
+    if summary_row:
+        activity_summary = {
+            "requests": {
+                "open": summary_row["open_requests"] or 0,
+                "pending": summary_row["pending_requests"] or 0,
+                "active": summary_row["active_requests"] or 0,
+            },
+            "tasks": {
+                "running": summary_row["running_tasks"] or 0,
+                "queued": summary_row["queued_tasks"] or 0,
+                "ready": ready_tasks["total_count"],
+                "completed": summary_row["completed_tasks"] or 0,
+                "failed": summary_row["failed_tasks"] or 0,
+            },
         }
 
-        pending_approval_count = await conn.fetchval(
-            """SELECT COUNT(*)
-               FROM requests
-               WHERE organization_id = $1
-                 AND approval_status = 'pending_approval'
-                 AND status NOT IN ('cancelled', 'rejection_processing')""",
-            user.organization_id,
-        ) or 0
-        approval_rows = await conn.fetch(
-            """SELECT r.id, r.title, r.description, r.source, r.priority,
-                      r.created_at, r.updated_at,
-                      (SELECT COUNT(*) FROM tasks t WHERE t.request_id = r.id)
-                        AS task_count
-               FROM requests r
-               WHERE r.organization_id = $1
-                 AND r.approval_status = 'pending_approval'
-                 AND r.status NOT IN ('cancelled', 'rejection_processing')
-               ORDER BY
-                 CASE r.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
-                                 WHEN 'medium' THEN 2 ELSE 3 END,
-                 r.created_at
-               LIMIT 5""",
-            user.organization_id,
-        )
-        pending_approvals = {
-            "items": [dict(row) for row in approval_rows],
-            "total_count": pending_approval_count,
-        }
+    active_work = await dashboard_repo.get_active_work(
+        user.organization_id,
+        statuses=list(CURRENT_WORK_STATUSES),
+        approval_statuses=list(APPROVED_APPROVAL_STATUSES),
+    )
+    pending_approvals = await dashboard_repo.get_pending_approvals(user.organization_id)
+    completed_24h_count = await dashboard_repo.count_completed_last_24_hours(
+        user.organization_id,
+    )
 
-        completed_24h_count = await conn.fetchval(
-            """SELECT COUNT(*) FROM requests
-               WHERE organization_id = $1
-                 AND status = 'completed'
-                 AND completed_at > NOW() - INTERVAL '24 hours'""",
-            user.organization_id,
-        ) or 0
-
-        if is_admin_or_owner:
-            admin_row = await conn.fetchrow(
-                """SELECT
-                     (SELECT COUNT(*) FROM users
-                      WHERE organization_id = $1 AND is_active = true)
-                        AS active_users,
-                     (SELECT COUNT(*) FROM requests
-                      WHERE organization_id = $1
-                        AND status = 'failed'
-                        AND updated_at > NOW() - INTERVAL '7 days')
-                        AS failed_requests_7d,
-                     (SELECT COUNT(*) FROM tasks
-                      WHERE organization_id = $1
-                        AND status = 'failed'
-                        AND updated_at > NOW() - INTERVAL '7 days')
-                        AS failed_tasks_7d,
-                     (SELECT COUNT(*) FROM schedules
-                      WHERE organization_id = $1
-                        AND enabled = true
-                        AND status = 'active') AS active_schedules,
-                     (SELECT COUNT(*) FROM sandboxes
-                      WHERE organization_id = $1
-                        AND status NOT IN ('destroyed', 'stopped'))
-                        AS live_sandboxes""",
-                user.organization_id,
-            )
-            admin_summary = dict(admin_row) if admin_row else {}
+    if is_admin_or_owner:
+        admin_summary = await dashboard_repo.get_admin_summary(user.organization_id) or {}
 
     goal_summaries = [
         _goal_summary(goal, goal_requests_by_id.get(str(goal["id"]), []))
@@ -550,16 +395,13 @@ async def dashboard(request: Request):
 
     heartbeat_row = None
     if user.organization_id:
-        async with scoped_acquire(organization_id=user.organization_id) as conn:
-            heartbeat_row = await conn.fetchrow(
-                """SELECT instance_id, hostname, pid, roles, status,
-                          last_seen_at, metadata
-                   FROM daemon_instances
-                   WHERE organization_id = $1::uuid
-                   ORDER BY last_seen_at DESC
-                   LIMIT 1""",
-                user.organization_id,
-            )
+        heartbeat_row = await dashboard_repo.get_latest_heartbeat(
+            user.organization_id,
+            fields=(
+                "instance_id, hostname, pid, roles, status, "
+                "last_seen_at, metadata"
+            ),
+        )
 
     daemon_state = await memory_access.search(
         user_id=user.id,

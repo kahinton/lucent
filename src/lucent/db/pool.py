@@ -3,21 +3,17 @@
 This module handles PostgreSQL connection pooling, initialization,
 and optional OpenTelemetry instrumentation for query tracing.
 
-It also owns the tenant session-context contract (RLS wave, migrations
-114/115/116): every scoped session carries three session-local GUCs:
+It also owns the tenant session-context contract: every scoped session
+carries three session-local GUCs:
 
     app.user_id : uuid | ''   (empty for the daemon/system role branches)
     app.org_id  : uuid | ''
     app.role    : 'member' | 'admin' | 'owner' | 'daemon' | 'system'
 
-The RLS policies created by migration 116 read these GUCs. A session with
-no context set sees zero rows on every RLS-bound table (fail-closed deny):
-``current_setting('app.org_id', true)`` returns empty, so every policy
-predicate is false. Context is set per-acquire via ``scoped_acquire()``
-(session-local, scrubbed on release — transaction-local values would
-vanish before the caller's first statement, a live-verified asyncpg
-behavior); the pool ``reset`` hook clears any residue when a connection
-is returned.
+Context is set per-acquire via ``scoped_acquire()`` (session-local, scrubbed
+on release — transaction-local values would vanish before the caller's first
+statement, a live-verified asyncpg behavior); the pool ``reset`` hook clears
+any residue when a connection is returned.
 """
 
 import asyncio
@@ -34,6 +30,12 @@ from uuid import UUID
 import asyncpg
 from asyncpg import Connection, Pool
 
+from lucent.db.scope_audit import (
+    ScopeAuditedConnection,
+    ScopeAuditedPool,
+    effective_scope,
+    audit_enabled,
+)
 from lucent.logging import get_logger
 
 logger = get_logger(__name__)
@@ -43,9 +45,8 @@ _pool: Pool | None = None
 _asyncpg_instrumented: bool = False
 
 # ---------------------------------------------------------------------------
-# Tenant session context (RLS wave contract -- see module docstring).
+# Tenant session context (see module docstring).
 # ---------------------------------------------------------------------------
-RLS_WAVE_MIGRATION = "116_rls_policies.sql"
 TENANT_GUCS = ("app.user_id", "app.org_id", "app.role", "app.auth_context")
 _tenant_scope: ContextVar[dict[str, str] | None] = ContextVar(
     "tenant_scope", default=None
@@ -92,9 +93,8 @@ def _runner_guc_preamble() -> str:
 
     Session-local set_config (is_local=false): the values live for the life
     of the pooled connection, so migrations and the enumerated system-infra
-    paths execute under the permissive app.role='system' branch of every RLS
-    policy (migration 116). Cleanup is the pool reset hook's job
-    (_reset_connection), which scrubs the GUCs when the connection returns.
+    paths run with an explicit system context. Cleanup is the pool reset
+    hook's job (_reset_connection), which scrubs the GUCs on connection return.
     """
     return (
         "SELECT set_config('app.user_id', '', false), "
@@ -106,9 +106,8 @@ def _runner_guc_preamble() -> str:
 def _tenant_guc_scrub() -> str:
     """SQL that clears tenant context from a pooled connection.
 
-    Sets every GUC to empty at session level: RLS policy predicates evaluate
-    false, so any later raw acquire on this connection is fail-closed denied
-    rather than inheriting a stale scope (or a bypass role).
+    Sets every GUC to empty at session level, so any later raw acquire does
+    not inherit a stale scope.
     """
     return (
         "SELECT set_config('app.user_id', '', false), "
@@ -212,16 +211,6 @@ async def init_db(
     Returns:
         The initialized connection pool.
 
-    Tenant cutover (startup chain): the URL handed to this function may be
-    replaced before the pool is created. The zero-touch startup chain
-    (lucent.startup.tenant_chain) runs migrations through the bootstrap
-    superuser up to the RLS wave, provisions the ``lucent_app`` credential
-    in OpenBao-backed secret storage, and hands the post-cutover URL to the
-    server. This function re-checks the cutover just before the pool is
-    created: if the current URL still connects as a superuser/BYPASSRLS
-    role, the chain runs here and the pool is created from the returned
-    ``lucent_app`` URL, so migrations 115/116 (FORCE RLS) bind the pool
-    session instead of bypassing it.
     """
     global _pool
 
@@ -231,17 +220,6 @@ async def init_db(
     url = database_url or os.environ.get("DATABASE_URL")
     if not url:
         raise ValueError("DATABASE_URL environment variable is required")
-
-    # Tenant cutover: when this server process is about to create its pool on
-    # a superuser/BYPASSRLS connection, run the zero-touch chain first and
-    # build the pool from the returned lucent_app URL. Idempotent: the chain
-    # is a fast verify-then-return when cutover already happened (and is a
-    # no-op for any non-superuser URL, including the daemon's restricted
-    # role, which intentionally skips this path via run_migrations=False).
-    if run_migrations and await _needs_tenant_cutover(url):
-        from lucent.startup.tenant_chain import run_tenant_cutover_chain
-
-        url = await run_tenant_cutover_chain(url)
 
     # Instrument asyncpg before pool creation so all connections are traced
     _instrument_asyncpg()
@@ -256,6 +234,9 @@ async def init_db(
         reset=_reset_connection,
     )
 
+    if audit_enabled():
+        _pool = ScopeAuditedPool(_pool)
+
     logger.info("Database connection pool created (min=2, max=10)")
 
     # Run migrations (server only — the daemon's restricted role cannot do DDL)
@@ -263,31 +244,6 @@ async def init_db(
         await _run_migrations(_pool)
 
     return _pool
-
-
-async def _needs_tenant_cutover(url: str) -> bool:
-    """Return True when ``url`` connects as a superuser or BYPASSRLS role.
-
-    Used by init_db to decide whether the zero-touch tenant cutover chain
-    must run before the pool is created. Connection failures return False —
-    init_db's normal error path (create_pool raising) is the right place to
-    surface an unreachable database, and the chain's bootstrap run will
-    retry on the next boot.
-    """
-    try:
-        conn = await asyncpg.connect(url)
-    except Exception:
-        return False
-    try:
-        row = await conn.fetchrow(
-            "SELECT rolsuper, rolbypassrls FROM pg_roles "
-            "WHERE rolname = current_user"
-        )
-    except Exception:
-        return False
-    finally:
-        await conn.close()
-    return bool(row and (row["rolsuper"] or row["rolbypassrls"]))
 
 
 async def _init_connection(conn: Connection) -> None:
@@ -308,35 +264,6 @@ async def _init_connection(conn: Connection) -> None:
     )
 
 
-async def _ensure_rls_wave_preconditions(conn: Connection, name: str) -> None:
-    """Fail closed if the RLS-wave migration applies before cutover.
-
-    Migration 116 FORCE-binds row level security on every tenant table. FORCE
-    also binds the table owner, but a **superuser or BYPASSRLS** session
-    bypasses every policy — so applying 116 while the server pool still
-    connects as the bootstrap superuser would give only the appearance of
-    enforcement. The runner refuses to apply it until the startup chain has
-    cut the pool over to ``lucent_app`` (created, granted, and handed
-    ownership by migration 114, credential provisioned at boot via OpenBao).
-    """
-    if name != RLS_WAVE_MIGRATION:
-        return
-
-    row = await conn.fetchrow(
-        "SELECT rolsuper, rolbypassrls FROM pg_roles "
-        "WHERE rolname = current_user"
-    )
-    if row and (row["rolsuper"] or row["rolbypassrls"]):
-        raise RuntimeError(
-            f"Migration {name} aborted: the runner session is superuser or "
-            "BYPASSRLS, so FORCE ROW LEVEL SECURITY would not bind it. Cut "
-            "the server pool over to the lucent_app role in compose "
-            "(DATABASE_URL), restart the lucent service, and let this "
-            "migration apply after cutover. Migration 114 has already "
-            "created the role and its grants."
-        )
-
-
 async def _reset_connection(conn: Connection) -> None:
     """Pool reset hook: clear tenant-context residue on connection return.
 
@@ -347,25 +274,18 @@ async def _reset_connection(conn: Connection) -> None:
     try:
         await conn.execute(_tenant_guc_scrub())
     except Exception:  # pragma: no cover - pool reset must never raise
-        logger.debug("tenant GUC scrub on connection return failed", exc_info=True)
+        logger.debug(
+            "tenant context scrub on connection return failed", exc_info=True
+        )
 
 
-async def _run_migrations(pool: Pool, *, stop_before: str | None = None) -> None:
+async def _run_migrations(pool: Pool) -> None:
     """Run SQL migration files in order, tracking which have been applied.
 
     Uses a ``schema_migrations`` table to record applied migrations with
     SHA-256 checksums.  Skips previously-run files and warns when a file's
     content has changed since it was applied.
 
-    Args:
-        stop_before: Optional migration filename at which the run stops
-            (file excluded). The bootstrap startup chain passes
-            ``115_provision_orphan_tables.sql`` so the superuser session
-            applies everything through 114 (role creation + ownership
-            reassignment) without touching the RLS wave: the
-            ``_ensure_rls_wave_preconditions`` gate already refuses to apply
-            116 from a superuser session, and stopping cleanly keeps the
-            gate as the only enforcement of that invariant.
     """
     migrations_dir = Path(__file__).parent / "migrations"
 
@@ -375,17 +295,15 @@ async def _run_migrations(pool: Pool, *, stop_before: str | None = None) -> None
     # Get all forward SQL files sorted by name (exclude rollback files)
     migration_files = _discover_forward_migration_files(migrations_dir)
 
-    async with pool.acquire() as conn:  # rls: system-infra — audited no-scope site
-        # Bind app.role='system' (session-local) for migration statements:
-        # the RLS policies from migration 116 carry a permissive branch for
-        # app.role='system', so DDL and data migrations keep working after
-        # the RLS wave. Session-local (not transaction-local): asyncpg runs
+    async with pool.acquire() as conn:
+        # Bind app.role='system' (session-local) for migration statements.
+        # Session-local (not transaction-local): asyncpg runs
         # each top-level statement in its own implicit transaction, which
         # would commit txn-local values away before the next statement
         # (live-verified). Cleanup is the pool reset hook's job.
         await conn.execute(_runner_guc_preamble())
 
-        # Bootstrap tracking table (handles legacy _migrations upgrade)
+        # Bootstrap tracking table (handles legacy _migrations upgrade).
         await _bootstrap_schema_migrations(conn, migration_files)
 
         # Get already-applied migrations with checksums
@@ -398,35 +316,17 @@ async def _run_migrations(pool: Pool, *, stop_before: str | None = None) -> None
         skipped_count = 0
 
         for migration_file in migration_files:
-            # Bootstrap-run stop boundary: the startup chain applies the
-            # pre-wave migrations only (through 114); 115/116 are applied
-            # post-cutover through the lucent_app pool.
-            if stop_before is not None and migration_file.name == stop_before:
-                logger.info(
-                    "Bootstrap migration run stopping before %s (RLS wave is "
-                    "applied post-cutover through the app role)",
-                    migration_file.name,
-                )
-                break
-
-            await _ensure_rls_wave_preconditions(conn, migration_file.name)
 
             if migration_file.name in applied:
-                # Verify checksum to detect post-application drift. The
-                # orphan-provision migration stores its file checksum with an
-                # "orphan-created:" prefix (apply-time marker read by its
-                # rollback file), so the drift check compares the suffix.
+                # Verify checksum to detect post-application drift.
                 current_checksum = _file_checksum(migration_file)
                 recorded = applied[migration_file.name]
-                recorded_cmp = recorded
-                if recorded and recorded.startswith("orphan-created:"):
-                    recorded_cmp = recorded.split(":", 1)[1]
-                if recorded_cmp and current_checksum != recorded_cmp:
+                if recorded and current_checksum != recorded:
                     logger.warning(
                         "Migration %s modified after application "
                         "(recorded: %s, current: %s)",
                         migration_file.name,
-                        (recorded_cmp or "")[:12],
+        (recorded or "")[:12],
                         current_checksum[:12],
                     )
                 skipped_count += 1
@@ -434,27 +334,6 @@ async def _run_migrations(pool: Pool, *, stop_before: str | None = None) -> None
 
             sql = migration_file.read_text()
             checksum = hashlib.sha256(sql.encode()).hexdigest()
-            # 115 records whether it created any of the three orphan tables
-            # or found them pre-existing; its .down.sql reads this marker to
-            # decide whether rollback may drop them (fresh replay) or must
-            # no-op (live DB). 114 runs before 115 and reassigns ownership,
-            # so on the live DB the orphans are already lucent_app-owned
-            # (pre != 0, no marker); on a fresh replay they did not exist
-            # (pre == 0) and 115 creates them — but pre is re-read before
-            # apply here only to distinguish the two cases accurately.
-            if migration_file.name == "115_provision_orphan_tables.sql":
-                pre = await conn.fetchval(
-                    "SELECT count(*) FROM pg_tables "
-                    "WHERE schemaname='public' AND tablename IN "
-                    "('memories', 'requests', 'resource_access_grants')"
-                )
-                if pre > 0:
-                    # 114 already reassigned ownership; the tables existed
-                    # before this wave. Record the un-prefixed checksum.
-                    pass
-                else:
-                    checksum = "orphan-created:" + checksum
-
             async with conn.transaction():
                 await conn.execute(sql)
                 await conn.execute(
@@ -472,45 +351,6 @@ async def _run_migrations(pool: Pool, *, stop_before: str | None = None) -> None
                 applied_count,
                 skipped_count,
             )
-
-
-async def run_migrations_for_bootstrap(database_url: str | None = None) -> None:
-    """Run migrations through the bootstrap superuser, stopping before the
-    RLS wave (tenant startup chain, step 1).
-
-    Creates a dedicated throwaway pool on the bootstrap URL (the
-    superuser from ``DATABASE_URL``), applies every pending migration up to
-    and including ``114_tenant_roles.sql``, and closes it. The module-level
-    server pool is untouched: the server's real pool does not exist yet
-    (this runs inside init_db, before create_pool) and bootstrap DDL must
-    never be visible through ``get_pool()``. Migrations 115/116 are
-    deliberately not applied here — the RLS wave must be applied
-    post-cutover through the ``lucent_app`` pool (the
-    ``_ensure_rls_wave_preconditions`` gate refuses a superuser runner
-    session). The bootstrap role also cannot be disabled by this path: 116's
-    FORCE binding would lock the break-glass superuser out of its own
-    runner before the first cutover boot completes.
-    """
-    url = database_url or os.environ.get("DATABASE_URL")
-    if not url:
-        raise ValueError("DATABASE_URL environment variable is required")
-
-    _instrument_asyncpg()
-    bootstrap_pool = await asyncpg.create_pool(
-        url,
-        min_size=1,
-        max_size=2,
-        command_timeout=60,
-        init=_init_connection,
-        reset=_reset_connection,
-    )
-    try:
-        await _run_migrations(bootstrap_pool, stop_before="115_provision_orphan_tables.sql")
-    finally:
-        try:
-            await bootstrap_pool.close()
-        except Exception:  # pragma: no cover - cleanup best-effort
-            logger.debug("bootstrap pool close failed", exc_info=True)
 
 
 async def _rollback_migrations(
@@ -539,7 +379,7 @@ async def _rollback_migrations(
     migration_files = _discover_forward_migration_files(migrations_dir)
     migration_map = {path.name: path for path in migration_files}
 
-    async with pool.acquire() as conn:  # rls: system-infra — audited no-scope site
+    async with pool.acquire() as conn:
         await _bootstrap_schema_migrations(conn, migration_files)
 
         rows = await conn.fetch(
@@ -778,12 +618,19 @@ async def scoped_acquire(
         raise TenantScopeError(
             "scoped_acquire() refused: no tenant context on this task. "
             "Set explicit user_id/organization_id, or set_tenant_scope(...) "
-            "for the daemon/system role branches. RLS-bound tables return "
+            "for the daemon/system role branches. Tenant-scoped tables return "
             "zero rows without context."
         )
 
     pool = await get_pool()
+    audit_scope = effective_scope(
+        scope,
+        user_id=user_id,
+        organization_id=organization_id,
+        role=role,
+    )
     async with pool.acquire() as conn:
+        conn = ScopeAuditedConnection(conn, audit_scope)
         await conn.execute(
             "SELECT set_config('app.user_id', $1, false), "
             "set_config('app.org_id', $2, false), "
@@ -827,10 +674,17 @@ async def scoped_acquire_on(
         raise TenantScopeError(
             "scoped_acquire_on() refused: no tenant context for this pool. "
             "Pass explicit user_id/organization_id, or a daemon/system role "
-            "branch. RLS-bound tables return zero rows without context."
+            "branch. Tenant-scoped tables return zero rows without context."
         )
 
     async with pool.acquire() as conn:
+        audit_scope = effective_scope(
+            scope,
+            user_id=user_id,
+            organization_id=organization_id,
+            role=role,
+        )
+        conn = ScopeAuditedConnection(conn, audit_scope)
         await conn.execute(
             "SELECT set_config('app.user_id', $1, false), "
             "set_config('app.org_id', $2, false), "

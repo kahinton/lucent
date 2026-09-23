@@ -8,11 +8,11 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
-TEST_ORG_ID = uuid4()
-
 import pytest
 
 from lucent.db.api_key import ApiKeyRepository
+
+TEST_ORG_ID = uuid4()
 
 
 def _make_mock_pool(mock_conn=None):
@@ -315,6 +315,23 @@ class TestRevokeEdgeCases:
         result = await repo.revoke(uuid4(), uuid4(), organization_id=TEST_ORG_ID)
 
         assert result is False
+
+    async def test_revoke_any_scopes_to_organization(self):
+        """Internal revocation succeeds only for a key in the caller's organization."""
+        key_id = uuid4()
+        mock_conn = AsyncMock()
+        mock_conn.execute.return_value = "UPDATE 1"
+
+        pool = _make_mock_pool(mock_conn)
+        repo = ApiKeyRepository(pool)
+        result = await repo.revoke_any(key_id, organization_id=TEST_ORG_ID)
+
+        assert result is True
+        query, *args = mock_conn.execute.call_args_list[1].args
+        assert "UPDATE api_keys" in query
+        assert "organization_id = $3::uuid" in query
+        assert args[0] == str(key_id)
+        assert args[2] == str(TEST_ORG_ID)
 
     async def test_revoke_wrong_user(self):
         """Test that revoking with wrong user_id returns False."""

@@ -16,6 +16,7 @@ import asyncpg
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
+from lucent.db.secrets import SecretMigrationRepository
 from lucent.secrets.builtin import _derive_fernet_key
 
 logger = logging.getLogger("migrate_secrets_to_transit")
@@ -147,9 +148,8 @@ async def migrate_secrets(
     transit_key: str,
 ) -> MigrationStats:
     stats = MigrationStats()
-    rows = await conn.fetch(
-        "SELECT id, key, encrypted_value FROM secrets ORDER BY created_at, id"
-    )
+    repository = SecretMigrationRepository(conn)
+    rows = await repository.list_ciphertexts()
 
     for row in rows:
         secret_id = row["id"]
@@ -188,12 +188,7 @@ async def migrate_secrets(
                 mount=transit_mount,
                 key=transit_key,
             )
-            async with conn.transaction():
-                await conn.execute(
-                    "UPDATE secrets SET encrypted_value = $1, updated_at = NOW() WHERE id = $2",
-                    ciphertext.encode("utf-8"),
-                    secret_id,
-                )
+            await repository.update_ciphertext(secret_id, ciphertext.encode("utf-8"))
             stats.migrated += 1
             logger.info("Migrated key=%s id=%s", secret_key, secret_id)
         except InvalidToken:

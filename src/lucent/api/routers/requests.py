@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, Field
 
-from lucent.db.pool import scoped_acquire
+from lucent.db.pool import scoped_acquire, scoped_acquire_on
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_PATTERN
 from lucent.rbac import Role
@@ -351,6 +351,7 @@ async def list_planning_targets(
     targets = await repo.list_planning_targets(
         str(user.organization_id),
         user_id=effective_user_id,
+        role="daemon" if _is_daemon_user(user) and not user.is_memory_scoped else "member",
         limit=limit,
     )
     return {"targets": targets, "count": len(targets)}
@@ -436,20 +437,10 @@ async def request_memories(request_id: UUID, user: AuthenticatedUser, pool=Depen
     req = await _get_visible_request(repo, str(request_id), user)
     if not req:
         raise HTTPException(404, "Request not found")
-    async with scoped_acquire(organization_id=user.organization_id, user_id=user.id) as conn:
-        rows = await conn.fetch(
-            """SELECT rm.memory_id, rm.relation, rm.created_at,
-                      m.content, m.type AS memory_type, m.tags,
-                      m.metadata->>'status' AS status
-               FROM request_memories rm
-               JOIN memories m ON rm.memory_id = m.id
-               WHERE rm.request_id = $1
-                      AND m.organization_id = $2
-                      AND m.deleted_at IS NULL
-               ORDER BY rm.created_at""",
-            request_id,
-                user.organization_id,
-        )
+    rows = await repo.get_request_memory_links(
+        str(request_id),
+        user.organization_id,
+    )
     memory_access = _build_memory_access(pool, user)
     items = await memory_access.filter_memory_links(
         [dict(r) for r in rows],
@@ -661,15 +652,12 @@ async def create_task(
     if body.requesting_user_id:
         if not _is_privileged_request_actor(user):
             raise HTTPException(403, "Only admins/owners/daemon can set requesting_user_id")
-        async with pool.acquire() as conn:
-            target_user_exists = await conn.fetchval(
-                """SELECT 1 FROM users
-                   WHERE id = $1::uuid
-                     AND organization_id = $2::uuid
-                     AND is_active = true""",
-                body.requesting_user_id,
-                org_id,
-            )
+        from lucent.db.user import UserRepository
+
+        target_user_exists = await UserRepository(pool).active_user_exists(
+            org_id,
+            body.requesting_user_id,
+        )
         if not target_user_exists:
             raise HTTPException(422, "requesting_user_id must be an active user in this org")
         requesting_user_id = body.requesting_user_id

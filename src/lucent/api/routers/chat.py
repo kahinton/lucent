@@ -36,9 +36,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from lucent.db.pool import scoped_acquire
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import UserRepository, get_pool
+from lucent.db.user_interactions import UserInteractionRepository
 from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
 from lucent.prompts.memory_usage import render_active_user_context
@@ -845,16 +845,13 @@ async def _mirror_handoff_user_turn(
     if not content.strip():
         return
     try:
-        async with scoped_acquire(organization_id=user["organization_id"], user_id=user["id"]) as conn:
-            exists = await conn.fetchval(
-                """SELECT 1
-                   FROM user_interaction_messages
-                   WHERE interaction_id = $1::uuid
-                     AND metadata->>'llm_message_id' = $2
-                   LIMIT 1""",
-                interaction_id,
-                chat_session.user_message_id,
-            )
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        exists = await UserInteractionRepository(pool).has_message_with_llm_id(
+            interaction_id=interaction_id,
+            llm_message_id=chat_session.user_message_id,
+            org_id=user["organization_id"],
+        )
         if exists:
             return
 

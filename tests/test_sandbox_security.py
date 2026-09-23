@@ -370,7 +370,7 @@ class TestIdleTimeoutSweep:
         repo.update_status = AsyncMock()
         manager._repo.return_value = repo
         # Skip API key provisioning.
-        manager._create_task_scoped_api_key = AsyncMock(return_value=(None, ""))
+        manager._create_task_scoped_api_key = AsyncMock(return_value=(None, "", None))
         return manager, backend
 
     @pytest.mark.asyncio

@@ -42,6 +42,41 @@ def test_pod_manifest_uses_portable_template_fields_only():
     assert "/host/cache" not in str(manifest)
 
 
+def test_pod_manifest_adds_isolated_mcp_bridge_sidecar():
+    backend = KubernetesBackend(namespace="test-sandboxes")
+    config = SandboxConfig(
+        image="postgres:16-alpine",
+        env_vars={
+            "CI": "true",
+            "LUCENT_API_URL": "http://lucent-api/api",
+            "LUCENT_SANDBOX_MCP_API_KEY": "hs_bridge-key",
+            "LUCENT_SANDBOX_MCP_ENABLED": "1",
+            "LUCENT_SANDBOX_TASK_ID": "task-1",
+        },
+        mcp_bridge_port=9123,
+    )
+
+    manifest = backend._pod_manifest("sandbox-id", "sandbox-name", config)
+    sandbox, bridge = manifest["spec"]["containers"]
+
+    assert sandbox["image"] == "postgres:16-alpine"
+    sandbox_env = {item["name"]: item["value"] for item in sandbox["env"]}
+    bridge_env = {item["name"]: item["value"] for item in bridge["env"]}
+    assert sandbox_env["CI"] == "true"
+    assert "LUCENT_SANDBOX_MCP_API_KEY" not in sandbox_env
+    assert sandbox_env["LUCENT_SANDBOX_MCP_ENABLED"] == "1"
+    assert bridge["name"] == "mcp-bridge"
+    assert bridge["command"][0] == "python3"
+    assert bridge_env["LUCENT_SANDBOX_MCP_API_KEY"] == "hs_bridge-key"
+    assert bridge_env["LUCENT_SANDBOX_MCP_PORT"] == "9123"
+    assert "LUCENT_MCP_BRIDGE_SOURCE_B64" in bridge_env
+    assert bridge["readinessProbe"]["httpGet"] == {
+        "path": "/health", "port": 9123
+    }
+    assert bridge["securityContext"]["runAsNonRoot"] is True
+    assert bridge["securityContext"]["readOnlyRootFilesystem"] is True
+
+
 @pytest.mark.asyncio
 async def test_isolated_network_mode_creates_deny_egress_policy():
     backend = KubernetesBackend(namespace="test-sandboxes")

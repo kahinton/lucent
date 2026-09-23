@@ -42,7 +42,7 @@ class SandboxManager:
     def __init__(self, backend: SandboxBackend | None = None):
         self._backend = backend or self._default_backend()
         self._cleanup_tasks: dict[str, asyncio.Task] = {}
-        self._sandbox_bridge_api_keys: dict[str, UUID] = {}
+        self._sandbox_bridge_api_keys: dict[str, tuple[UUID, str | None]] = {}
         # Idle-timeout tracking: sandbox_id → monotonic timestamp of last activity
         self._last_activity: dict[str, float] = {}
         # Per-sandbox idle_timeout_seconds (0 = disabled)
@@ -86,15 +86,28 @@ class SandboxManager:
         key_id: UUID | None = None
         effective_config = SandboxConfig(**asdict(config))
 
-        # For task-linked sandboxes, provision a short-lived scoped key for bridge proxying.
+        # Bridge routing and credentials are Lucent-controlled. Remove any
+        # caller-supplied values before provisioning the task-scoped key.
+        for bridge_env_key in (
+            "LUCENT_API_URL",
+            "LUCENT_SANDBOX_MCP_API_KEY",
+            "LUCENT_SANDBOX_MCP_ENABLED",
+            "LUCENT_SANDBOX_TASK_ID",
+            "LUCENT_SANDBOX_MCP_PORT",
+        ):
+            effective_config.env_vars.pop(bridge_env_key, None)
+
         if effective_config.task_id:
-            key_id, raw_key = await self._create_task_scoped_api_key(effective_config)
+            key_id, raw_key, bridge_org_id = await self._create_task_scoped_api_key(
+                effective_config
+            )
             effective_config.env_vars = dict(effective_config.env_vars)
-            effective_config.env_vars.setdefault(
-                "LUCENT_API_URL",
-                os.environ.get("LUCENT_SANDBOX_BRIDGE_API_URL", "http://host.docker.internal:8766/api"),
+            effective_config.env_vars["LUCENT_API_URL"] = os.environ.get(
+                "LUCENT_SANDBOX_BRIDGE_API_URL",
+                "http://host.docker.internal:8766/api",
             )
             effective_config.env_vars["LUCENT_SANDBOX_MCP_API_KEY"] = raw_key
+            effective_config.env_vars["LUCENT_SANDBOX_MCP_ENABLED"] = "1"
             effective_config.env_vars["LUCENT_SANDBOX_TASK_ID"] = effective_config.task_id
             effective_config.env_vars["LUCENT_SANDBOX_MCP_PORT"] = str(
                 effective_config.mcp_bridge_port
@@ -104,7 +117,7 @@ class SandboxManager:
         info = await self._backend.create(effective_config)
 
         if key_id and info.status != SandboxStatus.FAILED:
-            self._sandbox_bridge_api_keys[info.id] = key_id
+            self._sandbox_bridge_api_keys[info.id] = (key_id, bridge_org_id)
 
         # Persist to database
         try:
@@ -143,10 +156,12 @@ class SandboxManager:
 
         # Schedule auto-destruction based on timeout
         if effective_config.timeout_seconds > 0 and info.status != SandboxStatus.FAILED:
-            task = asyncio.create_task(self._auto_destroy(info.id, effective_config.timeout_seconds))
+            task = asyncio.create_task(
+                self._auto_destroy(info.id, effective_config.timeout_seconds)
+            )
             self._cleanup_tasks[info.id] = task
         if info.status == SandboxStatus.FAILED and key_id:
-            await self._revoke_api_key(key_id)
+            await self._revoke_api_key(key_id, bridge_org_id)
             self._sandbox_bridge_api_keys.pop(info.id, None)
 
         # Record initial activity timestamp and idle-timeout config.
@@ -264,13 +279,12 @@ class SandboxManager:
         self._credential_expiry.pop(sandbox_id, None)
 
         try:
+            bridge_key = self._sandbox_bridge_api_keys.pop(sandbox_id, None)
+            if bridge_key:
+                await self._revoke_api_key(*bridge_key)
             await self._backend.destroy(sandbox_id)
         except Exception as e:
             logger.warning("Backend destroy failed for %s: %s", sandbox_id[:12], e)
-        finally:
-            key_id = self._sandbox_bridge_api_keys.pop(sandbox_id, None)
-            if key_id:
-                await self._revoke_api_key(key_id)
 
         try:
             repo = await self._repo()
@@ -309,23 +323,53 @@ class SandboxManager:
             config=config,
         )
 
-    async def list_all(self, organization_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+    async def list_all(
+        self,
+        organization_id: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
         """List all sandboxes from DB."""
         try:
             repo = await self._repo()
-            return await repo.list_all(organization_id=organization_id, limit=limit, offset=offset)
+            return await repo.list_all(
+                organization_id=organization_id,
+                limit=limit,
+                offset=offset,
+            )
         except Exception as e:
             logger.error("Failed to list sandboxes: %s", e, exc_info=True)
-            return {"items": [], "total_count": 0, "offset": offset, "limit": limit, "has_more": False}
+            return {
+                "items": [],
+                "total_count": 0,
+                "offset": offset,
+                "limit": limit,
+                "has_more": False,
+            }
 
-    async def list_active(self, organization_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+    async def list_active(
+        self,
+        organization_id: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
         """List non-destroyed sandboxes from DB."""
         try:
             repo = await self._repo()
-            return await repo.list_active(organization_id=organization_id, limit=limit, offset=offset)
+            return await repo.list_active(
+                organization_id=organization_id,
+                limit=limit,
+                offset=offset,
+            )
         except Exception as e:
             logger.error("Failed to list active sandboxes: %s", e, exc_info=True)
-            return {"items": [], "total_count": 0, "offset": offset, "limit": limit, "has_more": False}
+            return {
+                "items": [],
+                "total_count": 0,
+                "offset": offset,
+                "limit": limit,
+                "has_more": False,
+            }
 
     async def cleanup_all(self) -> int:
         """Destroy all managed sandboxes. Returns count destroyed."""
@@ -421,7 +465,9 @@ class SandboxManager:
                 "Failed to invalidate git credentials in sandbox %s: %s", sandbox_id[:12], exc
             )
 
-    async def _create_task_scoped_api_key(self, config: SandboxConfig) -> tuple[UUID, str]:
+    async def _create_task_scoped_api_key(
+        self, config: SandboxConfig
+    ) -> tuple[UUID, str, str | None]:
         """Create a short-lived API key scoped for sandbox bridge operations."""
         pool = await self._pool()
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=config.timeout_seconds + 600)
@@ -440,12 +486,14 @@ class SandboxManager:
             ),
             memory_scope=MEMORY_SCOPE_USER if config.requesting_user_id else None,
         )
-        return record["id"], plain_key
+        return record["id"], plain_key, str(org_id) if org_id else None
 
-    async def _revoke_api_key(self, key_id: UUID) -> None:
+    async def _revoke_api_key(
+        self, key_id: UUID, organization_id: str | None
+    ) -> None:
         pool = await self._pool()
         try:
-            await ApiKeyRepository(pool).revoke_by_id(key_id)
+            await ApiKeyRepository(pool).revoke_any(key_id, organization_id=organization_id)
         except Exception as e:
             logger.warning("Failed to revoke sandbox API key %s: %s", str(key_id)[:8], e)
 
@@ -456,7 +504,13 @@ class SandboxManager:
 
     async def _ensure_daemon_service_user(self, organization_id: str | None) -> dict:
         pool = await self._pool()
-        async with pool.acquire() as conn:
+        from lucent.db.pool import scoped_acquire_on
+
+        async with scoped_acquire_on(
+            pool,
+            organization_id=organization_id,
+            role="daemon",
+        ) as conn:
             from lucent.daemon_identity import resolve_daemon_service_user
 
             return await resolve_daemon_service_user(conn, organization_id)

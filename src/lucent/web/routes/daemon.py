@@ -8,8 +8,8 @@ from uuid import UUID
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.db.pool import scoped_acquire
 from lucent.db import AuditRepository, MemoryRepository, get_pool
+from lucent.db.requests import RequestRepository
 from lucent.logging import get_logger
 from lucent.metrics import metrics
 
@@ -206,11 +206,10 @@ async def daemon_review_action(
 
         # Notify daemon
         try:
-            async with pool.acquire() as conn:  # rls: pg_notify plumbing — no row access
-                await conn.execute(
-                    "SELECT pg_notify('request_ready', $1)",
-                    f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
-                )
+            await RequestRepository(pool).notify_ready(
+                org_id=org_id,
+                payload=f'{{"type": "approval", "action": "{action}", "request_id": "{request_id}"}}',
+            )
         except Exception:
             pass
 
@@ -247,33 +246,16 @@ async def daemon_review_action(
         review_repo = ReviewRepository(pool)
 
         status = "approved" if action == "approve" else "rejected"
-        async with scoped_acquire(organization_id=org_id) as conn:
-            async with conn.transaction():
-                await review_repo.create_review(
-                    request_id=str(request_id),
-                    organization_id=org_id,
-                    status=status,
-                    reviewer_user_id=str(user.id),
-                    reviewer_display_name=user.display_name or user.email,
-                    comments=comment.strip() or None,
-                    source="human",
-                    conn=conn,
-                )
-                if action == "approve":
-                    updated = await review_repo.mark_request_completed(
-                        request_id=str(request_id),
-                        organization_id=org_id,
-                        conn=conn,
-                    )
-                else:
-                    updated = await review_repo.mark_request_needs_rework(
-                        request_id=str(request_id),
-                        organization_id=org_id,
-                        feedback=comment.strip(),
-                        conn=conn,
-                    )
-                if not updated:
-                    raise HTTPException(status_code=409, detail="Request is not in review state")
+        updated = await review_repo.process_status_review(
+            request_id=str(request_id),
+            organization_id=org_id,
+            status=status,
+            reviewer_user_id=str(user.id),
+            reviewer_display_name=user.display_name or user.email,
+            comments=comment.strip() or None,
+        )
+        if not updated:
+            raise HTTPException(status_code=409, detail="Request is not in review state")
 
         # Create learning memory from rejection
         if action == "reject":
@@ -293,11 +275,10 @@ async def daemon_review_action(
 
         # Notify daemon
         try:
-            async with pool.acquire() as conn:  # rls: pg_notify plumbing — no row access
-                await conn.execute(
-                    "SELECT pg_notify('request_ready', $1)",
-                    f'{{"type": "review", "action": "{action}", "request_id": "{request_id}"}}',
-                )
+            await RequestRepository(pool).notify_ready(
+                org_id=org_id,
+                payload=f'{{"type": "review", "action": "{action}", "request_id": "{request_id}"}}',
+            )
         except Exception:
             pass
 
@@ -452,11 +433,10 @@ async def daemon_feedback(
         for attempt in range(2):
             try:
                 metrics.wake_notify_total.add(1, attributes=notify_attrs)
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        "SELECT pg_notify('request_ready', $1)",
-                        notify_payload,
-                    )
+                await RequestRepository(pool).notify_ready(
+                    org_id=user.organization_id,
+                    payload=notify_payload,
+                )
                 sent = True
                 break
             except Exception as notify_err:

@@ -19,7 +19,8 @@ from lucent.auth_providers import (
     rotate_session,
     sign_value,
 )
-from lucent.db import AdminAuditRepository, UserRepository, get_pool
+from lucent.db import AdminAuditRepository, GroupRepository, UserRepository, get_pool
+from lucent.db.pool import scoped_acquire_on
 from lucent.db import admin_audit as audit_actions
 from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
 
@@ -628,26 +629,13 @@ async def _resolve_model_owner_scope(form, user, pool) -> tuple[str | None, str 
     return None, None
 
 
-async def _model_owner_names(pool, models: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
+async def _model_owner_names(org_id: str, pool, models: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
     user_ids = {model["owner_user_id"] for model in models if model.get("owner_user_id")}
     group_ids = {model["owner_group_id"] for model in models if model.get("owner_group_id")}
-    user_names: dict[str, str] = {}
-    group_names: dict[str, str] = {}
-    async with pool.acquire() as conn:
-        if user_ids:
-            rows = await conn.fetch(
-                "SELECT id, COALESCE(display_name, email, 'Unknown user') AS name "
-                "FROM users WHERE id = ANY($1::uuid[])",
-                list(user_ids),
-            )
-            user_names = {str(row["id"]): row["name"] for row in rows}
-        if group_ids:
-            rows = await conn.fetch(
-                "SELECT id, name FROM groups WHERE id = ANY($1::uuid[])",
-                list(group_ids),
-            )
-            group_names = {str(row["id"]): row["name"] for row in rows}
-    return user_names, group_names
+    return (
+        await UserRepository(pool).get_display_names_by_ids(list(user_ids)),
+        await GroupRepository(pool).get_names_by_ids(list(group_ids)),
+    )
 
 
 @router.get("/models", response_class=HTMLResponse)

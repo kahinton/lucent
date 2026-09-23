@@ -256,6 +256,22 @@ class UserRepository:
 
         return self._row_to_dict(row)
 
+    async def get_password_hash(self, user_id: UUID) -> str | None:
+        async with scoped_acquire(organization_id=None, user_id=user_id, role="member") as conn:
+            row = await conn.fetchrow(
+                "SELECT password_hash FROM users WHERE id = $1",
+                str(user_id),
+            )
+        return None if row is None else row["password_hash"]
+
+    async def is_force_password_change(self, user_id: UUID) -> bool:
+        async with scoped_acquire(organization_id=None, user_id=user_id, role="member") as conn:
+            row = await conn.fetchrow(
+                "SELECT force_password_change FROM users WHERE id = $1",
+                str(user_id),
+            )
+        return bool(row and row["force_password_change"])
+
     async def get_by_external_id(self, external_id: str, provider: str) -> dict[str, Any] | None:
         """Get a user by their external ID and provider.
 
@@ -548,6 +564,53 @@ class UserRepository:
                 rows = await conn.fetch(query, str(organization_id))
 
         return [self._row_to_dict(row) for row in rows]
+
+    async def get_first_non_daemon_owner(self, organization_id: UUID) -> dict[str, Any] | None:
+        async with scoped_acquire(organization_id=organization_id, role="member") as conn:
+            row = await conn.fetchrow(
+                """SELECT id::text, role
+                   FROM users
+                   WHERE organization_id = $1
+                     AND role <> 'daemon'
+                     AND COALESCE(external_id, '') NOT LIKE 'daemon-service%'
+                   ORDER BY CASE role
+                       WHEN 'owner' THEN 0
+                       WHEN 'admin' THEN 1
+                       ELSE 2
+                   END, created_at ASC
+                   LIMIT 1""",
+                organization_id,
+            )
+        return dict(row) if row else None
+
+    async def get_display_names_by_ids(self, user_ids: list[UUID]) -> dict[str, str]:
+        if not user_ids:
+            return {}
+        async with scoped_acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, COALESCE(display_name, email, 'Unknown user') AS owner_name "
+                "FROM users WHERE id = ANY($1::uuid[])",
+                user_ids,
+            )
+        return {str(row["id"]): str(row["owner_name"]) for row in rows}
+
+    async def active_user_exists(
+        self,
+        *,
+        organization_id: str,
+        user_id: str,
+    ) -> bool:
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT 1 FROM users
+                       WHERE id = $1::uuid
+                         AND organization_id = $2::uuid
+                         AND is_active = true""",
+                    UUID(user_id),
+                    UUID(organization_id),
+                )
+            )
 
     async def delete(self, user_id: UUID) -> bool:
         """Permanently delete a user.

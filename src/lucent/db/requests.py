@@ -59,7 +59,7 @@ _STALE_TASK_ACTIVITY_CLAUSE = """
 
 # Advisory lock namespace for serializing memory-link operations on the same
 # memory_id across concurrent transactions. Keyed alongside the memory UUID.
-# Distinct from DECOMPOSITION_LOCK_NAMESPACE in daemon.py.
+# Distinct from the request-decomposition advisory-lock namespace.
 MEMORY_LINK_LOCK_NAMESPACE = 0x4C4D454D  # "LMEM" — Lucent MEMory link
 
 # How recently a completed/cancelled request must have happened for a
@@ -999,6 +999,40 @@ class RequestRepository:
             )
         return dict(row) if row else None
 
+    async def get_task_summary(
+        self,
+        task_id: str,
+        org_id: str,
+    ) -> dict | None:
+        async with scoped_acquire(organization_id=org_id) as conn:
+            row = await conn.fetchrow(
+                """SELECT id::text, request_id::text, title, agent_type,
+                          model, reasoning_effort
+                   FROM tasks
+                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                task_id,
+                org_id,
+            )
+        return dict(row) if row else None
+
+    async def get_latest_task_event(
+        self,
+        task_id: str,
+        event_types: list[str],
+    ) -> dict | None:
+        async with scoped_acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT metadata
+                   FROM task_events
+                   WHERE task_id = $1::uuid
+                     AND event_type = ANY($2::text[])
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                task_id,
+                event_types,
+            )
+        return dict(row) if row else None
+
     async def mark_request_viewed(
         self,
         request_id: str,
@@ -1929,7 +1963,9 @@ class RequestRepository:
             )
         task = dict(row)
         # Log creation event
-        await self.add_task_event(str(task["id"]), "created", f"Task created: {title}")
+        await self.add_task_event(
+            str(task["id"]), "created", f"Task created: {title}", org_id=org_id
+        )
         return task
 
     async def get_task(self, task_id: str, org_id: str | None = None) -> dict | None:
@@ -1946,6 +1982,78 @@ class RequestRepository:
                     "SELECT * FROM tasks WHERE id = $1", UUID(task_id)
                 )
         return dict(row) if row else None
+
+    async def get_request_memory_links(self, request_id: str, org_id: str) -> list[dict]:
+        async with scoped_acquire(organization_id=org_id) as conn:
+            rows = await conn.fetch(
+                """SELECT rm.memory_id, rm.relation, rm.created_at,
+                          m.content, m.type AS memory_type, m.tags,
+                          m.metadata->>'status' AS status
+                   FROM request_memories rm
+                   JOIN memories m ON rm.memory_id = m.id
+                   WHERE rm.request_id = $1
+                     AND m.organization_id = $2
+                     AND m.deleted_at IS NULL
+                   ORDER BY rm.created_at""",
+                UUID(request_id),
+                UUID(org_id),
+            )
+        return [dict(row) for row in rows]
+
+    async def active_request_exists_by_title(self, title: str, org_id: str) -> bool:
+        async with scoped_acquire(organization_id=org_id) as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT id FROM requests
+                       WHERE title = $1
+                         AND organization_id = $2::uuid
+                         AND status NOT IN ('completed', 'failed', 'cancelled')
+                       LIMIT 1""",
+                    title,
+                    org_id,
+                )
+            )
+
+    async def active_scan_request_id(self, target_repo: str, org_id: str) -> str | None:
+        async with scoped_acquire(organization_id=org_id) as conn:
+            request_id = await conn.fetchval(
+                """SELECT id FROM requests
+                   WHERE target_repo = $1
+                     AND organization_id = $2
+                     AND status NOT IN ('completed', 'failed', 'cancelled')
+                   LIMIT 1""",
+                target_repo,
+                org_id,
+            )
+        return None if request_id is None else str(request_id)
+
+    async def owns_request(
+        self,
+        request_id: str,
+        *,
+        org_id: str,
+        user_id: str,
+    ) -> bool:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT EXISTS(
+                           SELECT 1 FROM requests
+                           WHERE id = $1::uuid AND organization_id = $2::uuid
+                             AND created_by = $3::uuid
+                       )""",
+                    request_id,
+                    org_id,
+                    user_id,
+                )
+            )
+
+    async def notify_ready(self, *, org_id: str, payload: str) -> None:
+        async with scoped_acquire(organization_id=org_id, role="daemon") as conn:
+            await conn.execute(
+                "SELECT pg_notify('request_ready', $1)",
+                payload,
+            )
 
     async def list_tasks(
         self,
@@ -2031,6 +2139,7 @@ class RequestRepository:
         org_id: str,
         *,
         user_id: str | None = None,
+        role: str = "member",
         limit: int = 50,
     ) -> list[dict]:
         """Return goal milestones that the planner MUST progress this cycle.
@@ -2069,7 +2178,7 @@ class RequestRepository:
         ``user_id`` filters to a single user's goals (used by per-user
         cognitive fan-out). Otherwise returns goals for the whole org.
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire(organization_id=org_id, role=role) as conn:
             params: list = [UUID(org_id)]
             user_clause = ""
             if user_id:
@@ -2501,6 +2610,7 @@ class RequestRepository:
                 "claimed",
                 f"Claimed by {instance_id}",
                 metadata={"instance_id": instance_id},
+                org_id=str(task["organization_id"]),
             )
             # Update parent request to in_progress if still pending/planned
             await self._ensure_request_in_progress(
@@ -2617,6 +2727,7 @@ class RequestRepository:
                 task_id,
                 "edited",
                 f"Task edited: {', '.join(edited_fields)}",
+                org_id=org_id,
             )
         return dict(row) if row else None
 
@@ -2673,7 +2784,13 @@ class RequestRepository:
                         now,
                     )
         if row:
-            await self.add_task_event(task_id, "running", "Agent started execution")
+            org = dict(row).get("organization_id")
+            await self.add_task_event(
+                task_id,
+                "running",
+                "Agent started execution",
+                org_id=str(org) if org else None,
+            )
             return dict(row)
         return None
 
@@ -2815,6 +2932,7 @@ class RequestRepository:
                 task_id,
                 "completed",
                 f"Completed ({len(result)} chars output)",
+                org_id=str(task["organization_id"]),
             )
             # Check if all tasks in request are done
             await self._check_request_completion(
@@ -2920,6 +3038,7 @@ class RequestRepository:
                 "failed",
                 f"Failed: {error[:200]}",
                 {"rejected_output_chars": len(result or "")},
+                org_id=str(task["organization_id"]),
             )
             await self._check_request_completion(
                 str(task["request_id"]), org_id=str(task["organization_id"])
@@ -2963,6 +3082,7 @@ class RequestRepository:
             "needs_review",
             f"Manual review required: {error[:200]}",
             {"rejected_output_chars": len(result or "")},
+            org_id=str(task["organization_id"]),
         )
         return task
 
@@ -3027,7 +3147,12 @@ class RequestRepository:
                         now,
                     )
         if row:
-            await self.add_task_event(task_id, "released", "Task released back to pending")
+            await self.add_task_event(
+                task_id,
+                "released",
+                "Task released back to pending",
+                org_id=str(org_id),
+            )
             return dict(row)
         return None
 
@@ -3060,7 +3185,12 @@ class RequestRepository:
                 )
         if row:
             task = dict(row)
-            await self.add_task_event(task_id, "retried", "Task queued for retry")
+            await self.add_task_event(
+                task_id,
+                "retried",
+                "Task queued for retry",
+                org_id=str(task["organization_id"]),
+            )
             # If parent request was marked failed, set it back to in_progress
             await self._ensure_request_in_progress(
                 str(task["request_id"]), org_id=str(task["organization_id"])
@@ -3087,7 +3217,12 @@ class RequestRepository:
         if not row:
             return None
         task = dict(row)
-        await self.add_task_event(task_id, "cancelled", "Task cancelled by user")
+        await self.add_task_event(
+            task_id,
+            "cancelled",
+            "Task cancelled by user",
+            org_id=str(task["organization_id"]),
+        )
         return task
 
     async def retry_task_with_feedback(
@@ -3134,6 +3269,7 @@ class RequestRepository:
             "review_feedback",
             "Retry queued with review feedback",
             metadata={"feedback": feedback},
+            org_id=org_id,
         )
         refreshed = await self.get_task(task_id, org_id=org_id)
         return refreshed
@@ -3205,6 +3341,7 @@ class RequestRepository:
             "rework_queued",
             "Task reopened after request review",
             metadata={"feedback": feedback},
+            org_id=org_id,
         )
         return await self.get_task(task_id, org_id=org_id)
 
@@ -3351,6 +3488,7 @@ AND (
                 str(row["id"]),
                 "reaper",
                 f"Claim expired (was claimed by {claimed_by}), task requeued to pending",
+                org_id=org_id,
             )
         return len(rows)
 

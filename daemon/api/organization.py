@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lucent.db.daemon import DaemonRepository
 
 async def resolve_daemon_org(connection) -> tuple[str, str] | None:
     """Resolve and cache the single organization served by this daemon."""
@@ -10,11 +11,7 @@ async def resolve_daemon_org(connection) -> tuple[str, str] | None:
     if runtime._resolved_daemon_org is not None:
         return runtime._resolved_daemon_org
     if runtime.DAEMON_ORG:
-        row = await connection.fetchrow(
-            "SELECT id, name FROM organizations "
-            "WHERE id::text = $1 OR name = $1 LIMIT 1",
-            runtime.DAEMON_ORG,
-        )
+        row = await DaemonRepository(connection).resolve_organization(runtime.DAEMON_ORG)
         if not row:
             runtime.log(
                 f"LUCENT_DAEMON_ORG={runtime.DAEMON_ORG!r} matches no organization; "
@@ -29,9 +26,8 @@ async def resolve_daemon_org(connection) -> tuple[str, str] | None:
         )
         return runtime._resolved_daemon_org
 
-    rows = await connection.fetch(
-        "SELECT id, name FROM organizations WHERE name <> $1 ORDER BY created_at",
-        runtime.SYSTEM_ORG_NAME,
+    rows = await DaemonRepository(connection).list_organizations_except(
+        runtime.SYSTEM_ORG_NAME
     )
     if not rows:
         return None

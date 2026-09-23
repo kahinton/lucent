@@ -174,6 +174,41 @@ class ReviewRepository:
 
         return dict(row) if row else None
 
+    async def process_status_review(
+        self,
+        *,
+        request_id: str,
+        organization_id: str,
+        status: str,
+        reviewer_user_id: str,
+        reviewer_display_name: str | None,
+        comments: str | None,
+    ) -> dict | None:
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            async with conn.transaction():
+                await self.create_review(
+                    request_id=request_id,
+                    organization_id=organization_id,
+                    status=status,
+                    reviewer_user_id=reviewer_user_id,
+                    reviewer_display_name=reviewer_display_name,
+                    comments=comments,
+                    source="human",
+                    conn=conn,
+                )
+                if status == "approved":
+                    return await self.mark_request_completed(
+                        request_id=request_id,
+                        organization_id=organization_id,
+                        conn=conn,
+                    )
+                return await self.mark_request_needs_rework(
+                    request_id=request_id,
+                    organization_id=organization_id,
+                    feedback=comments,
+                    conn=conn,
+                )
+
     async def get_review(
         self, review_id: str, organization_id: str
     ) -> dict | None:

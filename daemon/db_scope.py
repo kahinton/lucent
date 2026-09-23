@@ -26,6 +26,13 @@ from typing import Any
 
 import asyncpg
 
+from lucent.db.daemon import DaemonRepository
+from lucent.db.scope_audit import (
+    ScopeAuditedConnection,
+    effective_scope,
+    audit_enabled,
+)
+
 
 async def connect_scoped(
     dsn: str,
@@ -47,13 +54,10 @@ async def connect_scoped(
     """
     conn = await asyncpg.connect(dsn, **connect_kwargs)
     try:
-        await conn.execute(
-            "SELECT set_config('app.user_id', $1, false), "
-            "set_config('app.org_id', $2, false), "
-            "set_config('app.role', $3, false);",
-            user_id or "",
-            organization_id or "",
-            role,
+        await DaemonRepository(conn).set_scope(
+            user_id=user_id or "",
+            organization_id=organization_id or "",
+            role=role,
         )
     except Exception:
         # RLS wave not yet applied (pre-cutover stack): session-local
@@ -61,4 +65,15 @@ async def connect_scoped(
         # role lacks set-config rights on a custom GUC the connect must
         # not break the daemon. Empty context is the fail-closed state.
         pass
+    if audit_enabled():
+        return ScopeAuditedConnection(
+            conn,
+            effective_scope(
+                None,
+                user_id=user_id,
+                organization_id=organization_id,
+                role=role,
+                access_type="direct_connect",
+            ),
+        )
     return conn

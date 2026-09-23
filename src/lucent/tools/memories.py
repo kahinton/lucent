@@ -246,10 +246,11 @@ async def _get_memory_access_service(user_role: str | None = None) -> MemoryAcce
             raise RuntimeError("DATABASE_URL environment variable is required")
         pool = await init_db(database_url)
     is_admin = (user_role or "").lower() in {"admin", "owner"}
+    _, org_id, _, _, _ = await _get_current_user_context()
     return MemoryAccessService(
         repo,
         GitHubRepoAccessService(pool),
-        organization_id=org_id,
+        organization_id=str(org_id) if org_id else None,
         is_admin=is_admin,
     )
 

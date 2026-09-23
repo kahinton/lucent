@@ -12,8 +12,9 @@ from uuid import UUID, uuid4
 
 from asyncpg import Pool
 
-from lucent.db.pool import scoped_acquire
 from lucent.db.files import UserFileRepository
+from lucent.db.llm_sessions import LLMSessionRepository
+from lucent.db.requests import RequestRepository
 from lucent.storage.providers import FileStorageRegistry
 
 DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -63,29 +64,16 @@ class UserFileService:
         )
 
         if task_id:
-            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-                task = await conn.fetchrow(
-                    """SELECT t.id, t.request_id, r.created_by
-                       FROM tasks t JOIN requests r ON r.id = t.request_id
-                       WHERE t.id = $1::uuid AND t.organization_id = $2::uuid""",
-                    task_id,
-                    org_id,
-                )
+            task = await RequestRepository(self.pool).get_task_with_request_owner(task_id, org_id)
             if not task or str(task["created_by"] or "") != str(user_id):
                 raise ValueError("Task not found")
             request_id = str(task["request_id"])
         elif request_id:
-            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-                owns_request = await conn.fetchval(
-                    """SELECT EXISTS(
-                           SELECT 1 FROM requests
-                           WHERE id = $1::uuid AND organization_id = $2::uuid
-                             AND created_by = $3::uuid
-                       )""",
-                    request_id,
-                    org_id,
-                    user_id,
-                )
+            owns_request = await RequestRepository(self.pool).owns_request(
+                request_id,
+                org_id=org_id,
+                user_id=user_id,
+            )
             if not owns_request:
                 raise ValueError("Request not found")
 
@@ -205,17 +193,11 @@ class UserFileService:
     ) -> None:
         if not session_id:
             return
-        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-            owns_session = await conn.fetchval(
-                """SELECT EXISTS(
-                       SELECT 1 FROM llm_sessions
-                       WHERE id = $1::uuid AND organization_id = $2::uuid
-                         AND user_id = $3::uuid
-                   )""",
-                session_id,
-                org_id,
-                user_id,
-            )
+        owns_session = await LLMSessionRepository(self.pool).user_owns_session(
+            session_id=session_id,
+            org_id=org_id,
+            user_id=user_id,
+        )
         if not owns_session:
             raise ValueError("Chat session not found")
 
@@ -227,33 +209,23 @@ class UserFileService:
         org_id: str,
         user_id: str,
     ) -> str | None:
-        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-            if task_id:
-                task = await conn.fetchrow(
-                    """SELECT t.request_id
-                       FROM tasks t JOIN requests r ON r.id = t.request_id
-                       WHERE t.id = $1::uuid AND t.organization_id = $2::uuid
-                         AND r.created_by = $3::uuid""",
-                    task_id,
-                    org_id,
-                    user_id,
-                )
-                if not task:
-                    raise ValueError("Task not found")
-                return str(task["request_id"])
-            if request_id:
-                owns_request = await conn.fetchval(
-                    """SELECT EXISTS(
-                           SELECT 1 FROM requests
-                           WHERE id = $1::uuid AND organization_id = $2::uuid
-                             AND created_by = $3::uuid
-                       )""",
-                    request_id,
-                    org_id,
-                    user_id,
-                )
-                if not owns_request:
-                    raise ValueError("Request not found")
+        if task_id:
+            request_id = await RequestRepository(self.pool).task_request_id_for_user(
+                task_id,
+                org_id=org_id,
+                user_id=user_id,
+            )
+            if not request_id:
+                raise ValueError("Task not found")
+            return request_id
+        if request_id:
+            owns_request = await RequestRepository(self.pool).owns_request(
+                request_id,
+                org_id=org_id,
+                user_id=user_id,
+            )
+            if not owns_request:
+                raise ValueError("Request not found")
         return request_id
 
     async def _resolve_owned_file(

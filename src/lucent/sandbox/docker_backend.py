@@ -12,13 +12,20 @@ import socket
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import docker.errors
 
 import docker
 from lucent.sandbox.backend import SandboxBackend
+from lucent.sandbox.bridge_runtime import (
+    bridge_command,
+    bridge_env,
+    bridge_image,
+    bridge_port,
+    mcp_enabled,
+    primary_env,
+)
 from lucent.sandbox.devcontainer import DevcontainerConfig, detect_devcontainer
 from lucent.sandbox.models import (
     ExecResult,
@@ -251,9 +258,8 @@ class DockerBackend(SandboxBackend):
                     timeout=120,
                 )
                 if clone_result.exit_code != 0:
-                    raise RuntimeError(
-                        f"Git clone failed: {self._sanitize_git_output(clone_result.stderr, config)}"
-                    )
+                    sanitized_stderr = self._sanitize_git_output(clone_result.stderr, config)
+                    raise RuntimeError(f"Git clone failed: {sanitized_stderr}")
 
             # An empty managed-tool workspace cannot contain a devcontainer.
             if config.repo_url:
@@ -293,7 +299,7 @@ class DockerBackend(SandboxBackend):
                     # Don't fail the sandbox — setup commands are best-effort
 
             # Start MCP bridge when task-scoped key is present
-            if config.env_vars.get("LUCENT_SANDBOX_MCP_API_KEY"):
+            if mcp_enabled(config):
                 bridge_started = await self._start_mcp_bridge(sandbox_id, config)
                 if not bridge_started:
                     raise RuntimeError("Failed to start sandbox MCP bridge")
@@ -335,6 +341,7 @@ class DockerBackend(SandboxBackend):
         # whether we hit an exception or returned early with FAILED status.
         if info.status != SandboxStatus.READY and info.container_id:
             try:
+                await self._remove_bridge(sandbox_id)
                 await asyncio.to_thread(self._force_remove_container, info.container_id)
             except Exception as cleanup_err:
                 logger.warning(
@@ -366,6 +373,7 @@ class DockerBackend(SandboxBackend):
         try:
             # Stop and remove current container
             container = self._find_container(sandbox_id)
+            await self._remove_bridge(sandbox_id)
             if container:
                 await asyncio.to_thread(container.stop, timeout=10)
                 await asyncio.to_thread(container.remove, force=True)
@@ -513,7 +521,7 @@ class DockerBackend(SandboxBackend):
             stdin_open=True,
             tty=False,
             working_dir=config.working_dir,
-            environment=config.env_vars,
+            environment=primary_env(config),
             mem_limit=memory_limit,
             nano_cpus=int(cpu_limit * 1e9),
             network_mode=network_mode,
@@ -569,42 +577,123 @@ class DockerBackend(SandboxBackend):
                 return container
             raise
 
-    async def _start_mcp_bridge(self, sandbox_id: str, config: SandboxConfig) -> bool:
-        """Inject and start the MCP bridge process inside the container."""
-        bridge_source_path = Path(__file__).with_name("mcp_bridge.py")
-        if not bridge_source_path.exists():
-            logger.error("Sandbox MCP bridge source missing: %s", bridge_source_path)
+    async def _start_mcp_bridge(
+        self, sandbox_id: str, config: SandboxConfig
+    ) -> bool:
+        """Start a trusted bridge sidecar in the user container's network."""
+        container = self._find_container(sandbox_id)
+        if container is None:
+            logger.error("Cannot start MCP bridge for missing sandbox %s", sandbox_id[:12])
             return False
 
-        source = bridge_source_path.read_bytes()
-        bridge_path = "/tmp/lucent_mcp_bridge.py"
-        await self._write_file_unchecked(sandbox_id, bridge_path, source)
-
-        port = int(config.mcp_bridge_port or 8765)
-        start_cmd = (
-            f"python {shlex.quote(bridge_path)} --host 127.0.0.1 --port {port} "
-            f">/tmp/lucent-mcp-bridge.log 2>&1 &"
-        )
-        result = await self.exec(sandbox_id, start_cmd, timeout=10)
-        if result.exit_code != 0:
-            logger.error("Failed to launch MCP bridge in sandbox %s: %s", sandbox_id[:12], result.stderr)
+        port = bridge_port(config)
+        bridge_id = str(uuid.uuid4())
+        client = self._docker()
+        image = bridge_image()
+        try:
+            await asyncio.to_thread(self._pull_image_if_missing, image)
+            bridge_container = await asyncio.to_thread(
+                client.containers.run,
+                image=image,
+                command=bridge_command(),
+                name=f"lucent-sandbox-bridge-{bridge_id[:12]}",
+                labels={
+                    f"{LABEL_PREFIX}.managed": "false",
+                    f"{LABEL_PREFIX}.bridge-id": bridge_id,
+                    f"{LABEL_PREFIX}.sandbox-id": sandbox_id,
+                },
+                detach=True,
+                stdin_open=False,
+                tty=False,
+                environment=bridge_env(config),
+                network_mode=f"container:{container.id}",
+                mem_limit="128m",
+                nano_cpus=int(0.25 * 1e9),
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
+                read_only=True,
+                tmpfs={"/tmp": "size=16m,noexec,nosuid"},
+                restart_policy={"Name": "unless-stopped"},
+                auto_remove=False,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to start MCP bridge sidecar for sandbox %s: %s",
+                sandbox_id[:12], exc,
+            )
             return False
 
-        # Give the process a chance to bind and verify health endpoint.
-        health_cmd = (
-            "python -c \"import urllib.request,sys;"
-            f"resp=urllib.request.urlopen('http://127.0.0.1:{port}/health',timeout=5);"
-            "sys.exit(0 if resp.status==200 else 1)\""
-        )
-        for _ in range(5):
-            await asyncio.sleep(1)
-            probe = await self.exec(sandbox_id, health_cmd, timeout=10)
-            if probe.exit_code == 0:
-                logger.info("Sandbox MCP bridge started on 127.0.0.1:%d (%s)", port, sandbox_id[:12])
-                return True
-
+        health_command = [
+            "python3",
+            "-c",
+            (
+                "import urllib.request,sys;"
+                "resp=urllib.request.urlopen("
+                f"'http://127.0.0.1:{port}/health',timeout=5);"
+                "sys.exit(0 if resp.status==200 else 1)"
+            ),
+        ]
+        try:
+            for _ in range(10):
+                await asyncio.sleep(1)
+                probe = await asyncio.to_thread(
+                    bridge_container.exec_run, health_command, demux=True
+                )
+                if probe[0] == 0:
+                    logger.info(
+                        "Sandbox MCP bridge started on 127.0.0.1:%d (%s)",
+                        port, sandbox_id[:12],
+                    )
+                    return True
+                bridge_container.reload()
+                if bridge_container.status != "running":
+                    break
+        except Exception:
+            logger.warning(
+                "MCP bridge sidecar probe failed for sandbox %s",
+                sandbox_id[:12], exc_info=True,
+            )
         logger.error("Sandbox MCP bridge health check failed for %s", sandbox_id[:12])
+        await self._remove_bridge(sandbox_id)
         return False
+
+    def _pull_image_if_missing(self, image: str) -> None:
+        client = self._docker()
+        try:
+            client.images.get(image)
+        except docker.errors.ImageNotFound:
+            logger.info("Pulling sandbox MCP bridge image: %s", image)
+            client.images.pull(image)
+
+    def _find_bridge(
+        self, sandbox_id: str
+    ) -> docker.models.containers.Container | None:
+        client = self._docker()
+        containers = client.containers.list(
+            all=True,
+            filters={
+                "label": [
+                    f"{LABEL_PREFIX}.bridge-id",
+                    f"{LABEL_PREFIX}.sandbox-id={sandbox_id}",
+                ]
+            },
+        )
+        return containers[0] if containers else None
+
+    async def _remove_bridge(self, sandbox_id: str) -> None:
+        bridge = self._find_bridge(sandbox_id)
+        if bridge is None:
+            return
+        try:
+            await asyncio.to_thread(bridge.remove, force=True)
+            logger.info("Removed sandbox MCP bridge sidecar: %s", sandbox_id[:12])
+        except docker.errors.NotFound:
+            pass
+        except Exception:
+            logger.warning(
+                "Failed to remove sandbox MCP bridge sidecar %s",
+                sandbox_id[:12], exc_info=True,
+            )
 
     async def _apply_network_allowlist(
         self,
@@ -999,9 +1088,11 @@ class DockerBackend(SandboxBackend):
         if container:
             await asyncio.to_thread(container.stop, timeout=10)
             logger.info("Stopped sandbox: %s", sandbox_id[:12])
+        await self._remove_bridge(sandbox_id)
 
     async def destroy(self, sandbox_id: str) -> None:
         try:
+            await self._remove_bridge(sandbox_id)
             container = self._find_container(sandbox_id)
             if container:
                 try:

@@ -10,6 +10,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from lucent.access_control import AccessControlService
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
+from lucent.db.groups import GroupRepository
+from lucent.db.user import UserRepository
 from lucent.logging import get_logger
 from lucent.rbac import Role
 from lucent.settings import (
@@ -34,7 +36,7 @@ async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
     return await repo.get_user_groups(user_id, org_id)
 
 
-async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
+async def _resolve_owner_maps(user_id: str, org_id: str, pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
     user_ids = {
         str(item.get(user_key))
         for item in items
@@ -47,23 +49,14 @@ async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], 
     if not user_ids and not group_ids:
         return user_map, group_map
 
-    async with pool.acquire() as conn:
-        if user_ids:
-            user_rows = await conn.fetch(
-                """
-                SELECT id, COALESCE(display_name, email, 'Unknown user') AS owner_name
-                FROM users
-                WHERE id = ANY($1::uuid[])
-                """,
-                [UUID(uid) for uid in user_ids],
-            )
-            user_map = {str(row["id"]): row["owner_name"] for row in user_rows}
-        if group_ids:
-            group_rows = await conn.fetch(
-                "SELECT id, name FROM groups WHERE id = ANY($1::uuid[])",
-                [UUID(gid) for gid in group_ids],
-            )
-            group_map = {str(row["id"]): row["name"] for row in group_rows}
+    if user_ids:
+        user_map = await UserRepository(pool).get_display_names_by_ids(
+            [UUID(uid) for uid in user_ids],
+        )
+    if group_ids:
+        group_map = await GroupRepository(pool).get_names_by_ids(
+            [UUID(gid) for gid in group_ids],
+        )
     return user_map, group_map
 
 
@@ -369,7 +362,7 @@ async def definitions_page(
         *hooks_result["items"],
         *tools_result["items"],
     ]
-    user_map, group_map = await _resolve_owner_maps(pool, all_items)
+    user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, all_items)
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
     agents = _attach_owner_names(agents_result["items"], user_map, group_map)
     skills = _attach_owner_names(skills_result["items"], user_map, group_map)
@@ -443,7 +436,7 @@ async def agent_detail_page(request: Request, agent_id: str):
     )
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    user_map, group_map = await _resolve_owner_maps(pool, [agent])
+    user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, [agent])
     agent = _attach_owner_names([agent], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
     can_approve, approval_label = await _approval_button_state(pool, user, "agent", agent)
@@ -537,7 +530,7 @@ async def skill_detail_page(request: Request, skill_id: str):
     )
     if not skill:
         raise HTTPException(status_code=404, detail="Skill not found")
-    user_map, group_map = await _resolve_owner_maps(pool, [skill])
+    user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, [skill])
     skill = _attach_owner_names([skill], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
     can_approve, approval_label = await _approval_button_state(pool, user, "skill", skill)
@@ -574,7 +567,7 @@ async def mcp_server_detail_page(request: Request, server_id: str):
     )
     if not server:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    user_map, group_map = await _resolve_owner_maps(pool, [server])
+    user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, [server])
     server = _attach_owner_names([server], user_map, group_map)[0]
     server["args_text"] = _args_text(server.get("args"))
     server["headers_text"] = _json_text(server.get("headers"), {})
@@ -615,7 +608,7 @@ async def hook_detail_page(request: Request, hook_id: str):
     )
     if not hook:
         raise HTTPException(status_code=404, detail="Hook not found")
-    user_map, group_map = await _resolve_owner_maps(pool, [hook])
+    user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, [hook])
     hook = _attach_owner_names([hook], user_map, group_map)[0]
     user_groups = await _get_user_groups(pool, str(user.id), org_id)
     can_approve, approval_label = await _approval_button_state(pool, user, "hook", hook)
@@ -651,7 +644,7 @@ async def managed_tool_detail_page(request: Request, tool_id: str):
     )
     if not tool:
         raise HTTPException(status_code=404, detail="Managed tool not found")
-    user_map, group_map = await _resolve_owner_maps(pool, [tool])
+    user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, [tool])
     tool = _attach_owner_names([tool], user_map, group_map)[0]
     tool["input_schema_text"] = _json_text(tool.get("input_schema"), {})
     tool["output_schema_text"] = _json_text(tool.get("output_schema"), {})

@@ -11,10 +11,17 @@ import socket
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from lucent.sandbox.backend import SandboxBackend
+from lucent.sandbox.bridge_runtime import (
+    bridge_command,
+    bridge_env,
+    bridge_image,
+    bridge_port,
+    mcp_enabled,
+    primary_env,
+)
 from lucent.sandbox.models import ExecResult, SandboxConfig, SandboxInfo, SandboxStatus
 
 LABEL_MANAGED = "io.lucent.sandbox.managed"
@@ -65,11 +72,41 @@ class KubernetesBackend(SandboxBackend):
         safe = "".join(char if char.isalnum() or char == "-" else "-" for char in base)
         return f"{safe.strip('-')[:40]}-{sandbox_id[:8]}"
 
+    @staticmethod
+    def _bridge_container(config: SandboxConfig) -> dict:
+        return {
+            "name": "mcp-bridge",
+            "image": bridge_image(),
+            "imagePullPolicy": "IfNotPresent",
+            "command": bridge_command(),
+            "env": [
+                {"name": key, "value": value}
+                for key, value in bridge_env(config).items()
+            ],
+            "resources": {
+                "requests": {"cpu": "0.25", "memory": "128Mi"},
+                "limits": {"cpu": "0.25", "memory": "128Mi"},
+            },
+            "readinessProbe": {
+                "httpGet": {"path": "/health", "port": bridge_port(config)},
+                "initialDelaySeconds": 1,
+                "periodSeconds": 1,
+                "timeoutSeconds": 2,
+                "failureThreshold": 10,
+            },
+            "securityContext": {
+                "allowPrivilegeEscalation": False,
+                "capabilities": {"drop": ["ALL"]},
+                "readOnlyRootFilesystem": True,
+                "runAsNonRoot": True,
+            },
+        }
+
     def _pod_manifest(self, sandbox_id: str, name: str, config: SandboxConfig) -> dict:
         labels = {LABEL_MANAGED: "true", LABEL_ID: sandbox_id}
         if config.organization_id:
             labels["io.lucent.organization.id"] = config.organization_id
-        resources = {
+        user_resources = {
             "requests": {
                 "cpu": str(config.cpu_limit),
                 "memory": _k8s_memory(config.memory_limit),
@@ -83,6 +120,30 @@ class KubernetesBackend(SandboxBackend):
             "name": "workspace",
             "emptyDir": {"sizeLimit": _k8s_memory(config.disk_limit)},
         }
+        containers = [
+            {
+                "name": "sandbox",
+                "image": config.image,
+                "command": [
+                    "sh",
+                    "-c",
+                    "trap 'exit 0' TERM INT; while :; do sleep 30; done",
+                ],
+                "workingDir": config.working_dir,
+                "env": [
+                    {"name": key, "value": value}
+                    for key, value in primary_env(config).items()
+                ],
+                "resources": user_resources,
+                "securityContext": {
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["NET_RAW"]},
+                },
+                "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],
+            }
+        ]
+        if mcp_enabled(config):
+            containers.append(self._bridge_container(config))
         return {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -91,28 +152,7 @@ class KubernetesBackend(SandboxBackend):
                 "restartPolicy": "Never",
                 "automountServiceAccountToken": False,
                 "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
-                "containers": [
-                    {
-                        "name": "sandbox",
-                        "image": config.image,
-                        "command": [
-                            "sh",
-                            "-c",
-                            "trap 'exit 0' TERM INT; while :; do sleep 30; done",
-                        ],
-                        "workingDir": config.working_dir,
-                        "env": [
-                            {"name": key, "value": value}
-                            for key, value in config.env_vars.items()
-                        ],
-                        "resources": resources,
-                        "securityContext": {
-                            "allowPrivilegeEscalation": False,
-                            "capabilities": {"drop": ["NET_RAW"]},
-                        },
-                        "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],
-                    }
-                ],
+                "containers": containers,
                 "volumes": [workspace],
                 "activeDeadlineSeconds": config.timeout_seconds or None,
             },
@@ -155,9 +195,8 @@ class KubernetesBackend(SandboxBackend):
                     raise RuntimeError(f"Git clone failed: {result.stderr.strip()}")
             for command in config.setup_commands:
                 await self.exec(sandbox_id, command, timeout=300)
-            if config.env_vars.get("LUCENT_SANDBOX_MCP_API_KEY"):
-                if not await self._start_mcp_bridge(sandbox_id, config):
-                    raise RuntimeError("Failed to start sandbox MCP bridge")
+            if mcp_enabled(config):
+                await self._wait_for_bridge(name)
             await self._apply_network_policy(sandbox_id, name, config)
             info.status = SandboxStatus.READY
             info.ready_at = datetime.now(timezone.utc)
@@ -185,7 +224,18 @@ class KubernetesBackend(SandboxBackend):
                 for status in (pod.status.container_statuses or [])
                 if status.name == "sandbox"
             ]
-            if phase == "Running" and sandbox_statuses and sandbox_statuses[0].ready:
+            bridge_statuses = [
+                status
+                for status in (pod.status.container_statuses or [])
+                if status.name == "mcp-bridge"
+            ]
+            bridge_ready = not bridge_statuses or bridge_statuses[0].ready
+            if (
+                phase == "Running"
+                and sandbox_statuses
+                and sandbox_statuses[0].ready
+                and bridge_ready
+            ):
                 return
             if phase in ("Failed", "Succeeded"):
                 raise RuntimeError(f"Sandbox pod entered {phase} phase")
@@ -224,29 +274,20 @@ class KubernetesBackend(SandboxBackend):
                 return username, token
         return "x-access-token", credentials
 
-    async def _start_mcp_bridge(self, sandbox_id: str, config: SandboxConfig) -> bool:
-        source = Path(__file__).with_name("mcp_bridge.py").read_bytes()
-        bridge_path = "/tmp/lucent_mcp_bridge.py"
-        await self.write_file(sandbox_id, bridge_path, source)
-        port = int(config.mcp_bridge_port or 8765)
-        result = await self.exec(
-            sandbox_id,
-            f"python {shlex.quote(bridge_path)} --host 127.0.0.1 --port {port} "
-            ">/tmp/lucent-mcp-bridge.log 2>&1 &",
-            timeout=10,
-        )
-        if result.exit_code != 0:
-            return False
-        probe_command = (
-            "python -c \"import urllib.request,sys;"
-            f"r=urllib.request.urlopen('http://127.0.0.1:{port}/health',timeout=5);"
-            "sys.exit(0 if r.status==200 else 1)\""
-        )
-        for _ in range(5):
+    async def _wait_for_bridge(self, name: str, timeout: int = 10) -> None:
+        core, _ = self._clients()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pod = await asyncio.to_thread(core.read_namespaced_pod, name, self._namespace)
+            bridge_statuses = [
+                status
+                for status in (pod.status.container_statuses or [])
+                if status.name == "mcp-bridge"
+            ]
+            if bridge_statuses and bridge_statuses[0].ready:
+                return
             await asyncio.sleep(1)
-            if (await self.exec(sandbox_id, probe_command, timeout=10)).exit_code == 0:
-                return True
-        return False
+        raise TimeoutError("Timed out waiting for MCP bridge sidecar")
 
     async def _apply_network_policy(
         self, sandbox_id: str, name: str, config: SandboxConfig

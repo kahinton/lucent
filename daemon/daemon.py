@@ -41,6 +41,7 @@ if __package__ in {None, ""}:
 import httpx
 
 from lucent.mcp_config import build_internal_mcp_server, build_scoped_internal_mcp_server
+from lucent.db.daemon import DaemonRepository
 from lucent.prompts.memory_usage import render_active_user_context
 from daemon.db_scope import connect_scoped
 from daemon.observability.tools import (
@@ -200,9 +201,6 @@ DAEMON_INTERVAL_MINUTES = runtime_settings.daemon_interval_minutes()
 MODEL = runtime_settings.daemon_model_id() or ""
 STALE_HEARTBEAT_MINUTES = runtime_settings.daemon_stale_heartbeat_minutes()
 
-# PG advisory-lock namespace for the request-decomposition backfill.
-# Two-int form: (namespace, hashtext(request_id)::int). Arbitrary unique int.
-DECOMPOSITION_LOCK_NAMESPACE = 0x4C434D50  # "LCMP" — Lucent CoMPose
 # Overall timeout for an entire run_session call (client start + create + response)
 SESSION_TOTAL_TIMEOUT = runtime_settings.daemon_session_timeout_seconds()
 # Idle timeout: kill session if no LLM activity for this long (seconds)
@@ -1625,35 +1623,14 @@ async def _load_request_owner_context(user_id: str, org_id: str) -> str:
     user: dict[str, Any] = {"id": user_id, "organization_id": org_id}
     individual_memory = None
     try:
-        import asyncpg
-
         conn = await connect_scoped(DATABASE_URL, organization_id=org_id, user_id=user_id)
         try:
-            user_row = await conn.fetchrow(
-                """
-                SELECT id, organization_id, display_name, email, role
-                FROM users
-                WHERE id = $1::uuid AND organization_id = $2::uuid
-                """,
-                user_id,
-                org_id,
-            )
+            user_row, memory_row = await DaemonRepository(
+                conn
+            ).get_request_owner_context(user_id=user_id, organization_id=org_id)
             if user_row:
                 user = dict(user_row)
-                memory_row = await conn.fetchrow(
-                    """
-                    SELECT id, username, type, content, tags, importance, metadata,
-                           created_at, updated_at, user_id, organization_id, shared
-                    FROM memories
-                    WHERE type = 'individual'
-                      AND deleted_at IS NULL
-                      AND user_id = $1::uuid
-                      AND organization_id = $2::uuid
-                    """,
-                    user_id,
-                    org_id,
-                )
-                individual_memory = dict(memory_row) if memory_row else None
+            individual_memory = memory_row
         finally:
             await conn.close()
     except Exception:
@@ -1953,19 +1930,12 @@ class LucentDaemon(
         runtime state such as enabled/next_run_at.
         Uses direct DB connection (same pattern as key provisioning).
         """
-        import asyncpg
-
         try:
             conn = await asyncpg.connect(DATABASE_URL)
             try:
                 bound = await _resolve_daemon_org(conn)
                 if bound:
-                    await conn.execute(
-                        "SELECT set_config('app.user_id', '', false), "
-                        "set_config('app.org_id', $1, false), "
-                        "set_config('app.role', 'daemon', false);",
-                        bound[0],
-                    )
+                    await DaemonRepository(conn).set_daemon_scope(bound[0])
                 if not bound:
                     log(
                         "Cannot seed system schedules — no organization to bind to "
@@ -1984,16 +1954,9 @@ class LucentDaemon(
 
                 user_id = str(user["id"])
 
-                await conn.execute(
-                    """UPDATE schedules
-                       SET enabled = false,
-                           status = 'completed',
-                           updated_at = NOW()
-                       WHERE title = 'Memory Consolidation'
-                         AND organization_id = $1::uuid
-                         AND is_system = true""",
-                    org_id,
-                )
+                await DaemonRepository(
+                    conn
+                ).disable_memory_consolidation_schedule(org_id)
 
                 system_schedules = [
                     {
@@ -2088,47 +2051,31 @@ class LucentDaemon(
                         "Review the generated request and recorded task outputs "
                         "before approval."
                     )
-                    existing = await conn.fetchrow(
-                        """SELECT id FROM schedules
-                           WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
-                        sched["title"],
+                    existing = await DaemonRepository(conn).find_system_schedule(
                         org_id,
+                        sched["title"],
                     )
                     if existing:
                         # Built-in system schedule definitions are source-controlled.
                         # Refresh definition fields on startup so prompt fixes take
                         # effect, but preserve operational state (enabled, status,
                         # next_run_at, run history).
-                        await conn.execute(
-                            """UPDATE schedules SET
-                                   description = $3,
-                                   agent_type = $4,
-                                   schedule_type = $5,
-                                   interval_seconds = $6,
-                                   cron_expression = $7,
-                                   priority = $8,
-                                   prompt = $9,
-                                   trigger_type = 'schedule',
-                                   trigger_config = ($10::text)::jsonb,
-                                   request_template = ($11::text)::jsonb,
-                                   actions = ($12::text)::jsonb,
-                                   review_instructions = $13,
-                                   updated_at = NOW()
-                               WHERE id = $1::uuid AND organization_id = $2::uuid
-                                 AND is_system = true""",
+                        await DaemonRepository(conn).update_system_schedule(
                             str(existing["id"]),
                             org_id,
-                            sched["description"],
-                            sched["agent_type"],
-                            sched["schedule_type"],
-                            sched.get("interval_seconds"),
-                            sched.get("cron_expression"),
-                            sched["priority"],
-                            sched["prompt"],
-                            json.dumps(trigger_config),
-                            json.dumps(request_template),
-                            json.dumps([workflow_action]),
-                            review_instructions,
+                            {
+                                "description": sched["description"],
+                                "agent_type": sched["agent_type"],
+                                "schedule_type": sched["schedule_type"],
+                                "interval_seconds": sched.get("interval_seconds"),
+                                "cron_expression": sched.get("cron_expression"),
+                                "priority": sched["priority"],
+                                "prompt": sched["prompt"],
+                                "trigger_config": trigger_config,
+                                "request_template": request_template,
+                                "actions": [workflow_action],
+                                "review_instructions": review_instructions,
+                            },
                         )
                         updated += 1
                         continue
@@ -2144,30 +2091,24 @@ class LucentDaemon(
                     else:
                         next_run_at = now + timedelta(minutes=5)  # first cron run in 5 min
 
-                    await conn.execute(
-                        """INSERT INTO schedules
-                           (title, organization_id, description, agent_type, schedule_type,
-                            interval_seconds, cron_expression, next_run_at, priority, prompt,
-                            created_by, is_system, enabled, trigger_type, trigger_config,
-                            request_template, actions, review_instructions)
-                           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10,
-                               $11::uuid, true, true, 'schedule', ($12::text)::jsonb,
-                               ($13::text)::jsonb, ($14::text)::jsonb, $15)""",
-                        sched["title"],
-                        org_id,
-                        sched["description"],
-                        sched["agent_type"],
-                        sched["schedule_type"],
-                        interval_seconds,
-                        cron_expression,
-                        next_run_at,
-                        sched["priority"],
-                        sched["prompt"],
-                        user_id,
-                        json.dumps(trigger_config),
-                        json.dumps(request_template),
-                        json.dumps([workflow_action]),
-                        review_instructions,
+                    await DaemonRepository(conn).create_system_schedule(
+                        {
+                            "title": sched["title"],
+                            "organization_id": org_id,
+                            "description": sched["description"],
+                            "agent_type": sched["agent_type"],
+                            "schedule_type": sched["schedule_type"],
+                            "interval_seconds": interval_seconds,
+                            "cron_expression": cron_expression,
+                            "next_run_at": next_run_at,
+                            "priority": sched["priority"],
+                            "prompt": sched["prompt"],
+                            "created_by": user_id,
+                            "trigger_config": trigger_config,
+                            "request_template": request_template,
+                            "actions": [workflow_action],
+                            "review_instructions": review_instructions,
+                        },
                     )
                     created += 1
 
@@ -2196,8 +2137,6 @@ class LucentDaemon(
         feedback and close the loop — otherwise rejected requests remain in
         rejection_processing forever.
         """
-        import asyncpg
-
         try:
             conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
         except Exception as e:
@@ -2205,38 +2144,7 @@ class LucentDaemon(
             return []
 
         try:
-            rows = await conn.fetch(
-                """
-                SELECT user_id::text AS user_id,
-                       SUM(goals_scanned)::int AS goals_scanned,
-                       SUM(rejections_pending)::int AS rejections_pending
-                FROM (
-                    SELECT user_id,
-                           COUNT(*)::int AS goals_scanned,
-                           0 AS rejections_pending
-                    FROM memories
-                    WHERE organization_id = $1::uuid
-                      AND type = 'goal'
-                      AND lifecycle_stage = 'active'
-                      AND COALESCE(metadata->>'status', '') = 'active'
-                      AND user_id IS NOT NULL
-                    GROUP BY user_id
-                    UNION ALL
-                    SELECT created_by AS user_id,
-                           0 AS goals_scanned,
-                           COUNT(*)::int AS rejections_pending
-                    FROM requests
-                    WHERE organization_id = $1::uuid
-                      AND status = 'rejection_processing'
-                      AND created_by IS NOT NULL
-                    GROUP BY created_by
-                ) AS combined
-                GROUP BY user_id
-                ORDER BY user_id
-                """,
-                org_id,
-            )
-            return [dict(r) for r in rows]
+            return await DaemonRepository(conn).list_active_goal_users(org_id)
         except Exception as e:
             log(f"Cognitive fan-out query failed: {e}", "WARN")
             return []
@@ -2249,65 +2157,19 @@ class LucentDaemon(
         schedule_title: str,
     ) -> list[dict[str, Any]]:
         """Return memory owners with work for a per-user maintenance pass."""
-        import asyncpg
-
         try:
             conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
         except Exception as e:
             log(f"{schedule_title} fan-out DB connect failed: {e}", "WARN")
             return []
 
+        repository = DaemonRepository(conn)
         try:
             if schedule_title == "Experience Compression":
-                rows = await conn.fetch(
-                    """
-                    SELECT DISTINCT user_id::text AS user_id
-                    FROM memories
-                    WHERE organization_id = $1::uuid
-                      AND user_id IS NOT NULL
-                      AND type = 'experience'
-                      AND deleted_at IS NULL
-                      AND COALESCE(lifecycle_stage, 'active') = 'active'
-                      AND created_at < date_trunc('day', now())
-                      AND NOT (
-                          COALESCE(tags, '{}'::text[])
-                          && ARRAY[
-                              'daily-digest', 'pinned', 'do_not_consolidate',
-                              'heartbeat', 'state', 'telemetry'
-                          ]::text[]
-                      )
-                    ORDER BY user_id
-                    """,
-                    org_id,
-                )
-            elif schedule_title == "Learning Extraction":
-                rows = await conn.fetch(
-                    """
-                    SELECT DISTINCT user_id::text AS user_id
-                    FROM memories
-                    WHERE organization_id = $1::uuid
-                      AND user_id IS NOT NULL
-                      AND deleted_at IS NULL
-                      AND COALESCE(lifecycle_stage, 'active') = 'active'
-                      AND (
-                          COALESCE(tags, '{}'::text[])
-                          && ARRAY[
-                              'daemon-result', 'rejection-lesson',
-                              'feedback-rejected', 'feedback-approved', 'validated'
-                          ]::text[]
-                      )
-                      AND NOT ('lesson-extracted' = ANY(COALESCE(tags, '{}'::text[])))
-                      AND NOT (
-                          COALESCE(tags, '{}'::text[])
-                          && ARRAY['heartbeat', 'state', 'telemetry']::text[]
-                      )
-                    ORDER BY user_id
-                    """,
-                    org_id,
-                )
-            else:
-                return []
-            return [dict(row) for row in rows]
+                return await repository.list_experience_compression_users(org_id)
+            if schedule_title == "Learning Extraction":
+                return await repository.list_learning_extraction_users(org_id)
+            return []
         except Exception as e:
             log(f"{schedule_title} fan-out query failed: {e}", "WARN")
             return []
@@ -2500,28 +2362,17 @@ class LucentDaemon(
         since: datetime,
     ) -> int:
         """Count cognitive requests created for a user since a timestamp."""
-        import asyncpg
-
         try:
             conn = await connect_scoped(DATABASE_URL, organization_id=org_id, user_id=user_id)
         except Exception:
             return 0
 
         try:
-            count = await conn.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM requests
-                WHERE organization_id = $1::uuid
-                  AND created_by = $2::uuid
-                  AND source = 'cognitive'
-                  AND created_at >= $3
-                """,
-                org_id,
-                user_id,
-                since,
+            return await DaemonRepository(conn).count_user_cognitive_requests_since(
+                organization_id=org_id,
+                user_id=user_id,
+                since=since,
             )
-            return int(count or 0)
         except Exception:
             return 0
         finally:
@@ -2620,7 +2471,7 @@ class LucentDaemon(
 
         try:
             async with pool.acquire() as conn:  # rls: plumbing-only pg_notify (no row reads)
-                await conn.execute("SELECT pg_notify('request_ready', $1)", str(req["id"]))
+                await DaemonRepository(conn).notify_request_ready(req["id"])
         except Exception as notify_err:
             log(
                 "cognitive direct request notify failed "
@@ -2647,25 +2498,15 @@ class LucentDaemon(
         fan it out under the user's scoped key. Returns the number of
         rejected requests handed to the session.
         """
-        import asyncpg
-
         try:
             conn = await connect_scoped(DATABASE_URL, organization_id=org_id, user_id=user_id)
         except Exception as e:
             log(f"Rejection processing DB connect failed: {e}", "WARN")
             return 0
         try:
-            rows = await conn.fetch(
-                """
-                SELECT id::text AS id, title, approval_comment
-                FROM requests
-                WHERE organization_id = $1::uuid
-                  AND created_by = $2::uuid
-                  AND status = 'rejection_processing'
-                ORDER BY created_at
-                """,
-                org_id,
-                user_id,
+            rows = await DaemonRepository(conn).list_rejection_processing_requests(
+                organization_id=org_id,
+                user_id=user_id,
             )
         except Exception as e:
             log(f"Rejection processing query failed: {e}", "WARN")
@@ -2918,46 +2759,11 @@ class LucentDaemon(
             return []
 
         try:
-            rows = await conn.fetch(
-                """
-                SELECT r.id::text AS request_id,
-                       r.title,
-                       r.description,
-                       r.created_by::text AS created_by,
-                       r.target_repo,
-                       r.target_paths,
-                       r.priority,
-                       r.source,
-                       r.approval_status,
-                       r.goal_memory_id::text AS goal_memory_id,
-                       r.goal_milestone_index,
-                       CASE
-                           WHEN r.goal_memory_id IS NOT NULL
-                                AND r.goal_milestone_index IS NOT NULL
-                           THEN gm.metadata->'milestones'->(r.goal_milestone_index - 1)->>'description'
-                           ELSE NULL
-                       END AS goal_milestone_description
-                FROM requests r
-                LEFT JOIN memories gm ON gm.id = r.goal_memory_id
-                WHERE r.organization_id = $1::uuid
-                  AND ($3::uuid IS NULL OR r.id = $3::uuid)
-                  AND r.approval_status IN (
-                      'pending_approval', 'auto_approved', 'approved'
-                  )
-                  AND r.status IN ('pending', 'in_progress')
-                  AND r.created_at < NOW() - ($2::int * INTERVAL '1 second')
-                  AND r.created_by IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM tasks t WHERE t.request_id = r.id
-                  )
-                ORDER BY r.created_at ASC
-                LIMIT 5
-                """,
+            return await DaemonRepository(conn).list_backfill_decomposition_requests(
                 org_id,
-                min_age_seconds,
-                request_id,
+                min_age_seconds=min_age_seconds,
+                request_id=request_id,
             )
-            return [dict(r) for r in rows]
         except Exception as e:
             log(f"Decomp backfill query failed: {e}", "WARN")
             return []
@@ -3124,11 +2930,9 @@ class LucentDaemon(
                     log(f"Decomp lock connect failed for {request_id[:8]}: {e}", "WARN")
                     continue
 
-                acquired = await lock_conn.fetchval(
-                    "SELECT pg_try_advisory_lock($1, hashtext($2)::int)",
-                    DECOMPOSITION_LOCK_NAMESPACE,
-                    request_id,
-                )
+                acquired = await DaemonRepository(
+                    lock_conn
+                ).acquire_decomposition_lock(request_id)
                 if not acquired:
                     log(
                         f"Decomp backfill: request {request_id[:8]} already "
@@ -3141,26 +2945,12 @@ class LucentDaemon(
                 # Re-check candidacy under the lock to avoid the TOCTOU window
                 # where another daemon finished decomposing this very request
                 # between our list query and our lock acquisition.
-                still_undecomposed = await lock_conn.fetchval(
-                    """
-                    SELECT 1
-                    FROM requests r
-                    WHERE r.id = $1::uuid
-                      AND r.approval_status IN (
-                          'pending_approval', 'auto_approved', 'approved'
-                      )
-                      AND r.status IN ('pending', 'in_progress')
-                      AND NOT EXISTS (
-                          SELECT 1 FROM tasks t WHERE t.request_id = r.id
-                      )
-                    """,
-                    request_id,
-                )
+                still_undecomposed = await DaemonRepository(
+                    lock_conn
+                ).request_is_still_undecomposed(request_id)
                 if not still_undecomposed:
-                    await lock_conn.execute(
-                        "SELECT pg_advisory_unlock($1, hashtext($2)::int)",
-                        DECOMPOSITION_LOCK_NAMESPACE,
-                        request_id,
+                    await DaemonRepository(lock_conn).release_decomposition_lock(
+                        request_id
                     )
                     await lock_conn.close()
                     lock_conn = None
@@ -3254,7 +3044,10 @@ class LucentDaemon(
                     if not session_result:
                         errors.append("session produced no output")
 
-                    tasks_created = await self._count_tasks_for_request(request_id)
+                    tasks_created = await self._count_tasks_for_request(
+                        request_id,
+                        str(org_id),
+                    )
                     tool_events = self._session_tool_trackers.pop(session_name, [])
                     if session_result and tasks_created == 0:
                         fallback_created = await self._create_fallback_decomposition_tasks(
@@ -3263,7 +3056,10 @@ class LucentDaemon(
                             tool_events,
                         )
                         if fallback_created > 0:
-                            tasks_created = await self._count_tasks_for_request(request_id)
+                            tasks_created = await self._count_tasks_for_request(
+                                request_id,
+                                str(org_id),
+                            )
                         else:
                             errors.append("session produced output but no tasks were created")
 
@@ -3339,10 +3135,8 @@ class LucentDaemon(
             finally:
                 if lock_conn is not None:
                     try:
-                        await lock_conn.execute(
-                            "SELECT pg_advisory_unlock($1, hashtext($2)::int)",
-                            DECOMPOSITION_LOCK_NAMESPACE,
-                            request_id,
+                        await DaemonRepository(lock_conn).release_decomposition_lock(
+                            request_id
                         )
                     except Exception:
                         pass
@@ -3358,34 +3152,28 @@ class LucentDaemon(
     ) -> str | None:
         """Return the request's status if it has reached a terminal state, else None."""
         try:
-            row = await conn.fetchrow(
-                """
-                SELECT status FROM requests
-                WHERE id = $1::uuid
-                  AND status IN ('cancelled', 'completed', 'failed')
-                """,
-                request_id,
-            )
+            return await DaemonRepository(conn).get_terminal_request_status(request_id)
         except Exception:
             return None
         if not row:
             return None
         return str(row["status"])
 
-    async def _count_tasks_for_request(self, request_id: str) -> int:
+    async def _count_tasks_for_request(
+        self,
+        request_id: str,
+        org_id: str,
+    ) -> int:
         """Count tasks attached to a request — used to verify decomposition outcome."""
-        import asyncpg
-
         try:
-            conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
+            conn = await connect_scoped(
+                DATABASE_URL,
+                organization_id=org_id,
+            )
         except Exception:
             return 0
         try:
-            count = await conn.fetchval(
-                "SELECT COUNT(*) FROM tasks WHERE request_id = $1::uuid",
-                request_id,
-            )
-            return int(count or 0)
+            return await DaemonRepository(conn).count_tasks_for_request(request_id)
         except Exception:
             return 0
         finally:
@@ -4621,8 +4409,13 @@ class LucentDaemon(
                 {"run_managed_tool": True} if _surface["granted_tool_names"] else None
             )
 
-            # Mark running only after requester-scoped resources resolve successfully
-            await _start_owned(task_id)
+            started = await _start_owned(task_id)
+            if not started:
+                reason = "Task could not transition from claimed to running"
+                log(f"Task {task_id[:8]} start failed: {reason}", "ERROR")
+                await _release_owned(task_id)
+                await RequestAPI.add_event(task_id, "start_failed", reason)
+                continue
             await RequestAPI.add_event(
                 task_id,
                 "agent_dispatched",

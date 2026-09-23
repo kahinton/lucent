@@ -6,9 +6,10 @@ import json
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
-from lucent.db.pool import scoped_acquire
 from lucent.auth import get_current_user
 from lucent.db import get_pool
+from lucent.db.credentials import CredentialRepository
+from lucent.db.groups import GroupRepository
 from lucent.secrets.base import SecretProvider, SecretScope
 
 SECRET_REF_PREFIX = "secret://"
@@ -81,19 +82,9 @@ async def _candidate_scopes(organization_id: str, user_id: str) -> list[SecretSc
     scopes = [SecretScope(organization_id=organization_id, owner_user_id=user_id)]
     try:
         pool = await get_pool()
-    except Exception:
-        return scopes
-
-    try:
-        async with scoped_acquire(
-            organization_id=organization_id, user_id=user_id
-        ) as conn:
-            rows = await conn.fetch(
-                "SELECT group_id FROM user_groups WHERE user_id = $1",
-                user_id,
-            )
-        for row in rows:
-            scopes.append(SecretScope(organization_id=organization_id, owner_group_id=str(row["group_id"])))
+        groups = await GroupRepository(pool).get_user_group_ids(user_id)
+        for group_id in groups:
+            scopes.append(SecretScope(organization_id=organization_id, owner_group_id=group_id))
     except Exception:
         return scopes
     return scopes
@@ -126,25 +117,11 @@ async def _get_connection_access_token(integration_type: str, user_id: str) -> s
     """Return the latest active user connection access token for an integration."""
     pool = await get_pool()
     user = get_current_user() or {}
-    async with scoped_acquire(
-        organization_id=user.get("organization_id") or "",
-        user_id=user.get("id") or "",
-        role="system" if not user.get("organization_id") else None,
-    ) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT encrypted_secret_payload, access_token_expires_at
-            FROM enterprise_credentials
-            WHERE integration_type = $1
-              AND scope_type = 'user'
-              AND owner_user_id = $2
-              AND status = 'active'
-            ORDER BY updated_at DESC, created_at DESC
-            LIMIT 5
-            """,
-            integration_type,
-            user_id,
-        )
+    rows = await CredentialRepository(pool).get_active_user_tokens(
+        organization_id=str(user.get("organization_id") or ""),
+        user_id=str(user.get("id") or ""),
+        integration_type=integration_type,
+    )
     if not rows:
         return None
 

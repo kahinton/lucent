@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lucent.db.daemon import DaemonRepository
+
 
 async def provision_daemon_api_key(instance_id: str) -> str | None:
     """Provision and record one daemon-instance API key with a bounded TTL."""
@@ -28,12 +30,7 @@ async def provision_daemon_api_key(instance_id: str) -> str | None:
             return None
         organization_id, _organization_name = bound_organization
         # rls: bind the daemon org branch once the org identity is known
-        await connection.execute(
-            "SELECT set_config('app.user_id', '', false), "
-            "set_config('app.org_id', $1, false), "
-            "set_config('app.role', 'daemon', false);",
-            organization_id,
-        )
+        await DaemonRepository(connection).set_daemon_scope(organization_id)
         user = await runtime._ensure_daemon_service_user(connection, organization_id)
         if not user:
             return None
@@ -45,38 +42,21 @@ async def provision_daemon_api_key(instance_id: str) -> str | None:
             else organization_id
         )
         key_name = f"daemon-{instance_id}"
-        await connection.execute(
-            "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
-            "WHERE user_id = $1 AND name = $2 AND revoked_at IS NULL",
-            user_id,
-            key_name,
-        )
-        await connection.execute(
-            "DELETE FROM api_keys WHERE user_id = $1 "
-            "AND name LIKE 'daemon-%' AND revoked_at IS NOT NULL "
-            "AND id NOT IN ("
-            "  SELECT id FROM api_keys WHERE user_id = $1 "
-            "  AND name LIKE 'daemon-%' AND revoked_at IS NOT NULL "
-            "  ORDER BY revoked_at DESC LIMIT 5"
-            ")",
-            user_id,
-        )
+        repository = DaemonRepository(connection)
+        await repository.revoke_active_daemon_key(user_id, key_name)
+        await repository.prune_revoked_daemon_keys(user_id)
 
         plain_key = f"hs_{secrets.token_urlsafe(32)}"
         key_prefix = plain_key[:11]
         key_hash = bcrypt.hashpw(plain_key.encode(), bcrypt.gensalt()).decode()
-        row = await connection.fetchrow(
-            "INSERT INTO api_keys "
-            "(user_id, organization_id, name, key_prefix, key_hash, scopes, expires_at) "
-            "VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '1 hour' * $7) "
-            "RETURNING id, expires_at",
+        row = await repository.create_daemon_key(
             user_id,
             organization_id,
             key_name,
             key_prefix,
             key_hash,
-            runtime.DAEMON_KEY_SCOPES,
-            runtime.KEY_TTL_HOURS,
+            scopes=runtime.DAEMON_KEY_SCOPES,
+            ttl_hours=runtime.KEY_TTL_HOURS,
         )
         runtime._current_key_db_id = str(row["id"])
         runtime._current_key_expires_at = row["expires_at"]
@@ -107,17 +87,8 @@ async def revoke_current_key() -> None:
             # on failure the PK-bound revoke stays fail-closed (safe no-op).
             bound = await runtime._resolve_daemon_org(connection)
             if bound:
-                await connection.execute(
-                    "SELECT set_config('app.user_id', '', false), "
-                    "set_config('app.org_id', $1, false), "
-                    "set_config('app.role', 'daemon', false);",
-                    bound[0],
-                )
-            await connection.execute(
-                "UPDATE api_keys SET is_active = false, revoked_at = NOW() "
-                "WHERE id = $1 AND revoked_at IS NULL",
-                key_id,
-            )
+                await DaemonRepository(connection).set_daemon_scope(bound[0])
+            await DaemonRepository(connection).revoke_api_key(key_id)
             runtime.log(f"Revoked daemon API key on shutdown (id: {key_id[:8]}...)")
         finally:
             await connection.close()

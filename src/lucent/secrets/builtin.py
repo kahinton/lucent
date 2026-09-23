@@ -9,12 +9,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-from uuid import UUID
-
-import asyncpg
 from cryptography.fernet import Fernet, InvalidToken
 
-from lucent.db.pool import scoped_acquire_on
 from lucent.secrets.base import SecretProvider, SecretScope
 
 
@@ -49,9 +45,12 @@ def _get_fernet(secret_key: str | None = None) -> Fernet:
 class BuiltinSecretProvider(SecretProvider):
     """PostgreSQL-backed secret provider with Fernet encryption at rest."""
 
-    def __init__(self, pool: asyncpg.Pool, secret_key: str | None = None) -> None:
+    def __init__(self, pool, secret_key: str | None = None) -> None:
         self._pool = pool
         self._fernet = _get_fernet(secret_key)
+        from lucent.db.secrets import SecretRepository
+
+        self._repository = SecretRepository(pool)
 
     def _encrypt(self, plaintext: str) -> bytes:
         return self._fernet.encrypt(plaintext.encode("utf-8"))
@@ -62,88 +61,22 @@ class BuiltinSecretProvider(SecretProvider):
         except InvalidToken:
             raise SecretKeyError("Decryption failed — wrong key or corrupted data")
 
-    def _scope_filter(self, scope: SecretScope) -> tuple[str, list]:
-        """Build WHERE clause + params for scope-based lookups."""
-        conditions = ["organization_id = $1"]
-        params: list = [UUID(scope.organization_id)]
-        idx = 2
-        if scope.system_managed:
-            conditions.append("system_managed = true")
-            conditions.append("owner_user_id IS NULL")
-            conditions.append("owner_group_id IS NULL")
-        else:
-            conditions.append("system_managed = false")
-        if scope.owner_user_id:
-            conditions.append(f"owner_user_id = ${idx}")
-            params.append(UUID(scope.owner_user_id))
-            idx += 1
-        if scope.owner_group_id:
-            conditions.append(f"owner_group_id = ${idx}")
-            params.append(UUID(scope.owner_group_id))
-        return " AND ".join(conditions), params
-
     async def get(self, key: str, scope: SecretScope) -> str | None:
-        where, params = self._scope_filter(scope)
-        query = f"SELECT encrypted_value FROM secrets WHERE key = ${len(params) + 1} AND {where}"
-        params.append(key)
-        # Context binds from the SecretScope's org: correct under RLS both
-        # at boot (no request/task scope exists yet) and at runtime.
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            row = await conn.fetchrow(query, *params)
-        if row is None:
+        encrypted_value = await self._repository.get_encrypted_value(key, scope)
+        if encrypted_value is None:
             return None
-        return self._decrypt(row["encrypted_value"])
+        return self._decrypt(encrypted_value)
 
     async def set(self, key: str, value: str, scope: SecretScope) -> None:
         encrypted = self._encrypt(value)
-        owner_user = UUID(scope.owner_user_id) if scope.owner_user_id else None
-        owner_group = UUID(scope.owner_group_id) if scope.owner_group_id else None
-        org_id = UUID(scope.organization_id)
-
-        # Upsert: try update first, then insert
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            async with conn.transaction():
-                where, params = self._scope_filter(scope)
-                update_q = (
-                    f"UPDATE secrets SET encrypted_value = ${len(params) + 1}, "
-                    f"updated_at = NOW() "
-                    f"WHERE key = ${len(params) + 2} AND {where}"
-                )
-                params.extend([encrypted, key])
-                result = await conn.execute(update_q, *params)
-                if result == "UPDATE 0":
-                    await conn.execute(
-                        "INSERT INTO secrets (key, encrypted_value, owner_user_id, "
-                        "owner_group_id, organization_id, system_managed) "
-                        "VALUES ($1, $2, $3, $4, $5, $6)",
-                        key,
-                        encrypted,
-                        owner_user,
-                        owner_group,
-                        org_id,
-                        scope.system_managed,
-                    )
+        await self._repository.upsert_encrypted_value(key, encrypted, scope)
 
     async def delete(self, key: str, scope: SecretScope) -> bool:
-        where, params = self._scope_filter(scope)
-        query = f"DELETE FROM secrets WHERE key = ${len(params) + 1} AND {where}"
-        params.append(key)
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            result = await conn.execute(query, *params)
-        return result != "DELETE 0"
+        return await self._repository.delete(key, scope)
 
     async def list_keys(self, scope: SecretScope) -> list[str]:
-        where, params = self._scope_filter(scope)
-        query = f"SELECT key FROM secrets WHERE {where} ORDER BY key"
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            rows = await conn.fetch(query, *params)
-        return [r["key"] for r in rows]
+        return await self._repository.list_keys(scope)
 
     async def get_secret_id(self, key: str, scope: SecretScope) -> str | None:
         """Get the UUID of a secret by key and scope (for ACL checks)."""
-        where, params = self._scope_filter(scope)
-        query = f"SELECT id FROM secrets WHERE key = ${len(params) + 1} AND {where}"
-        params.append(key)
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            row = await conn.fetchrow(query, *params)
-        return str(row["id"]) if row else None
+        return await self._repository.get_id(key, scope)

@@ -325,6 +325,25 @@ After sandbox creation, the response includes a `devcontainer` field (if one was
 | `bridge` | Full network access via Docker bridge |
 | `allowlist` | Network access restricted to `allowed_hosts` only |
 
+## MCP Bridge Runtime
+
+Task sandboxes run the Lucent MCP bridge in a separate, isolated sidecar. The
+sidecar supplies the trusted Python runtime, so MCP works without installing
+Python or bridge code into an arbitrary sandbox image such as `postgres`.
+The user container receives only `LUCENT_SANDBOX_MCP_ENABLED`; bridge source
+and credentials are confined to the sidecar. Operators can override the trusted
+bridge image with `LUCENT_SANDBOX_BRIDGE_IMAGE`.
+The bridge is enabled only for task-linked sandboxes and always uses a
+Lucent-issued, task-scoped key. Caller-supplied values for bridge routing and
+credential environment keys are ignored.
+Bridge routing and credentials are provisioned by Lucent, so caller-supplied
+values for those environment keys are ignored.
+
+The sidecar shares the sandbox network namespace so the user image can reach
+the bridge on `127.0.0.1`. The bridge still requires network egress to the
+Lucent API, so use `bridge`, or an `allowlist` that includes the Lucent API
+hostname, when MCP tools must function.
+
 ## Lifecycle
 
 1. **CREATING** — Container is being set up

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lucent.db.daemon import DaemonRepository
 import asyncio
 import hashlib
 
@@ -104,18 +105,9 @@ async def _create_task_sandbox(
             from lucent.db.pool import scoped_acquire
 
             async with scoped_acquire(organization_id=org_id) as conn:
-                credential = await conn.fetchrow(
-                    """
-                    SELECT id, encrypted_secret_payload
-                    FROM enterprise_credentials
-                    WHERE integration_type = 'github'
-                      AND scope_type = 'user'
-                      AND owner_user_id = $1::uuid
-                      AND status = 'active'
-                    ORDER BY updated_at DESC
-                    LIMIT 1
-                    """,
-                    requesting_user_id,
+                credential = await DaemonRepository(conn).get_github_credential(
+                    organization_id=org_id,
+                    owner_user_id=requesting_user_id,
                 )
             if not credential:
                 runtime.log(
@@ -258,25 +250,10 @@ async def _request_has_later_reusable_sandbox_task(
 
     pool = await get_pool()
     async with scoped_acquire(organization_id=org_id) as conn:
-        return bool(
-            await conn.fetchval(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM tasks
-                    WHERE request_id = $1::uuid
-                      AND id != $2::uuid
-                      AND sequence_order > $3
-                      AND status IN ('pending', 'planned', 'running', 'needs_review')
-                      AND COALESCE(
-                          (sandbox_config->>'reuse_within_request')::boolean,
-                          false
-                      )
-                )
-                """,
-                request_id,
-                task_id,
-                sequence_order,
-            )
+        return await DaemonRepository(conn).has_later_reusable_sandbox_task(
+            request_id=request_id,
+            task_id=task_id,
+            sequence_order=sequence_order,
         )
 
 

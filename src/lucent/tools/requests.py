@@ -193,58 +193,27 @@ async def _handoff_lineage_references(
     request: dict[str, Any] | None = None
     workflow: dict[str, Any] | None = None
 
-    async with scoped_acquire(organization_id=org_id) as conn:
-        if task_id:
-            task_row = await conn.fetchrow(
-                """SELECT id::text, request_id::text, title, agent_type, model, reasoning_effort
-                   FROM tasks
-                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
-                task_id,
-                org_id,
-            )
-            if task_row:
-                task = dict(task_row)
-                request_id = request_id or task.get("request_id")
+    from lucent.db.requests import RequestRepository
+    from lucent.db.schedules import ScheduleRepository
 
-        if request_id:
-            request_row = await conn.fetchrow(
-                """SELECT id::text, title, source, status
-                   FROM requests
-                   WHERE id = $1::uuid AND organization_id = $2::uuid""",
-                request_id,
-                org_id,
-            )
-            if request_row:
-                request = dict(request_row)
-
-        if schedule_run_id:
-            workflow_row = await conn.fetchrow(
-                """SELECT sr.id::text AS schedule_run_id,
-                          s.id::text AS workflow_id,
-                          s.title AS workflow_title
-                   FROM schedule_runs sr
-                   JOIN schedules s ON s.id = sr.schedule_id
-                   WHERE sr.id = $1::uuid AND s.organization_id = $2::uuid""",
-                schedule_run_id,
-                org_id,
-            )
-            if workflow_row:
-                workflow = dict(workflow_row)
-        elif request_id:
-            workflow_row = await conn.fetchrow(
-                """SELECT sr.id::text AS schedule_run_id,
-                          s.id::text AS workflow_id,
-                          s.title AS workflow_title
-                   FROM schedule_runs sr
-                   JOIN schedules s ON s.id = sr.schedule_id
-                   WHERE sr.request_id = $1::uuid AND s.organization_id = $2::uuid
-                   ORDER BY sr.created_at DESC
-                   LIMIT 1""",
-                request_id,
-                org_id,
-            )
-            if workflow_row:
-                workflow = dict(workflow_row)
+    request_repo = RequestRepository(pool)
+    schedule_repo = ScheduleRepository(pool)
+    if task_id:
+        task = await request_repo.get_task_summary(task_id, org_id)
+        if task:
+            request_id = request_id or task.get("request_id")
+    if request_id:
+        request = await request_repo.get_request(request_id, org_id)
+    if schedule_run_id:
+        workflow = await schedule_repo.get_latest_run(
+            org_id=org_id,
+            schedule_run_id=schedule_run_id,
+        )
+    elif request_id:
+        workflow = await schedule_repo.get_latest_run(
+            org_id=org_id,
+            request_id=request_id,
+        )
 
     refs: list[dict[str, Any]] = []
     if workflow and workflow.get("workflow_id"):
@@ -1179,36 +1148,25 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
             bounded_timeout = 300
 
         pool = await _get_pool()
-        async with scoped_acquire(organization_id=str(org_id)) as conn:
-            if task_id:
-                task_row = await conn.fetchrow(
-                    """SELECT id::text
-                       FROM tasks
-                       WHERE id = $1::uuid AND organization_id = $2::uuid""",
-                    task_id,
-                    str(org_id),
-                )
-                if not task_row:
-                    return json.dumps({"error": "Current task not found"})
+        from lucent.db.requests import RequestRepository
 
+        request_repo = RequestRepository(pool)
+        if task_id and not await request_repo.get_task_summary(task_id, str(org_id)):
+            return json.dumps({"error": "Current task not found"})
+
+        if not resolved_sandbox_id:
+            if not task_id:
+                return json.dumps({"error": "sandbox_id is required outside task context"})
+            event_row = await request_repo.get_latest_task_event(
+                task_id,
+                ["sandbox_created", "sandbox_reused"],
+            )
+            metadata = (
+                _coerce_event_metadata(event_row["metadata"]) if event_row else {}
+            )
+            resolved_sandbox_id = _valid_uuid(metadata.get("sandbox_id"))
             if not resolved_sandbox_id:
-                if not task_id:
-                    return json.dumps({"error": "sandbox_id is required outside task context"})
-                event_row = await conn.fetchrow(
-                    """SELECT metadata
-                       FROM task_events
-                       WHERE task_id = $1::uuid
-                         AND event_type IN ('sandbox_created', 'sandbox_reused')
-                       ORDER BY created_at DESC
-                       LIMIT 1""",
-                    task_id,
-                )
-                metadata = (
-                    _coerce_event_metadata(event_row["metadata"]) if event_row else {}
-                )
-                resolved_sandbox_id = _valid_uuid(metadata.get("sandbox_id"))
-                if not resolved_sandbox_id:
-                    return json.dumps({"error": "No sandbox_created event for current task"})
+                return json.dumps({"error": "No sandbox_created event for current task"})
 
         from lucent.sandbox.manager import get_sandbox_manager
 

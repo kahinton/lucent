@@ -3,11 +3,12 @@
 import json
 import logging
 from datetime import datetime
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from lucent.db.pool import scoped_acquire
+from lucent.db.pool import scoped_acquire_on
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_SCHEDULE
 from lucent.rbac import Role
@@ -43,7 +44,11 @@ async def _schedule_owner_context(
     if sched.get("is_system"):
         from lucent.daemon_identity import ensure_daemon_service_user
 
-        async with pool.acquire() as conn:  # rls: users exempt — daemon-service identity resolution
+        async with scoped_acquire_on(
+            pool,
+            organization_id=str(sched["organization_id"]),
+            role="daemon",
+        ) as conn:
             daemon_user = await ensure_daemon_service_user(
                 conn, str(sched["organization_id"])
             )
@@ -66,21 +71,11 @@ async def _schedule_owner_context(
             if not sched.get("is_system") and owner_is_daemon:
                 if fallback_user is not None and not _is_daemon_user(fallback_user):
                     return str(fallback_user.id), str(fallback_user.role)
-                async with pool.acquire() as conn:  # rls: users exempt
-                    human_owner = await conn.fetchrow(
-                        """SELECT id::text, role
-                           FROM users
-                           WHERE organization_id = $1::uuid
-                             AND role <> 'daemon'
-                             AND COALESCE(external_id, '') NOT LIKE 'daemon-service%'
-                           ORDER BY CASE role
-                               WHEN 'owner' THEN 0
-                               WHEN 'admin' THEN 1
-                               ELSE 2
-                           END, created_at ASC
-                           LIMIT 1""",
-                        str(sched.get("organization_id")),
-                    )
+                from lucent.db.user import UserRepository
+
+                human_owner = await UserRepository(pool).get_first_non_daemon_owner(
+                    UUID(str(sched.get("organization_id"))),
+                )
                 if human_owner:
                     return str(human_owner["id"]), str(human_owner["role"] or "member")
             return owner_id, str(owner["role"])
@@ -528,16 +523,10 @@ async def _trigger_schedule_execution(
 
     try:
         if task_actions and not _workflow_allows_concurrent(sched):
-            async with scoped_acquire(organization_id=org_id) as conn:
-                active_request = await conn.fetchval(
-                    """SELECT id FROM requests
-                       WHERE title = $1
-                         AND organization_id = $2::uuid
-                         AND status NOT IN ('completed', 'failed', 'cancelled')
-                       LIMIT 1""",
-                    request_title,
-                    org_id,
-                )
+            active_request = await sched_repo.has_active_request_by_title(
+                request_title,
+                org_id,
+            )
             if active_request:
                 logger.info(
                     "Workflow %s skipped — active request %s exists",

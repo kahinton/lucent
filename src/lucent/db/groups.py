@@ -10,7 +10,6 @@ from uuid import UUID
 
 from asyncpg import Pool
 
-from lucent.access_control import AccessControlService
 from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
@@ -137,6 +136,8 @@ class GroupRepository:
                 UUID(group_id),
                 role,
             )
+        from lucent.access_control import AccessControlService
+
         AccessControlService.invalidate_user_groups(user_id)
         return dict(row)
 
@@ -149,6 +150,8 @@ class GroupRepository:
                 UUID(user_id),
             )
         if result == "DELETE 1":
+            from lucent.access_control import AccessControlService
+
             AccessControlService.invalidate_user_groups(user_id)
         return result == "DELETE 1"
 
@@ -168,6 +171,8 @@ class GroupRepository:
                 UUID(user_id),
             )
         if row:
+            from lucent.access_control import AccessControlService
+
             AccessControlService.invalidate_user_groups(user_id)
         return dict(row) if row else None
 

@@ -153,6 +153,61 @@ class LLMSessionRepository:
     def __init__(self, pool: Pool):
         self.pool = pool
 
+    async def find_embedded_interaction_session(
+        self,
+        *,
+        org_id: str | UUID,
+        user_id: str | UUID,
+        interaction_id: str,
+    ) -> dict[str, Any] | None:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+            row = await conn.fetchrow(
+                """SELECT * FROM llm_sessions
+                   WHERE organization_id = $1::uuid
+                     AND user_id = $2::uuid
+                     AND kind = 'embedded_chat'
+                     AND status <> 'deleted'
+                     AND metadata->>'interaction_id' = $3
+                   ORDER BY COALESCE(last_message_at, updated_at, created_at) DESC
+                   LIMIT 1""",
+                str(org_id),
+                str(user_id),
+                interaction_id,
+            )
+        return dict(row) if row else None
+
+    async def list_request_relations(self, request_id: str) -> list[dict[str, Any]]:
+        async with scoped_acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT session_id, relation
+                   FROM llm_session_requests
+                   WHERE request_id = $1
+                   ORDER BY created_at DESC""",
+                request_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def user_owns_session(
+        self,
+        *,
+        session_id: str,
+        org_id: str,
+        user_id: str,
+    ) -> bool:
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+            return bool(
+                await conn.fetchval(
+                    """SELECT EXISTS(
+                           SELECT 1 FROM llm_sessions
+                           WHERE id = $1::uuid AND organization_id = $2::uuid
+                             AND user_id = $3::uuid
+                       )""",
+                    session_id,
+                    org_id,
+                    user_id,
+                )
+            )
+
     async def create_session(
         self,
         *,

@@ -48,3 +48,6 @@ VALID_REQUEST_STATUSES: frozenset[str] = frozenset(
         REQUEST_STATUS_REJECTION_PROCESSING,
     }
 )
+
+# PostgreSQL advisory-lock namespace for request decomposition backfill.
+DECOMPOSITION_LOCK_NAMESPACE = 0x4C434D50

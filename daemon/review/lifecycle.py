@@ -6,6 +6,7 @@ runtime module, avoiding stale configuration snapshots and circular imports.
 
 from __future__ import annotations
 
+from lucent.db.daemon import DaemonRepository
 from daemon.runtime.module_proxy import runtime
 
 
@@ -139,8 +140,6 @@ async def _find_review_agent_type(daemon, org_id: str, requesting_user_id: str) 
 
 async def _resolve_review_requesting_user_id(daemon, *, org_id: str, requester_user_id: str) -> str:
     """Route daemon-owned review work to a human owner/admin for Handoffs."""
-    import asyncpg
-
     from daemon.db_scope import connect_scoped
 
     try:
@@ -149,14 +148,17 @@ async def _resolve_review_requesting_user_id(daemon, *, org_id: str, requester_u
         runtime.log(f'Review requester resolution DB connect failed: {e}', 'WARN')
         return requester_user_id
     try:
-        requester = await conn.fetchrow('SELECT id::text AS id, role, external_id\n                   FROM users\n                   WHERE id = $1::uuid AND organization_id = $2::uuid', requester_user_id, org_id)
+        requester = await DaemonRepository(conn).get_review_requester(
+            requester_user_id,
+            org_id,
+        )
         if not requester:
             return requester_user_id
         req_ext = requester['external_id'] or ''
         req_is_daemon = requester['role'] == 'daemon' or req_ext == 'daemon-service' or req_ext.startswith('daemon-service:')
         if not req_is_daemon:
             return requester_user_id
-        human = await conn.fetchrow("SELECT id::text AS id\n                   FROM users\n                   WHERE organization_id = $1::uuid\n                     AND is_active = true\n                     AND role IN ('owner', 'admin')\n                     AND COALESCE(external_id, '') <> 'daemon-service'\n                   ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at\n                   LIMIT 1", org_id)
+        human = await DaemonRepository(conn).get_review_human_owner(org_id)
         if human:
             runtime.log(f"Review request owned by daemon user {requester_user_id[:8]}; routing review/Handoffs to human {human['id'][:8]}")
             return str(human['id'])

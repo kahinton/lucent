@@ -15,7 +15,6 @@ from uuid import UUID
 import asyncpg
 import httpx
 
-from lucent.db.pool import scoped_acquire_on
 from lucent.secrets.base import SecretProvider, SecretScope
 
 logger = logging.getLogger(__name__)
@@ -51,6 +50,9 @@ class TransitSecretProvider(SecretProvider):
         transit_mount: str = "transit",
     ) -> None:
         self._pool = pool
+        from lucent.db.secrets import SecretRepository
+
+        self._repository = SecretRepository(pool)
         self._transit_key = transit_key
         self._transit_mount = transit_mount
         self._client = httpx.AsyncClient(
@@ -105,92 +107,25 @@ class TransitSecretProvider(SecretProvider):
     # Scope helpers (same pattern as BuiltinSecretProvider)
     # ------------------------------------------------------------------
 
-    def _scope_filter(self, scope: SecretScope) -> tuple[str, list]:
-        """Build WHERE clause + params for scope-based lookups."""
-        conditions = ["organization_id = $1"]
-        params: list = [UUID(scope.organization_id)]
-        idx = 2
-        if scope.system_managed:
-            conditions.append("system_managed = true")
-            conditions.append("owner_user_id IS NULL")
-            conditions.append("owner_group_id IS NULL")
-        else:
-            conditions.append("system_managed = false")
-        if scope.owner_user_id:
-            conditions.append(f"owner_user_id = ${idx}")
-            params.append(UUID(scope.owner_user_id))
-            idx += 1
-        if scope.owner_group_id:
-            conditions.append(f"owner_group_id = ${idx}")
-            params.append(UUID(scope.owner_group_id))
-        return " AND ".join(conditions), params
-
     # ------------------------------------------------------------------
     # SecretProvider interface
     # ------------------------------------------------------------------
 
     async def get(self, key: str, scope: SecretScope) -> str | None:
-        where, params = self._scope_filter(scope)
-        query = (
-            f"SELECT encrypted_value FROM secrets "
-            f"WHERE key = ${len(params) + 1} AND {where}"
-        )
-        params.append(key)
-        # Context binds from the SecretScope's org: correct under RLS both
-        # at boot (no request/task scope exists yet) and at runtime.
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            row = await conn.fetchrow(query, *params)
-        if row is None:
+        encrypted = await self._repository.get_encrypted_value(key, scope)
+        if encrypted is None:
             return None
-        # Column is BYTEA; transit ciphertext was stored as UTF-8 bytes.
-        ciphertext = bytes(row["encrypted_value"]).decode("utf-8")
-        return await self._decrypt(ciphertext)
+        return await self._decrypt(encrypted.decode("utf-8"))
 
     async def set(self, key: str, value: str, scope: SecretScope) -> None:
         ciphertext = await self._encrypt(value)
-        # Store transit ciphertext as bytes in the BYTEA column.
-        encrypted = ciphertext.encode("utf-8")
-        owner_user = UUID(scope.owner_user_id) if scope.owner_user_id else None
-        owner_group = UUID(scope.owner_group_id) if scope.owner_group_id else None
-        org_id = UUID(scope.organization_id)
-
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            async with conn.transaction():
-                where, params = self._scope_filter(scope)
-                update_q = (
-                    f"UPDATE secrets SET encrypted_value = ${len(params) + 1}, "
-                    f"updated_at = NOW() "
-                    f"WHERE key = ${len(params) + 2} AND {where}"
-                )
-                params.extend([encrypted, key])
-                result = await conn.execute(update_q, *params)
-                if result == "UPDATE 0":
-                    await conn.execute(
-                        "INSERT INTO secrets (key, encrypted_value, owner_user_id, "
-                        "owner_group_id, organization_id, system_managed) "
-                        "VALUES ($1, $2, $3, $4, $5, $6)",
-                        key,
-                        encrypted,
-                        owner_user,
-                        owner_group,
-                        org_id,
-                        scope.system_managed,
-                    )
+        await self._repository.upsert_encrypted_value(key, ciphertext.encode("utf-8"), scope)
 
     async def delete(self, key: str, scope: SecretScope) -> bool:
-        where, params = self._scope_filter(scope)
-        query = f"DELETE FROM secrets WHERE key = ${len(params) + 1} AND {where}"
-        params.append(key)
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            result = await conn.execute(query, *params)
-        return result != "DELETE 0"
+        return await self._repository.delete(key, scope)
 
     async def list_keys(self, scope: SecretScope) -> list[str]:
-        where, params = self._scope_filter(scope)
-        query = f"SELECT key FROM secrets WHERE {where} ORDER BY key"
-        async with scoped_acquire_on(self._pool, organization_id=scope.organization_id) as conn:
-            rows = await conn.fetch(query, *params)
-        return [r["key"] for r in rows]
+        return await self._repository.list_keys(scope)
 
     # ------------------------------------------------------------------
     # Health check

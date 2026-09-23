@@ -11,6 +11,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
+from lucent.db.groups import GroupRepository
+from lucent.db.user import UserRepository
+from lucent.db.pool import scoped_acquire_on
 from lucent.logging import get_logger
 from lucent.secrets import SecretRegistry, resolve_env_vars
 from lucent.sandbox.models import validate_extra_hosts
@@ -71,7 +74,7 @@ async def _get_user_groups(pool, user_id: str, org_id: str) -> list[dict]:
     return await repo.get_user_groups(user_id, org_id)
 
 
-async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
+async def _resolve_owner_maps(user_id: str, org_id: str, pool, items: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
     user_ids = {
         str(user_id)
         for item in items
@@ -88,23 +91,14 @@ async def _resolve_owner_maps(pool, items: list[dict]) -> tuple[dict[str, str], 
     if not user_ids and not group_ids:
         return user_map, group_map
 
-    async with pool.acquire() as conn:
-        if user_ids:
-            user_rows = await conn.fetch(
-                """
-                SELECT id, COALESCE(display_name, email, 'Unknown user') AS owner_name
-                FROM users
-                WHERE id = ANY($1::uuid[])
-                """,
-                [UUID(uid) for uid in user_ids],
-            )
-            user_map = {str(row["id"]): row["owner_name"] for row in user_rows}
-        if group_ids:
-            group_rows = await conn.fetch(
-                "SELECT id, name FROM groups WHERE id = ANY($1::uuid[])",
-                [UUID(gid) for gid in group_ids],
-            )
-            group_map = {str(row["id"]): row["name"] for row in group_rows}
+    if user_ids:
+        user_map = await UserRepository(pool).get_display_names_by_ids(
+            [UUID(uid) for uid in user_ids],
+        )
+    if group_ids:
+        group_map = await GroupRepository(pool).get_names_by_ids(
+            [UUID(gid) for gid in group_ids],
+        )
     return user_map, group_map
 
 
@@ -212,7 +206,7 @@ async def sandboxes_page(
     owner_groups = (
         await _get_user_groups(pool, str(user.id), org_id) if org_id else []
     )
-    user_map, group_map = await _resolve_owner_maps(pool, template_list)
+    user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, template_list)
     template_list = _attach_owner_names(template_list, user_map, group_map)
 
     # Load instances only when on instances tab
@@ -341,7 +335,7 @@ async def edit_template_page(request: Request, template_id: str):
     )
     if not tpl:
         raise HTTPException(404, "Template not found")
-    user_map, group_map = await _resolve_owner_maps(pool, [tpl])
+    user_map, group_map = await _resolve_owner_maps(str(user.id), str(user.organization_id), pool, [tpl])
     tpl = _attach_owner_names([tpl], user_map, group_map)[0]
     owner_groups = await _get_user_groups(pool, str(user.id), str(user.organization_id))
 

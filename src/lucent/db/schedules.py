@@ -354,6 +354,14 @@ class ScheduleRepository:
     def __init__(self, pool: Pool):
         self.pool = pool
 
+    async def has_active_request_by_title(self, title: str, org_id: str) -> bool:
+        from lucent.db.requests import RequestRepository
+
+        return await RequestRepository(self.pool).active_request_exists_by_title(
+            title,
+            org_id,
+        )
+
     async def _check_system_schedule_protection(
         self,
         schedule_id: str,
@@ -368,7 +376,7 @@ class ScheduleRepository:
         """
         if requester_role != "daemon":
             return
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire(organization_id=org_id, role="daemon") as conn:
             is_sys = await conn.fetchval(
                 "SELECT is_system FROM schedules "
                 "WHERE id = $1::uuid AND organization_id = $2::uuid",
@@ -463,27 +471,6 @@ class ScheduleRepository:
                 await conn.execute(tenant_guc_scrub())
         return [str(row["id"]) for row in rows]
 
-    async def list_daemon_service_users(self) -> list[dict]:
-        """Return every organization with its optional daemon service identity."""
-        async with self.pool.acquire() as conn:
-            await conn.execute(runner_guc_preamble())
-            try:
-                rows = await conn.fetch(
-                    """
-                    SELECT o.id::text AS organization_id,
-                           u.id::text AS daemon_user_id
-                    FROM organizations o
-                    LEFT JOIN users u
-                      ON u.organization_id = o.id
-                     AND (u.external_id = 'daemon-service'
-                          OR u.external_id = 'daemon-service:' || o.id::text)
-                     AND u.is_active = true
-                    """
-                )
-            finally:
-                await conn.execute(tenant_guc_scrub())
-        return [dict(row) for row in rows]
-
     async def get_organization_id(self, org_id: str) -> str | None:
         """Resolve an organization ID for system-level infrastructure paths."""
         async with self.pool.acquire() as conn:
@@ -547,7 +534,7 @@ class ScheduleRepository:
                 )
             ]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire(organization_id=org_id, role="daemon") as conn:
             existing = await conn.fetchrow(
                 """SELECT * FROM schedules
                    WHERE title = $1 AND organization_id = $2::uuid AND is_system = true""",
@@ -712,7 +699,7 @@ class ScheduleRepository:
                 )
             ]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire(organization_id=org_id, role="daemon") as conn:
             row = await conn.fetchrow(
                 """INSERT INTO schedules
                    (title, organization_id, description, agent_type, model, task_template,
@@ -807,7 +794,36 @@ class ScheduleRepository:
                 "SELECT * FROM schedules WHERE id = $1::uuid",
                 schedule_id,
             )
-            return dict(row) if row else None
+        return dict(row) if row else None
+
+    async def get_latest_run(
+        self,
+        *,
+        org_id: str,
+        schedule_run_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict | None:
+        if schedule_run_id:
+            clause = "WHERE sr.id = $1::uuid AND s.organization_id = $2::uuid"
+            params: tuple = (schedule_run_id, org_id)
+        elif request_id:
+            clause = """WHERE sr.request_id = $1::uuid
+                         AND s.organization_id = $2::uuid
+                       ORDER BY sr.created_at DESC LIMIT 1"""
+            params = (request_id, org_id)
+        else:
+            return None
+        async with scoped_acquire(organization_id=org_id) as conn:
+            row = await conn.fetchrow(
+                f"""SELECT sr.id::text AS schedule_run_id,
+                           s.id::text AS workflow_id,
+                           s.title AS workflow_title
+                    FROM schedule_runs sr
+                    JOIN schedules s ON s.id = sr.schedule_id
+                    {clause}""",
+                *params,
+            )
+        return dict(row) if row else None
 
     async def record_webhook_received(self, schedule_id: str) -> None:
         async with scoped_acquire(role="system") as conn:
@@ -1292,7 +1308,11 @@ class ScheduleRepository:
 
         from lucent.db.requests import RequestRepository
 
-        targets = await RequestRepository(self.pool).list_planning_targets(org_id, limit=1)
+        targets = await RequestRepository(self.pool).list_planning_targets(
+            org_id,
+            role="daemon",
+            limit=1,
+        )
         return bool(targets)
 
     async def mark_schedule_run(
