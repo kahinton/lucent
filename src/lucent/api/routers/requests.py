@@ -439,7 +439,7 @@ async def request_memories(request_id: UUID, user: AuthenticatedUser, pool=Depen
         raise HTTPException(404, "Request not found")
     rows = await repo.get_request_memory_links(
         str(request_id),
-        user.organization_id,
+        str(user.organization_id),
     )
     memory_access = _build_memory_access(pool, user)
     items = await memory_access.filter_memory_links(
@@ -655,8 +655,8 @@ async def create_task(
         from lucent.db.user import UserRepository
 
         target_user_exists = await UserRepository(pool).active_user_exists(
-            org_id,
-            body.requesting_user_id,
+            organization_id=org_id,
+            user_id=body.requesting_user_id,
         )
         if not target_user_exists:
             raise HTTPException(422, "requesting_user_id must be an active user in this org")

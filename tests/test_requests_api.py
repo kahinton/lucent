@@ -166,3 +166,95 @@ async def test_request_api_scopes_members_and_system_work(db_pool):
             await conn.execute("DELETE FROM requests WHERE organization_id = $1", org["id"])
             await conn.execute("DELETE FROM users WHERE organization_id = $1", org["id"])
             await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])
+
+
+@pytest.mark.asyncio
+async def test_create_task_validates_active_requesting_user(db_pool):
+    prefix = f"test_req_requser_{str(uuid4())[:8]}_"
+    org = await OrganizationRepository(db_pool).create(name=f"{prefix}org")
+    users = UserRepository(db_pool)
+    admin = await users.create(
+        external_id=f"{prefix}admin",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{prefix}admin@test.com",
+        display_name="Admin",
+        role="admin",
+    )
+    requester = await users.create(
+        external_id=f"{prefix}requester",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{prefix}requester@test.com",
+        display_name="Requester",
+    )
+    request = await RequestRepository(db_pool).create_request(
+        title="Requesting user validation",
+        org_id=str(org["id"]),
+        created_by=str(admin["id"]),
+    )
+
+    try:
+        async with _client_for(admin) as client:
+            response = await client.post(
+                f"/api/requests/{request['id']}/tasks",
+                json={"title": "Daemon-owned task", "requesting_user_id": str(requester["id"])},
+            )
+            assert response.status_code == 200, response.text
+            task = response.json()
+            assert task["requesting_user_id"] == str(requester["id"])
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM requests WHERE id = $1", request["id"])
+            await conn.execute(
+                "DELETE FROM users WHERE id = ANY($1::uuid[])",
+                [admin["id"], requester["id"]],
+            )
+            await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])
+
+
+@pytest.mark.asyncio
+async def test_request_memories_endpoint_handles_uuid_org(db_pool):
+    prefix = f"test_req_mem_{str(uuid4())[:8]}_"
+    org = await OrganizationRepository(db_pool).create(name=f"{prefix}org")
+    user = await UserRepository(db_pool).create(
+        external_id=f"{prefix}user",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{prefix}user@test.com",
+        display_name="Member",
+    )
+    request = await RequestRepository(db_pool).create_request(
+        title="Request memory links",
+        org_id=str(org["id"]),
+        created_by=str(user["id"]),
+    )
+    async with db_pool.acquire() as conn:
+        memory_id = await conn.fetchval(
+            """INSERT INTO memories (username, type, content, user_id, organization_id)
+               VALUES ($1, 'experience', $2, $3, $4)
+               RETURNING id""",
+            f"{prefix}memory",
+            f"{prefix}Linked memory",
+            user["id"],
+            org["id"],
+        )
+        await conn.execute(
+            """INSERT INTO request_memories (request_id, memory_id, relation)
+               VALUES ($1, $2, 'created')""",
+            request["id"],
+            memory_id,
+        )
+
+    try:
+        async with _client_for(user) as client:
+            response = await client.get(f"/api/requests/{request['id']}/memories")
+            assert response.status_code == 200, response.text
+            assert response.json()["items"][0]["memory_id"] == str(memory_id)
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM request_memories WHERE request_id = $1", request["id"])
+            await conn.execute("DELETE FROM requests WHERE id = $1", request["id"])
+            await conn.execute("DELETE FROM memories WHERE id = $1", memory_id)
+            await conn.execute("DELETE FROM users WHERE id = $1", user["id"])
+            await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])
