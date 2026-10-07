@@ -52,10 +52,12 @@ async def _resolve_owner_maps(user_id: str, org_id: str, pool, items: list[dict]
     if user_ids:
         user_map = await UserRepository(pool).get_display_names_by_ids(
             [UUID(uid) for uid in user_ids],
+            organization_id=org_id,
         )
     if group_ids:
         group_map = await GroupRepository(pool).get_names_by_ids(
             [UUID(gid) for gid in group_ids],
+            organization_id=org_id,
         )
     return user_map, group_map
 

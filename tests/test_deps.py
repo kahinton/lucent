@@ -156,6 +156,37 @@ class TestCurrentUserHasPermission:
         )
         assert user.has_permission(Permission.USERS_MANAGE) is True
 
+    def test_admin_can_manage_access_grants(self):
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="admin", email=None, display_name=None
+        )
+        assert user.has_permission(Permission.ACCESS_GRANT) is True
+
+    def test_owner_can_manage_access_grants(self):
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="owner", email=None, display_name=None
+        )
+        assert user.has_permission(Permission.ACCESS_GRANT) is True
+
+    def test_hyperadmin_can_manage_access_grants(self):
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="hyperadmin", email=None, display_name=None
+        )
+        assert user.has_permission(Permission.ACCESS_GRANT) is True
+
+    def test_member_cannot_manage_access_grants(self):
+        """Members share their own memories via memory routes, not the grants table."""
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="member", email=None, display_name=None
+        )
+        assert user.has_permission(Permission.ACCESS_GRANT) is False
+
+    def test_daemon_cannot_manage_access_grants(self):
+        user = CurrentUser(
+            id=uuid4(), organization_id=None, role="daemon", email=None, display_name=None
+        )
+        assert user.has_permission(Permission.ACCESS_GRANT) is False
+
 
 # =============================================================================
 # CurrentUser.require_permission

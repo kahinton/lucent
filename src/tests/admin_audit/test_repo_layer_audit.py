@@ -458,7 +458,7 @@ def test_template_read_and_mark_used_not_audited(actor_owner):
     pool = FakePool(_template_row())
     repo = SandboxTemplateRepository(pool)
     asyncio.run(repo.get(TEMPLATE_ID, ORG_ID))
-    asyncio.run(repo.mark_used(TEMPLATE_ID))
+    asyncio.run(repo.mark_used(TEMPLATE_ID, organization_id=ORG_ID))
     asyncio.run(repo.list_all(ORG_ID))
     assert _admin_inserts(pool.recorded) == []
 

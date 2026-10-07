@@ -25,7 +25,6 @@ class MemoryRecord(TypedDict):
     deleted_at: datetime | None
     user_id: UUID | None
     organization_id: UUID | None
-    shared: bool
     last_accessed_at: datetime | None
 
 
@@ -45,7 +44,6 @@ class MemorySearchRecord(TypedDict):
     similarity_score: float | None
     user_id: UUID | None
     organization_id: UUID | None
-    shared: bool
     last_accessed_at: datetime | None
 
 

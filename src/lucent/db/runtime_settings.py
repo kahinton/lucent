@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 import asyncpg
+
 from lucent.db.pool import scoped_acquire
 
 
@@ -89,24 +90,46 @@ class RuntimeSettingsRepository:
         query = """
             INSERT INTO runtime_settings
                 (organization_id, key, value, value_type, created_by, updated_by)
-            VALUES ($1, $2, $3::jsonb, $4, $5, $5)
-            ON CONFLICT (organization_id, key) DO UPDATE SET
-                value = EXCLUDED.value,
-                value_type = EXCLUDED.value_type,
-                updated_by = EXCLUDED.updated_by,
-                updated_at = NOW()
+            SELECT $1, $2, $3::jsonb, $4, $5, $5
+            WHERE NOT EXISTS (
+                SELECT 1 FROM runtime_settings
+                WHERE organization_id = $1 AND key = $2
+            )
             RETURNING id, organization_id, key, value, value_type,
                       created_by, updated_by, created_at, updated_at
         """
+        update_query = """
+            UPDATE runtime_settings SET
+                value = $3::jsonb,
+                value_type = $4,
+                updated_by = $5,
+                updated_at = NOW()
+            WHERE organization_id = $1 AND key = $2
+            RETURNING id, organization_id, key, value, value_type,
+                      created_by, updated_by, created_at, updated_at
+        """
+        creator = UUID(str(user_id)) if user_id else None
+        # Update-then-insert: a plain ON CONFLICT DO UPDATE fires the BEFORE
+        # INSERT auth_id trigger on the conflict path, leaking an unused
+        # auth_ids row each time an existing key is changed.
         async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
-                query,
+                update_query,
                 UUID(str(organization_id)),
                 key,
                 value,
                 value_type,
-                UUID(str(user_id)) if user_id else None,
+                creator,
             )
+            if row is None:
+                row = await conn.fetchrow(
+                    query,
+                    UUID(str(organization_id)),
+                    key,
+                    value,
+                    value_type,
+                    creator,
+                )
         return dict(row)
 
     async def delete_setting(

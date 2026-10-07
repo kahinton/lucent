@@ -22,6 +22,147 @@ async def _get_definition_repository() -> DefinitionRepository:
     return DefinitionRepository(pool)
 
 
+async def _get_authorized_definition_repository(
+    user_id, org_id,
+) -> DefinitionRepository:
+    """Definition reads are clearance-driven for user-scoped contexts.
+
+    Default deny: the pool carries the definitions policies, so listing and
+    by-ID usage lookups resolve only what this principal is explicitly
+    granted (own, group-owned, built-in org grant, or an explicit grant).
+    """
+    from lucent.db.definitions import get_authorized_definitions_pool
+
+    pool = await get_pool()
+    authorized = await get_authorized_definitions_pool(
+        pool, {"id": str(user_id), "organization_id": str(org_id)}
+    )
+    return DefinitionRepository(authorized)
+
+
+def _is_unscoped_daemon_role(role: str | None, memory_scope: str | None) -> bool:
+    """True for unscoped daemon contexts — system actors reading org-wide.
+
+    Mirrors the creation rule in _owner_args_for_context: the daemon is an
+    actor, not a capability owner, and runtime composition trusts the agent
+    for this first pass; such contexts keep the legacy org-shared reads.
+    """
+    return role == "daemon" and memory_scope != "user"
+
+
+_USAGE_LISTERS = {
+    "agents": ("list_agents", "list_agents_accessible_by"),
+    "skills": ("list_skills", "list_skills_accessible_by"),
+    "mcp_servers": ("list_mcp_servers", "list_mcp_servers_accessible_by"),
+    "hooks": ("list_hooks", "list_hooks_accessible_by"),
+    "managed_tools": ("list_managed_tools", "list_managed_tools_accessible_by"),
+}
+
+
+async def _usage_list_definitions(
+    kind: str,
+    *,
+    org_id: str,
+    user_id: str | None,
+    role: str | None,
+    memory_scope: str | None,
+    status: str | None = None,
+    search: str | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> dict:
+    """List definitions for a session context (clearance-driven).
+
+    User contexts get default-deny clearance reads; unscoped daemon contexts
+    keep the legacy org-shared listing.
+    """
+    legacy_method, cleared_method = _USAGE_LISTERS[kind]
+    kwargs: dict = {
+        "status": status,
+        "limit": limit,
+        "offset": offset,
+    }
+    if role == "daemon" and memory_scope != "user":
+        repo = await _get_definition_repository()
+        result = await getattr(repo, legacy_method)(
+            org_id,
+            requester_user_id=user_id if user_id else None,
+            requester_role=role,
+            **kwargs,
+        )
+    else:
+        repo = await _get_authorized_definition_repository(user_id, org_id)
+        cleared = getattr(repo, cleared_method)
+        if search is not None:
+            kwargs["search"] = search
+        result = await cleared(str(user_id), org_id, **kwargs)
+    return result
+
+
+_USAGE_GETTERS = {
+    "agents": "get_usable_agent",
+    "skills": "get_usable_skill",
+    "mcp_servers": "get_usable_mcp_server",
+    "hooks": "get_usable_hook",
+    "managed_tools": "get_usable_managed_tool",
+}
+
+
+async def _usage_get_definition_by_id(
+    kind: str,
+    resource_id: str,
+    *,
+    org_id: str,
+    user_id: str | None,
+    role: str | None,
+    memory_scope: str | None,
+) -> dict | None:
+    """Resolve one definition by ID for *use* in a session (clearance-driven).
+
+    Unscoped daemon contexts keep the legacy requester-scoped getter — the
+    daemon is an actor and runtime composition trusts the agent for this
+    first pass.
+    """
+    if _is_unscoped_daemon_role(role, memory_scope):
+        legacy_getters = {
+            "agents": "get_agent",
+            "skills": "get_skill",
+            "mcp_servers": "get_mcp_server",
+            "hooks": "get_hook",
+            "managed_tools": "get_managed_tool",
+        }
+        repo = await _get_definition_repository()
+        return await getattr(repo, legacy_getters[kind])(
+            resource_id,
+            org_id,
+            requester_user_id=user_id if user_id else None,
+            requester_role=role,
+        )
+    repo = await _get_authorized_definition_repository(user_id, org_id)
+    return await getattr(repo, _USAGE_GETTERS[kind])(resource_id)
+
+
+async def _usage_get_managed_tool_by_name(
+    name: str,
+    *,
+    org_id: str,
+    user_id: str | None,
+    role: str | None,
+    memory_scope: str | None,
+) -> dict | None:
+    """Resolve a managed tool by name for *use* in a session (clearance-driven)."""
+    if _is_unscoped_daemon_role(role, memory_scope):
+        repo = await _get_definition_repository()
+        return await repo.get_managed_tool_by_name(
+            name,
+            org_id,
+            requester_user_id=user_id if user_id else None,
+            requester_role=role,
+        )
+    repo = await _get_authorized_definition_repository(user_id, org_id)
+    return await repo.get_usable_managed_tool_by_name(name, org_id)
+
+
 async def _can_modify_definition(
     user_id: str,
     org_id: str,
@@ -104,10 +245,17 @@ def _owner_args_for_context(
     user_role: str | None,
     memory_scope: str | None,
 ) -> dict:
-    """Return repository ownership kwargs for the current MCP auth context."""
-    if user_role == "daemon" and memory_scope != "user":
-        return {"shared_with_org": True}
-    return {"owner_user_id": str(user_id)}
+    """Return repository ownership kwargs for the current MCP auth context.
+
+    Scoped contexts (task agents working for a specific user) pin the acting
+    user as owner. Unscoped daemon contexts pass no owner kwargs and rely on
+    the repository default, which attaches the org's owner user — every
+    instance definition should end up owned, not org-shared-and-unowned
+    (Kyle, 2026-10-01).
+    """
+    if user_role != "daemon" or memory_scope == "user":
+        return {"owner_user_id": str(user_id)}
+    return {}
 
 
 def _requires_unscoped_human(memory_scope: str | None) -> str | None:
@@ -150,18 +298,19 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        result = await repo.list_agents(
-            str(org_id),
+        result = await _usage_list_definitions(
+            "agents",
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
             status=status,
             limit=min(limit, 100),
             offset=offset,
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
         )
         return json.dumps(result, default=_serialize)
     # End of definition MCP tool registration.
@@ -177,16 +326,17 @@ Args:
 Returns: JSON with the agent details, or an error if not found."""
     )
     async def get_agent_definition(agent_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        agent = await repo.get_agent(
+        agent = await _usage_get_definition_by_id(
+            "agents",
             agent_id,
-            str(org_id),
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
         )
         if not agent:
             return json.dumps({"error": "Agent not found"})
@@ -212,19 +362,20 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        result = await repo.list_skills(
-            str(org_id),
+        result = await _usage_list_definitions(
+            "skills",
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
             status=status,
             search=search,
             limit=min(limit, 100),
             offset=offset,
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
         )
         return json.dumps(result, default=_serialize)
 
@@ -239,16 +390,17 @@ Args:
 Returns: JSON with the skill details, or an error if not found."""
     )
     async def get_skill_definition(skill_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        skill = await repo.get_skill(
+        skill = await _usage_get_definition_by_id(
+            "skills",
             skill_id,
-            str(org_id),
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
         )
         if not skill:
             return json.dumps({"error": "Skill not found"})
@@ -277,14 +429,23 @@ Returns: JSON with agents, skills, mcp_servers, sandbox_templates arrays and tot
 
         # Include proposed sandbox templates so the planner sees what's
         # already been proposed (and won't duplicate) and admins can review
-        # them in one place.
+        # them in one place. Pending proposals are management data: admins/
+        # owners see every pending proposal, other principals only their own
+        # (proposals are owned by their proposer).
         try:
             from lucent.db import get_pool
             from lucent.db.sandbox_template import SandboxTemplateRepository
 
             pool = await get_pool()
             tpl_repo = SandboxTemplateRepository(pool)
-            proposed_templates = await tpl_repo.list_proposed(str(org_id))
+            if role in ("admin", "owner") or (role == "daemon" and memory_scope != "user"):
+                proposed_templates = await tpl_repo.list_proposed(str(org_id))
+            else:
+                proposed_templates = [
+                    t
+                    for t in await tpl_repo.list_proposed(str(org_id))
+                    if str(t.get("proposed_by") or "") == str(user_id)
+                ]
             result["sandbox_templates"] = [
                 {
                     "id": str(t["id"]),
@@ -1178,18 +1339,19 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        result = await repo.list_mcp_servers(
-            str(org_id),
+        result = await _usage_list_definitions(
+            "mcp_servers",
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
             status=status,
             limit=min(limit, 100),
             offset=offset,
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
         )
         return json.dumps(result, default=_serialize)
 
@@ -1212,18 +1374,19 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        result = await repo.list_hooks(
-            str(org_id),
+        result = await _usage_list_definitions(
+            "hooks",
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
             status=status,
             limit=min(limit, 100),
             offset=offset,
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
         )
         return json.dumps(result, default=_serialize)
 
@@ -1236,16 +1399,17 @@ Args:
 Returns: JSON with the hook details, or an error if not found."""
     )
     async def get_hook_definition(hook_id: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        hook = await repo.get_hook(
+        hook = await _usage_get_definition_by_id(
+            "hooks",
             hook_id,
-            str(org_id),
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
         )
         if not hook:
             return json.dumps({"error": "Hook not found"})
@@ -1270,18 +1434,19 @@ Returns: JSON with items array, total_count, and pagination info."""
         limit: int = 25,
         offset: int = 0,
     ) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
-        result = await repo.list_managed_tools(
-            str(org_id),
+        result = await _usage_list_definitions(
+            "managed_tools",
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
             status=status,
             limit=min(limit, 100),
             offset=offset,
-            requester_user_id=str(user_id) if user_id else None,
-            requester_role=role,
         )
         from lucent.settings import custom_tooling_enabled
 
@@ -1298,29 +1463,24 @@ Args:
 Returns: JSON with the managed tool details, or an error if not found."""
     )
     async def get_tool_definition(tool: str) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
-        repo = await _get_definition_repository()
+        context = dict(
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
+        )
         found = None
         try:
             UUID(tool)
-            found = await repo.get_managed_tool(
-                tool,
-                str(org_id),
-                requester_user_id=str(user_id) if user_id else None,
-                requester_role=role,
-            )
+            found = await _usage_get_definition_by_id("managed_tools", tool, **context)
         except (TypeError, ValueError):
             found = None
         if not found:
-            found = await repo.get_managed_tool_by_name(
-                tool,
-                str(org_id),
-                requester_user_id=str(user_id) if user_id else None,
-                requester_role=role,
-            )
+            found = await _usage_get_managed_tool_by_name(tool, **context)
         if not found:
             return json.dumps({"error": "Managed tool not found"})
         return json.dumps(found, default=_serialize)
@@ -1340,7 +1500,7 @@ Args:
 Returns: JSON with ok/result/stdout/stderr/run_id metadata, or an error."""
     )
     async def run_managed_tool(tool: str, arguments: dict | str | None = None) -> str:
-        user_id, org_id, role, _, _ = await _get_current_user_context()
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if not user_id:
@@ -1354,35 +1514,37 @@ Returns: JSON with ok/result/stdout/stderr/run_id metadata, or an error."""
         from lucent.access_control import AccessControlService
         from lucent.services.managed_tools import ManagedToolBlockedError, ManagedToolExecutor
 
-        repo = DefinitionRepository(pool)
+        context = dict(
+            org_id=str(org_id),
+            user_id=str(user_id),
+            role=role,
+            memory_scope=memory_scope,
+        )
         found = None
         try:
             UUID(tool)
-            found = await repo.get_managed_tool(
-                tool,
-                str(org_id),
-                requester_user_id=str(user_id),
-                requester_role=role,
-            )
+            found = await _usage_get_definition_by_id("managed_tools", tool, **context)
         except (TypeError, ValueError):
             found = None
         if not found:
-            found = await repo.get_managed_tool_by_name(
-                tool,
-                str(org_id),
-                requester_user_id=str(user_id),
-                requester_role=role,
-            )
+            found = await _usage_get_managed_tool_by_name(tool, **context)
         if not found:
             return json.dumps({"error": "Managed tool not found", "code": 404})
         if found.get("status") != "active":
             return json.dumps({"error": "Managed tool is not active", "code": 409})
 
-        acl = AccessControlService(pool)
-        if not await acl.can_access(str(user_id), "managed_tool", str(found["id"]), str(org_id)):
-            return json.dumps({"error": "Managed tool not found", "code": 404})
+        if _is_unscoped_daemon_role(role, memory_scope):
+            # Legacy resolution above is org-shared for system actors — keep
+            # the explicit can_access gate that user contexts no longer need
+            # (their clearance lookup is the gate).
+            acl = AccessControlService(pool)
+            if not await acl.can_access(
+                str(user_id), "managed_tool", str(found["id"]), str(org_id)
+            ):
+                return json.dumps({"error": "Managed tool not found", "code": 404})
 
         agent_id = get_llm_context().get("agent_definition_id")
+        repo = DefinitionRepository(pool)
         executor = ManagedToolExecutor(repo)
         try:
             result = await executor.execute(

@@ -383,7 +383,12 @@ async def daemon_feedback(
             updated_tags.remove("feedback-processed")
 
     updated_metadata = {**existing_metadata, "feedback": feedback}
-    await repo.update(memory_id=memory_id, metadata=updated_metadata, tags=updated_tags)
+    await repo.update(
+        memory_id=memory_id,
+        metadata=updated_metadata,
+        tags=updated_tags,
+        organization_id=str(user.organization_id),
+    )
 
     # Create a first-class review record for approve/reject actions.
     # This bridges the legacy memory-based feedback UI with the new reviews table.

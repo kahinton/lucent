@@ -1,7 +1,7 @@
 """Pydantic models for API requests and responses."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -65,7 +65,6 @@ class MemoryResponse(BaseModel):
     deleted_at: datetime | None
     user_id: UUID | None
     organization_id: UUID | None
-    shared: bool
     last_accessed_at: datetime | None
     access_count: int = 0
 
@@ -110,6 +109,47 @@ class MemoryAccessGrantListResponse(BaseModel):
     """Read grants configured for a memory."""
 
     grants: list[MemoryAccessGrantResponse]
+
+
+class AuthAccessGrantUpsert(BaseModel):
+    """Set one principal's resource role; the new role replaces the old role."""
+
+    grantee_type: Literal["organization", "user", "group"]
+    grantee_id: UUID | None = None
+    role: Literal["read", "write", "owner"] = "read"
+
+
+class AuthAccessGrantRevoke(BaseModel):
+    """Remove one principal's resource grant."""
+
+    grantee_type: Literal["organization", "user", "group"]
+    grantee_id: UUID | None = None
+
+
+class AuthAccessGrantResponse(BaseModel):
+    """A configured role grant for any auth-ID-backed resource."""
+
+    id: UUID
+    resource_type: str
+    resource_id: UUID
+    organization_id: UUID
+    grantee_type: Literal["organization", "user", "group"]
+    grantee_id: UUID
+    role: Literal["read", "write", "owner"]
+    granted_by: UUID | None
+    created_at: datetime
+    user_display_name: str | None = None
+    user_email: str | None = None
+    group_name: str | None = None
+    organization_name: str | None = None
+
+
+class AuthAccessGrantListResponse(BaseModel):
+    """Roles configured for one resource."""
+
+    grants: list[AuthAccessGrantResponse]
+
+
 
 
 class MemoryListResponse(BaseModel):
@@ -167,7 +207,6 @@ class SearchResultMemory(BaseModel):
     similarity_score: float | None
     user_id: UUID | None
     organization_id: UUID | None
-    shared: bool
     last_accessed_at: datetime | None
     access_count: int = 0
     lifecycle_stage: str | None = None

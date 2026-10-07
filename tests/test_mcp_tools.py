@@ -20,6 +20,7 @@ from lucent.db import (
     MemoryRepository,
     UserRepository,
 )
+from lucent.db.memory import get_first_memory_owner
 from lucent.tools.memories import register_tools
 
 # ============================================================================
@@ -264,9 +265,20 @@ class TestCreateMemory:
         assert result["tags"] == []
         assert result["related_memory_ids"] == []
 
-    async def test_daemon_auto_sharing_via_mcp(self, mcp_tools, test_user, clean_test_data):
-        """Daemon-service identity auto-shares memories even when shared=False."""
+    async def test_daemon_no_auto_sharing_via_mcp(
+        self, mcp_tools, db_pool, test_user, clean_test_data
+    ):
+        """Daemon keys no longer force org-wide sharing: the memory is
+        attributed to the org's first owner and keeps the daemon tag."""
         prefix = clean_test_data
+        # Make the test user the org's first owner — attribution target.
+        await db_pool.execute(
+            "UPDATE users SET role = 'owner' WHERE id = $1", test_user["id"]
+        )
+        first_owner = await get_first_memory_owner(
+            db_pool, test_user["organization_id"]
+        )
+        assert first_owner is not None
         set_current_user(
             {
                 "id": test_user["id"],
@@ -289,8 +301,16 @@ class TestCreateMemory:
                     "shared": False,
                 },
             )
-            assert result["shared"] is True
+            # Shared state is the org read clearance (shared column retired
+            # in 132); a shared=false create files no org clearance.
             assert "daemon" in result["tags"]
+            assert not await MemoryRepository(db_pool).is_org_shared(
+                UUID(result["id"]), test_user["organization_id"]
+            )
+            # Attributed to the org's first owner (the test user), not the
+            # daemon display name.
+            assert result["username"] == f"{prefix}Test User"
+            assert str(result["user_id"]) == str(test_user["id"])
         finally:
             set_current_user(None)
 
@@ -331,7 +351,11 @@ class TestCreateMemory:
             assert result["username"] == "Scoped User"
             assert result["tags"] == ["test"]
             assert result["user_id"] == str(scoped_user["id"])
-            assert result["shared"] is False
+            # A user-scoped daemon create files no org clearance (shared
+            # column retired in 132).
+            assert not await MemoryRepository(db_pool).is_org_shared(
+                UUID(result["id"]), scoped_user["organization_id"]
+            )
         finally:
             set_current_user(None)
 
@@ -2374,8 +2398,10 @@ async def team_mcp_tools(db_pool):
 class TestShareMemory:
     """Tests for the share_memory MCP tool (team mode only)."""
 
-    async def test_share_memory_success(self, team_mcp_tools, auth_user, clean_test_data):
-        """Test sharing a memory sets shared=true."""
+    async def test_share_memory_success(
+        self, team_mcp_tools, db_pool, auth_user, clean_test_data
+    ):
+        """Test sharing a memory files the org read clearance."""
         prefix = clean_test_data
         created = await _call(
             team_mcp_tools,
@@ -2398,7 +2424,10 @@ class TestShareMemory:
         )
 
         assert "error" not in result
-        assert result.get("shared") is True
+        assert "shared" not in result
+        assert await MemoryRepository(db_pool).is_org_shared(
+            UUID(created["id"]), auth_user["organization_id"]
+        )
 
     async def test_share_memory_requires_auth(self, team_mcp_tools, test_memory):
         """Test that share_memory requires authentication."""
@@ -2440,8 +2469,10 @@ class TestShareMemory:
 class TestUnshareMemory:
     """Tests for the unshare_memory MCP tool (team mode only)."""
 
-    async def test_unshare_memory_success(self, team_mcp_tools, auth_user, clean_test_data):
-        """Test unsharing a shared memory sets shared=false."""
+    async def test_unshare_memory_success(
+        self, team_mcp_tools, db_pool, auth_user, clean_test_data
+    ):
+        """Test unsharing a shared memory removes the org read clearance."""
         prefix = clean_test_data
         created = await _call(
             team_mcp_tools,
@@ -2473,7 +2504,10 @@ class TestUnshareMemory:
         )
 
         assert "error" not in result
-        assert result.get("shared") is False
+        assert "shared" not in result
+        assert not await MemoryRepository(db_pool).is_org_shared(
+            UUID(created["id"]), auth_user["organization_id"]
+        )
 
     async def test_unshare_memory_requires_auth(self, team_mcp_tools, test_memory):
         """Test that unshare_memory requires authentication."""

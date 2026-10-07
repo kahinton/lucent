@@ -89,6 +89,19 @@ async def test_create_and_get_credential() -> None:
     assert created["display_name"] == "GitHub"
     assert fetched is not None
 
+    # SQL wiring: the create INSERT is org-scoped and carries the payload.
+    create_call = pool.acquire.return_value.__aenter__.return_value.fetchrow.call_args_list[0]
+    assert "INSERT INTO enterprise_credentials" in str(create_call.args[0])
+    assert create_call.args[1] == row["organization_id"]
+    assert create_call.args[2] == "github"
+    assert create_call.args[9] == b"secret"
+    # get_credential fetches by (id, organization_id) — org-scoped read.
+    get_pool_conn = pool.acquire.return_value.__aenter__.return_value
+    get_call = get_pool_conn.fetchrow.call_args_list[1]
+    assert "WHERE id = $1 AND organization_id = $2" in str(get_call.args[0])
+    assert get_call.args[1] == created["id"]
+    assert get_call.args[2] == row["organization_id"]
+
 
 @pytest.mark.asyncio
 async def test_consume_oauth_state_returns_row() -> None:
@@ -117,6 +130,15 @@ async def test_consume_oauth_state_returns_row() -> None:
     assert consumed is not None
     assert consumed["provider"] == "github"
 
+    # SQL wiring: the challenge is consumed (UPDATE, RETURNING) under its org.
+    conn = pool.acquire.return_value.__aenter__.return_value
+    update_call = conn.fetchrow.call_args_list[0]
+    assert "UPDATE oauth2_state_challenges" in str(update_call.args[0])
+    assert "RETURNING *" in str(update_call.args[0])
+    assert update_call.args[1] == row["organization_id"]
+    assert update_call.args[2] == "github"
+    assert update_call.args[3] == "abc"
+
 
 @pytest.mark.asyncio
 async def test_delete_credential_true_when_deleted() -> None:
@@ -126,3 +148,10 @@ async def test_delete_credential_true_when_deleted() -> None:
 
     deleted = await repo.delete_credential(str(uuid4()), str(row["organization_id"]))
     assert deleted is True
+
+    # SQL wiring: the DELETE carries the credential UUID and org UUID.
+    conn = pool.acquire.return_value.__aenter__.return_value
+    call = conn.execute.call_args_list[1]  # [0] is the GUC preamble
+    assert "DELETE FROM enterprise_credentials" in str(call.args[0])
+    assert str(call.args[1]) != str(row["organization_id"])  # credential id, not org
+    assert call.args[2] == row["organization_id"]

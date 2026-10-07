@@ -155,10 +155,10 @@ class TestAuditRepositoryLog:
         """Test creating a basic audit log entry."""
         repo = AuditRepository(db_pool)
         entry = await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
-            organization_id=audit_user["organization_id"],
         )
 
         assert entry["id"] is not None
@@ -171,10 +171,10 @@ class TestAuditRepositoryLog:
         """Test audit entry with field change tracking."""
         repo = AuditRepository(db_pool)
         entry = await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
-            organization_id=audit_user["organization_id"],
             changed_fields=["content", "tags"],
             old_values={"content": "old content", "tags": ["old"]},
             new_values={"content": "new content", "tags": ["new"]},
@@ -189,10 +189,10 @@ class TestAuditRepositoryLog:
         repo = AuditRepository(db_pool)
         snapshot = {"content": "snapshot content", "tags": ["v1"]}
         entry = await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
-            organization_id=audit_user["organization_id"],
             version=1,
             snapshot=snapshot,
         )
@@ -204,6 +204,7 @@ class TestAuditRepositoryLog:
         """Test audit entry with notes."""
         repo = AuditRepository(db_pool)
         entry = await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="delete",
             user_id=audit_user["id"],
@@ -218,6 +219,7 @@ class TestAuditRepositoryLog:
         repo = AuditRepository(db_pool)
         ctx = {"ip": "127.0.0.1", "user_agent": "test-client"}
         entry = await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
@@ -230,6 +232,7 @@ class TestAuditRepositoryLog:
         """Test audit entry without user_id (system action)."""
         repo = AuditRepository(db_pool)
         entry = await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="system_cleanup",
         )
@@ -254,7 +257,7 @@ class TestAuditRepositoryGetByMemoryId:
                 organization_id=audit_user["organization_id"],
             )
 
-        result = await repo.get_by_memory_id(audit_memory["id"])
+        result = await repo.get_by_memory_id(audit_memory["id"], organization_id=audit_memory["organization_id"])
 
         assert result["total_count"] == 3
         assert len(result["entries"]) == 3
@@ -268,28 +271,33 @@ class TestAuditRepositoryGetByMemoryId:
 
         for i in range(5):
             await repo.log(
+                organization_id=audit_memory["organization_id"],
                 memory_id=audit_memory["id"],
                 action_type="update",
                 user_id=audit_user["id"],
             )
 
-        page1 = await repo.get_by_memory_id(audit_memory["id"], limit=2, offset=0)
+        page1 = await repo.get_by_memory_id(audit_memory["id"], organization_id=audit_memory["organization_id"], limit=2, offset=0)
         assert len(page1["entries"]) == 2
         assert page1["total_count"] == 5
         assert page1["has_more"] is True
 
-        page2 = await repo.get_by_memory_id(audit_memory["id"], limit=2, offset=2)
+        page2 = await repo.get_by_memory_id(audit_memory["id"], organization_id=audit_memory["organization_id"], limit=2, offset=2)
         assert len(page2["entries"]) == 2
         assert page2["has_more"] is True
 
-        page3 = await repo.get_by_memory_id(audit_memory["id"], limit=2, offset=4)
+        page3 = await repo.get_by_memory_id(audit_memory["id"], organization_id=audit_memory["organization_id"], limit=2, offset=4)
         assert len(page3["entries"]) == 1
         assert page3["has_more"] is False
 
-    async def test_empty_result(self, db_pool):
+    async def test_empty_result(self, db_pool, audit_org):
         """Test querying a memory with no audit entries."""
         repo = AuditRepository(db_pool)
-        result = await repo.get_by_memory_id(uuid4())
+        # The random memory id belongs to no audit rows; the org threads the
+        # tenant guard (the query stays fail-closed to this org, so the
+        # random id legitimately returns nothing).
+        result = await repo.get_by_memory_id(
+            uuid4(), organization_id=audit_org["id"])
 
         assert result["total_count"] == 0
         assert len(result["entries"]) == 0
@@ -300,17 +308,19 @@ class TestAuditRepositoryGetByMemoryId:
         repo = AuditRepository(db_pool)
 
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
         )
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
         )
 
-        result = await repo.get_by_memory_id(audit_memory["id"])
+        result = await repo.get_by_memory_id(audit_memory["id"], organization_id=audit_memory["organization_id"])
         entries = result["entries"]
         assert entries[0]["created_at"] >= entries[1]["created_at"]
 
@@ -318,50 +328,52 @@ class TestAuditRepositoryGetByMemoryId:
 class TestAuditRepositoryGetByUserId:
     """Tests for AuditRepository.get_by_user_id()."""
 
-    async def test_get_entries_for_user(self, db_pool, audit_user, audit_memory):
+    async def test_get_entries_for_user(self, db_pool, audit_user, audit_org, audit_memory):
         """Test retrieving audit entries by user."""
         repo = AuditRepository(db_pool)
 
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
         )
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
         )
 
-        result = await repo.get_by_user_id(audit_user["id"])
+        result = await repo.get_by_user_id(audit_user["id"], organization_id=audit_org["id"])
         assert result["total_count"] == 2
         assert len(result["entries"]) == 2
 
-    async def test_filter_by_action_type(self, db_pool, audit_user, audit_memory):
+    async def test_filter_by_action_type(self, db_pool, audit_user, audit_org, audit_memory):
         """Test filtering audit entries by action type."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
-        await repo.log(memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"])
-        await repo.log(memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"])
+        await repo.log(organization_id=audit_memory["organization_id"], memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
+        await repo.log(organization_id=audit_memory["organization_id"], memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"])
+        await repo.log(organization_id=audit_memory["organization_id"], memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"])
 
-        result = await repo.get_by_user_id(audit_user["id"], action_type="update")
+        result = await repo.get_by_user_id(audit_user["id"], organization_id=audit_org["id"], action_type="update")
         assert result["total_count"] == 2
 
-    async def test_filter_by_since(self, db_pool, audit_user, audit_memory):
+    async def test_filter_by_since(self, db_pool, audit_user, audit_org, audit_memory):
         """Test filtering audit entries by timestamp."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
+        await repo.log(organization_id=audit_memory["organization_id"], memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
 
         # Search for entries since a past time (should find the entry)
         past = datetime.now(timezone.utc) - timedelta(hours=1)
-        result = await repo.get_by_user_id(audit_user["id"], since=past)
+        result = await repo.get_by_user_id(audit_user["id"], organization_id=audit_org["id"], since=past)
         assert result["total_count"] >= 1
 
         # Search for entries since the future (should find nothing)
         future = datetime.now(timezone.utc) + timedelta(hours=1)
-        result = await repo.get_by_user_id(audit_user["id"], since=future)
+        result = await repo.get_by_user_id(audit_user["id"], organization_id=audit_org["id"], since=future)
         assert result["total_count"] == 0
 
 
@@ -373,10 +385,10 @@ class TestAuditRepositoryGetByOrganizationId:
         repo = AuditRepository(db_pool)
 
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
-            organization_id=audit_org["id"],
         )
 
         result = await repo.get_by_organization_id(audit_org["id"])
@@ -388,16 +400,16 @@ class TestAuditRepositoryGetByOrganizationId:
         repo = AuditRepository(db_pool)
 
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
-            organization_id=audit_org["id"],
         )
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="delete",
             user_id=audit_user["id"],
-            organization_id=audit_org["id"],
         )
 
         past = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -411,13 +423,13 @@ class TestAuditRepositoryGetByOrganizationId:
 class TestAuditRepositoryGetRecent:
     """Tests for AuditRepository.get_recent()."""
 
-    async def test_get_recent_no_filters(self, db_pool, audit_user, audit_memory):
+    async def test_get_recent_no_filters(self, db_pool, audit_user, audit_org, audit_memory):
         """Test getting recent entries without filters."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
+        await repo.log(organization_id=audit_memory["organization_id"], memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
 
-        entries = await repo.get_recent()
+        entries = await repo.get_recent(organization_id=audit_org["id"])
         assert len(entries) >= 1
 
     async def test_get_recent_with_org_filter(self, db_pool, audit_user, audit_org, audit_memory):
@@ -425,36 +437,37 @@ class TestAuditRepositoryGetRecent:
         repo = AuditRepository(db_pool)
 
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
-            organization_id=audit_org["id"],
         )
 
         entries = await repo.get_recent(organization_id=audit_org["id"])
         assert len(entries) >= 1
         assert all(e["organization_id"] == audit_org["id"] for e in entries)
 
-    async def test_get_recent_with_action_types(self, db_pool, audit_user, audit_memory):
+    async def test_get_recent_with_action_types(self, db_pool, audit_user, audit_org, audit_memory):
         """Test filtering recent entries by action types list."""
         repo = AuditRepository(db_pool)
 
-        await repo.log(memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
-        await repo.log(memory_id=audit_memory["id"], action_type="delete", user_id=audit_user["id"])
+        await repo.log(organization_id=audit_memory["organization_id"], memory_id=audit_memory["id"], action_type="create", user_id=audit_user["id"])
+        await repo.log(organization_id=audit_memory["organization_id"], memory_id=audit_memory["id"], action_type="delete", user_id=audit_user["id"])
 
-        entries = await repo.get_recent(action_types=["create"])
+        entries = await repo.get_recent(organization_id=audit_org["id"], action_types=["create"])
         assert all(e["action_type"] == "create" for e in entries)
 
-    async def test_get_recent_with_limit(self, db_pool, audit_user, audit_memory):
+    async def test_get_recent_with_limit(self, db_pool, audit_user, audit_org, audit_memory):
         """Test limiting recent entries."""
         repo = AuditRepository(db_pool)
 
         for _ in range(5):
             await repo.log(
-                memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"]
+                organization_id=audit_memory["organization_id"],
+                memory_id=audit_memory["id"], action_type="update", user_id=audit_user["id"],
             )
 
-        entries = await repo.get_recent(limit=2)
+        entries = await repo.get_recent(organization_id=audit_org["id"], limit=2)
         assert len(entries) == 2
 
 
@@ -467,6 +480,7 @@ class TestAuditRepositoryVersions:
 
         for v in range(1, 4):
             await repo.log(
+                organization_id=audit_memory["organization_id"],
                 memory_id=audit_memory["id"],
                 action_type="create" if v == 1 else "update",
                 user_id=audit_user["id"],
@@ -474,7 +488,7 @@ class TestAuditRepositoryVersions:
                 snapshot={"content": f"version {v}"},
             )
 
-        result = await repo.get_versions(audit_memory["id"])
+        result = await repo.get_versions(audit_memory["id"], organization_id=audit_memory["organization_id"])
         assert result["total_count"] == 3
         # Newest version first
         assert result["versions"][0]["version"] == 3
@@ -486,6 +500,7 @@ class TestAuditRepositoryVersions:
 
         # One versioned, one not
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
@@ -493,12 +508,13 @@ class TestAuditRepositoryVersions:
             snapshot={"content": "v1"},
         )
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
         )
 
-        result = await repo.get_versions(audit_memory["id"])
+        result = await repo.get_versions(audit_memory["id"], organization_id=audit_memory["organization_id"])
         assert result["total_count"] == 1
 
     async def test_get_version_snapshot(self, db_pool, audit_user, audit_memory):
@@ -507,6 +523,7 @@ class TestAuditRepositoryVersions:
 
         snapshot_data = {"content": "snapshot at v2", "tags": ["a", "b"]}
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
@@ -514,7 +531,7 @@ class TestAuditRepositoryVersions:
             snapshot=snapshot_data,
         )
 
-        entry = await repo.get_version_snapshot(audit_memory["id"], version=2)
+        entry = await repo.get_version_snapshot(audit_memory["id"], version=2, organization_id=audit_memory["organization_id"])
         assert entry is not None
         assert entry["version"] == 2
         assert entry["snapshot"] == snapshot_data
@@ -522,7 +539,7 @@ class TestAuditRepositoryVersions:
     async def test_get_version_snapshot_not_found(self, db_pool, audit_memory):
         """Test snapshot retrieval for nonexistent version."""
         repo = AuditRepository(db_pool)
-        entry = await repo.get_version_snapshot(audit_memory["id"], version=999)
+        entry = await repo.get_version_snapshot(audit_memory["id"], version=999, organization_id=audit_memory["organization_id"])
         assert entry is None
 
 
@@ -548,10 +565,10 @@ class TestAuditMemoryEndpoint:
         """Member can see their own audit entries for a memory."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
-            organization_id=audit_user["organization_id"],
         )
 
         resp = await member_client.get(f"/api/audit/memory/{audit_memory['id']}")
@@ -567,10 +584,10 @@ class TestAuditMemoryEndpoint:
         """Admin can see all org entries for a memory."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
-            organization_id=audit_admin["organization_id"],
         )
 
         resp = await admin_client.get(f"/api/audit/memory/{audit_memory['id']}")
@@ -586,6 +603,7 @@ class TestAuditUserEndpoint:
         """Member can view their own audit log."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
@@ -605,6 +623,7 @@ class TestAuditUserEndpoint:
         """Admin can view any user's audit log in their org."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="update",
             user_id=audit_user["id"],
@@ -617,6 +636,7 @@ class TestAuditUserEndpoint:
         """Test action_type and since query parameters."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
@@ -638,10 +658,10 @@ class TestAuditOrganizationEndpoint:
         """Admin can view organization audit log."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
-            organization_id=audit_user["organization_id"],
         )
 
         resp = await admin_client.get("/api/audit/organization")
@@ -663,6 +683,7 @@ class TestAuditRecentEndpoint:
         """Admin can view recent audit entries."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],
@@ -682,6 +703,7 @@ class TestAuditRecentEndpoint:
         """Test action_types and limit query parameters."""
         repo = AuditRepository(db_pool)
         await repo.log(
+            organization_id=audit_memory["organization_id"],
             memory_id=audit_memory["id"],
             action_type="create",
             user_id=audit_user["id"],

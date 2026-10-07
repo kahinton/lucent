@@ -11,6 +11,7 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.auth_providers import (
+    CSRF_COOKIE_NAME,
     SECURE_COOKIES,
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
@@ -19,8 +20,7 @@ from lucent.auth_providers import (
     rotate_session,
     sign_value,
 )
-from lucent.db import AdminAuditRepository, GroupRepository, UserRepository, get_pool
-from lucent.db.pool import scoped_acquire_on
+from lucent.db import AdminAuditRepository, UserRepository, get_pool
 from lucent.db import admin_audit as audit_actions
 from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
 
@@ -608,34 +608,9 @@ async def _model_owner_users(pool, org_id: str) -> list[dict]:
     return await UserRepository(pool).get_by_organization(UUID(org_id))
 
 
-async def _resolve_model_owner_scope(form, user, pool) -> tuple[str | None, str | None]:
-    owner_scope = str(form.get("owner_scope", "org")).strip()
-    if owner_scope == "me":
-        return str(user.id), None
-    if owner_scope.startswith("user:"):
-        owner_user_id = owner_scope.removeprefix("user:").strip()
-        owner_user = await UserRepository(pool).get_by_id(UUID(owner_user_id))
-        if not owner_user or str(owner_user["organization_id"]) != str(user.organization_id):
-            raise HTTPException(status_code=403, detail="Permission denied")
-        return owner_user_id, None
-    if owner_scope.startswith("group:"):
-        group_id = owner_scope.removeprefix("group:").strip()
-        from lucent.db.groups import GroupRepository
-
-        group = await GroupRepository(pool).get_group(group_id, str(user.organization_id))
-        if not group:
-            raise HTTPException(status_code=403, detail="Permission denied")
-        return None, group_id
-    return None, None
-
-
-async def _model_owner_names(org_id: str, pool, models: list[dict]) -> tuple[dict[str, str], dict[str, str]]:
-    user_ids = {model["owner_user_id"] for model in models if model.get("owner_user_id")}
-    group_ids = {model["owner_group_id"] for model in models if model.get("owner_group_id")}
-    return (
-        await UserRepository(pool).get_display_names_by_ids(list(user_ids)),
-        await GroupRepository(pool).get_names_by_ids(list(group_ids)),
-    )
+# NOTE: models carry no owner concept anymore (131): they belong to the
+# organization and access is granted explicitly, so the old
+# _resolve_model_owner_scope / owner-chip plumbing is gone.
 
 
 @router.get("/models", response_class=HTMLResponse)
@@ -663,9 +638,11 @@ async def models_list(request: Request):
     )
     providers = _visible_model_providers(all_models, active_providers)
     models = [m for m in all_models if m["provider"] in providers]
-    owner_user_names, owner_group_names = await _model_owner_names(pool, models)
     owner_groups = await _model_owner_groups(pool, str(user.organization_id))
     owner_users = await _model_owner_users(pool, str(user.organization_id))
+    model_grants = await _model_grant_map(
+        pool, str(user.organization_id),
+    ) if models else {}
     enabled_count = sum(1 for m in models if m["is_enabled"])
 
     return templates.TemplateResponse(
@@ -683,9 +660,8 @@ async def models_list(request: Request):
             "provider_statuses": provider_statuses,
             "owner_groups": owner_groups,
             "owner_users": owner_users,
-            "owner_user_names": owner_user_names,
-            "owner_group_names": owner_group_names,
-            "personal_owner_label": user.display_name or user.email or "you",
+            "model_grants": model_grants,
+            "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
 
@@ -830,16 +806,17 @@ async def discover_models_web(request: Request):
 async def toggle_model(request: Request, model_id: str):
     """Enable or disable a model."""
     await _check_csrf(request)
-    await _require_admin(request)
+    user = await _require_admin(request)
     pool = await get_pool()
     from lucent.db.models import ModelRepository
 
     repo = ModelRepository(pool)
-    model = await repo.get_model(model_id)
+    org_id = str(user.organization_id)
+    model = await repo.get_model(model_id, org_id)
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
 
-    await repo.toggle_model(model_id, not model["is_enabled"])
+    await repo.toggle_model(model_id, not model["is_enabled"], organization_id=org_id)
     await _refresh_runtime_registry(pool)
     return RedirectResponse(url="/settings/models", status_code=303)
 
@@ -854,14 +831,17 @@ async def edit_model(request: Request, model_id: str):
 
     form = await request.form()
     repo = ModelRepository(pool)
-    model = await repo.get_model(model_id)
+    model = await repo.get_model(model_id, str(user.organization_id))
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
     provider = form.get("provider", model["provider"])
     engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
     if error:
         return _models_redirect(error=error)
-    owner_user_id, owner_group_id = await _resolve_model_owner_scope(form, user, pool)
+    # Models belong to the organization: the form no longer sets an owner,
+    # and a save through this form clears any stale owner left on the row.
+    owner_user_id: str | None = None
+    owner_group_id: str | None = None
 
     await repo.update_model(
         model_id,
@@ -905,6 +885,8 @@ async def add_model(request: Request):
         return RedirectResponse(url="/settings/models?error=Model+ID+is+required", status_code=303)
 
     repo = ModelRepository(pool)
+    # Existence check stays global on purpose: model IDs are unique across
+    # the whole registry, so an ID taken by another org must still refuse.
     existing = await repo.get_model(model_id)
     if existing:
         return RedirectResponse(url="/settings/models?error=Model+ID+already+exists", status_code=303)
@@ -912,7 +894,9 @@ async def add_model(request: Request):
     engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
     if error:
         return _models_redirect(error=error)
-    owner_user_id, owner_group_id = await _resolve_model_owner_scope(form, user, pool)
+    # Models belong to the organization; a new model starts closed with no
+    # owner — access comes only from explicit grants.
+    owner_user_id, owner_group_id = None, None
 
     await repo.create_model(
         model_id=model_id,
@@ -943,11 +927,101 @@ async def add_model(request: Request):
 async def delete_model(request: Request, model_id: str):
     """Remove a model from the registry."""
     await _check_csrf(request)
-    await _require_admin(request)
+    user = await _require_admin(request)
     pool = await get_pool()
     from lucent.db.models import ModelRepository
 
+    org_id = str(user.organization_id)
     repo = ModelRepository(pool)
-    await repo.delete_model(model_id)
+    # Management by-ID reads are org-predicated — same as the edit route.
+    await repo.delete_model(model_id, organization_id=org_id)
     await _refresh_runtime_registry(pool)
     return RedirectResponse(url="/settings/models?success=Model+removed", status_code=303)
+
+
+async def _model_grant_map(pool, org_id: str) -> dict[str, list[dict]]:
+    """Clearances for the org's models, grouped by model id (read grants).
+
+    One query for the whole models page; each row's Manage-access modal
+    renders from this map. Models carry no owner (131), so this is the
+    whole access picture.
+    """
+    from lucent.db.pool import scoped_acquire
+
+    async with scoped_acquire(organization_id=org_id) as conn:
+        rows = await conn.fetch(
+            """
+                SELECT m.id AS model_id, acl.principal_type, acl.principal_id,
+                       u.display_name AS user_display_name, u.email AS user_email,
+                       g.name AS group_name
+                FROM models m
+                JOIN auth_clearances acl ON acl.auth_id = m.auth_id
+                LEFT JOIN users u
+                  ON u.id = acl.principal_id AND acl.principal_type = 'user'
+                LEFT JOIN groups g
+                  ON g.id = acl.principal_id AND acl.principal_type = 'group'
+                WHERE m.organization_id = $1::uuid AND acl.role = 'read'
+            """,
+            org_id,
+        )
+    grants: dict[str, list[dict]] = {}
+    for row in rows:
+        grants.setdefault(str(row["model_id"]), []).append(dict(row))
+    return grants
+
+
+@router.post("/models/{model_id}/grants")
+async def model_grant_access(
+    request: Request,
+    model_id: str,
+    grantee_type: str = Form(...),
+    grantee_id: str = Form(""),
+):
+    """Grant read access to a model from the models settings page."""
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.access_control import AuthAccessRepository
+
+    try:
+        await AuthAccessRepository(pool).upsert_grant(
+            "model",
+            model_id,
+            grantee_type=grantee_type,
+            grantee_id=grantee_id or None,
+            role="read",
+            granted_by=user.id,
+            organization_id=user.organization_id,
+        )
+    except ValueError as exc:
+        return _models_redirect(error=str(exc))
+    return _models_redirect(success="Access granted")
+
+
+@router.post("/models/{model_id}/grants/revoke")
+async def model_revoke_access(
+    request: Request,
+    model_id: str,
+    grantee_type: str = Form(...),
+    grantee_id: str = Form(""),
+):
+    """Remove one read grant from the models settings page."""
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.access_control import AuthAccessRepository
+
+    try:
+        revoked = await AuthAccessRepository(pool).revoke_grant(
+            "model",
+            model_id,
+            grantee_type=grantee_type,
+            grantee_id=grantee_id or None,
+            granted_by=user.id,
+            organization_id=user.organization_id,
+        )
+    except ValueError as exc:
+        return _models_redirect(error=str(exc))
+    if not revoked:
+        return _models_redirect(warning="Access grant not found")
+    return _models_redirect(success="Access removed")

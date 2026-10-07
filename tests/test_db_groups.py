@@ -3,6 +3,8 @@
 Covers: group CRUD, membership management, cross-org isolation.
 """
 
+from uuid import UUID
+
 import pytest
 import pytest_asyncio
 
@@ -221,7 +223,11 @@ class TestDeleteGroup:
 
     @pytest.mark.asyncio
     async def test_delete_cascades_membership(self, repo, test_organization, group, test_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         await repo.delete_group(str(group["id"]), str(test_organization["id"]))
         groups = await repo.get_user_groups(str(test_user["id"]), str(test_organization["id"]))
         assert len(groups) == 0
@@ -232,72 +238,139 @@ class TestDeleteGroup:
 
 class TestAddMember:
     @pytest.mark.asyncio
-    async def test_add_member(self, repo, group, test_user):
-        m = await repo.add_member(str(group["id"]), str(test_user["id"]))
+    async def test_add_member(self, repo, group, test_user, test_organization):
+        m = await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         assert m["user_id"] == test_user["id"]
         assert m["group_id"] == group["id"]
         assert m["role"] == "member"
 
     @pytest.mark.asyncio
-    async def test_add_admin(self, repo, group, test_user):
-        m = await repo.add_member(str(group["id"]), str(test_user["id"]), role="admin")
+    async def test_add_admin(self, repo, group, test_user, test_organization):
+        m = await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            role="admin",
+            organization_id=str(test_organization["id"]),
+        )
         assert m["role"] == "admin"
 
     @pytest.mark.asyncio
-    async def test_add_invalid_role(self, repo, group, test_user):
+    async def test_add_invalid_role(self, repo, group, test_user, test_organization):
         with pytest.raises(ValueError, match="Invalid role"):
-            await repo.add_member(str(group["id"]), str(test_user["id"]), role="superadmin")
+            await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            role="superadmin",
+            organization_id=str(test_organization["id"]),
+        )
 
     @pytest.mark.asyncio
-    async def test_add_duplicate_fails(self, repo, group, test_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
+    async def test_add_duplicate_fails(self, repo, group, test_user, test_organization):
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         with pytest.raises(Exception):  # asyncpg.UniqueViolationError
-            await repo.add_member(str(group["id"]), str(test_user["id"]))
+            await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
 
 
 class TestRemoveMember:
     @pytest.mark.asyncio
-    async def test_remove_member(self, repo, group, test_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
-        removed = await repo.remove_member(str(group["id"]), str(test_user["id"]))
+    async def test_remove_member(self, repo, group, test_user, test_organization):
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
+        removed = await repo.remove_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         assert removed is True
 
     @pytest.mark.asyncio
-    async def test_remove_nonexistent(self, repo, group, test_user):
-        removed = await repo.remove_member(str(group["id"]), str(test_user["id"]))
+    async def test_remove_nonexistent(self, repo, group, test_user, test_organization):
+        removed = await repo.remove_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         assert removed is False
 
 
 class TestUpdateMemberRole:
     @pytest.mark.asyncio
-    async def test_promote_to_admin(self, repo, group, test_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
+    async def test_promote_to_admin(self, repo, group, test_user, test_organization):
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         updated = await repo.update_member_role(
-            str(group["id"]), str(test_user["id"]), "admin"
+            str(group["id"]),
+            str(test_user["id"]),
+            "admin",
+            organization_id=str(test_organization["id"]),
         )
         assert updated is not None
         assert updated["role"] == "admin"
 
     @pytest.mark.asyncio
-    async def test_demote_to_member(self, repo, group, test_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]), role="admin")
+    async def test_demote_to_member(self, repo, group, test_user, test_organization):
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            role="admin",
+            organization_id=str(test_organization["id"]),
+        )
         updated = await repo.update_member_role(
-            str(group["id"]), str(test_user["id"]), "member"
+            str(group["id"]),
+            str(test_user["id"]),
+            "member",
+            organization_id=str(test_organization["id"]),
         )
         assert updated["role"] == "member"
 
     @pytest.mark.asyncio
-    async def test_update_invalid_role(self, repo, group, test_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
+    async def test_update_invalid_role(self, repo, group, test_user, test_organization):
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         with pytest.raises(ValueError, match="Invalid role"):
-            await repo.update_member_role(str(group["id"]), str(test_user["id"]), "owner")
+            await repo.update_member_role(
+                str(group["id"]),
+                str(test_user["id"]),
+                "owner",
+                organization_id=str(test_organization["id"]),
+            )
 
 
 class TestListMembers:
     @pytest.mark.asyncio
     async def test_list_members(self, repo, test_organization, group, test_user, second_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
-        await repo.add_member(str(group["id"]), str(second_user["id"]), role="admin")
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
+        await repo.add_member(
+            str(group["id"]),
+            str(second_user["id"]),
+            role="admin",
+            organization_id=str(test_organization["id"]),
+        )
         members = await repo.list_members(str(group["id"]), str(test_organization["id"]))
         assert len(members) == 2
         # Verify user details are included
@@ -315,8 +388,17 @@ class TestGetUserGroups:
     async def test_user_groups(self, repo, test_organization, test_user):
         g1 = await repo.create_group(name="Alpha", org_id=str(test_organization["id"]))
         g2 = await repo.create_group(name="Beta", org_id=str(test_organization["id"]))
-        await repo.add_member(str(g1["id"]), str(test_user["id"]))
-        await repo.add_member(str(g2["id"]), str(test_user["id"]), role="admin")
+        await repo.add_member(
+            str(g1["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
+        await repo.add_member(
+            str(g2["id"]),
+            str(test_user["id"]),
+            role="admin",
+            organization_id=str(test_organization["id"]),
+        )
         groups = await repo.get_user_groups(str(test_user["id"]), str(test_organization["id"]))
         assert len(groups) == 2
         names = [g["name"] for g in groups]
@@ -329,27 +411,86 @@ class TestGetUserGroups:
         assert groups == []
 
 
-class TestMembershipChecks:
+class TestGetGroupNames:
     @pytest.mark.asyncio
-    async def test_is_member(self, repo, group, test_user):
-        assert await repo.is_member(str(test_user["id"]), str(group["id"])) is False
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
-        assert await repo.is_member(str(test_user["id"]), str(group["id"])) is True
+    async def test_get_names_by_ids(self, repo, test_organization):
+        group = await repo.create_group(name="Owners", org_id=str(test_organization["id"]))
+
+        names = await repo.get_names_by_ids(
+            [UUID(str(group["id"]))],
+            organization_id=str(test_organization["id"]),
+        )
+        assert names == {str(group["id"]): "Owners"}
 
     @pytest.mark.asyncio
-    async def test_is_group_admin(self, repo, group, test_user):
-        await repo.add_member(str(group["id"]), str(test_user["id"]))
-        assert await repo.is_group_admin(str(test_user["id"]), str(group["id"])) is False
-        await repo.update_member_role(str(group["id"]), str(test_user["id"]), "admin")
-        assert await repo.is_group_admin(str(test_user["id"]), str(group["id"])) is True
+    async def test_get_names_by_ids_excludes_other_org(self, repo, other_org, group):
+        names = await repo.get_names_by_ids(
+            [UUID(str(group["id"]))],
+            organization_id=str(other_org["id"]),
+        )
+        assert names == {}
+
+
+class TestMembershipChecks:
+    @pytest.mark.asyncio
+    async def test_is_member(self, repo, group, test_user, test_organization):
+        assert await repo.is_member(
+            str(test_user["id"]),
+            str(group["id"]),
+            organization_id=str(test_organization["id"]),
+        ) is False
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
+        assert await repo.is_member(
+            str(test_user["id"]),
+            str(group["id"]),
+            organization_id=str(test_organization["id"]),
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_is_group_admin(self, repo, group, test_user, test_organization):
+        await repo.add_member(
+            str(group["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
+        assert await repo.is_group_admin(
+            str(test_user["id"]),
+            str(group["id"]),
+            organization_id=str(test_organization["id"]),
+        ) is False
+        await repo.update_member_role(
+            str(group["id"]),
+            str(test_user["id"]),
+            "admin",
+            organization_id=str(test_organization["id"]),
+        )
+        assert await repo.is_group_admin(
+            str(test_user["id"]),
+            str(group["id"]),
+            organization_id=str(test_organization["id"]),
+        ) is True
 
     @pytest.mark.asyncio
     async def test_get_user_group_ids(self, repo, test_organization, test_user):
         g1 = await repo.create_group(name="Team1", org_id=str(test_organization["id"]))
         g2 = await repo.create_group(name="Team2", org_id=str(test_organization["id"]))
-        await repo.add_member(str(g1["id"]), str(test_user["id"]))
-        await repo.add_member(str(g2["id"]), str(test_user["id"]))
-        ids = await repo.get_user_group_ids(str(test_user["id"]))
+        await repo.add_member(
+            str(g1["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
+        await repo.add_member(
+            str(g2["id"]),
+            str(test_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
+        ids = await repo.get_user_group_ids(
+            str(test_user["id"]), organization_id=str(test_organization["id"])
+        )
         assert len(ids) == 2
         assert str(g1["id"]) in ids
         assert str(g2["id"]) in ids

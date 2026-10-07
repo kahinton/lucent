@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -22,6 +23,22 @@ def _pool_with_conn(conn: AsyncMock) -> MagicMock:
     ctx.__aexit__ = AsyncMock(return_value=False)
     pool.acquire = MagicMock(return_value=ctx)
     return pool
+
+
+# The repository resolves the user's org via the users table before reading
+# the org-scoped credential, and a scoped acquire runs the set_config
+# preamble + scrub through the same connection. The cache write is the only
+# six-argument execute call (SQL + 5 upsert params).
+def _organization_row() -> dict[str, str]:
+    return {"organization_id": str(uuid4())}
+
+
+def _cache_write_call(conn: AsyncMock) -> Any:
+    writes = [
+        c for c in conn.execute.await_args_list if len(c.args) == 6
+    ]
+    assert len(writes) == 1, f"expected exactly one cache-write execute, got {writes!r}"
+    return writes[0]
 
 
 @pytest.mark.asyncio
@@ -59,6 +76,7 @@ async def test_check_access_fetches_github_and_caches_result(
                 "checked_at": datetime.now(UTC) - timedelta(hours=1),
                 "expires_at": datetime.now(UTC) - timedelta(minutes=1),
             },
+            _organization_row(),
             {"encrypted_secret_payload": b"secret"},
         ]
     )
@@ -78,8 +96,8 @@ async def test_check_access_fetches_github_and_caches_result(
     access = await service.check_access(user_id, "Owner/Repo")
 
     assert access is True
-    conn.execute.assert_awaited_once()
-    assert conn.execute.await_args.args[3] is True
+    conn.execute.assert_awaited()
+    assert _cache_write_call(conn).args[3] is True
 
 
 @pytest.mark.asyncio
@@ -115,6 +133,7 @@ async def test_check_access_stale_cache_triggers_refresh_and_negative_ttl(
     conn.fetchrow = AsyncMock(
         side_effect=[
             {"has_access": True, "checked_at": stale_checked, "expires_at": stale_expires},
+            _organization_row(),
             {"encrypted_secret_payload": b"secret"},
         ]
     )
@@ -136,11 +155,11 @@ async def test_check_access_stale_cache_triggers_refresh_and_negative_ttl(
     access = await service.check_access(user_id, "owner/repo")
 
     assert access is False
-    conn.execute.assert_awaited_once()
-    # args: user_id, repo_full_name, has_access, checked_at, expires_at
-    assert conn.execute.await_args.args[3] is False
-    checked_at = conn.execute.await_args.args[4]
-    expires_at = conn.execute.await_args.args[5]
+    conn.execute.assert_awaited()
+    # args: SQL, user_id, repo_full_name, has_access, checked_at, expires_at
+    assert _cache_write_call(conn).args[3] is False
+    checked_at = _cache_write_call(conn).args[4]
+    expires_at = _cache_write_call(conn).args[5]
     ttl = expires_at - checked_at
     assert timedelta(minutes=4, seconds=50) <= ttl <= timedelta(minutes=5, seconds=10)
 
@@ -151,7 +170,9 @@ async def test_check_access_handles_rate_limit_and_caches_negative(
 ) -> None:
     user_id = uuid4()
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[None, {"encrypted_secret_payload": b"secret"}])
+    conn.fetchrow = AsyncMock(
+        side_effect=[None, _organization_row(), {"encrypted_secret_payload": b"secret"}]
+    )
     conn.execute = AsyncMock()
     pool = _pool_with_conn(conn)
     service = GitHubRepoAccessService(
@@ -170,8 +191,8 @@ async def test_check_access_handles_rate_limit_and_caches_negative(
     access = await service.check_access(user_id, "owner/repo")
 
     assert access is False
-    conn.execute.assert_awaited_once()
-    assert conn.execute.await_args.args[3] is False
+    conn.execute.assert_awaited()
+    assert _cache_write_call(conn).args[3] is False
 
 
 @pytest.mark.asyncio
@@ -180,7 +201,9 @@ async def test_check_access_handles_http_client_failure_and_caches_negative(
 ) -> None:
     user_id = uuid4()
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[None, {"encrypted_secret_payload": b"secret"}])
+    conn.fetchrow = AsyncMock(
+        side_effect=[None, _organization_row(), {"encrypted_secret_payload": b"secret"}]
+    )
     conn.execute = AsyncMock()
     pool = _pool_with_conn(conn)
     service = GitHubRepoAccessService(
@@ -198,8 +221,8 @@ async def test_check_access_handles_http_client_failure_and_caches_negative(
     access = await service.check_access(user_id, "owner/repo")
 
     assert access is False
-    conn.execute.assert_awaited_once()
-    assert conn.execute.await_args.args[3] is False
+    conn.execute.assert_awaited()
+    assert _cache_write_call(conn).args[3] is False
 
 
 @pytest.mark.asyncio
@@ -243,7 +266,9 @@ async def test_check_access_org_repo_returns_true_on_200(
 ) -> None:
     user_id = uuid4()
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[None, {"encrypted_secret_payload": b"secret"}])
+    conn.fetchrow = AsyncMock(
+        side_effect=[None, _organization_row(), {"encrypted_secret_payload": b"secret"}]
+    )
     conn.execute = AsyncMock()
     pool = _pool_with_conn(conn)
     service = GitHubRepoAccessService(
@@ -262,7 +287,8 @@ async def test_check_access_org_repo_returns_true_on_200(
     access = await service.check_access(user_id, "my-org/shared-repo")
 
     assert access is True
-    conn.execute.assert_awaited_once()
+    conn.execute.assert_awaited()
+    assert _cache_write_call(conn).args[3] is True
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +346,9 @@ async def test_user_with_credential_works_when_app_not_installed(
     GitHub App required."""
     user_id = uuid4()
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[None, {"encrypted_secret_payload": b"s"}])
+    conn.fetchrow = AsyncMock(
+        side_effect=[None, _organization_row(), {"encrypted_secret_payload": b"s"}]
+    )
     conn.execute = AsyncMock()
     pool = _pool_with_conn(conn)
     service = GitHubRepoAccessService(
@@ -491,7 +519,9 @@ async def test_pat_disabled_does_not_block_existing_credential_acl(
     monkeypatch.setenv("LUCENT_CONNECTIONS_PAT_ENABLED", "false")
     user_id = uuid4()
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[None, {"encrypted_secret_payload": b"s"}])
+    conn.fetchrow = AsyncMock(
+        side_effect=[None, _organization_row(), {"encrypted_secret_payload": b"s"}]
+    )
     conn.execute = AsyncMock()
     pool = _pool_with_conn(conn)
     service = GitHubRepoAccessService(

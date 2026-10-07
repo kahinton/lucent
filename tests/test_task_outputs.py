@@ -327,7 +327,11 @@ class TestReviewOutputGuidance:
         async def fake_resolve_review_requesting_user_id(*, org_id, requester_user_id):
             return requester_user_id
 
+        async def fake_select_model_for_user(**kwargs):
+            return "test-review-model", "unit test stub"
+
         monkeypatch.setattr(daemon, "_find_review_agent_type", fake_find_review_agent_type)
+        monkeypatch.setattr("daemon.daemon._select_model_for_user", fake_select_model_for_user)
         monkeypatch.setattr(
             daemon,
             "_resolve_review_requesting_user_id",
@@ -400,7 +404,11 @@ class TestReviewOutputGuidance:
         async def fake_resolve_review_requesting_user_id(*, org_id, requester_user_id):
             return requester_user_id
 
+        async def fake_select_model_for_user(**kwargs):
+            return "test-review-model", "unit test stub"
+
         monkeypatch.setattr(daemon, "_find_review_agent_type", fake_find_review_agent_type)
+        monkeypatch.setattr("daemon.daemon._select_model_for_user", fake_select_model_for_user)
         monkeypatch.setattr(
             daemon,
             "_resolve_review_requesting_user_id",
@@ -467,7 +475,11 @@ class TestReviewOutputGuidance:
             assert requester_user_id == "33333333-3333-3333-3333-333333333333"
             return human_user_id
 
+        async def fake_select_model_for_user(**kwargs):
+            return "test-review-model", "unit test stub"
+
         monkeypatch.setattr(daemon, "_find_review_agent_type", fake_find_review_agent_type)
+        monkeypatch.setattr("daemon.daemon._select_model_for_user", fake_select_model_for_user)
         monkeypatch.setattr(
             daemon,
             "_resolve_review_requesting_user_id",

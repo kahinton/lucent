@@ -80,11 +80,11 @@ async def test_build_view_model_default_shape(monkeypatch: pytest.MonkeyPatch) -
     int_repo.list_by_org = AsyncMock(return_value=[])
 
     monkeypatch.setattr(
-        "lucent.integrations.credential_repository.CredentialRepository",
+        "lucent.db.credentials.CredentialRepository",
         lambda pool: cred_repo,
     )
     monkeypatch.setattr(
-        "lucent.integrations.repositories.IntegrationRepo",
+        "lucent.db.integrations_repositories.IntegrationRepo",
         lambda pool: int_repo,
     )
 
@@ -134,11 +134,11 @@ async def test_build_view_model_pat_disabled_disables_provider_pat(
     int_repo = MagicMock()
     int_repo.list_by_org = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "lucent.integrations.credential_repository.CredentialRepository",
+        "lucent.db.credentials.CredentialRepository",
         lambda pool: cred_repo,
     )
     monkeypatch.setattr(
-        "lucent.integrations.repositories.IntegrationRepo",
+        "lucent.db.integrations_repositories.IntegrationRepo",
         lambda pool: int_repo,
     )
 
@@ -163,11 +163,11 @@ async def test_build_view_model_workspace_disabled_returns_empty_section(
         side_effect=AssertionError("IntegrationRepo built when workspace flag is off")
     )
     monkeypatch.setattr(
-        "lucent.integrations.credential_repository.CredentialRepository",
+        "lucent.db.credentials.CredentialRepository",
         lambda pool: cred_repo,
     )
     monkeypatch.setattr(
-        "lucent.integrations.repositories.IntegrationRepo", int_repo_factory
+        "lucent.db.integrations_repositories.IntegrationRepo", int_repo_factory
     )
 
     vm = await build_connections_view_model(user=_user("admin"), pool=_make_pool())
@@ -201,11 +201,11 @@ async def test_build_view_model_member_cannot_manage(
         ]
     )
     monkeypatch.setattr(
-        "lucent.integrations.credential_repository.CredentialRepository",
+        "lucent.db.credentials.CredentialRepository",
         lambda pool: cred_repo,
     )
     monkeypatch.setattr(
-        "lucent.integrations.repositories.IntegrationRepo",
+        "lucent.db.integrations_repositories.IntegrationRepo",
         lambda pool: int_repo,
     )
 
@@ -230,11 +230,11 @@ async def test_build_view_model_env_detected_respects_flag(
     int_repo = MagicMock()
     int_repo.list_by_org = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "lucent.integrations.credential_repository.CredentialRepository",
+        "lucent.db.credentials.CredentialRepository",
         lambda pool: cred_repo,
     )
     monkeypatch.setattr(
-        "lucent.integrations.repositories.IntegrationRepo",
+        "lucent.db.integrations_repositories.IntegrationRepo",
         lambda pool: int_repo,
     )
 

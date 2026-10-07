@@ -14,6 +14,11 @@ class _CaptureConn:
         self.search_query: str = ""
         self.search_params: tuple[object, ...] = ()
 
+    async def execute(self, query: str, *params: object) -> str:
+        # The scope wrapper's set_config preamble/scrub lands here; the SQL
+        # under test arrives via fetchrow/fetch, so just absorb these.
+        return "SET"
+
     async def fetchrow(self, query: str, *params: object) -> dict[str, int]:
         return {"total": 0}
 
@@ -64,7 +69,7 @@ def test_vitality_boost_math_is_centered_and_bounded() -> None:
     ) == pytest.approx(0.525, rel=1e-6)
 
 
-async def test_search_default_ranking_sql_unchanged(monkeypatch) -> None:
+async def test_search_default_ranking_sql_unchanged(daemon_tenant_scope, monkeypatch) -> None:
     monkeypatch.delenv("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", raising=False)
     monkeypatch.delenv("LUCENT_SEARCH_VITALITY_BOOST_ALPHA", raising=False)
     conn = _CaptureConn()
@@ -76,7 +81,7 @@ async def test_search_default_ranking_sql_unchanged(monkeypatch) -> None:
     assert "final_rank" not in conn.search_query
 
 
-async def test_search_uses_vitality_boost_when_enabled(monkeypatch) -> None:
+async def test_search_uses_vitality_boost_when_enabled(daemon_tenant_scope, monkeypatch) -> None:
     monkeypatch.setenv("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", "true")
     monkeypatch.setenv("LUCENT_SEARCH_VITALITY_BOOST_ALPHA", "0.2")
     conn = _CaptureConn()
@@ -90,7 +95,7 @@ async def test_search_uses_vitality_boost_when_enabled(monkeypatch) -> None:
     assert conn.search_params[-3] == 0.2
 
 
-async def test_search_override_disables_boost_even_if_env_enabled(monkeypatch) -> None:
+async def test_search_override_disables_boost_even_if_env_enabled(daemon_tenant_scope, monkeypatch) -> None:
     monkeypatch.setenv("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", "true")
     monkeypatch.setenv("LUCENT_SEARCH_VITALITY_BOOST_ALPHA", "0.2")
     conn = _CaptureConn()

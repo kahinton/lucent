@@ -167,6 +167,12 @@ async def acknowledge_message(
     metadata = dict(memory.get("metadata") or {})
     metadata["acknowledged_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    await repo.update(memory_id=message_id, tags=tags, metadata=metadata)
+    await repo.update(
+        memory_id=message_id,
+        tags=tags,
+        metadata=metadata,
+        organization_id=user.organization_id,
+        user_id=user.id,
+    )
 
     return SuccessResponse(success=True, message=f"Message {message_id} acknowledged")

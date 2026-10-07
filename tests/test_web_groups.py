@@ -318,7 +318,11 @@ async def test_remove_member(client, db_pool, owner_user, member_user, web_prefi
         name=f"{web_prefix}rmmember",
         org_id=str(org["id"]),
     )
-    await repo.add_member(str(group["id"]), str(target["id"]))
+    await repo.add_member(
+        str(group["id"]),
+        str(target["id"]),
+        organization_id=str(org["id"]),
+    )
 
     resp = await client.post(
         f"/settings/groups/{group['id']}/members/{target['id']}/remove",

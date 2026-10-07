@@ -9,7 +9,6 @@ from uuid import UUID
 import httpx
 from mcp.server import MCPServer as FastMCP
 
-from lucent.db.pool import scoped_acquire
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import get_llm_context
 from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
@@ -700,11 +699,14 @@ if the agent type is not approved or the sandbox template is invalid."""
             error = validate_model(model, require_tools=True)
             if error:
                 return json.dumps({"error": error})
-            from lucent.access_control import AccessControlService
+            from lucent.db.models import ModelRepository, get_authorized_models_pool
 
-            if not await AccessControlService(await _get_pool()).can_access(
-                str(user_id), "model", model, str(org_id)
-            ):
+            # Usage is clearance-driven and default-deny — same gate the
+            # picker applies.
+            model_pool = await get_authorized_models_pool(
+                await _get_pool(), {"id": str(user_id), "organization_id": str(org_id)}
+            )
+            if not await ModelRepository(model_pool).get_usable_model(model):
                 return json.dumps({"error": "Model is not available to this user"})
             effort_error = validate_reasoning_effort(model, reasoning_effort)
             if effort_error:
@@ -714,17 +716,21 @@ if the agent type is not approved or the sandbox template is invalid."""
 
         # Validate agent_type resolves to an approved definition
         from lucent.db import get_pool
-        from lucent.db.definitions import DefinitionRepository
+        from lucent.db.definitions import DefinitionRepository, get_authorized_definitions_pool
 
+        # Usage is clearance-driven and default-deny: only agents this
+        # principal is granted may be dispatched.
         pool = await get_pool()
-        def_repo = DefinitionRepository(pool)
+        agent_pool = await get_authorized_definitions_pool(
+            pool, {"id": str(user_id), "organization_id": str(org_id)}
+        )
+        def_repo = DefinitionRepository(agent_pool)
         agents = (
-            await def_repo.list_agents(
+            await def_repo.list_agents_accessible_by(
+                str(user_id),
                 str(org_id),
                 status="active",
                 limit=200,
-                requester_user_id=str(user_id),
-                requester_role=user_role,
             )
         )["items"]
         active_names = {a["name"] for a in agents}
@@ -744,25 +750,37 @@ if the agent type is not approved or the sandbox template is invalid."""
         # safe whitelist.
         sandbox_config: dict | None = None
         if sandbox_template_id:
-            from lucent.db.sandbox_template import SandboxTemplateRepository
+            from lucent.db.sandbox_template import (
+                SandboxTemplateRepository,
+                get_authorized_templates_pool,
+            )
 
-            tpl_repo = SandboxTemplateRepository(pool)
+            # Usage is clearance-driven and default-deny — the caller must
+            # have a clearance on the template (own / group / built-in org
+            # grant), not merely share its organization.
+            tpl_pool = await get_authorized_templates_pool(
+                pool, {"id": str(user_id), "organization_id": str(org_id)}
+            )
+            tpl_repo = SandboxTemplateRepository(tpl_pool)
             try:
-                tpl = await tpl_repo.get(sandbox_template_id, str(org_id))
+                tpl = await tpl_repo.get_usable_template(sandbox_template_id)
             except Exception as exc:
                 return json.dumps(
                     {"error": f"Invalid sandbox_template_id: {exc}"}
                 )
             if not tpl:
-                approved = await tpl_repo.list_dispatchable(str(org_id))
+                accessible = await tpl_repo.list_templates_accessible_by(
+                    str(user_id), str(org_id), status="approved"
+                )
                 return json.dumps(
                     {
                         "error": (
                             f"Sandbox template {sandbox_template_id} not found "
-                            f"in this organization."
+                            f"or not cleared for this user."
                         ),
                         "available_templates": [
-                            {"id": str(t["id"]), "name": t["name"]} for t in approved
+                            {"id": str(t["id"]), "name": t["name"]}
+                            for t in accessible["items"]
                         ],
                         "hint": (
                             "Call list_sandbox_templates to discover IDs, or "
@@ -884,15 +902,16 @@ if the agent type is not approved or the sandbox template is invalid."""
         description="""List approved sandbox templates the planner can reference.
 
 Use this BEFORE calling create_task whenever a task needs to run in a sandbox.
-Returns the templates currently approved for dispatch in this organization,
-including built-in templates and any organization-approved custom templates.
+Returns the templates currently cleared for this user's use — built-in
+templates, plus any organization-approved custom templates the user has a
+clearance on.
 
 If none of the returned templates fit the work you're planning, call
 propose_sandbox_template to submit a new design for human review — do NOT
 fall back to inline sandbox_config (it's no longer accepted)."""
     )
     async def list_sandbox_templates() -> str:
-        _, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         from lucent.settings import custom_tooling_enabled, sandboxes_enabled
@@ -912,12 +931,33 @@ fall back to inline sandbox_config (it's no longer accepted)."""
                 }
             )
         from lucent.db import get_pool
-        from lucent.db.sandbox_template import SandboxTemplateRepository
+        from lucent.db.sandbox_template import (
+            SandboxTemplateRepository,
+            get_authorized_templates_pool,
+        )
 
         pool = await get_pool()
-        repo = SandboxTemplateRepository(pool)
-        approved = await repo.list_dispatchable(str(org_id))
-        proposed = await repo.list_proposed(str(org_id))
+        # Usage is clearance-driven and default-deny: the planner sees only
+        # the templates cleared for its principal (own / group / built-in
+        # org grant), not everything approved in the organization.
+        tpl_pool = await get_authorized_templates_pool(
+            pool, {"id": str(user_id), "organization_id": str(org_id)}
+        )
+        repo = SandboxTemplateRepository(tpl_pool)
+        accessible = await repo.list_templates_accessible_by(
+            str(user_id), str(org_id), status="approved"
+        )
+        approved = accessible["items"]
+        # Proposals in review are management data: admins/owners see every
+        # pending proposal, other principals only their own (proposals are
+        # owned by their proposer, so the clearance filter suffices).
+        if user_role in ("admin", "owner"):
+            legacy_repo = SandboxTemplateRepository(pool)
+            proposed = await legacy_repo.list_proposed(str(org_id))
+        else:
+            proposed = await repo.list_templates_accessible_by(
+                str(user_id), str(org_id), status="proposed"
+            )
 
         def _summary(tpl: dict) -> dict:
             return {
@@ -1171,7 +1211,7 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
         from lucent.sandbox.manager import get_sandbox_manager
 
         manager = get_sandbox_manager()
-        info = await manager.get(resolved_sandbox_id)
+        info = await manager.get(resolved_sandbox_id, str(org_id))
         if not info:
             return json.dumps({"error": "Sandbox not found"})
         info_org_id = (
@@ -2116,8 +2156,9 @@ Use this INSTEAD of search_memories(type='goal') + manual milestone reasoning.
 Goals not in this list are not plannable; do not invent work for them.
 
 Args:
-    user_id: Optional UUID to scope to one user's goals (used by per-user
-        cognitive fan-out). Omit to get the whole org's plannable goals.
+    user_id: Explicit UUID to scope to one user's goals (the per-user
+        cognitive fan-out passes this). Omit to scope to YOUR OWN goals.
+        Org-wide planning targets are a daemon path, not exposed here.
     limit: Maximum goals to return (default 50).
 
 Returns: JSON list of {goal_id, goal_title, next_milestone_index,
@@ -2128,14 +2169,19 @@ Returns: JSON list of {goal_id, goal_title, next_milestone_index,
         user_id: str = "",
         limit: int = 50,
     ) -> str:
-        _, org_id, _, _, _ = await _get_current_user_context()
+        caller_user_id, org_id, _, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        # Members see only their own plannable goals; the listing is scoped to
+        # the caller unless an explicit user_id overrides (per-user fan-out).
+        effective_user_id = user_id or (str(caller_user_id) if caller_user_id else "")
+        if not effective_user_id:
+            return json.dumps({"error": "User context required"})
 
         repo = await _get_request_repository()
         targets = await repo.list_planning_targets(
             str(org_id),
-            user_id=user_id or None,
+            user_id=effective_user_id,
             limit=limit,
         )
         return json.dumps(targets)
@@ -2173,16 +2219,19 @@ provided, the recommended model plus a selection reason."""
         user_id, org_id, _, _, _ = await _get_current_user_context()
         if user_id and org_id:
             from lucent.db import UserRepository
-            from lucent.db.models import ModelRepository
+            from lucent.db.models import ModelRepository, get_authorized_models_pool
 
             effective_user = await UserRepository(await _get_pool()).get_by_id(user_id)
             if not effective_user or str(effective_user["organization_id"]) != str(org_id):
                 return json.dumps({"error": "No user context"})
+            model_pool = await get_authorized_models_pool(
+                await _get_pool(),
+                {"id": str(user_id), "organization_id": str(org_id)},
+            )
             rows = (
-                await ModelRepository(await _get_pool()).list_models_accessible_by(
+                await ModelRepository(model_pool).list_models_accessible_by(
                     str(user_id),
                     str(org_id),
-                    requester_role=str(effective_user.get("role") or "member"),
                 )
             )["items"]
             models = [model for row in rows if (model := get_model(row["id"]))]

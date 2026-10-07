@@ -194,10 +194,9 @@ class GitHubRepoAccessService:
         )
 
     async def _get_user_github_token(self, user_id: UUID) -> str | None:
-        # rls: enterprise_credentials is RLS-bound (org-keyed shape b).
-        # Resolve the user's org from the exempt users table first, then
-        # bind it for the credential read — fail-closed empty when the
-        # user (or their org) cannot be resolved.
+        # enterprise_credentials is org-keyed. Resolve the user's org via the
+        # users table first, then bind it for the credential read —
+        # fail-closed empty when the user (or their org) cannot be resolved.
         payload = await self._repository.get_user_credential_payload(user_id=user_id)
         if not payload:
             return None
@@ -388,8 +387,7 @@ class GitHubRepoAccessService:
         if not self._is_valid_repo_name(normalized):
             return None
 
-        # rls: integrations is RLS-bound (org-keyed shape b) and the org is
-        # a parameter here — bind it.
+        # integrations is org-keyed and the org is a parameter here — pass it.
         row = await self._repository.get_active_app_installation(
             organization_id=organization_id
         )

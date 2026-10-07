@@ -9,12 +9,19 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from math import ceil
 from time import monotonic
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
 
+from lucent.db.pool import (
+    AuthorizedDatabasePool,
+    AuthorizedQueryError,
+    AuthTablePolicy,
+    get_authorized_pool_for_user,
+    scoped_acquire_on,
+)
 from lucent.metrics import metrics
 from lucent.models.repo_names import normalize_repository_full_name
 from lucent.settings import (
@@ -23,9 +30,80 @@ from lucent.settings import (
     search_vitality_boost_enabled,
     shadow_forget_enabled,
 )
-from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
+
+
+# ── Clearance-driven memory usage reads ────────────────────────────────────
+#
+# Memories follow the definitions/schedules pattern: *use* (search, detail
+# reads, tags, export) is clearance-driven and default-deny — ownership
+# (migration 123) and org/user/group read grants live in auth_clearances
+# (migration 129 retired memory_access_grants; the cosmetic `memories.shared`
+# column itself was retired in 132 — the org read clearance is the only
+# source of truth for "visible to the whole org"). A plain pool used for
+# a usage read is fail-closed. Management reads (admin/owner routes, task
+# claim/release, vitality scorers, import) stay on the legacy org-scoped
+# path.
+#
+# Principal mapping for scoped daemon keys lives in the repo methods via
+# `_usage_pool`: an `org_shared_only` daemon key acts as the daemon-service
+# identity (it holds no owner clearances, so it matches only org read
+# clearances); an unscoped daemon-service key acts as the org's first owner
+# — the daemon works for the owner.
+
+MEMORY_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy(
+    "memories", direct_columns=()
+)
+
+MEMORY_FAIL_CLOSED_MSG = (
+    "Memories usage reads require an AuthorizedDatabasePool built for the "
+    "memories policy (usage is clearance-driven and default-deny)"
+)
+
+
+async def get_authorized_memories_pool(
+    pool: Pool,
+    user: dict[str, Any],
+    required_clearance: str = "read",
+) -> AuthorizedDatabasePool:
+    """Authorized pool for memory usage reads as this principal."""
+    return await get_authorized_pool_for_user(
+        pool, user, MEMORY_AUTH_POLICY, required_clearance
+    )
+
+
+_GRANTEE_TO_PRINCIPAL: Final[dict[str, str]] = {
+    "organization": "org",
+    "user": "user",
+    "group": "group",
+}
+
+
+async def get_first_memory_owner(
+    pool: Pool, organization_id: UUID | str | None
+) -> dict[str, Any] | None:
+    """The org's first owner user by created_at — the real user daemon
+    activity attributes to (None when the org has no owner user)."""
+    if organization_id is None:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id::text,
+                      COALESCE(display_name, email, 'unknown') AS display_name
+               FROM users
+               WHERE organization_id = $1::uuid AND role = 'owner'
+               ORDER BY created_at ASC
+               LIMIT 1""",
+            str(organization_id),
+        )
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "display_name": row["display_name"],
+        "organization_id": str(organization_id),
+    }
 
 
 @dataclass(slots=True, frozen=True)
@@ -102,101 +180,9 @@ class MemoryRepository:
     _FULL_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, metadata, "
         "created_at, updated_at, deleted_at, user_id, "
-        "organization_id, shared, last_accessed_at, version, "
+        "organization_id, last_accessed_at, version, "
         "lifecycle_stage, vitality_score, vitality_computed_at"
     )
-
-    @staticmethod
-    def _daemon_authored_condition() -> str:
-        return """
-            (
-                EXISTS (
-                    SELECT 1 FROM users memory_owner
-                    WHERE memory_owner.id = memories.user_id
-                      AND (
-                          memory_owner.role = 'daemon'
-                          OR memory_owner.external_id = 'daemon-service'
-                          OR memory_owner.external_id LIKE 'daemon-service:%'
-                      )
-                )
-                OR (
-                    memories.username = 'Lucent Daemon'
-                    AND 'daemon' = ANY(memories.tags)
-                )
-            )
-        """
-
-    @staticmethod
-    def _daemon_reader_condition(org_param: str, user_param: str) -> str:
-        return f"""
-            EXISTS (
-                SELECT 1 FROM users memory_requester
-                WHERE memory_requester.id = {user_param}::uuid
-                  AND memory_requester.organization_id = {org_param}::uuid
-                  AND memory_requester.role IN ('admin', 'owner', 'daemon')
-            )
-        """
-
-    @classmethod
-    def daemon_owner_access_condition(cls, org_param: str, user_param: str) -> str:
-        """Allow organization owners to read daemon-authored memories."""
-        return (
-            f"(memories.organization_id = {org_param}::uuid "
-            f"AND ({cls._daemon_authored_condition()}) "
-            f"AND EXISTS ("
-            f"SELECT 1 FROM users memory_requester "
-            f"WHERE memory_requester.id = {user_param}::uuid "
-            f"AND memory_requester.organization_id = {org_param}::uuid "
-            f"AND memory_requester.role = 'owner'))"
-        )
-
-    @classmethod
-    def owned_memory_access_condition(cls, org_param: str, user_param: str) -> str:
-        """Allow scoped daemon output only to privileged readers."""
-        return (
-            f"(memories.user_id = {user_param}::uuid AND "
-            f"(NOT ({cls._daemon_authored_condition()}) "
-            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
-        )
-
-    @classmethod
-    def shared_memory_access_condition(cls, org_param: str, user_param: str) -> str:
-        """Allow organization-granted memories only to privileged daemon readers."""
-        return (
-            f"(EXISTS ("
-            f"SELECT 1 FROM memory_access_grants memory_grant "
-            f"WHERE memory_grant.memory_id = memories.id "
-            f"AND memory_grant.organization_id = {org_param}::uuid "
-            f"AND memory_grant.grantee_type = 'organization') "
-            f"AND (NOT ({cls._daemon_authored_condition()}) "
-            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
-        )
-
-    @classmethod
-    def granted_memory_access_condition(cls, org_param: str, user_param: str) -> str:
-        """Allow readers with an organization, user, or group access grant."""
-        return (
-            f"(EXISTS ("
-            f"SELECT 1 FROM memory_access_grants memory_grant "
-            f"WHERE memory_grant.memory_id = memories.id "
-            f"AND memory_grant.organization_id = {org_param}::uuid "
-            f"AND (memory_grant.grantee_type = 'organization' "
-            f"OR (memory_grant.grantee_type = 'user' "
-            f"AND memory_grant.grantee_user_id = {user_param}::uuid) "
-            f"OR (memory_grant.grantee_type = 'group' "
-            f"AND memory_grant.grantee_group_id IN ("
-            f"SELECT group_id FROM user_groups WHERE user_id = {user_param}::uuid)))) "
-            f"AND (NOT ({cls._daemon_authored_condition()}) "
-            f"OR ({cls._daemon_reader_condition(org_param, user_param)})))"
-        )
-
-    @classmethod
-    def user_memory_access_condition(cls, org_param: str, user_param: str) -> str:
-        """Return the complete owner-or-granted visibility condition."""
-        owned = cls.owned_memory_access_condition(org_param, user_param)
-        granted = cls.granted_memory_access_condition(org_param, user_param)
-        daemon_owner = cls.daemon_owner_access_condition(org_param, user_param)
-        return f"({owned} OR {granted} OR {daemon_owner})"
 
     async def is_daemon_authored(self, memory: Mapping[str, Any]) -> bool:
         """Return whether a memory was authored by a daemon principal."""
@@ -208,8 +194,8 @@ class MemoryRepository:
         owner_id = memory.get("user_id")
         if owner_id is None:
             return False
-        # rls: users is on migration 116's global-exempt list — this daemon
-        # identity resolution needs no tenant GUC binding.
+        # users is a cross-tenant identity table — this daemon identity
+        # resolution needs no tenant GUC binding.
         async with self.pool.acquire() as conn:
             return bool(
                 await conn.fetchval(
@@ -227,7 +213,7 @@ class MemoryRepository:
             )
     _SEARCH_COLUMNS = (
         "id, username, type, content, tags, importance, related_memory_ids, "
-        "metadata, created_at, updated_at, user_id, organization_id, shared, last_accessed_at, "
+        "metadata, created_at, updated_at, user_id, organization_id, last_accessed_at, "
         "lifecycle_stage, vitality_score"
     )
     _SHADOW_SCORE_COLUMNS = (
@@ -236,6 +222,70 @@ class MemoryRepository:
 
     def __init__(self, pool: Pool):
         self.pool = pool
+
+    # ── Clearance-driven usage reads ──────────────────────────────────────
+
+    async def _usage_pool(
+        self,
+        requesting_user_id: UUID | str | None,
+        requesting_org_id: UUID | str | None,
+        *,
+        memory_scope: str | None = None,
+        required_clearance: str = "read",
+    ) -> Pool:
+        """Clearance-mode read pool for memory *use* as the requesting
+        principal.
+
+        A repo already bound to an AuthorizedDatabasePool is used as-is
+        (a pool without the memories policy fails closed). A plain pool is
+        authorized on the fly from the requesting identity:
+
+        - a normal user or a human-scoped key acts as itself,
+        - an `org_shared_only` daemon key acts as the daemon-service identity
+          (clearance reads only; it owns nothing),
+        - an unscoped daemon-service key acts as the org's first owner —
+          the daemon works for the owner.
+        """
+        if isinstance(self.pool, AuthorizedDatabasePool):
+            if "memories" not in self.pool.table_names:
+                raise AuthorizedQueryError(
+                    "Memory usage reads require an AuthorizedDatabasePool "
+                    f"carrying the memories policy; got {list(self.pool.table_names)}"
+                )
+            return self.pool
+
+        if requesting_user_id is None or requesting_org_id is None:
+            raise TypeError(MEMORY_FAIL_CLOSED_MSG)
+
+        # users is a cross-tenant identity table — daemon identity resolution
+        # needs no tenant GUC binding.
+        async with self.pool.acquire() as conn:
+            identity = await conn.fetchrow(
+                "SELECT role, external_id FROM users WHERE id = $1::uuid",
+                str(requesting_user_id),
+            )
+
+        external_id = (
+            identity["external_id"] if identity and identity["external_id"] else ""
+        )
+        daemon_like = identity is not None and (
+            identity["role"] == "daemon"
+            or external_id == "daemon-service"
+            or external_id.startswith("daemon-service:")
+        )
+
+        principal_user = {
+            "id": str(requesting_user_id),
+            "organization_id": str(requesting_org_id),
+        }
+        if daemon_like and memory_scope != "org_shared_only":
+            owner = await get_first_memory_owner(self.pool, requesting_org_id)
+            if owner is not None and owner["id"] != principal_user["id"]:
+                principal_user["id"] = owner["id"]
+
+        return await get_authorized_memories_pool(
+            self.pool, principal_user, required_clearance=required_clearance
+        )
 
     @staticmethod
     def _normalize_vitality_score(vitality_score: float | None) -> float:
@@ -320,6 +370,7 @@ class MemoryRepository:
         user_id: UUID | None = None,
         organization_id: UUID | None = None,
         shared: bool = False,
+        daemon_reader_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Create a new memory.
 
@@ -333,7 +384,14 @@ class MemoryRepository:
             metadata: Optional type-specific metadata.
             user_id: Optional user ID (foreign key to users table).
             organization_id: Optional organization ID (for efficient org-scoped queries).
-            shared: Whether the memory is visible to other org members.
+            shared: Semantic "visible to other org members" intent — files the
+                org read clearance (the shared column is retired; this no
+                longer writes one).
+            daemon_reader_id: When a daemon key's write is attributed to the
+                org's first owner, the daemon key's own user id — it files a
+                read clearance so the daemon can still find what it authored
+                (e.g. its environment assessment) without exposing the memory
+                to org members, who are otherwise untouched.
 
         Returns:
             The created memory record.
@@ -360,8 +418,8 @@ class MemoryRepository:
             query = f"""
                 INSERT INTO memories (username, type, content, tags,
                     importance, related_memory_ids, metadata,
-                    user_id, organization_id, shared, lifecycle_stage)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    user_id, organization_id, lifecycle_stage)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING {self._FULL_COLUMNS}
             """
             logger.info(
@@ -373,17 +431,17 @@ class MemoryRepository:
             query = f"""
                 INSERT INTO memories (username, type, content, tags,
                     importance, related_memory_ids, metadata,
-                    user_id, organization_id, shared)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    user_id, organization_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING {self._FULL_COLUMNS}
             """
 
         # Sharing is now managed by the tool layer with type-based defaults.
         # Goals are no longer force-shared here — the daemon processes goals
         # per-user with scoped keys, so it doesn't need org-wide visibility.
-        effective_shared = shared
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id) as conn:
             # Validate related memory IDs exist and are not deleted
             if related_memory_ids:
                 await self._validate_related_ids(related_memory_ids, conn=conn)
@@ -398,21 +456,39 @@ class MemoryRepository:
                 metadata or {},
                 str(user_id) if user_id else None,
                 str(organization_id) if organization_id else None,
-                effective_shared,
             ]
             if initial_stage and initial_stage != "active":
                 create_params.append(initial_stage)
 
             row = await conn.fetchrow(query, *create_params)
-            if effective_shared and organization_id is not None:
+            if shared and organization_id is not None:
+                # Org-wide sharing = an org read clearance (grants retired in 129).
                 await conn.execute(
-                    """INSERT INTO memory_access_grants
-                           (memory_id, organization_id, grantee_type, created_by)
-                       VALUES ($1, $2, 'organization', $3)
-                       ON CONFLICT DO NOTHING""",
+                    """INSERT INTO auth_clearances
+                           (auth_id, role, principal_type, principal_id, granted_by)
+                       SELECT auth_id, 'read', 'org', $2, $3
+                       FROM memories WHERE id = $1
+                       ON CONFLICT (auth_id, principal_type, principal_id, role)
+                       DO NOTHING""",
                     row["id"],
                     str(organization_id),
                     str(user_id) if user_id else None,
+                )
+            if daemon_reader_id is not None and user_id is not None and daemon_reader_id != user_id:
+                # The daemon attributed its write to the owner (the daemon
+                # works for the owner): the daemon key keeps a read clearance
+                # on what it authored, so its org_shared_only searches still
+                # reach its own artifacts.
+                await conn.execute(
+                    """INSERT INTO auth_clearances
+                           (auth_id, role, principal_type, principal_id, granted_by)
+                       SELECT auth_id, 'read', 'user', $2, $3
+                       FROM memories WHERE id = $1
+                       ON CONFLICT (auth_id, principal_type, principal_id, role)
+                       DO NOTHING""",
+                    row["id"],
+                    str(daemon_reader_id),
+                    str(user_id),
                 )
 
         return self._row_to_dict(row)
@@ -459,14 +535,18 @@ class MemoryRepository:
     ) -> dict[str, Any] | None:
         """Find an accessible existing technical memory for the same file.
 
-        The duplicate boundary intentionally mirrors ordinary memory access:
-        the caller's own memories plus shared memories in the same org. Private
-        memories owned by other users do not block creation because their
-        existence is not visible to the caller.
+        The duplicate boundary mirrors ordinary memory access: the caller's
+        clearance view (own memories plus read grants in the same org). Private
+        memories the caller cannot read do not block creation because their
+        existence is not visible to them.
         """
         scope = self._technical_file_scope(metadata)
-        if scope is None or requesting_user_id is None or requesting_org_id is None:
+        if scope is None:
             return None
+
+        usage = await self._usage_pool(
+            requesting_user_id, requesting_org_id, memory_scope=memory_scope
+        )
 
         conditions = [
             "type = 'technical'",
@@ -474,38 +554,10 @@ class MemoryRepository:
             "COALESCE(lifecycle_stage, 'active') != 'forgotten'",
             "lower(metadata->>'repo') = $1",
             "lower(metadata->>'filename') = $2",
+            "organization_id = $3::uuid",
         ]
-        params: list[Any] = [scope["repo"], scope["filename"]]
-        param_idx = 3
-
-        normalized_scope = memory_scope if memory_scope in {"user", "org_shared_only"} else None
-        if normalized_scope == "user":
-            conditions.append(
-                self.owned_memory_access_condition(
-                    f"${param_idx + 1}", f"${param_idx}"
-                )
-            )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
-        elif normalized_scope == "org_shared_only":
-            conditions.append(
-                self.shared_memory_access_condition(
-                    f"${param_idx}", f"${param_idx + 1}"
-                )
-            )
-            params.append(str(requesting_org_id))
-            params.append(str(requesting_user_id))
-            param_idx += 2
-        else:
-            conditions.append(
-                self.user_memory_access_condition(
-                    f"${param_idx + 1}", f"${param_idx}"
-                )
-            )
-            params.append(str(requesting_user_id))
-            params.append(str(requesting_org_id))
-            param_idx += 2
+        params: list[Any] = [scope["repo"], scope["filename"], str(requesting_org_id)]
+        param_idx = 4
 
         if exclude_id is not None:
             conditions.append(f"id != ${param_idx}::uuid")
@@ -519,14 +571,13 @@ class MemoryRepository:
             WHERE {where_clause}
             ORDER BY
                 CASE WHEN user_id = ${param_idx}::uuid THEN 0 ELSE 1 END,
-                shared DESC,
                 updated_at DESC,
                 created_at ASC
             LIMIT 1
         """
         params.append(str(requesting_user_id))
 
-        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
+        async with usage.acquire() as conn:
             row = await conn.fetchrow(query, *params)
 
         return self._row_to_dict(row) if row else None
@@ -593,7 +644,7 @@ class MemoryRepository:
 
         Args:
             memory_id: The UUID of the memory to retrieve.
-            organization_id: Caller org — required for tenant scoping under RLS.
+            organization_id: Caller org — tenant GUC binding for scoped_acquire.
             user_id: Caller user id — the memories policy's ownership arm.
 
         Returns:
@@ -605,7 +656,8 @@ class MemoryRepository:
             WHERE id = $1 AND deleted_at IS NULL
         """
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id) as conn:
             row = await conn.fetchrow(query, str(memory_id))
 
         if row is None:
@@ -622,12 +674,13 @@ class MemoryRepository:
     ) -> dict[str, Any] | None:
         """Get a memory by ID with access control.
 
-        Returns the memory only if:
-        - The user owns the memory, OR
-        - The memory is shared within the user's organization
+        Clearance-driven (default-deny): the memory is returned only when the
+        requesting principal holds a read/owner clearance — ownership via
+        `user_id`, or an org/user/group read grant (`auth_clearances`).
 
-        When memory_scope is 'user', only the user's own memories are returned.
-        When memory_scope is 'org_shared_only', only shared org memories are returned.
+        When memory_scope is 'user', the principal is the requesting user's
+        full view. When memory_scope is 'org_shared_only' (daemon keys), the
+        principal matches org read clearances only.
 
         Args:
             memory_id: The UUID of the memory to retrieve.
@@ -638,48 +691,34 @@ class MemoryRepository:
         Returns:
             The memory record, or None if not found, deleted, or not accessible.
         """
-        normalized_scope = (
-            memory_scope if memory_scope in {"user", "org_shared_only"} else None
+        usage = await self._usage_pool(
+            user_id, organization_id, memory_scope=memory_scope
         )
-
-        # Keep placeholder numbering stable to avoid scope-dependent
-        # bind count mismatches in prepared statement execution paths.
-        owned_access = self.owned_memory_access_condition("$3", "$2")
-        organization_access = self.shared_memory_access_condition("$3", "$2")
-        granted_access = self.granted_memory_access_condition("$3", "$2")
-        daemon_owner_access = self.daemon_owner_access_condition("$3", "$2")
         query = f"""
             SELECT {self._FULL_COLUMNS}
             FROM memories
             WHERE id = $1
               AND deleted_at IS NULL
-              AND (
-                  {daemon_owner_access}
-                 OR ($4 = 'user' AND {owned_access})
-                 OR ($4 = 'org_shared_only' AND {organization_access})
-                   OR ($4 IS NULL AND ({owned_access} OR {granted_access}))
-              )
+              AND organization_id = $2::uuid
         """
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
-            row = await conn.fetchrow(
-                query,
-                str(memory_id),
-                str(user_id),
-                str(organization_id),
-                normalized_scope,
-            )
+        async with usage.acquire() as conn:
+            row = await conn.fetchrow(query, str(memory_id), str(organization_id))
 
         if row is None:
             return None
 
         return self._row_to_dict(row)
 
-    async def get_individual_memory_for_user(self, user_id: UUID) -> dict[str, Any] | None:
+    async def get_individual_memory_for_user(
+        self, user_id: UUID, organization_id: UUID | str | None = None
+    ) -> dict[str, Any] | None:
         """Get the individual memory associated with a user.
 
         Args:
             user_id: The user's UUID.
+            organization_id: The user's organization — required on request
+                paths, where no task tenant scope exists.
 
         Returns:
             The memory record, or None if not found.
@@ -692,7 +731,10 @@ class MemoryRepository:
               AND user_id = $1
         """
 
-        async with scoped_acquire(user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool,
+            user_id=user_id, organization_id=organization_id
+        ) as conn:
             row = await conn.fetchrow(query, str(user_id))
 
         if row is None:
@@ -705,48 +747,60 @@ class MemoryRepository:
         memory_id: UUID,
         user_id: UUID,
         shared: bool,
+        organization_id: UUID | str | None = None,
     ) -> dict[str, Any] | None:
         """Set the shared status of a memory.
 
-        Only the owner of the memory can change its shared status.
+        Only the owner of the memory can change its shared status. The
+        org-wide share is stored entirely as an org read clearance — the
+        ``memories.shared`` column was retired in migration 132.
 
         Args:
             memory_id: The UUID of the memory to update.
             user_id: The ID of the requesting user (must be owner).
             shared: Whether to share (True) or unshare (False) the memory.
+            organization_id: The requesting user's organization — required on
+                request paths, where no task tenant scope exists
+                (scoped_acquire fails closed without it).
 
         Returns:
-            The updated memory record, or None if not found or not owned by user.
+            The memory record, or None if not found or not owned by user.
         """
-        async with scoped_acquire(user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, user_id=user_id, organization_id=organization_id) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     f"""
-                        UPDATE memories
-                        SET shared = $1
-                        WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL
-                        RETURNING {self._FULL_COLUMNS}
+                        SELECT {self._FULL_COLUMNS}
+                        FROM memories
+                        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
                     """,
-                    shared,
                     str(memory_id),
                     str(user_id),
                 )
                 if row is None:
                     return None
+                if row["organization_id"] is None:
+                    return self._row_to_dict(row)
                 if shared:
+                    # Org-wide share files an org read clearance (129).
                     await conn.execute(
-                        """INSERT INTO memory_access_grants
-                               (memory_id, organization_id, grantee_type, created_by)
-                           VALUES ($1, $2, 'organization', $3)
-                           ON CONFLICT DO NOTHING""",
+                        """INSERT INTO auth_clearances
+                               (auth_id, role, principal_type, principal_id, granted_by)
+                           SELECT auth_id, 'read', 'org', $2, $3
+                           FROM memories WHERE id = $1
+                           ON CONFLICT (auth_id, principal_type, principal_id, role)
+                           DO NOTHING""",
                         row["id"],
                         row["organization_id"],
                         str(user_id),
                     )
                 else:
                     await conn.execute(
-                        """DELETE FROM memory_access_grants
-                           WHERE memory_id = $1 AND grantee_type = 'organization'""",
+                        """DELETE FROM auth_clearances
+                           WHERE auth_id = (SELECT auth_id FROM memories WHERE id = $1)
+                             AND role = 'read'
+                             AND principal_type = 'org'""",
                         row["id"],
                     )
 
@@ -773,7 +827,8 @@ class MemoryRepository:
         if grantee_type != "organization" and grantee_id is None:
             raise ValueError(f"{grantee_type} grants require a grantee_id")
 
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
             async with conn.transaction():
                 memory_exists = await conn.fetchval(
                     """SELECT EXISTS(
@@ -803,42 +858,47 @@ class MemoryRepository:
                     if not target_exists:
                         raise ValueError("Group not found in organization")
 
+                principal_type = _GRANTEE_TO_PRINCIPAL[grantee_type]
                 row = await conn.fetchrow(
-                    """INSERT INTO memory_access_grants
-                           (memory_id, organization_id, grantee_type, grantee_user_id,
-                            grantee_group_id, created_by)
-                       VALUES ($1, $2, $3, $4, $5, $6)
-                       ON CONFLICT DO NOTHING
-                       RETURNING id, memory_id, organization_id, grantee_type,
-                                 grantee_user_id, grantee_group_id, created_by, created_at""",
+                    """INSERT INTO auth_clearances
+                           (auth_id, role, principal_type, principal_id, granted_by)
+                       SELECT m.auth_id, 'read', $3::text,
+                              CASE $3 WHEN 'org' THEN $2::uuid ELSE $4::uuid END, $5
+                       FROM memories m
+                       WHERE m.id = $1
+                       ON CONFLICT (auth_id, principal_type, principal_id, role)
+                       DO NOTHING
+                       RETURNING id, created_at""",
                     str(memory_id),
                     str(organization_id),
-                    grantee_type,
-                    str(grantee_id) if grantee_type == "user" else None,
-                    str(grantee_id) if grantee_type == "group" else None,
+                    principal_type,
+                    str(grantee_id) if grantee_type != "organization" else None,
                     str(created_by) if created_by else None,
                 )
                 if row is None:
+                    # Clearance already existed (idempotent re-grant).
                     row = await conn.fetchrow(
-                        """SELECT id, memory_id, organization_id, grantee_type,
-                                  grantee_user_id, grantee_group_id, created_by, created_at
-                           FROM memory_access_grants
-                           WHERE memory_id = $1
-                             AND grantee_type = $2
-                             AND grantee_user_id IS NOT DISTINCT FROM $3::uuid
-                             AND grantee_group_id IS NOT DISTINCT FROM $4::uuid""",
+                        """SELECT c.id, c.created_at
+                           FROM memories m
+                           JOIN auth_clearances c ON c.auth_id = m.auth_id
+                           WHERE m.id = $1
+                             AND c.role = 'read'
+                             AND c.principal_type = $2::text
+                             AND c.principal_id = $3::uuid""",
                         str(memory_id),
-                        grantee_type,
-                        str(grantee_id) if grantee_type == "user" else None,
-                        str(grantee_id) if grantee_type == "group" else None,
+                        principal_type,
+                        str(organization_id if grantee_type == "organization" else grantee_id),
                     )
-                if grantee_type == "organization":
-                    await conn.execute(
-                        "UPDATE memories SET shared = TRUE WHERE id = $1",
-                        str(memory_id),
-                    )
-
-        return dict(row)
+        return {
+            "id": row["id"],
+            "memory_id": str(memory_id),
+            "organization_id": str(organization_id),
+            "grantee_type": grantee_type,
+            "grantee_user_id": grantee_id if grantee_type == "user" else None,
+            "grantee_group_id": grantee_id if grantee_type == "group" else None,
+            "created_by": created_by,
+            "created_at": row["created_at"],
+        }
 
     async def revoke_access(
         self,
@@ -847,7 +907,7 @@ class MemoryRepository:
         grantee_type: str,
         grantee_id: UUID | None,
     ) -> bool:
-        """Remove one access grant and synchronize legacy organization sharing."""
+        """Remove one access grant (clearance from the memory's auth_id)."""
         if grantee_type not in {"organization", "user", "group"}:
             raise ValueError("grantee_type must be organization, user, or group")
         if grantee_type == "organization" and grantee_id is not None:
@@ -855,50 +915,114 @@ class MemoryRepository:
         if grantee_type != "organization" and grantee_id is None:
             raise ValueError(f"{grantee_type} grants require a grantee_id")
 
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        principal_type = _GRANTEE_TO_PRINCIPAL[grantee_type]
+        principal_id = organization_id if grantee_type == "organization" else grantee_id
+
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
             async with conn.transaction():
-                result = await conn.execute(
-                    """DELETE FROM memory_access_grants
-                       WHERE memory_id = $1
-                         AND organization_id = $2
-                         AND grantee_type = $3
-                         AND grantee_user_id IS NOT DISTINCT FROM $4::uuid
-                         AND grantee_group_id IS NOT DISTINCT FROM $5::uuid""",
+                deleted = await conn.fetchval(
+                    """WITH target AS (
+                           SELECT m.auth_id
+                           FROM memories m
+                           WHERE m.id = $1 AND m.organization_id = $2
+                       )
+                       DELETE FROM auth_clearances c
+                       USING target
+                       WHERE c.auth_id = target.auth_id
+                         AND c.role = 'read'
+                         AND c.principal_type = $3::text
+                         AND c.principal_id = $4::uuid
+                       RETURNING 1""",
                     str(memory_id),
                     str(organization_id),
-                    grantee_type,
-                    str(grantee_id) if grantee_type == "user" else None,
-                    str(grantee_id) if grantee_type == "group" else None,
+                    principal_type,
+                    str(principal_id),
                 )
-                if result != "DELETE 1":
+                if not deleted:
                     return False
-                if grantee_type == "organization":
-                    await conn.execute(
-                        "UPDATE memories SET shared = FALSE WHERE id = $1",
-                        str(memory_id),
-                    )
         return True
 
     async def list_access_grants(
         self, memory_id: UUID, organization_id: UUID
     ) -> list[dict[str, Any]]:
-        """List configured read grants with safe display names for the UI/API."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        """List configured read grants with safe display names for the UI/API.
+
+        Reads the memory's clearances (grants retired in 129) and maps
+        principal columns back to the legacy grantee fields the UI consumes.
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
             rows = await conn.fetch(
-                """SELECT grant_row.id, grant_row.memory_id, grant_row.organization_id,
-                          grant_row.grantee_type, grant_row.grantee_user_id,
-                          grant_row.grantee_group_id, grant_row.created_by,
-                          grant_row.created_at, user_target.display_name AS user_display_name,
-                          user_target.email AS user_email, group_target.name AS group_name
-                   FROM memory_access_grants grant_row
-                   LEFT JOIN users user_target ON user_target.id = grant_row.grantee_user_id
-                   LEFT JOIN groups group_target ON group_target.id = grant_row.grantee_group_id
-                   WHERE grant_row.memory_id = $1 AND grant_row.organization_id = $2
-                   ORDER BY grant_row.grantee_type, user_target.display_name, group_target.name""",
+                """SELECT c.id, m.id AS memory_id, m.organization_id,
+                          c.principal_type, c.principal_id,
+                          c.granted_by AS created_by, c.created_at,
+                          user_target.display_name AS user_display_name,
+                          user_target.email AS user_email,
+                          group_target.name AS group_name
+                   FROM memories m
+                   JOIN auth_clearances c ON c.auth_id = m.auth_id
+                   LEFT JOIN users user_target
+                       ON c.principal_type = 'user' AND user_target.id = c.principal_id
+                   LEFT JOIN groups group_target
+                       ON c.principal_type = 'group' AND group_target.id = c.principal_id
+                   WHERE m.id = $1 AND m.organization_id = $2
+                     AND c.role = 'read'
+                   ORDER BY c.principal_type, user_target.display_name, group_target.name""",
                 str(memory_id),
                 str(organization_id),
             )
-        return [dict(row) for row in rows]
+        grants: list[dict[str, Any]] = []
+        for row in rows:
+            grantee_type = {"org": "organization", "user": "user", "group": "group"}[
+                row["principal_type"]
+            ]
+            grants.append(
+                {
+                    "id": row["id"],
+                    "memory_id": row["memory_id"],
+                    "organization_id": row["organization_id"],
+                    "grantee_type": grantee_type,
+                    "grantee_user_id": row["principal_id"] if grantee_type == "user" else None,
+                    "grantee_group_id": row["principal_id"] if grantee_type == "group" else None,
+                    "created_by": row["created_by"],
+                    "created_at": row["created_at"],
+                    "user_display_name": row["user_display_name"],
+                    "user_email": row["user_email"],
+                    "group_name": row["group_name"],
+                }
+            )
+        return grants
+
+    async def org_shared_ids(
+        self, memory_ids: list[UUID], organization_id: UUID
+    ) -> set[UUID]:
+        """Which of the given memories currently carry an org read clearance.
+
+        The source of truth for "visible to the whole org" since the
+        ``memories.shared`` column was retired in migration 132. Runs on a
+        plain scoped connection: the authorized pools forbid manual
+        ``auth_clearances`` references, and this probe is exactly that
+        lookup.
+        """
+        if not memory_ids or organization_id is None:
+            return set()
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
+            rows = await conn.fetch(
+                """SELECT m.id
+                   FROM memories m
+                   JOIN auth_clearances c ON c.auth_id = m.auth_id
+                   WHERE m.id = ANY($1::uuid[]) AND m.organization_id = $2
+                     AND c.role = 'read' AND c.principal_type = 'org'""",
+                [str(uid) for uid in memory_ids],
+                str(organization_id),
+            )
+        return {row["id"] if isinstance(row["id"], UUID) else UUID(str(row["id"])) for row in rows}
+
+    async def is_org_shared(self, memory_id: UUID, organization_id: UUID) -> bool:
+        """Whether the memory currently carries an org read clearance."""
+        return memory_id in await self.org_shared_ids([memory_id], organization_id)
 
     async def update(
         self,
@@ -923,7 +1047,7 @@ class MemoryRepository:
             metadata: Optional new metadata.
             expected_version: If provided, the update only succeeds if the memory's
                 current version matches. Raises VersionConflictError on mismatch.
-            organization_id: Tenant GUC binding (memories is RLS-bound).
+            organization_id: Tenant GUC binding for scoped_acquire.
             user_id: Owner GUC for member-branch visibility. Callers that
                 already authorize the target memory (ownership verified in
                 the product rule) may omit it.
@@ -1011,7 +1135,9 @@ class MemoryRepository:
             )
 
         if not updates:
-            return await self.get(memory_id)
+            return await self.get(
+                memory_id, organization_id=organization_id, user_id=user_id
+            )
 
         # Always increment version on update
         updates.append("version = version + 1")
@@ -1036,10 +1162,10 @@ class MemoryRepository:
         """
 
         # Use a single connection for validation and update.
-        # rls: memories is RLS-bound (shape c). Bind the caller's org; the
-        # user GUC carries member visibility, with owner authorization
-        # already enforced by the product layer before this call.
-        async with scoped_acquire(
+        # Bind the caller's org+user GUCs via scoped_acquire; owner
+        # authorization is enforced by the product layer before this call.
+        async with scoped_acquire_on(
+            self.pool,
             organization_id=organization_id, user_id=user_id
         ) as conn:
             if related_memory_ids is not None:
@@ -1052,7 +1178,9 @@ class MemoryRepository:
         if row is None:
             # Distinguish between "not found" and "version mismatch"
             if expected_version is not None:
-                existing = await self.get(memory_id)
+                existing = await self.get(
+                    memory_id, organization_id=organization_id, user_id=user_id
+                )
                 if existing is not None:
                     raise VersionConflictError(
                         memory_id=memory_id,
@@ -1077,7 +1205,8 @@ class MemoryRepository:
         if status not in {"active", "paused", "completed", "abandoned"}:
             raise ValueError(f"Invalid goal milestone status: {status}")
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id) as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     f"""SELECT {self._FULL_COLUMNS}
@@ -1159,8 +1288,7 @@ class MemoryRepository:
         Args:
             memory_id: The UUID of the task memory to claim.
             instance_id: The unique identifier of the claiming daemon instance.
-            org_id: Tenant GUC binding (memories is RLS-bound); without it
-                the claim is fail-closed empty under RLS.
+            org_id: Tenant GUC binding; without it the claim is fail-closed empty.
 
         Returns:
             The updated memory record if claimed successfully, or None if the
@@ -1168,7 +1296,8 @@ class MemoryRepository:
         """
         claim_tag = f"claimed-by-{instance_id}"
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id) as conn:
             async with conn.transaction():
                 # Lock the row and verify it's still pending
                 row = await conn.fetchrow(
@@ -1224,13 +1353,13 @@ class MemoryRepository:
         Args:
             memory_id: The UUID of the task memory to release.
             instance_id: Optional — only release if claimed by this instance.
-            org_id: Tenant GUC binding (memories is RLS-bound); without it
-                the release is fail-closed empty under RLS.
+            org_id: Tenant GUC binding; without it the release is fail-closed empty.
 
         Returns:
             The updated memory record, or None if not found/not claimed.
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id) as conn:
             async with conn.transaction():
                 if instance_id:
                     claim_tag = f"claimed-by-{instance_id}"
@@ -1313,7 +1442,8 @@ class MemoryRepository:
             RETURNING id
         """
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id) as conn:
             await self._record_ldr_observation(
                 source_id=memory_id,
                 canonical_id=ldr_canonical_id,
@@ -1452,35 +1582,18 @@ class MemoryRepository:
         params: list[Any] = []
         param_idx = 1
 
-        # Add access control condition if user context is provided
-        if requesting_user_id is not None and requesting_org_id is not None:
-            if memory_scope == "user":
-                conditions.append(
-                    self.owned_memory_access_condition(
-                        f"${param_idx + 1}", f"${param_idx}"
-                    )
-                )
-                params.append(str(requesting_user_id))
-                params.append(str(requesting_org_id))
-                param_idx += 2
-            elif memory_scope == "org_shared_only":
-                conditions.append(
-                    self.shared_memory_access_condition(
-                        f"${param_idx}", f"${param_idx + 1}"
-                    )
-                )
-                params.append(str(requesting_org_id))
-                params.append(str(requesting_user_id))
-                param_idx += 2
-            else:
-                conditions.append(
-                    self.user_memory_access_condition(
-                        f"${param_idx + 1}", f"${param_idx}"
-                    )
-                )
-                params.append(str(requesting_user_id))
-                params.append(str(requesting_org_id))
-                param_idx += 2
+        # Usage reads are clearance-driven: authorize the pool from the
+        # requesting identity (principal mapping handles scoped daemon keys)
+        # and keep the org predicate in SQL as defense in depth. No requesting
+        # identity → the legacy org-wide management arm (system context).
+        usage = None
+        if requesting_user_id is not None:
+            usage = await self._usage_pool(
+                requesting_user_id, requesting_org_id, memory_scope=memory_scope
+            )
+            conditions.append(f"organization_id = ${param_idx}::uuid")
+            params.append(str(requesting_org_id))
+            param_idx += 1
 
         # GitHub repo ACL filter (None means caller is admin/owner — no filter).
         if accessible_repos is not None:
@@ -1660,19 +1773,25 @@ class MemoryRepository:
 
         params.extend([limit, offset])
 
-        # rls: memories is RLS-bound (shape c). Bind the requester's org
-        # (and user when a scope is threaded) so the search sees only the
-        # tenant slice the product-rule WHERE clause already targets.
-        async with scoped_acquire(
-            organization_id=requesting_org_id, user_id=requesting_user_id
-        ) as conn:
-            # Get total count
-            count_params = params[:-2]  # Exclude limit and offset
-            count_row = await conn.fetchrow(count_query, *count_params)
-            total_count = count_row["total"] if count_row else 0
+        # Clearance mode binds the principal's GUCs on the authorized pool;
+        # the legacy management arm keeps its tenant GUC binding.
+        if usage is not None:
+            async with usage.acquire() as conn:
+                count_params = params[:-2]  # Exclude limit and offset
+                count_row = await conn.fetchrow(count_query, *count_params)
+                total_count = count_row["total"] if count_row else 0
 
-            # Get results
-            rows = await conn.fetch(search_query, *params)
+                rows = await conn.fetch(search_query, *params)
+        else:
+            async with scoped_acquire_on(
+                self.pool,
+                organization_id=requesting_org_id, user_id=requesting_user_id
+            ) as conn:
+                count_params = params[:-2]  # Exclude limit and offset
+                count_row = await conn.fetchrow(count_query, *count_params)
+                total_count = count_row["total"] if count_row else 0
+
+                rows = await conn.fetch(search_query, *params)
 
         memories = [self._row_to_search_dict(row) for row in rows]
 
@@ -1687,9 +1806,9 @@ class MemoryRepository:
     async def list_recent_goal_milestones(
         self, *, user_id: str, organization_id: str, limit: int
     ) -> list[asyncpg.Record]:
-        """Return recent goal rows with milestone metadata, scoped to user access."""
-        memory_access = self.user_memory_access_condition("$2", "$1")
-        query = f"""
+        """Return recent goal rows with milestone metadata, clearance-driven."""
+        usage = await self._usage_pool(UUID(user_id), UUID(organization_id))
+        query = """
             SELECT memories.id,
                    COALESCE(memories.content, '') AS title,
                    COALESCE(memories.metadata->>'status', 'active') AS status,
@@ -1702,15 +1821,43 @@ class MemoryRepository:
             FROM memories
             WHERE memories.type = 'goal'
               AND memories.deleted_at IS NULL
-              AND memories.organization_id = $2::uuid
-              AND {memory_access}
+              AND memories.organization_id = $1::uuid
             ORDER BY COALESCE(memories.updated_at, memories.created_at) DESC
-            LIMIT $3
+            LIMIT $2
         """
-        async with scoped_acquire(
-            organization_id=organization_id, user_id=user_id
-        ) as conn:
-            return await conn.fetch(query, UUID(user_id), UUID(organization_id), limit)
+        # Visibility comes entirely from the pool's clearance rewrite; the
+        # user_id stays in the principal binding, not the SQL ($1 here is the
+        # org predicate).
+        async with usage.acquire() as conn:
+            return await conn.fetch(query, UUID(organization_id), limit)
+
+    async def list_knowledge_tree(
+        self, *, organization_id: str | UUID, user_id: str | UUID
+    ) -> list[asyncpg.Record]:
+        """Technical memories for the /knowledge tree, clearance-driven.
+
+        Groups (in the route layer) by metadata repo/directory/file. Replaces
+        the legacy `user_clause` arm this method never actually had — the
+        /knowledge page was 500ing on the missing `user_memory_access_condition`
+        reference until this rewrite.
+        """
+        usage = await self._usage_pool(UUID(user_id), UUID(organization_id))
+        query = """
+            SELECT m.id, m.type, m.content, m.tags, m.importance,
+                   m.metadata->>'repo' AS repo,
+                   m.metadata->>'directory' AS directory,
+                   m.metadata->>'filename' AS filename,
+                   m.created_at, m.updated_at, m.vitality_score,
+                   m.lifecycle_stage
+            FROM memories m
+            WHERE m.deleted_at IS NULL
+              AND m.type = 'technical'
+              AND COALESCE(m.lifecycle_stage, 'active') IN ('active', 'consolidating')
+              AND NOT ('superseded' = ANY(m.tags))
+              AND m.organization_id = $1::uuid
+        """
+        async with usage.acquire() as conn:
+            return await conn.fetch(query, str(organization_id))
 
     async def get_memories_by_ids(
         self,
@@ -1730,7 +1877,8 @@ class MemoryRepository:
             WHERE id IN ({placeholders})
               AND deleted_at IS NULL
         """
-        async with scoped_acquire(
+        async with scoped_acquire_on(
+            self.pool,
             organization_id=requesting_org_id, user_id=requesting_user_id
         ) as conn:
             rows = await conn.fetch(query, *memory_ids)
@@ -1785,35 +1933,18 @@ class MemoryRepository:
         params: list[Any] = []
         param_idx = 1
 
-        # Add access control condition if user context is provided
-        if requesting_user_id is not None and requesting_org_id is not None:
-            if memory_scope == "user":
-                conditions.append(
-                    self.owned_memory_access_condition(
-                        f"${param_idx + 1}", f"${param_idx}"
-                    )
-                )
-                params.append(str(requesting_user_id))
-                params.append(str(requesting_org_id))
-                param_idx += 2
-            elif memory_scope == "org_shared_only":
-                conditions.append(
-                    self.shared_memory_access_condition(
-                        f"${param_idx}", f"${param_idx + 1}"
-                    )
-                )
-                params.append(str(requesting_org_id))
-                params.append(str(requesting_user_id))
-                param_idx += 2
-            else:
-                conditions.append(
-                    self.user_memory_access_condition(
-                        f"${param_idx + 1}", f"${param_idx}"
-                    )
-                )
-                params.append(str(requesting_user_id))
-                params.append(str(requesting_org_id))
-                param_idx += 2
+        # Usage reads are clearance-driven: authorize the pool from the
+        # requesting identity (principal mapping handles scoped daemon keys)
+        # and keep the org predicate in SQL as defense in depth. No requesting
+        # identity → the legacy org-wide management arm (system context).
+        usage = None
+        if requesting_user_id is not None:
+            usage = await self._usage_pool(
+                requesting_user_id, requesting_org_id, memory_scope=memory_scope
+            )
+            conditions.append(f"organization_id = ${param_idx}::uuid")
+            params.append(str(requesting_org_id))
+            param_idx += 1
 
         # GitHub repo ACL filter (None means caller is admin/owner — no filter).
         if accessible_repos is not None:
@@ -1955,15 +2086,25 @@ class MemoryRepository:
 
         params.extend([limit, offset])
 
-        # rls: memories is RLS-bound (shape c) — same requester binding as search().
-        async with scoped_acquire(
-            organization_id=requesting_org_id, user_id=requesting_user_id
-        ) as conn:
-            count_params = params[:-2]
-            count_row = await conn.fetchrow(count_query, *count_params)
-            total_count = count_row["total"] if count_row else 0
+        # Clearance mode binds the principal's GUCs on the authorized pool;
+        # the legacy management arm keeps its tenant GUC binding.
+        if usage is not None:
+            async with usage.acquire() as conn:
+                count_params = params[:-2]
+                count_row = await conn.fetchrow(count_query, *count_params)
+                total_count = count_row["total"] if count_row else 0
 
-            rows = await conn.fetch(search_query, *params)
+                rows = await conn.fetch(search_query, *params)
+        else:
+            async with scoped_acquire_on(
+                self.pool,
+                organization_id=requesting_org_id, user_id=requesting_user_id
+            ) as conn:
+                count_params = params[:-2]
+                count_row = await conn.fetchrow(count_query, *count_params)
+                total_count = count_row["total"] if count_row else 0
+
+                rows = await conn.fetch(search_query, *params)
 
         memories = [self._row_to_search_dict(row) for row in rows]
 
@@ -2005,16 +2146,14 @@ class MemoryRepository:
         params: list[Any] = []
         param_idx = 1
 
-        # Add access control condition if user context is provided
-        if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(
-                self.user_memory_access_condition(
-                    f"${param_idx + 1}", f"${param_idx}"
-                )
-            )
-            params.append(str(requesting_user_id))
+        # Clearance-driven usage read; no requesting identity → the legacy
+        # org-wide management arm (system context).
+        usage = None
+        if requesting_user_id is not None:
+            usage = await self._usage_pool(requesting_user_id, requesting_org_id)
+            conditions.append(f"organization_id = ${param_idx}::uuid")
             params.append(str(requesting_org_id))
-            param_idx += 2
+            param_idx += 1
 
         if accessible_repos is not None:
             conditions.append(
@@ -2047,8 +2186,15 @@ class MemoryRepository:
         """
         params.append(limit)
 
-        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
-            rows = await conn.fetch(query, *params)
+        if usage is not None:
+            async with usage.acquire() as conn:
+                rows = await conn.fetch(query, *params)
+        else:
+            async with scoped_acquire_on(
+                self.pool,
+                organization_id=requesting_org_id, user_id=requesting_user_id
+            ) as conn:
+                rows = await conn.fetch(query, *params)
 
         return [{"tag": row["tag"], "count": row["count"]} for row in rows]
 
@@ -2079,16 +2225,14 @@ class MemoryRepository:
         params: list[Any] = []
         param_idx = 1
 
-        # Add access control condition if user context is provided
-        if requesting_user_id is not None and requesting_org_id is not None:
-            conditions.append(
-                self.user_memory_access_condition(
-                    f"${param_idx + 1}", f"${param_idx}"
-                )
-            )
-            params.append(str(requesting_user_id))
+        # Clearance-driven usage read; no requesting identity → the legacy
+        # org-wide management arm (system context).
+        usage = None
+        if requesting_user_id is not None:
+            usage = await self._usage_pool(requesting_user_id, requesting_org_id)
+            conditions.append(f"organization_id = ${param_idx}::uuid")
             params.append(str(requesting_org_id))
-            param_idx += 2
+            param_idx += 1
 
         if accessible_repos is not None:
             conditions.append(
@@ -2121,8 +2265,15 @@ class MemoryRepository:
         """
         params.append(limit)
 
-        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
-            rows = await conn.fetch(sql, *params)
+        if usage is not None:
+            async with usage.acquire() as conn:
+                rows = await conn.fetch(sql, *params)
+        else:
+            async with scoped_acquire_on(
+                self.pool,
+                organization_id=requesting_org_id, user_id=requesting_user_id
+            ) as conn:
+                rows = await conn.fetch(sql, *params)
 
         return [
             {"tag": row["tag"], "count": row["count"], "similarity": row["sim"]} for row in rows
@@ -2163,34 +2314,16 @@ class MemoryRepository:
         params: list[Any] = []
         param_idx = 1
 
-        if requesting_user_id is not None and requesting_org_id is not None:
-            if memory_scope == "user":
-                conditions.append(
-                    self.owned_memory_access_condition(
-                        f"${param_idx + 1}", f"${param_idx}"
-                    )
-                )
-                params.append(str(requesting_user_id))
-                params.append(str(requesting_org_id))
-                param_idx += 2
-            elif memory_scope == "org_shared_only":
-                conditions.append(
-                    self.shared_memory_access_condition(
-                        f"${param_idx}", f"${param_idx + 1}"
-                    )
-                )
-                params.append(str(requesting_org_id))
-                params.append(str(requesting_user_id))
-                param_idx += 2
-            else:
-                conditions.append(
-                    self.user_memory_access_condition(
-                        f"${param_idx + 1}", f"${param_idx}"
-                    )
-                )
-                params.append(str(requesting_user_id))
-                params.append(str(requesting_org_id))
-                param_idx += 2
+        # Clearance-driven usage read; no requesting identity → the legacy
+        # org-wide management arm (system context).
+        usage = None
+        if requesting_user_id is not None:
+            usage = await self._usage_pool(
+                requesting_user_id, requesting_org_id, memory_scope=memory_scope
+            )
+            conditions.append(f"organization_id = ${param_idx}::uuid")
+            params.append(str(requesting_org_id))
+            param_idx += 1
 
         if type is not None:
             conditions.append(f"type = ${param_idx}")
@@ -2231,8 +2364,15 @@ class MemoryRepository:
             ORDER BY created_at ASC
         """
 
-        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
-            rows = await conn.fetch(query, *params)
+        if usage is not None:
+            async with usage.acquire() as conn:
+                rows = await conn.fetch(query, *params)
+        else:
+            async with scoped_acquire_on(
+                self.pool,
+                organization_id=requesting_org_id, user_id=requesting_user_id
+            ) as conn:
+                rows = await conn.fetch(query, *params)
 
         return [self._row_to_dict(row) for row in rows]
 
@@ -2265,7 +2405,8 @@ class MemoryRepository:
         skipped = 0
         errors: list[dict[str, str]] = []
 
-        async with scoped_acquire(organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
             # Build set of existing content hashes for this user
             existing_rows = await conn.fetch(
                 "SELECT md5(content || type || username) AS hash FROM memories "
@@ -2337,8 +2478,8 @@ class MemoryRepository:
                             INSERT INTO memories
                                 (username, type, content, tags, importance,
                                  related_memory_ids, metadata, user_id, organization_id,
-                                 shared, created_at, updated_at)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false,$10,$11)
+                                 created_at, updated_at)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                             RETURNING {self._FULL_COLUMNS}
                         """
                         await conn.fetchrow(
@@ -2359,8 +2500,8 @@ class MemoryRepository:
                         query = f"""
                             INSERT INTO memories
                                 (username, type, content, tags, importance,
-                                 related_memory_ids, metadata, user_id, organization_id, shared)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false)
+                                 related_memory_ids, metadata, user_id, organization_id)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                             RETURNING {self._FULL_COLUMNS}
                         """
                         await conn.fetchrow(
@@ -2413,7 +2554,8 @@ class MemoryRepository:
                 org_condition = "AND organization_id = $3::uuid"
                 params.append(organization_id)
 
-            async with scoped_acquire(organization_id=organization_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=organization_id) as conn:
                 rows = await conn.fetch(
                     f"""
                     SELECT {self._FULL_COLUMNS}
@@ -2463,7 +2605,8 @@ class MemoryRepository:
                 )
                 computed_stage = self._map_action_to_lifecycle_stage(score_result.action)
 
-                async with scoped_acquire(organization_id=organization_id) as conn:
+                async with scoped_acquire_on(
+                    self.pool, organization_id=organization_id) as conn:
                     await conn.execute(
                         """
                         UPDATE memories
@@ -2527,7 +2670,8 @@ class MemoryRepository:
         cfg = GcpConfig()
 
         while True:
-            async with scoped_acquire(organization_id=organization_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=organization_id) as conn:
                 rows = await conn.fetch(
                     f"""
                     SELECT {self._FULL_COLUMNS}
@@ -2553,7 +2697,8 @@ class MemoryRepository:
                 organization_id=str(organization_id) if organization_id else None,
             )
 
-            async with scoped_acquire(organization_id=organization_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=organization_id) as conn:
                 for mem in memory_dicts:
                     signals = graph_signals.get(mem["id"], {})
                     signals["out_degree"] = len(mem.get("related_memory_ids") or [])
@@ -2637,7 +2782,8 @@ class MemoryRepository:
         limit = max(1, min(limit, 500))
         cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
 
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
             latest_rows = await conn.fetch(
                 """
                 SELECT DISTINCT ON (ms.memory_id)
@@ -2808,10 +2954,10 @@ class MemoryRepository:
 
         cutoff = now - timedelta(days=90)
 
-        # rls: memories / request_memories / memory_access_log are RLS-bound;
-        # bind the vitality-scorer's org so the signal reads see the same
+        # Bind the vitality-scorer's org so the signal reads see the same
         # tenant slice the candidate query did (fail-closed empty otherwise).
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
             in_degree_rows = await conn.fetch(
                 """
                 SELECT rel_id::uuid AS memory_id, COUNT(*)::BIGINT AS in_degree
@@ -2922,7 +3068,8 @@ class MemoryRepository:
             org_filter = "AND organization_id = $1"
             params.append(str(organization_id))
 
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
             stage_rows = await conn.fetch(
                 f"""
                 SELECT lifecycle_stage, COUNT(*) AS count
@@ -3014,9 +3161,10 @@ class MemoryRepository:
             return None
 
         effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
-        # rls: memory_shadow_scores is RLS-bound (EXISTS-to-memories, org-keyed);
-        # bind the org so the sidecar insert shares the scorer's tenant slice.
-        async with scoped_acquire(organization_id=org_id) as conn:
+        # memory_shadow_scores is org-keyed; bind the org so the sidecar insert
+        # shares the scorer's tenant slice.
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO memory_shadow_scores (
@@ -3055,7 +3203,8 @@ class MemoryRepository:
             return None
 
         effective_computed_at = self._utc(computed_at) if computed_at else datetime.now(UTC)
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 f"""
                 INSERT INTO memory_shadow_scores (
@@ -3094,7 +3243,8 @@ class MemoryRepository:
         if not shadow_forget_enabled():
             return None
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id) as conn:
             row = await conn.fetchrow(
                 f"""
                 SELECT {self._SHADOW_SCORE_COLUMNS}
@@ -3147,7 +3297,8 @@ class MemoryRepository:
         if conn is not None:
             rows = await conn.fetch(query, *str_ids)
         else:
-            async with scoped_acquire(
+            async with scoped_acquire_on(
+                self.pool,
                 organization_id=organization_id, user_id=user_id
             ) as pool_conn:
                 rows = await pool_conn.fetch(query, *str_ids)
@@ -3199,7 +3350,6 @@ class MemoryRepository:
             "similarity_score": row["sim_score"],
             "user_id": user_id,
             "organization_id": org_id,
-            "shared": row["shared"],
             "last_accessed_at": row["last_accessed_at"],
             "lifecycle_stage": (
                 row["lifecycle_stage"] if "lifecycle_stage" in row.keys() else "active"
@@ -3232,9 +3382,6 @@ class MemoryRepository:
                 else UUID(row["organization_id"])
             )
 
-        # Handle shared flag
-        shared = row["shared"] if "shared" in row.keys() else False
-
         # Handle last_accessed_at
         last_accessed_at = row["last_accessed_at"] if "last_accessed_at" in row.keys() else None
 
@@ -3252,7 +3399,6 @@ class MemoryRepository:
             "deleted_at": row["deleted_at"],
             "user_id": user_id,
             "organization_id": org_id,
-            "shared": shared,
             "last_accessed_at": last_accessed_at,
             "version": row["version"] if "version" in row.keys() else 1,
             "lifecycle_stage": (
@@ -3302,9 +3448,10 @@ class MemoryRepository:
               AND accessed_at >= ${cutoff_param}
             GROUP BY memory_id
         """
-        # rls: memory_access_log is RLS-bound — bind the vitality-scorer's
-        # org so the access-count slice matches the candidate query.
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        # Bind the vitality-scorer's org so the access-count slice matches
+        # the candidate query.
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id) as conn:
             rows = await conn.fetch(query, *[str(mid) for mid in memory_ids], cutoff)
 
         counts: dict[UUID, int] = {memory_id: 0 for memory_id in memory_ids}

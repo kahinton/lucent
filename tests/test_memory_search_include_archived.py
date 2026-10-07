@@ -29,6 +29,11 @@ class _CaptureConn:
         self.search_query: str = ""
         self.count_query: str = ""
 
+    async def execute(self, query: str, *params: object) -> str:
+        # The scope wrapper's set_config preamble/scrub lands here; the SQL
+        # under test arrives via fetchrow/fetch, so just absorb these.
+        return "SET"
+
     async def fetchrow(self, query: str, *params: object) -> dict[str, int]:
         self.count_query = query
         return {"total": 0}
@@ -68,7 +73,7 @@ _LIFECYCLE_FRAGMENT = (
 # ---------------------------------------------------------------------------
 
 
-async def test_search_default_sql_unchanged_when_flag_off(monkeypatch) -> None:
+async def test_search_default_sql_unchanged_when_flag_off(daemon_tenant_scope, monkeypatch) -> None:
     """Snapshot regression: with the rollout flag off (the default), passing
     no ``include_archived`` argument must emit SQL byte-identical to the
     pre-M9 baseline — i.e. it must NOT contain the lifecycle WHERE addition.
@@ -87,7 +92,7 @@ async def test_search_default_sql_unchanged_when_flag_off(monkeypatch) -> None:
     assert "deleted_at IS NULL" in conn.search_query
 
 
-async def test_search_full_default_sql_unchanged_when_flag_off(monkeypatch) -> None:
+async def test_search_full_default_sql_unchanged_when_flag_off(daemon_tenant_scope, monkeypatch) -> None:
     monkeypatch.delenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", raising=False)
     monkeypatch.delenv("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", raising=False)
     conn = _CaptureConn()
@@ -99,7 +104,7 @@ async def test_search_full_default_sql_unchanged_when_flag_off(monkeypatch) -> N
     assert "lifecycle_stage" not in conn.count_query
 
 
-async def test_search_default_excludes_archived_when_flag_enabled(monkeypatch) -> None:
+async def test_search_default_excludes_archived_when_flag_enabled(daemon_tenant_scope, monkeypatch) -> None:
     monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
     monkeypatch.delenv("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", raising=False)
     conn = _CaptureConn()
@@ -112,7 +117,7 @@ async def test_search_default_excludes_archived_when_flag_enabled(monkeypatch) -
     assert _LIFECYCLE_FRAGMENT in conn.count_query
 
 
-async def test_search_full_default_excludes_archived_when_flag_enabled(monkeypatch) -> None:
+async def test_search_full_default_excludes_archived_when_flag_enabled(daemon_tenant_scope, monkeypatch) -> None:
     monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
     monkeypatch.delenv("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", raising=False)
     conn = _CaptureConn()
@@ -124,7 +129,7 @@ async def test_search_full_default_excludes_archived_when_flag_enabled(monkeypat
     assert _LIFECYCLE_FRAGMENT in conn.count_query
 
 
-async def test_include_archived_true_skips_filter_when_flag_enabled(monkeypatch) -> None:
+async def test_include_archived_true_skips_filter_when_flag_enabled(daemon_tenant_scope, monkeypatch) -> None:
     monkeypatch.setenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", "true")
     conn = _CaptureConn()
     repo = MemoryRepository(_CapturePool(conn))
@@ -135,7 +140,7 @@ async def test_include_archived_true_skips_filter_when_flag_enabled(monkeypatch)
     assert _LIFECYCLE_FRAGMENT not in conn.count_query
 
 
-async def test_include_archived_false_is_noop_when_flag_off(monkeypatch) -> None:
+async def test_include_archived_false_is_noop_when_flag_off(daemon_tenant_scope, monkeypatch) -> None:
     """Even when a caller explicitly passes ``include_archived=False`` we
     must NOT add the WHERE clause while the rollout flag is off — otherwise
     behavior would diverge from the documented baseline."""

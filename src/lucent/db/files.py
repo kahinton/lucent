@@ -28,9 +28,8 @@ class UserFileRepository:
         return item
 
     async def create(self, **values: Any) -> dict[str, Any]:
-        # rls: user_files / user_file_revisions are RLS-bound (shape a).
-        # The row's own org+user stamp is available in values — bind it so
-        # the INSERT satisfies the policy's WITH-CHECK.
+        # The row's own org+user stamp is available in values — bind it so the
+        # INSERT is structurally scoped like every other file query.
         async with scoped_acquire(
             organization_id=values["org_id"], user_id=values["user_id"]
         ) as conn:
@@ -121,8 +120,8 @@ class UserFileRepository:
         return [self._to_dict(row) for row in rows]
 
     async def append_revision(self, **values: Any) -> dict[str, Any] | None:
-        # rls: bind the file row's org+user (shape a) — the ownership
-        # SELECT ... FOR UPDATE and the revision INSERT both need it.
+        # Bind the file row's org+user — the ownership SELECT ... FOR UPDATE
+        # and the revision INSERT both need it.
         async with scoped_acquire(
             organization_id=values["org_id"], user_id=values["user_id"]
         ) as conn:

@@ -88,9 +88,17 @@ def _mock_challenge_repo() -> MagicMock:
     repo.create = AsyncMock()
     repo.increment_attempts = AsyncMock()
     repo.redeem = AsyncMock()
-    # For _pending_for_integration — needs pool.acquire context manager
+    # Pending-by-integration now goes through the repo method, which reads
+    # via the repo's own pool — proxy test-configured ``_conn.fetch`` the
+    # way the repo does.
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=[])
+
+    async def _list_pending(*_args, **_kwargs):
+        rows = await conn.fetch()
+        return [dict(r) for r in rows]
+
+    repo.list_pending_for_integration = _list_pending
     ctx = AsyncMock()
     ctx.__aenter__ = AsyncMock(return_value=conn)
     ctx.__aexit__ = AsyncMock(return_value=False)
@@ -103,7 +111,8 @@ def _mock_challenge_repo() -> MagicMock:
 
 def _mock_link_repo() -> MagicMock:
     repo = MagicMock()
-    repo.resolve_identity = AsyncMock(return_value=None)
+    repo.resolve_by_external_identity = AsyncMock(return_value=None)
+    repo.resolve_by_external_identity = AsyncMock(return_value=None)
     repo.create = AsyncMock()
     repo.activate = AsyncMock()
     repo.supersede = AsyncMock()
@@ -313,7 +322,7 @@ class TestIdentityResolve:
         link = _make_link(
             user_id=user_id, organization_id=org_id, status="active",
         )
-        link_repo.resolve_identity = AsyncMock(return_value=link)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=link)
 
         challenge_repo = _mock_challenge_repo()
         challenge_svc = PairingChallengeService(challenge_repo)
@@ -332,7 +341,7 @@ class TestIdentityResolve:
     @pytest.mark.asyncio
     async def test_resolve_no_link(self):
         link_repo = _mock_link_repo()
-        link_repo.resolve_identity = AsyncMock(return_value=None)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=None)
 
         challenge_repo = _mock_challenge_repo()
         challenge_svc = PairingChallengeService(challenge_repo)
@@ -350,7 +359,7 @@ class TestIdentityResolve:
     async def test_resolve_superseded_link_not_resolved(self):
         link_repo = _mock_link_repo()
         link = _make_link(status="superseded")
-        link_repo.resolve_identity = AsyncMock(return_value=link)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=link)
 
         challenge_repo = _mock_challenge_repo()
         challenge_svc = PairingChallengeService(challenge_repo)
@@ -367,7 +376,7 @@ class TestIdentityResolve:
     async def test_resolve_revoked_link_not_resolved(self):
         link_repo = _mock_link_repo()
         link = _make_link(status="revoked")
-        link_repo.resolve_identity = AsyncMock(return_value=link)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=link)
 
         challenge_repo = _mock_challenge_repo()
         challenge_svc = PairingChallengeService(challenge_repo)
@@ -383,7 +392,7 @@ class TestIdentityResolve:
     @pytest.mark.asyncio
     async def test_resolve_passes_workspace_id(self):
         link_repo = _mock_link_repo()
-        link_repo.resolve_identity = AsyncMock(return_value=None)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=None)
 
         challenge_repo = _mock_challenge_repo()
         challenge_svc = PairingChallengeService(challenge_repo)
@@ -395,10 +404,11 @@ class TestIdentityResolve:
             external_workspace_id="W_123",
         )
 
-        link_repo.resolve_identity.assert_awaited_once_with(
-            provider="slack",
-            external_user_id="U_EXT_123",
+        link_repo.resolve_by_external_identity.assert_awaited_once_with(
+            "slack",
+            "U_EXT_123",
             external_workspace_id="W_123",
+            organization_id=None,
         )
 
 
@@ -414,7 +424,7 @@ class TestResolveOrPrompt:
     async def test_returns_identity_when_linked(self):
         link_repo = _mock_link_repo()
         link = _make_link(status="active")
-        link_repo.resolve_identity = AsyncMock(return_value=link)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=link)
 
         challenge_repo = _mock_challenge_repo()
         challenge_svc = PairingChallengeService(challenge_repo)
@@ -430,7 +440,7 @@ class TestResolveOrPrompt:
     @pytest.mark.asyncio
     async def test_returns_prompt_string_when_unlinked(self):
         link_repo = _mock_link_repo()
-        link_repo.resolve_identity = AsyncMock(return_value=None)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=None)
 
         challenge_repo = _mock_challenge_repo()
         challenge_svc = PairingChallengeService(challenge_repo)
@@ -478,7 +488,7 @@ class TestRedeemCode:
         challenge_repo.redeem = AsyncMock(return_value=challenge)
 
         # No existing link
-        link_repo.resolve_identity = AsyncMock(return_value=None)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=None)
 
         # Mock create + activate
         new_link = _make_link(
@@ -529,7 +539,7 @@ class TestRedeemCode:
         old_link = _make_link(
             link_id=old_link_id, user_id=user_id, organization_id=org_id,
         )
-        link_repo.resolve_identity = AsyncMock(return_value=old_link)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=old_link)
 
         new_link = _make_link(
             link_id=new_link_id, user_id=user_id, organization_id=org_id,
@@ -624,7 +634,7 @@ class TestRedeemCode:
         challenge_repo.increment_attempts = AsyncMock(return_value=challenge)
         challenge_repo.redeem = AsyncMock(return_value=challenge)
 
-        link_repo.resolve_identity = AsyncMock(return_value=None)
+        link_repo.resolve_by_external_identity = AsyncMock(return_value=None)
         new_link = _make_link(user_id=user_id, organization_id=org_id)
         link_repo.create = AsyncMock(return_value=new_link)
         link_repo.activate = AsyncMock(return_value=None)  # fails

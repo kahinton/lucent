@@ -47,7 +47,12 @@ class MemoryAPI:
         importance: int = 5,
         metadata: dict | None = None,
     ) -> dict | None:
-        """Create an organization-visible memory through the server API."""
+        """Create a memory through the server API.
+
+        The API attributes daemon writes to the org's first owner as a real
+        user; sharing is that owner's explicit choice, so no org-wide
+        force-share is sent.
+        """
         from daemon.runtime.module_proxy import runtime
 
         body = {
@@ -55,7 +60,6 @@ class MemoryAPI:
             "content": content,
             "tags": tags,
             "importance": importance,
-            "shared": True,
         }
         if metadata:
             body["metadata"] = metadata

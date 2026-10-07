@@ -305,7 +305,11 @@ async def change_password(request: Request):
     new_token = None
     if session_token:
         new_token = await rotate_session(pool, session_token)
-    await destroy_all_user_sessions(pool, user.id, except_token=session_token or None)
+    # After rotation the device's session lives under the NEW token hash, so
+    # the keep-alive must exempt the rotated token (the old raw token's hash
+    # no longer matches any row).
+    keep_token = new_token or session_token
+    await destroy_all_user_sessions(pool, user.id, except_token=keep_token or None)
 
     await audit_repo.log_for_user(
         user, request,

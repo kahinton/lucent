@@ -273,12 +273,22 @@ class TestDaemonTaskResult:
 
         # Complete the task directly via the repository
         repo = MemoryRepository(db_pool)
-        memory = await repo.get(UUID(task_id))
+        memory = await repo.get(
+            UUID(task_id),
+            organization_id=api_user["organization_id"],
+            user_id=api_user["id"],
+        )
         new_tags = [t for t in memory["tags"] if t != "pending"]
         new_tags.append("completed")
         meta = dict(memory.get("metadata") or {})
         meta["result"] = "Found 3 patterns."
-        await repo.update(memory_id=UUID(task_id), tags=new_tags, metadata=meta)
+        await repo.update(
+            memory_id=UUID(task_id),
+            tags=new_tags,
+            metadata=meta,
+            organization_id=api_user["organization_id"],
+            user_id=api_user["id"],
+        )
 
         resp = await client.get(f"/api/daemon/tasks/{task_id}/result")
         assert resp.status_code == 200
@@ -311,7 +321,7 @@ class TestDaemonTaskCancel:
         get_resp = await client.get(f"/api/daemon/tasks/{task_id}")
         assert get_resp.status_code == 404
 
-    async def test_cancel_nonpending_task_fails(self, client, db_pool, api_prefix):
+    async def test_cancel_nonpending_task_fails(self, client, db_pool, api_user, api_prefix):
         """Cannot cancel a task that is no longer pending (e.g. claimed)."""
         create_resp = await client.post(
             "/api/daemon/tasks",
@@ -323,7 +333,9 @@ class TestDaemonTaskCancel:
 
         # Claim the task via DB
         repo = MemoryRepository(db_pool)
-        await repo.claim_task(UUID(task_id), "test-instance")
+        await repo.claim_task(
+            UUID(task_id), "test-instance", org_id=api_user["organization_id"]
+        )
 
         resp = await client.delete(f"/api/daemon/tasks/{task_id}")
         assert resp.status_code == 400
@@ -480,7 +492,9 @@ class TestDaemonMessageAcknowledge:
         assert resp.json()["success"] is True
 
         # Verify the message is now acknowledged
-        updated = await repo.get(msg["id"])
+        updated = await repo.get(
+            msg["id"], organization_id=api_user["organization_id"], user_id=api_user["id"]
+        )
         assert "acknowledged" in updated["tags"]
         assert "pending" not in updated["tags"]
         assert "acknowledged_at" in (updated.get("metadata") or {})
@@ -521,7 +535,9 @@ class TestDaemonMessageAcknowledge:
         resp2 = await client.post(f"/api/daemon/messages/{msg['id']}/acknowledge")
         assert resp2.status_code == 200
 
-        updated = await repo.get(msg["id"])
+        updated = await repo.get(
+            msg["id"], organization_id=api_user["organization_id"], user_id=api_user["id"]
+        )
         assert updated["tags"].count("acknowledged") == 1
 
 
@@ -604,10 +620,19 @@ class TestDaemonTaskListFiltering:
 
         # Mark completed via repo
         repo = MemoryRepository(db_pool)
-        memory = await repo.get(UUID(task_id))
+        memory = await repo.get(
+            UUID(task_id),
+            organization_id=api_user["organization_id"],
+            user_id=api_user["id"],
+        )
         new_tags = [t for t in memory["tags"] if t != "pending"]
         new_tags.append("completed")
-        await repo.update(memory_id=UUID(task_id), tags=new_tags)
+        await repo.update(
+            memory_id=UUID(task_id),
+            tags=new_tags,
+            organization_id=api_user["organization_id"],
+            user_id=api_user["id"],
+        )
 
         resp = await client.get("/api/daemon/tasks", params={"status": "completed"})
         assert resp.status_code == 200
@@ -617,7 +642,7 @@ class TestDaemonTaskListFiltering:
         ids = [t["id"] for t in tasks]
         assert task_id in ids
 
-    async def test_list_tasks_filter_claimed(self, client, db_pool, api_prefix):
+    async def test_list_tasks_filter_claimed(self, client, db_pool, api_user, api_prefix):
         """Filter tasks by status=claimed."""
         create_resp = await client.post(
             "/api/daemon/tasks",
@@ -629,7 +654,9 @@ class TestDaemonTaskListFiltering:
 
         # Claim via repo
         repo = MemoryRepository(db_pool)
-        await repo.claim_task(UUID(task_id), "test-instance-xyz")
+        await repo.claim_task(
+            UUID(task_id), "test-instance-xyz", org_id=api_user["organization_id"]
+        )
 
         resp = await client.get("/api/daemon/tasks", params={"status": "claimed"})
         assert resp.status_code == 200

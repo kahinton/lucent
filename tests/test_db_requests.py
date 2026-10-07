@@ -170,20 +170,26 @@ class TestListRequests:
 
 class TestUpdateRequestStatus:
     @pytest.mark.asyncio
-    async def test_update_to_in_progress(self, repo, req):
-        updated = await repo.update_request_status(str(req["id"]), "in_progress")
+    async def test_update_to_in_progress(self, repo, req, test_organization):
+        updated = await repo.update_request_status(
+            str(req["id"]), "in_progress", org_id=str(test_organization["id"])
+        )
         assert updated["status"] == "in_progress"
         assert updated["completed_at"] is None
 
     @pytest.mark.asyncio
-    async def test_update_to_completed(self, repo, req):
-        updated = await repo.update_request_status(str(req["id"]), "completed")
+    async def test_update_to_completed(self, repo, req, test_organization):
+        updated = await repo.update_request_status(
+            str(req["id"]), "completed", org_id=str(test_organization["id"])
+        )
         assert updated["status"] == "completed"
         assert updated["completed_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_update_to_failed(self, repo, req):
-        updated = await repo.update_request_status(str(req["id"]), "failed")
+    async def test_update_to_failed(self, repo, req, test_organization):
+        updated = await repo.update_request_status(
+            str(req["id"]), "failed", org_id=str(test_organization["id"])
+        )
         assert updated["status"] == "failed"
         assert updated["completed_at"] is not None
 
@@ -197,18 +203,24 @@ class TestUpdateRequestStatus:
         )
 
         assert updated["status"] == status
-        updated_task = await repo.get_task(str(task["id"]))
+        updated_task = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert updated_task["status"] == "cancelled"
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert any(
             event["detail"] == f"Task cancelled because parent request was {status}"
             for event in events["items"]
         )
 
     @pytest.mark.asyncio
-    async def test_update_nonexistent(self, repo):
+    async def test_update_nonexistent(self, repo, test_organization):
         result = await repo.update_request_status(
-            "00000000-0000-0000-0000-000000000000", "completed"
+            "00000000-0000-0000-0000-000000000000",
+            "completed",
+            org_id=str(test_organization["id"]),
         )
         assert result is None
 
@@ -251,7 +263,9 @@ class TestCreateTask:
             title="Task With Event",
             org_id=str(test_organization["id"]),
         )
-        events = await repo.list_task_events(str(t["id"]))
+        events = await repo.list_task_events(
+            str(t["id"]), org_id=str(test_organization["id"])
+        )
         assert len(events["items"]) == 1
         assert events["items"][0]["event_type"] == "created"
 
@@ -284,30 +298,41 @@ class TestCreateTask:
 
 class TestGetTask:
     @pytest.mark.asyncio
-    async def test_get_existing(self, repo, task):
-        found = await repo.get_task(str(task["id"]))
+    async def test_get_existing(self, repo, task, test_organization):
+        found = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert found is not None
         assert found["title"] == "Test Task"
 
     @pytest.mark.asyncio
-    async def test_get_nonexistent(self, repo):
-        found = await repo.get_task("00000000-0000-0000-0000-000000000000")
+    async def test_get_nonexistent(self, repo, test_organization):
+        found = await repo.get_task(
+            "00000000-0000-0000-0000-000000000000",
+            org_id=str(test_organization["id"]),
+        )
         assert found is None
 
 
 class TestListTasks:
     @pytest.mark.asyncio
     async def test_list_by_request(self, repo, req, task, test_organization):
-        result = await repo.list_tasks(str(req["id"]))
+        result = await repo.list_tasks(
+            str(req["id"]), org_id=str(test_organization["id"])
+        )
         assert len(result["items"]) >= 1
         assert any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
     async def test_list_filter_status(self, repo, req, task, test_organization):
-        result = await repo.list_tasks(str(req["id"]), status="pending")
+        result = await repo.list_tasks(
+            str(req["id"]), status="pending", org_id=str(test_organization["id"])
+        )
         assert any(t["id"] == task["id"] for t in result["items"])
 
-        result = await repo.list_tasks(str(req["id"]), status="completed")
+        result = await repo.list_tasks(
+            str(req["id"]), status="completed", org_id=str(test_organization["id"])
+        )
         assert not any(t["id"] == task["id"] for t in result["items"])
 
     @pytest.mark.asyncio
@@ -319,7 +344,7 @@ class TestListTasks:
         _t1 = await repo.create_task(
             request_id=str(req["id"]), title="Second", org_id=org, sequence_order=1
         )
-        result = await repo.list_tasks(str(req["id"]))
+        result = await repo.list_tasks(str(req["id"]), org_id=org)
         titles = [t["title"] for t in result["items"] if t["title"] in ("First", "Second")]
         assert titles.index("First") < titles.index("Second")
 
@@ -332,7 +357,9 @@ class TestListPendingRequests:
 
     @pytest.mark.asyncio
     async def test_excludes_completed(self, repo, req, test_organization):
-        await repo.update_request_status(str(req["id"]), "completed")
+        await repo.update_request_status(
+            str(req["id"]), "completed", org_id=str(test_organization["id"])
+        )
         result = await repo.list_pending_requests(str(test_organization["id"]))
         assert not any(r["id"] == req["id"] for r in result["items"])
 
@@ -360,7 +387,9 @@ class TestListPendingTasks:
 
     @pytest.mark.asyncio
     async def test_excludes_claimed_tasks(self, repo, req, task, test_organization):
-        await repo.claim_task(str(task["id"]), "test-instance")
+        await repo.claim_task(
+            str(task["id"]), "test-instance", org_id=str(test_organization["id"])
+        )
         result = await repo.list_pending_tasks(str(test_organization["id"]))
         assert not any(t["id"] == task["id"] for t in result["items"])
 
@@ -380,9 +409,9 @@ class TestListPendingTasks:
         assert t1["id"] not in pending_ids
 
         # Complete t0, now t1 should be dispatchable
-        await repo.claim_task(str(t0["id"]), "inst")
-        await repo.start_task(str(t0["id"]))
-        await repo.complete_task(str(t0["id"]), "done")
+        await repo.claim_task(str(t0["id"]), "inst", org_id=org)
+        await repo.start_task(str(t0["id"]), org_id=org)
+        await repo.complete_task(str(t0["id"]), "done", org_id=org)
         pending = await repo.list_pending_tasks(org)
         pending_ids = [t["id"] for t in pending["items"]]
         assert t1["id"] in pending_ids
@@ -435,63 +464,88 @@ class TestListQueuedTasks:
 
 class TestTaskLifecycle:
     @pytest.mark.asyncio
-    async def test_claim_task(self, repo, task):
-        claimed = await repo.claim_task(str(task["id"]), "daemon-1")
+    async def test_claim_task(self, repo, task, test_organization):
+        claimed = await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
         assert claimed is not None
         assert claimed["status"] == "claimed"
         assert claimed["claimed_by"] == "daemon-1"
         assert claimed["claimed_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_claim_already_claimed(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        second = await repo.claim_task(str(task["id"]), "daemon-2")
+    async def test_claim_already_claimed(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
+        second = await repo.claim_task(
+            str(task["id"]), "daemon-2", org_id=str(test_organization["id"])
+        )
         assert second is None
 
     @pytest.mark.asyncio
-    async def test_claim_sets_request_in_progress(self, repo, req, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
+    async def test_claim_sets_request_in_progress(self, repo, req, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
         org_id = str(req["organization_id"])
         updated_req = await repo.get_request(str(req["id"]), org_id)
         assert updated_req["status"] == "in_progress"
 
     @pytest.mark.asyncio
-    async def test_start_task(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        started = await repo.start_task(str(task["id"]))
+    async def test_start_task(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
+        started = await repo.start_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert started is not None
         assert started["status"] == "running"
 
     @pytest.mark.asyncio
-    async def test_start_unclaimed_task(self, repo, task):
-        result = await repo.start_task(str(task["id"]))
+    async def test_start_unclaimed_task(self, repo, task, test_organization):
+        result = await repo.start_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_complete_task(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        completed = await repo.complete_task(str(task["id"]), "All done")
+    async def test_complete_task(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
+        completed = await repo.complete_task(
+            str(task["id"]), "All done", org_id=str(test_organization["id"])
+        )
         assert completed is not None
         assert completed["status"] == "completed"
         assert completed["result"] == "All done"
         assert completed["completed_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_fail_task(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        failed = await repo.fail_task(str(task["id"]), "Something broke")
+    async def test_fail_task(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
+        failed = await repo.fail_task(
+            str(task["id"]), "Something broke", org_id=str(test_organization["id"])
+        )
         assert failed is not None
         assert failed["status"] == "failed"
         assert failed["error"] == "Something broke"
         assert failed["completed_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_mark_task_needs_review_and_retry(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
+    async def test_mark_task_needs_review_and_retry(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
         reviewed = await repo.mark_task_needs_review(
             str(task["id"]),
             "Required tool call was not completed",
             result="Useful investigation output",
+            org_id=str(test_organization["id"]),
         )
 
         assert reviewed is not None
@@ -499,38 +553,56 @@ class TestTaskLifecycle:
         assert reviewed["result"] == "Useful investigation output"
         assert reviewed["completed_at"] is not None
 
-        retried = await repo.retry_task(str(task["id"]))
+        retried = await repo.retry_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert retried is not None
         assert retried["status"] == "pending"
         assert retried["error"] is None
 
     @pytest.mark.asyncio
-    async def test_release_claimed_task(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        released = await repo.release_task(str(task["id"]))
+    async def test_release_claimed_task(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
+        released = await repo.release_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert released is not None
         assert released["status"] == "pending"
         assert released["claimed_by"] is None
         assert released["claimed_at"] is None
 
     @pytest.mark.asyncio
-    async def test_release_running_task(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        await repo.start_task(str(task["id"]))
-        released = await repo.release_task(str(task["id"]))
+    async def test_release_running_task(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
+        await repo.start_task(str(task["id"]), org_id=str(test_organization["id"]))
+        released = await repo.release_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert released is not None
         assert released["status"] == "pending"
 
     @pytest.mark.asyncio
-    async def test_release_pending_task_noop(self, repo, task):
-        result = await repo.release_task(str(task["id"]))
+    async def test_release_pending_task_noop(self, repo, task, test_organization):
+        result = await repo.release_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_retry_failed_task(self, repo, task):
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        await repo.fail_task(str(task["id"]), "error")
-        retried = await repo.retry_task(str(task["id"]))
+    async def test_retry_failed_task(self, repo, task, test_organization):
+        await repo.claim_task(
+            str(task["id"]), "daemon-1", org_id=str(test_organization["id"])
+        )
+        await repo.fail_task(
+            str(task["id"]), "error", org_id=str(test_organization["id"])
+        )
+        retried = await repo.retry_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert retried is not None
         assert retried["status"] == "pending"
         assert retried["claimed_by"] is None
@@ -538,18 +610,21 @@ class TestTaskLifecycle:
         assert retried["result"] is None
 
     @pytest.mark.asyncio
-    async def test_retry_non_failed_noop(self, repo, task):
-        result = await repo.retry_task(str(task["id"]))
+    async def test_retry_non_failed_noop(self, repo, task, test_organization):
+        result = await repo.retry_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_full_lifecycle(self, repo, task):
+    async def test_full_lifecycle(self, repo, task, test_organization):
         """pending → claimed → running → completed."""
         tid = str(task["id"])
+        org_id = str(test_organization["id"])
         assert task["status"] == "pending"
-        await repo.claim_task(tid, "d1")
-        await repo.start_task(tid)
-        result = await repo.complete_task(tid, "Success!")
+        await repo.claim_task(tid, "d1", org_id=org_id)
+        await repo.start_task(tid, org_id=org_id)
+        result = await repo.complete_task(tid, "Success!", org_id=org_id)
         assert result["status"] == "completed"
 
 
@@ -558,22 +633,31 @@ class TestReleaseStale:
     async def test_releases_stale_tasks(self, repo, task, db_pool, test_organization):
         tid = str(task["id"])
         org_id = str(test_organization["id"])
-        await repo.claim_task(tid, "daemon-1")
-        # Manually backdate claimed_at
+        await repo.claim_task(tid, "daemon-1", org_id=org_id)
+        # Backdate the claim and clear its activity: claim_task stamps
+        # last_heartbeat_at and logs a 'claimed' event, both of which count as
+        # recent activity in the activity-based stale predicate. A hung task
+        # with zero activity for the threshold must still be reaped.
         async with db_pool.acquire() as conn:
             await conn.execute(
-                "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
+                "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes',"
+                " last_heartbeat_at = NULL WHERE id = $1",
+                task["id"],
+            )
+            await conn.execute(
+                "UPDATE task_events SET created_at = NOW() - interval '60 minutes'"
+                " WHERE task_id = $1",
                 task["id"],
             )
         count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count >= 1
-        refreshed = await repo.get_task(tid)
+        refreshed = await repo.get_task(tid, org_id=org_id)
         assert refreshed["status"] == "pending"
 
     @pytest.mark.asyncio
     async def test_does_not_release_fresh_tasks(self, repo, task, test_organization):
         org_id = str(test_organization["id"])
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(str(task["id"]), "daemon-1", org_id=org_id)
         count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count == 0
 
@@ -690,12 +774,15 @@ class TestApprovalGate:
 
 class TestRequestCompletion:
     @pytest.mark.asyncio
-    async def test_auto_complete_when_review_skipped(self, repo, req, task, monkeypatch):
+    async def test_auto_complete_when_review_skipped(
+        self, repo, req, task, test_organization, monkeypatch
+    ):
         """Request moves to completed when all tasks are done
         and LUCENT_SKIP_POST_REVIEW=true."""
         monkeypatch.setenv("LUCENT_SKIP_POST_REVIEW", "true")
-        await repo.claim_task(str(task["id"]), "d1")
-        await repo.complete_task(str(task["id"]), "done")
+        org_id = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), "d1", org_id=org_id)
+        await repo.complete_task(str(task["id"]), "done", org_id=org_id)
         org_id = str(req["organization_id"])
         updated = await repo.get_request(str(req["id"]), org_id)
         assert updated["status"] == "completed"
@@ -712,8 +799,8 @@ class TestRequestCompletion:
             org_id=org,
             agent_type="code",
         )
-        await repo.claim_task(str(t["id"]), "d1")
-        await repo.complete_task(str(t["id"]), "done")
+        await repo.claim_task(str(t["id"]), "d1", org_id=org)
+        await repo.complete_task(str(t["id"]), "done", org_id=org)
         updated = await repo.get_request(str(r["id"]), org)
         assert updated["status"] == "review"
 
@@ -729,11 +816,11 @@ class TestRequestCompletion:
         t1 = await repo.create_task(request_id=str(r["id"]), title="T1", org_id=org)
         t2 = await repo.create_task(request_id=str(r["id"]), title="T2", org_id=org)
         # Fail t1 first
-        await repo.claim_task(str(t1["id"]), "d1")
-        await repo.fail_task(str(t1["id"]), "oops")
+        await repo.claim_task(str(t1["id"]), "d1", org_id=org)
+        await repo.fail_task(str(t1["id"]), "oops", org_id=org)
         # Then complete t2 — this triggers the completion check
-        await repo.claim_task(str(t2["id"]), "d1")
-        await repo.complete_task(str(t2["id"]), "ok")
+        await repo.claim_task(str(t2["id"]), "d1", org_id=org)
+        await repo.complete_task(str(t2["id"]), "ok", org_id=org)
         updated = await repo.get_request(str(r["id"]), org)
         assert updated["status"] == "failed"
 
@@ -744,43 +831,49 @@ class TestRequestCompletion:
         r = await repo.create_request(title="Retry Test", org_id=org)
         t = await repo.create_task(request_id=str(r["id"]), title="T", org_id=org)
         tid = str(t["id"])
-        await repo.claim_task(tid, "d1")
-        await repo.fail_task(tid, "oops")
+        await repo.claim_task(tid, "d1", org_id=org)
+        await repo.fail_task(tid, "oops", org_id=org)
         # Reset request to pending to simulate a scenario where retry should activate it
-        await repo.update_request_status(str(r["id"]), "pending")
-        await repo.retry_task(tid)
+        await repo.update_request_status(str(r["id"]), "pending", org_id=org)
+        await repo.retry_task(tid, org_id=org)
         updated = await repo.get_request(str(r["id"]), org)
         assert updated["status"] == "in_progress"
 
 
 class TestTaskEvents:
     @pytest.mark.asyncio
-    async def test_add_event(self, repo, task):
+    async def test_add_event(self, repo, task, test_organization):
         event = await repo.add_task_event(
-            str(task["id"]), "progress", "50% done", metadata={"pct": 50}
+            str(task["id"]),
+            "progress",
+            "50% done",
+            metadata={"pct": 50},
+            org_id=str(test_organization["id"]),
         )
         assert event["event_type"] == "progress"
         assert event["detail"] == "50% done"
 
     @pytest.mark.asyncio
-    async def test_list_events(self, repo, task):
+    async def test_list_events(self, repo, task, test_organization):
         tid = str(task["id"])
+        org_id = str(test_organization["id"])
         # Task creation already logged one event
-        await repo.add_task_event(tid, "info", "extra")
-        events = await repo.list_task_events(tid)
+        await repo.add_task_event(tid, "info", "extra", org_id=org_id)
+        events = await repo.list_task_events(tid, org_id=org_id)
         assert len(events["items"]) >= 2
         types = [e["event_type"] for e in events["items"]]
         assert "created" in types
         assert "info" in types
 
     @pytest.mark.asyncio
-    async def test_lifecycle_events(self, repo, task):
+    async def test_lifecycle_events(self, repo, task, test_organization):
         """Full lifecycle produces expected event trail."""
         tid = str(task["id"])
-        await repo.claim_task(tid, "d1")
-        await repo.start_task(tid)
-        await repo.complete_task(tid, "done")
-        events = await repo.list_task_events(tid)
+        org_id = str(test_organization["id"])
+        await repo.claim_task(tid, "d1", org_id=org_id)
+        await repo.start_task(tid, org_id=org_id)
+        await repo.complete_task(tid, "done", org_id=org_id)
+        events = await repo.list_task_events(tid, org_id=org_id)
         types = [e["event_type"] for e in events["items"]]
         assert "created" in types
         assert "claimed" in types
@@ -800,37 +893,47 @@ class TestTaskEvents:
 
 class TestTaskMemoryLinks:
     @pytest.mark.asyncio
-    async def test_link_memory(self, repo, task, test_memory):
-        await repo.link_memory(str(task["id"]), str(test_memory["id"]), relation="created")
-        result = await repo.list_task_memories(str(task["id"]))
+    async def test_link_memory(self, repo, task, test_memory, test_organization):
+        org_id = str(test_organization["id"])
+        await repo.link_memory(
+            str(task["id"]), str(test_memory["id"]), relation="created", org_id=org_id
+        )
+        result = await repo.list_task_memories(str(task["id"]), org_id=org_id)
         assert len(result["items"]) == 1
         assert result["items"][0]["relation"] == "created"
         assert result["items"][0]["memory_id"] == test_memory["id"]
 
     @pytest.mark.asyncio
-    async def test_link_memory_idempotent(self, repo, task, test_memory):
+    async def test_link_memory_idempotent(self, repo, task, test_memory, test_organization):
         """Linking same memory twice with same relation is a no-op (ON CONFLICT)."""
         tid, mid = str(task["id"]), str(test_memory["id"])
-        await repo.link_memory(tid, mid, "read")
-        await repo.link_memory(tid, mid, "read")
-        result = await repo.list_task_memories(tid)
+        org_id = str(test_organization["id"])
+        await repo.link_memory(tid, mid, "read", org_id=org_id)
+        await repo.link_memory(tid, mid, "read", org_id=org_id)
+        result = await repo.list_task_memories(tid, org_id=org_id)
         read_links = [m for m in result["items"] if m["relation"] == "read"]
         assert len(read_links) == 1
 
     @pytest.mark.asyncio
-    async def test_link_different_relations(self, repo, task, test_memory):
+    async def test_link_different_relations(self, repo, task, test_memory, test_organization):
         tid, mid = str(task["id"]), str(test_memory["id"])
-        await repo.link_memory(tid, mid, "read")
-        await repo.link_memory(tid, mid, "updated")
-        result = await repo.list_task_memories(tid)
+        org_id = str(test_organization["id"])
+        await repo.link_memory(tid, mid, "read", org_id=org_id)
+        await repo.link_memory(tid, mid, "updated", org_id=org_id)
+        result = await repo.list_task_memories(tid, org_id=org_id)
         relations = {m["relation"] for m in result["items"]}
         assert "read" in relations
         assert "updated" in relations
 
     @pytest.mark.asyncio
-    async def test_link_creates_event(self, repo, task, test_memory):
-        await repo.link_memory(str(task["id"]), str(test_memory["id"]), "created")
-        events = await repo.list_task_events(str(task["id"]))
+    async def test_link_creates_event(self, repo, task, test_memory, test_organization):
+        org_id = str(test_organization["id"])
+        await repo.link_memory(
+            str(task["id"]), str(test_memory["id"]), "created", org_id=org_id
+        )
+        events = await repo.list_task_events(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         link_events = [e for e in events["items"] if e["event_type"] == "memory_created"]
         assert len(link_events) == 1
 
@@ -854,8 +957,8 @@ class TestGetRequestWithTasks:
         tid = str(task["id"])
 
         # Add an event and memory link
-        await repo.add_task_event(tid, "info", "test event")
-        await repo.link_memory(tid, str(test_memory["id"]), "created")
+        await repo.add_task_event(tid, "info", "test event", org_id=org)
+        await repo.link_memory(tid, str(test_memory["id"]), "created", org_id=org)
 
         result = await repo.get_request_with_tasks(str(req["id"]), org)
         assert result is not None
@@ -937,7 +1040,7 @@ class TestDashboardQueries:
         org = str(test_organization["id"])
         tid = str(task["id"])
         for i in range(5):
-            await repo.add_task_event(tid, "progress", f"step {i}")
+            await repo.add_task_event(tid, "progress", f"step {i}", org_id=org)
         events = await repo.get_recent_events(org, limit=3)
         assert len(events) == 3
 
@@ -968,14 +1071,18 @@ class TestCrossOrgIsolation:
     # ── 2. claim_task ────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_claim_task_cross_org_blocked(self, repo, task, other_org):
+    async def test_claim_task_cross_org_blocked(
+        self, repo, task, other_org, test_organization
+    ):
         """claim_task with wrong org_id returns None (task stays pending)."""
         result = await repo.claim_task(
             str(task["id"]), "attacker-instance", org_id=str(other_org["id"])
         )
         assert result is None
         # Verify task is still pending (not mutated)
-        original = await repo.get_task(str(task["id"]))
+        original = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert original["status"] == "pending"
 
     @pytest.mark.asyncio
@@ -990,19 +1097,31 @@ class TestCrossOrgIsolation:
     # ── 3. start_task ────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_start_task_cross_org_blocked(self, repo, task, other_org):
+    async def test_start_task_cross_org_blocked(
+        self, repo, task, other_org, test_organization
+    ):
         """start_task with wrong org_id returns None."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.start_task(str(task["id"]), org_id=str(other_org["id"]))
         assert result is None
         # Verify task is still claimed (not mutated)
-        original = await repo.get_task(str(task["id"]))
+        original = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert original["status"] == "claimed"
 
     @pytest.mark.asyncio
     async def test_start_task_same_org_allowed(self, repo, task, test_organization):
         """start_task with correct org_id succeeds."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.start_task(
             str(task["id"]), org_id=str(test_organization["id"])
         )
@@ -1012,20 +1131,32 @@ class TestCrossOrgIsolation:
     # ── 4. complete_task ─────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_complete_task_cross_org_blocked(self, repo, task, other_org):
+    async def test_complete_task_cross_org_blocked(
+        self, repo, task, other_org, test_organization
+    ):
         """complete_task with wrong org_id returns None."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.complete_task(
             str(task["id"]), "hacked", org_id=str(other_org["id"])
         )
         assert result is None
-        original = await repo.get_task(str(task["id"]))
+        original = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert original["status"] == "claimed"
 
     @pytest.mark.asyncio
     async def test_complete_task_same_org_allowed(self, repo, task, test_organization):
         """complete_task with correct org_id succeeds."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.complete_task(
             str(task["id"]), "done", org_id=str(test_organization["id"])
         )
@@ -1035,20 +1166,32 @@ class TestCrossOrgIsolation:
     # ── 5. fail_task ─────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_fail_task_cross_org_blocked(self, repo, task, other_org):
+    async def test_fail_task_cross_org_blocked(
+        self, repo, task, other_org, test_organization
+    ):
         """fail_task with wrong org_id returns None."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.fail_task(
             str(task["id"]), "sabotage", org_id=str(other_org["id"])
         )
         assert result is None
-        original = await repo.get_task(str(task["id"]))
+        original = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert original["status"] == "claimed"
 
     @pytest.mark.asyncio
     async def test_fail_task_same_org_allowed(self, repo, task, test_organization):
         """fail_task with correct org_id succeeds."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.fail_task(
             str(task["id"]), "real error", org_id=str(test_organization["id"])
         )
@@ -1058,18 +1201,30 @@ class TestCrossOrgIsolation:
     # ── 6. release_task ──────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_release_task_cross_org_blocked(self, repo, task, other_org):
+    async def test_release_task_cross_org_blocked(
+        self, repo, task, other_org, test_organization
+    ):
         """release_task with wrong org_id returns None."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.release_task(str(task["id"]), org_id=str(other_org["id"]))
         assert result is None
-        original = await repo.get_task(str(task["id"]))
+        original = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert original["status"] == "claimed"
 
     @pytest.mark.asyncio
     async def test_release_task_same_org_allowed(self, repo, task, test_organization):
         """release_task with correct org_id succeeds."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.release_task(
             str(task["id"]), org_id=str(test_organization["id"])
         )
@@ -1079,20 +1234,40 @@ class TestCrossOrgIsolation:
     # ── 7. retry_task ────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_retry_task_cross_org_blocked(self, repo, task, other_org):
+    async def test_retry_task_cross_org_blocked(
+        self, repo, task, other_org, test_organization
+    ):
         """retry_task with wrong org_id returns None."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        await repo.fail_task(str(task["id"]), "error")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
+        await repo.fail_task(
+            str(task["id"]),
+            "error",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.retry_task(str(task["id"]), org_id=str(other_org["id"]))
         assert result is None
-        original = await repo.get_task(str(task["id"]))
+        original = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert original["status"] == "failed"
 
     @pytest.mark.asyncio
     async def test_retry_task_same_org_allowed(self, repo, task, test_organization):
         """retry_task with correct org_id succeeds."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
-        await repo.fail_task(str(task["id"]), "error")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
+        await repo.fail_task(
+            str(task["id"]),
+            "error",
+            org_id=str(test_organization["id"]),
+        )
         result = await repo.retry_task(
             str(task["id"]), org_id=str(test_organization["id"])
         )
@@ -1103,10 +1278,14 @@ class TestCrossOrgIsolation:
 
     @pytest.mark.asyncio
     async def test_release_stale_tasks_cross_org_blocked(
-        self, repo, task, other_org, db_pool
+        self, repo, task, other_org, db_pool, test_organization
     ):
         """release_stale_tasks with wrong org_id returns 0 affected rows."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
         # Backdate claimed_at to make it stale
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -1118,7 +1297,9 @@ class TestCrossOrgIsolation:
         )
         assert count == 0
         # Verify task is still claimed (not released by wrong org)
-        original = await repo.get_task(str(task["id"]))
+        original = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert original["status"] == "claimed"
 
     @pytest.mark.asyncio
@@ -1126,17 +1307,35 @@ class TestCrossOrgIsolation:
         self, repo, task, test_organization, db_pool
     ):
         """release_stale_tasks with correct org_id releases the task."""
-        await repo.claim_task(str(task["id"]), "daemon-1")
+        await repo.claim_task(
+            str(task["id"]),
+            "daemon-1",
+            org_id=str(test_organization["id"]),
+        )
+        # claim_task stamps last_heartbeat_at AND logs a 'claimed' event; both
+        # count as activity, so a genuinely hung task must have the heartbeat
+        # cleared and events backdated to simulate zero recent activity.
         async with db_pool.acquire() as conn:
             await conn.execute(
-                "UPDATE tasks SET claimed_at = NOW() - interval '60 minutes' WHERE id = $1",
+                """UPDATE tasks
+                   SET claimed_at = NOW() - interval '60 minutes',
+                       last_heartbeat_at = NULL
+                   WHERE id = $1""",
+                task["id"],
+            )
+            await conn.execute(
+                """UPDATE task_events
+                   SET created_at = NOW() - interval '60 minutes'
+                   WHERE task_id = $1""",
                 task["id"],
             )
         count = await repo.release_stale_tasks(
             stale_minutes=30, org_id=str(test_organization["id"])
         )
         assert count >= 1
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(
+            str(task["id"]), org_id=str(test_organization["id"])
+        )
         assert refreshed["status"] == "pending"
 
     # ── 9. update_request_status ─────────────────────────────────────────
@@ -1231,11 +1430,11 @@ class TestListActiveWork:
         t2 = await repo.create_task(request_id=rid, title="Running", org_id=org)
         t3 = await repo.create_task(request_id=rid, title="Done", org_id=org)
         # Move t2 to claimed
-        await repo.claim_task(str(t2["id"]), "daemon-1")
+        await repo.claim_task(str(t2["id"]), "daemon-1", org_id=org)
         # Move t3 to completed
-        await repo.claim_task(str(t3["id"]), "daemon-2")
-        await repo.start_task(str(t3["id"]))
-        await repo.complete_task(str(t3["id"]), result="done")
+        await repo.claim_task(str(t3["id"]), "daemon-2", org_id=org)
+        await repo.start_task(str(t3["id"]), org_id=org)
+        await repo.complete_task(str(t3["id"]), "done", org_id=org)
 
         result = await repo.list_active_work(org)
         row = next(r for r in result["items"] if str(r["id"]) == rid)
@@ -1689,7 +1888,7 @@ class TestListPlanningTargets:
             {"description": "Prototype", "status": "active"},
             {"description": "Soak", "status": "active"},
         ])
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         ids = [t["goal_id"] for t in targets]
         assert gid in ids
         target = next(t for t in targets if t["goal_id"] == gid)
@@ -1711,48 +1910,44 @@ class TestListPlanningTargets:
         targets = await repo.list_planning_targets(org_id, role="daemon")
         assert gid in [target["goal_id"] for target in targets]
 
-    async def test_member_role_does_not_return_unowned_goal(
+    async def test_member_without_scope_fails_closed(
         self, repo, test_organization, db_pool
     ):
+        # The repo cannot guess whose goals a member wants to plan against —
+        # member callers must pass user_id (Kyle decision 2026-10-06); the
+        # org-wide listing is the daemon/planner path.
         org_id = str(test_organization["id"])
-        gid = await self._make_goal(
-            db_pool,
-            org_id,
-            milestones=[{"description": "Private", "status": "active"}],
-        )
-        targets = await repo.list_planning_targets(org_id, role="member")
-        assert gid not in [target["goal_id"] for target in targets]
+        with pytest.raises(ValueError):
+            await repo.list_planning_targets(org_id, role="member")
 
-    async def test_daemon_role_returns_org_goal(
-        self, repo, test_organization, db_pool
+    async def test_member_scope_returns_own_goal_only(
+        self, repo, test_organization, db_pool, test_user
     ):
         org_id = str(test_organization["id"])
-        gid = await self._make_goal(
+        own_gid = await self._make_goal(
             db_pool,
             org_id,
-            milestones=[{"description": "Do the thing", "status": "active"}],
+            milestones=[{"description": "My milestone", "status": "active"}],
+            user_id=str(test_user["id"]),
         )
-        targets = await repo.list_planning_targets(org_id, role="daemon")
-        assert gid in [target["goal_id"] for target in targets]
-
-    async def test_member_role_does_not_return_unowned_goal(
-        self, repo, test_organization, db_pool
-    ):
-        org_id = str(test_organization["id"])
-        gid = await self._make_goal(
+        other_gid = await self._make_goal(
             db_pool,
             org_id,
-            milestones=[{"description": "Private", "status": "active"}],
+            milestones=[{"description": "Someone else's", "status": "active"}],
         )
-        targets = await repo.list_planning_targets(org_id, role="member")
-        assert gid not in [target["goal_id"] for target in targets]
+        targets = await repo.list_planning_targets(
+            org_id, user_id=str(test_user["id"]), role="member"
+        )
+        returned = [target["goal_id"] for target in targets]
+        assert own_gid in returned
+        assert other_gid not in returned
 
     async def test_excludes_completed_goal(
         self, repo, test_organization, db_pool
     ):
         org_id = str(test_organization["id"])
         gid = await self._make_goal(db_pool, org_id, status="completed")
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         assert gid not in [t["goal_id"] for t in targets]
 
     async def test_excludes_abandoned_goal(
@@ -1760,7 +1955,7 @@ class TestListPlanningTargets:
     ):
         org_id = str(test_organization["id"])
         gid = await self._make_goal(db_pool, org_id, status="abandoned")
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         assert gid not in [t["goal_id"] for t in targets]
 
     async def test_excludes_goal_with_no_active_milestones(
@@ -1773,7 +1968,7 @@ class TestListPlanningTargets:
             {"description": "a", "status": "completed"},
             {"description": "b", "status": "abandoned"},
         ])
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         assert gid not in [t["goal_id"] for t in targets]
 
     async def test_excludes_goal_with_open_request(
@@ -1789,7 +1984,7 @@ class TestListPlanningTargets:
             goal_id=gid, goal_milestone_index=1,
         )
         assert r.get("status") != "skipped"
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         assert gid not in [t["goal_id"] for t in targets]
 
     async def test_includes_goal_after_request_completed(
@@ -1807,7 +2002,7 @@ class TestListPlanningTargets:
             goal_id=gid, goal_milestone_index=2,
         )
         await repo.update_request_status(str(r["id"]), "completed", org_id=org_id)
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         ids = [t["goal_id"] for t in targets]
         # Note: completing the request also marks milestone 2 done via the
         # completion side effect, which marks the entire goal completed
@@ -1854,7 +2049,7 @@ class TestListPlanningTargets:
         assert statuses[1] == "active"
 
         # And the planner should now surface milestone 2 as the next target.
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         target = next((t for t in targets if t["goal_id"] == gid), None)
         assert target is not None
         assert target["next_milestone_index"] == 2
@@ -1866,7 +2061,7 @@ class TestListPlanningTargets:
         free-form). The planner picks its own title."""
         org_id = str(test_organization["id"])
         gid = await self._make_goal(db_pool, org_id, milestones=[])
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         ids = [t["goal_id"] for t in targets]
         assert gid in ids
         target = next(t for t in targets if t["goal_id"] == gid)
@@ -2177,7 +2372,7 @@ class TestStartAfterGating:
         gid = await self._make_goal(db_pool, org_id, [
             {"description": "a", "status": "active", "start_after": future},
         ])
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         assert gid not in [t["goal_id"] for t in targets]
 
     async def test_planning_targets_includes_past_start_after(
@@ -2189,7 +2384,7 @@ class TestStartAfterGating:
         gid = await self._make_goal(db_pool, org_id, [
             {"description": "a", "status": "active", "start_after": past},
         ])
-        targets = await repo.list_planning_targets(org_id)
+        targets = await repo.list_planning_targets(org_id, role="daemon")
         assert gid in [t["goal_id"] for t in targets]
 
     async def test_create_refuses_future_start_after(

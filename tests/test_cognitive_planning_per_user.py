@@ -614,6 +614,11 @@ class TestMemoryMaintenanceFanout:
                 "daemon.daemon._build_scoped_memory_server_config",
                 side_effect=lambda **kwargs: {"headers": kwargs},
             ),
+            patch(
+                "daemon.daemon._select_model_for_user",
+                new_callable=AsyncMock,
+                side_effect=lambda **kwargs: ("test-model", "stubbed per-user selection"),
+            ) as select_model,
             patch.object(
                 daemon, "run_session", new_callable=AsyncMock, return_value="done"
             ) as run_session,
@@ -637,6 +642,8 @@ class TestMemoryMaintenanceFanout:
 
         assert "fan-out complete" in result
         assert [call.kwargs["memory_scope_user_id"] for call in mint_key.call_args_list] == user_ids
+        assert select_model.await_count == 2
+        assert [call.kwargs["user_id"] for call in select_model.await_args_list] == user_ids
         assert run_session.call_count == 2
         assert [call.kwargs["audit_context"]["user_id"] for call in run_session.call_args_list] == user_ids
 

@@ -17,6 +17,7 @@ from lucent.db import (
     MemoryRepository,
     UserRepository,
     VersionConflictError,
+    get_first_memory_owner,
     get_pool,
     init_db,
 )
@@ -143,7 +144,6 @@ def _build_snapshot(memory: dict[str, Any]) -> dict[str, Any]:
         "importance": memory["importance"],
         "metadata": memory["metadata"],
         "related_memory_ids": [str(uid) for uid in memory.get("related_memory_ids", [])],
-        "shared": memory.get("shared", False),
     }
 
 
@@ -369,6 +369,23 @@ Returns:
             effective_username = auth_username or username or "unknown"
             is_daemon = is_daemon_key_owner and not is_scoped_to_human
 
+            if is_daemon:
+                # Memories going forward are owned by a real user: an unscoped
+                # daemon key attributes its writes to the org's first owner
+                # (the daemon works for the owner). No org-wide force-share —
+                # sharing is the owner's explicit choice.
+                pool = await get_pool()
+                first_owner = await get_first_memory_owner(pool, org_id)
+                if first_owner is not None:
+                    user_id = UUID(first_owner["id"])
+                    attribution_user = {
+                        "id": first_owner["id"],
+                        "display_name": first_owner["display_name"],
+                        "username": first_owner["display_name"],
+                        "email": None,
+                    }
+                    effective_username = first_owner["display_name"]
+
             logger.info("create_memory: type=%s, user=%s, tags=%s", type, effective_username, tags)
 
             # Normalize tags: replace prohibited tags, auto-tag daemon content
@@ -412,6 +429,9 @@ Returns:
             #
             # Daemon-created memories in scoped sessions inherit the scope's
             # sharing context (scoped key already restricts to correct user).
+            # There is no daemon force-share: daemon-authored memories are
+            # attributed to the org's first owner and share like any other
+            # user's memory.
             if memory_type == MemoryType.TECHNICAL:
                 # Shared by default unless caller explicitly sets shared=False
                 effective_shared = shared if shared is not None else True
@@ -421,11 +441,6 @@ Returns:
             else:
                 # Goals and others: respect caller preference
                 effective_shared = shared
-
-            # Daemon-created memories outside of a scoped session should
-            # still be shared (daemon's own state, heartbeats, etc.)
-            if is_daemon and memory_scope is None:
-                effective_shared = True
 
             repo = await _get_repository()
             result = await repo.create(
@@ -439,6 +454,9 @@ Returns:
                 user_id=user_id,
                 organization_id=org_id,
                 shared=effective_shared,
+                daemon_reader_id=(
+                    UUID(str(current_user["id"])) if is_daemon else None
+                ),
             )
 
             # Log the creation in audit log with version snapshot
@@ -659,7 +677,9 @@ Returns:
 
             # Get their individual memory
             repo = await _get_repository()
-            individual_memory = await repo.get_individual_memory_for_user(user_id)
+            individual_memory = await repo.get_individual_memory_for_user(
+                user_id, organization_id=org_id
+            )
 
             result = {
                 "user": user_info,
@@ -1228,6 +1248,8 @@ Returns:
             result = await repo.update(
                 memory_id=uuid_id,
                 tags=new_tags,
+                organization_id=org_id,
+                user_id=user_id,
             )
 
             if result is None:
@@ -1633,6 +1655,8 @@ Returns:
                 importance=snapshot.get("importance"),
                 metadata=snapshot.get("metadata"),
                 related_memory_ids=[UUID(uid) for uid in snapshot.get("related_memory_ids", [])],
+                organization_id=org_id,
+                user_id=user_id,
             )
 
             if result is None:
@@ -1728,6 +1752,7 @@ Returns:
                     memory_id=UUID(memory_id),
                     user_id=user_id,
                     shared=True,
+                    organization_id=org_id,
                 )
 
                 if result is None:
@@ -1783,6 +1808,7 @@ Returns:
                     memory_id=UUID(memory_id),
                     user_id=user_id,
                     shared=False,
+                    organization_id=org_id,
                 )
 
                 if result is None:
@@ -2207,7 +2233,6 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "organization_id": str(memory["organization_id"])
         if memory.get("organization_id")
         else None,
-        "shared": memory.get("shared", False),
         "last_accessed_at": memory["last_accessed_at"].isoformat()
         if memory.get("last_accessed_at")
         else None,
@@ -2237,7 +2262,6 @@ def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:
         "organization_id": str(memory["organization_id"])
         if memory.get("organization_id")
         else None,
-        "shared": memory.get("shared", False),
         "last_accessed_at": memory["last_accessed_at"].isoformat()
         if memory.get("last_accessed_at")
         else None,

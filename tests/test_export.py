@@ -168,7 +168,7 @@ class TestMemoryExport:
             user_id=test_user["id"],
             organization_id=test_user["organization_id"],
         )
-        await repo.delete(memory["id"])
+        await repo.delete(memory["id"], organization_id=test_user["organization_id"])
 
         result = await repo.export(
             tags=["deleted"],
@@ -427,7 +427,7 @@ class TestMemoryImport:
 
         # Delete originals
         for m in original_memories:
-            await repo.delete(m["id"])
+            await repo.delete(m["id"], organization_id=test_user["organization_id"])
 
         # Import from export data — convert UUIDs/datetimes to strings as export would
         import_data = []

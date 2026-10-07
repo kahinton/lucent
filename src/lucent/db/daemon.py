@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
-
-from asyncpg import Connection
+from typing import TYPE_CHECKING, Any
 
 from lucent.constants import DECOMPOSITION_LOCK_NAMESPACE
+
+if TYPE_CHECKING:
+    # Annotation-only (``from __future__ import annotations`` makes the hint a
+    # string). An eager import here would break under stubbed asyncpg — e.g.
+    # tests that stub it down to just ``connect``.
+    from asyncpg import Connection
 
 
 class DaemonRepository:
@@ -148,7 +152,7 @@ class DaemonRepository:
         memory_row = await self.conn.fetchrow(
             """
             SELECT id, username, type, content, tags, importance, metadata,
-                   created_at, updated_at, user_id, organization_id, shared
+                   created_at, updated_at, user_id, organization_id
             FROM memories
             WHERE type = 'individual'
               AND deleted_at IS NULL
@@ -371,6 +375,43 @@ class DaemonRepository:
             """,
             organization_id,
             user_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def list_backfill_decomposition_requests(
+        self,
+        organization_id: str,
+        *,
+        min_age_seconds: int,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Requests the decomposition backfill should turn into tasks.
+
+        Same eligibility predicate as ``request_is_still_undecomposed``:
+        a request still mid-queue (non-terminal status, no tasks yet) plus
+        an age window so we don't race a planner that is about to
+        decompose it itself.
+        """
+        conditions = [
+            "r.organization_id = $1::uuid",
+            "r.approval_status IN ('pending_approval', 'auto_approved', 'approved')",
+            "r.status IN ('pending', 'in_progress')",
+            "NOT EXISTS (SELECT 1 FROM tasks t WHERE t.request_id = r.id)",
+            "r.created_at <= now() - make_interval(secs => $2)",
+        ]
+        params: list[str | int] = [organization_id, min_age_seconds]
+        if request_id:
+            params.append(request_id)
+            conditions.append(f"r.id = ${len(params)}::uuid")
+        rows = await self.conn.fetch(
+            f"""
+            SELECT id::text AS request_id, created_by::text AS created_by,
+                   title, created_at
+            FROM requests r
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at
+            """,
+            *params,
         )
         return [dict(row) for row in rows]
 

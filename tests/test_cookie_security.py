@@ -128,18 +128,22 @@ class TestImpersonationSessionRegeneration:
     """Verify session is regenerated when starting impersonation.
 
     Session fixation prevention: when an admin starts impersonating another
-    user, the old session must be invalidated and a new session token issued.
+    user, the old session token must be rotated in place (``rotate_session``)
+    and the new token set on this device's session cookie. Other devices are
+    intentionally unaffected — rotation is per-device, not per-user.
     """
 
-    def test_start_impersonation_calls_create_session(self):
-        """The start_impersonation endpoint must call create_session to regenerate."""
+    def test_start_impersonation_calls_rotate_session(self):
+        """The start_impersonation endpoint must rotate the session token
+        in place (session-fixation defense; mechanism supersedes the old
+        ``create_session`` approach)."""
         from lucent.web.routes import start_impersonation
 
         source = inspect.getsource(start_impersonation)
 
-        # Must call create_session before setting cookies
-        assert "create_session" in source, (
-            "start_impersonation must call create_session to regenerate the session"
+        # Must rotate the session before setting cookies
+        assert "rotate_session" in source, (
+            "start_impersonation must call rotate_session to regenerate the session"
         )
 
     def test_start_impersonation_sets_new_session_cookie(self):
@@ -165,19 +169,37 @@ class TestImpersonationSessionRegeneration:
         )
 
     def test_session_regeneration_before_cookie_setting(self):
-        """Session regeneration must happen before setting cookies."""
+        """Session rotation must happen before setting cookies."""
         from lucent.web.routes import start_impersonation
 
         source = inspect.getsource(start_impersonation)
 
-        # create_session must appear before set_cookie
-        create_pos = source.index("create_session")
+        # rotate_session must appear before set_cookie
+        rotate_pos = source.index("rotate_session")
         set_cookie_pos = source.index("set_cookie")
-        assert create_pos < set_cookie_pos, "create_session must be called before setting cookies"
+        assert rotate_pos < set_cookie_pos, (
+            "rotate_session must be called before setting cookies"
+        )
+
+    def test_start_impersonation_binds_impersonation_cookie_to_rotated_token(self):
+        """The impersonation cookie must be signed over user_id + the rotated
+        token's session hash, so a stolen cookie cannot be replayed against
+        another session."""
+        from lucent.web.routes import start_impersonation
+
+        source = inspect.getsource(start_impersonation)
+
+        # The impersonation cookie value must be built from the session hash
+        # of the rotated token: sign_value(f"{user_id}:{session_hash}")
+        assert 'sign_value(f"{user_id}:{session_hash}")' in source, (
+            "start_impersonation must bind lucent_impersonate to the rotated "
+            "session's hash before signing"
+        )
 
     @pytest.mark.asyncio
     async def test_start_impersonation_regenerates_session_token(self):
-        """Integration: verify old session token is replaced on impersonation."""
+        """Integration: the device's old session token is rotated in place
+        on impersonation and the response carries the NEW token."""
         from lucent.web.routes import start_impersonation
 
         admin_id = uuid4()
@@ -202,7 +224,11 @@ class TestImpersonationSessionRegeneration:
         mock_repo = AsyncMock()
         mock_repo.get_by_id.return_value = mock_target
 
+        old_token = "old_session_token_xyz789"
         new_token = "new_session_token_abc123"
+
+        mock_request = MagicMock()
+        mock_request.cookies = {SESSION_COOKIE_NAME: old_token}
 
         with (
             patch("lucent.web.routes.admin._check_csrf", new_callable=AsyncMock),
@@ -225,21 +251,23 @@ class TestImpersonationSessionRegeneration:
                 return_value=MagicMock(log_for_user=AsyncMock()),
             ),
             patch(
-                "lucent.web.routes.admin.create_session",
+                "lucent.web.routes.admin.rotate_session",
                 new_callable=AsyncMock,
                 return_value=new_token,
-            ) as mock_create,
+            ) as mock_rotate,
         ):
-            mock_request = MagicMock()
             response = await start_impersonation(mock_request, target_id)
 
-            # Verify create_session was called with the admin's user ID
-            mock_create.assert_called_once_with(mock_pool, admin_id)
+            # Verify rotate_session rotated the device's current token in place
+            mock_rotate.assert_awaited_once_with(mock_pool, old_token)
 
             # Verify the response sets a new session cookie with the new token
             set_cookie_headers = [h.decode() for _, h in response.raw_headers if _ == b"set-cookie"]
             session_cookies = [h for h in set_cookie_headers if SESSION_COOKIE_NAME in h]
             assert len(session_cookies) >= 1, "Response must set a new session cookie"
             assert new_token in session_cookies[0], (
-                "Session cookie must contain the new regenerated token"
+                "Session cookie must contain the new rotated token"
+            )
+            assert old_token not in session_cookies[0], (
+                "The old (pre-rotation) token must not appear on the session cookie"
             )

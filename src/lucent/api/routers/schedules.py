@@ -26,6 +26,41 @@ def _include_daemon_workflows(user: AuthenticatedUser) -> bool:
     return user.role >= Role.ADMIN
 
 
+async def _get_schedule_for_api(
+    pool,
+    schedule_id: str,
+    user: AuthenticatedUser,
+    *,
+    write: bool = False,
+) -> dict | None:
+    """Fetch a schedule per the caller's role (usage vs management).
+
+    Admins/owners and the daemon principal keep the legacy org-scoped fetch
+    (management view, incl. system + daemon-created rows). Other principals
+    get the clearance-driven usage probe — only schedules cleared for them
+    (their own creations, or explicit user/group grants) come back;
+    mutating callers request `write` so read-only grantees stay read-only.
+    """
+    from lucent.db.schedules import (
+        ScheduleRepository,
+        get_authorized_schedules_pool,
+    )
+
+    repo = ScheduleRepository(pool)
+    if _include_daemon_workflows(user) or _is_daemon_user(user):
+        return await repo.get_schedule(
+            schedule_id,
+            str(user.organization_id),
+            include_daemon_created=_include_daemon_workflows(user),
+        )
+    authorized = await get_authorized_schedules_pool(
+        pool,
+        {"id": str(user.id), "organization_id": str(user.organization_id)},
+        required_clearance="write" if write else "read",
+    )
+    return await ScheduleRepository(authorized).get_usable_schedule(schedule_id)
+
+
 async def _require_model_access(pool, model_id: str, user: AuthenticatedUser) -> None:
     from lucent.access_control import AccessControlService
 
@@ -465,13 +500,26 @@ async def _trigger_schedule_execution(
     req_repo = RequestRepository(pool)
 
     if user is not None:
-        created_by = None if _is_daemon_user(user) else str(user.id)
-        sched = await sched_repo.get_schedule(
-            schedule_id,
-            str(user.organization_id),
-            created_by=created_by,
-            include_daemon_created=_include_daemon_workflows(user),
-        )
+        if _is_daemon_user(user):
+            # Daemon principals keep the org-wide read: the daemon is the
+            # org's actor and runs schedules on behalf of their owners.
+            sched = await sched_repo.get_schedule(
+                schedule_id, str(user.organization_id)
+            )
+        elif _include_daemon_workflows(user):
+            sched = await sched_repo.get_schedule(
+                schedule_id,
+                str(user.organization_id),
+                created_by=str(user.id),
+                include_daemon_created=True,
+            )
+        else:
+            # Human members: clearance-driven usage probe. Triggering
+            # advances the schedule and creates tasks, so it needs a
+            # write-level clearance (read-only grantees can view, not run).
+            sched = await _get_schedule_for_api(
+                pool, schedule_id, user, write=True
+            )
         if not sched:
             raise HTTPException(404, "Workflow not found")
         org_id = str(user.organization_id)
@@ -773,6 +821,43 @@ async def create_schedule(
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 
+    # Usage is clearance-driven and default-deny: every referenced sandbox
+    # template must be cleared for the schedule creator.
+    referenced_templates = [
+        body.sandbox_template_id or None,
+        *[
+            action.get("sandbox_template_id") or None
+            for action in (body.actions or [])
+        ],
+    ]
+    referenced_templates = [tid for tid in referenced_templates if tid]
+    if referenced_templates:
+        from lucent.db.sandbox_template import (
+            SandboxTemplateRepository,
+            get_authorized_templates_pool,
+        )
+
+        tpl_pool = await get_authorized_templates_pool(
+            pool,
+            {"id": str(user.id), "organization_id": str(user.organization_id)},
+        )
+        tpl_repo = SandboxTemplateRepository(tpl_pool)
+        for template_id in referenced_templates:
+            tpl = await tpl_repo.get_usable_template(template_id)
+            if not tpl:
+                raise HTTPException(
+                    404,
+                    f"Sandbox template {template_id} not found or not "
+                    "cleared for this user",
+                )
+            if tpl.get("status") != "approved":
+                raise HTTPException(
+                    409,
+                    f"Sandbox template '{tpl.get('name')}' has status "
+                    f"{tpl.get('status')!r} — only 'approved' templates "
+                    "may be scheduled. A human admin must approve it first.",
+                )
+
     repo = ScheduleRepository(pool)
     return await repo.create_schedule(
         title=body.title,
@@ -809,27 +894,54 @@ async def list_schedules(
     enabled: bool | None = None,
     pool=Depends(get_pool),
 ):
-    from lucent.db.schedules import ScheduleRepository
+    """List schedules: admins/owners manage all org schedules; others see
+    only the ones cleared for them (their own + explicit grants)."""
+    from lucent.db.schedules import (
+        ScheduleRepository,
+        get_authorized_schedules_pool,
+    )
 
     repo = ScheduleRepository(pool)
-    return await repo.list_schedules(
+    if _include_daemon_workflows(user) or _is_daemon_user(user):
+        return await repo.list_schedules(
+            str(user.organization_id),
+            status=status,
+            enabled=enabled,
+            include_daemon_created=_include_daemon_workflows(user),
+        )
+    authorized = await get_authorized_schedules_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+    )
+    return await ScheduleRepository(authorized).list_schedules_accessible_by(
+        str(user.id),
         str(user.organization_id),
         status=status,
         enabled=enabled,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
     )
 
 
 @router.get("/summary")
 async def schedule_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
+    """Schedule counts: admins/owners manage all; others count their own."""
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    return await repo.get_summary(
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
+    if _include_daemon_workflows(user) or _is_daemon_user(user):
+        return await repo.get_summary(
+            str(user.organization_id),
+            include_daemon_created=_include_daemon_workflows(user),
+        )
+    # Members: count exactly the schedules cleared for them (own + grants).
+    from lucent.db.schedules import (
+        ScheduleRepository,
+        get_authorized_schedules_pool,
+    )
+
+    authorized = await get_authorized_schedules_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+    )
+    return await ScheduleRepository(authorized).get_summary_accessible_by(
+        str(user.organization_id)
     )
 
 
@@ -845,16 +957,21 @@ async def get_due_schedules(user: AuthenticatedUser, pool=Depends(get_pool)):
 async def get_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
-    repo = ScheduleRepository(pool)
-    result = await repo.get_schedule_with_runs(
-        schedule_id,
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
-    if not result:
+    sched = await _get_schedule_for_api(pool, schedule_id, user)
+    if not sched:
         raise HTTPException(404, "Schedule not found")
-    return result
+    if _include_daemon_workflows(user) or _is_daemon_user(user):
+        repo = ScheduleRepository(pool)
+        return await repo.get_schedule_with_runs(
+            schedule_id,
+            str(user.organization_id),
+            created_by=str(user.id),
+            include_daemon_created=_include_daemon_workflows(user),
+        )
+    # Members: runs are only read through the parent schedule they can use.
+    repo = ScheduleRepository(pool)
+    runs = await repo.list_runs(schedule_id, org_id=str(user.organization_id))
+    return {**sched, "runs": runs}
 
 
 @router.put("/{schedule_id}")
@@ -877,12 +994,7 @@ async def update_schedule(
         fields["reasoning_effort"] = None
     if "timezone" in fields:
         fields["timezone_str"] = fields.pop("timezone")
-    sched = await repo.get_schedule(
-        schedule_id,
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    sched = await _get_schedule_for_api(pool, schedule_id, user, write=True)
     if not sched:
         raise HTTPException(404, "Schedule not found")
     effective_model = fields.get("model", sched.get("model"))
@@ -921,12 +1033,7 @@ async def toggle_schedule(
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    sched = await repo.get_schedule(
-        schedule_id,
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    sched = await _get_schedule_for_api(pool, schedule_id, user, write=True)
     if not sched:
         raise HTTPException(404, "Schedule not found")
     try:
@@ -946,12 +1053,7 @@ async def delete_schedule(schedule_id: str, user: AuthenticatedUser, pool=Depend
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    sched = await repo.get_schedule(
-        schedule_id,
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    sched = await _get_schedule_for_api(pool, schedule_id, user, write=True)
     if not sched:
         raise HTTPException(404, "Schedule not found")
     try:
@@ -968,13 +1070,8 @@ async def list_runs(schedule_id: str, user: AuthenticatedUser, pool=Depends(get_
     from lucent.db.schedules import ScheduleRepository
 
     repo = ScheduleRepository(pool)
-    # Verify ownership
-    sched = await repo.get_schedule(
-        schedule_id,
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    # Verify access via the caller's role (usage vs management).
+    sched = await _get_schedule_for_api(pool, schedule_id, user)
     if not sched:
         raise HTTPException(404, "Schedule not found")
     return await repo.list_runs(schedule_id, org_id=str(user.organization_id))
@@ -1083,16 +1180,31 @@ async def list_workflows(
     trigger_type: str | None = None,
     pool=Depends(get_pool),
 ):
-    from lucent.db.schedules import ScheduleRepository
+    from lucent.db.schedules import (
+        ScheduleRepository,
+        get_authorized_schedules_pool,
+    )
 
     repo = ScheduleRepository(pool)
-    result = await repo.list_schedules(
-        str(user.organization_id),
-        status=status,
-        enabled=enabled,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    management = _include_daemon_workflows(user) or _is_daemon_user(user)
+    if management:
+        result = await repo.list_schedules(
+            str(user.organization_id),
+            status=status,
+            enabled=enabled,
+            created_by=str(user.id),
+            include_daemon_created=_include_daemon_workflows(user),
+        )
+    else:
+        authorized = await get_authorized_schedules_pool(
+            pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+        )
+        result = await ScheduleRepository(authorized).list_schedules_accessible_by(
+            str(user.id),
+            str(user.organization_id),
+            status=status,
+            enabled=enabled,
+        )
     if trigger_type:
         result["items"] = [
             item for item in result["items"]
@@ -1105,12 +1217,22 @@ async def list_workflows(
 
 @workflow_router.get("/summary")
 async def workflow_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
-    from lucent.db.schedules import ScheduleRepository
+    from lucent.db.schedules import (
+        ScheduleRepository,
+        get_authorized_schedules_pool,
+    )
 
-    return await ScheduleRepository(pool).get_summary(
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
+    if _include_daemon_workflows(user) or _is_daemon_user(user):
+        return await ScheduleRepository(pool).get_summary(
+            str(user.organization_id),
+            created_by=str(user.id),
+            include_daemon_created=_include_daemon_workflows(user),
+        )
+    authorized = await get_authorized_schedules_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+    )
+    return await ScheduleRepository(authorized).get_summary_accessible_by(
+        str(user.organization_id)
     )
 
 
@@ -1118,16 +1240,20 @@ async def workflow_summary(user: AuthenticatedUser, pool=Depends(get_pool)):
 async def get_workflow(workflow_id: str, user: AuthenticatedUser, pool=Depends(get_pool)):
     from lucent.db.schedules import ScheduleRepository
 
-    repo = ScheduleRepository(pool)
-    result = await repo.get_schedule_with_runs(
-        workflow_id,
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
-    if not result:
+    sched = await _get_schedule_for_api(pool, workflow_id, user)
+    if not sched:
         raise HTTPException(404, "Workflow not found")
-    return result
+    if _include_daemon_workflows(user) or _is_daemon_user(user):
+        repo = ScheduleRepository(pool)
+        return await repo.get_schedule_with_runs(
+            workflow_id,
+            str(user.organization_id),
+            created_by=str(user.id),
+            include_daemon_created=_include_daemon_workflows(user),
+        )
+    repo = ScheduleRepository(pool)
+    runs = await repo.list_runs(workflow_id, org_id=str(user.organization_id))
+    return {**sched, "runs": runs}
 
 
 @workflow_router.post("/{workflow_id}/trigger")

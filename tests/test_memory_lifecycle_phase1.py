@@ -142,8 +142,8 @@ class TestPhase1VitalityComputation:
         assert result["processed"] >= 2
         assert result["updated"] >= 2
 
-        fresh_after = await repo.get(fresh["id"])
-        stale_after = await repo.get(stale["id"])
+        fresh_after = await repo.get(fresh["id"], organization_id=test_user["organization_id"])
+        stale_after = await repo.get(stale["id"], organization_id=test_user["organization_id"])
         assert fresh_after is not None
         assert stale_after is not None
         assert fresh_after["vitality_score"] is not None
@@ -177,7 +177,7 @@ class TestPhase1VitalityComputation:
             batch_size=100,
             organization_id=str(test_user["organization_id"]),
         )
-        persisted = await repo.get(memory["id"])
+        persisted = await repo.get(memory["id"], organization_id=test_user["organization_id"])
         assert persisted is not None
         assert persisted["vitality_score"] is not None
         assert 0.0 <= persisted["vitality_score"] <= 1.0
@@ -223,8 +223,11 @@ class TestPhase1VitalityComputation:
             batch_size=100,
             organization_id=str(test_user["organization_id"]),
         )
-        individual_after = await repo.get(individual["id"])
-        goal_after = await repo.get(active_goal["id"])
+        individual_after = await repo.get(
+            individual["id"],
+            organization_id=test_user["organization_id"],
+        )
+        goal_after = await repo.get(active_goal["id"], organization_id=test_user["organization_id"])
         assert individual_after is not None
         assert goal_after is not None
         assert individual_after["lifecycle_stage"] == "active"

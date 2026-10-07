@@ -137,9 +137,9 @@ class IntegrationService:
         Finds the active user_link matching the integration and external user,
         then loads the full user record.
 
-        organization_id binds the RLS tenant GUC for the user_links read
-        (shape a policy); callers in the webhook pipeline pass the
-        integration's org. Without it the lookup is fail-closed empty.
+        organization_id binds the tenant GUC for the user_links read; callers
+        in the webhook pipeline pass the integration's org. Without it
+        the lookup is fail-closed empty.
 
         Returns:
             The user record dict, or None if no active link exists.
@@ -405,6 +405,7 @@ class IntegrationService:
             provider=event.platform,
             external_user_id=event.external_user_id,
             external_workspace_id=event.external_workspace_id,
+            organization_id=str(org_id),
         )
         if not identity.resolved:
             await self._audit(

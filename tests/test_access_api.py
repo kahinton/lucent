@@ -6,6 +6,7 @@ Tests /api/access endpoints (team-mode only):
 - GET /api/access/user/{user_id} (user activity)
 - GET /api/access/most-accessed (most accessed memories)
 - GET /api/access/organization/activity (org activity — 501)
+- GET/PUT/DELETE /api/access/resources/{type}/{id}/grants (clearance management)
 """
 
 from unittest.mock import patch
@@ -30,6 +31,11 @@ async def acc_prefix(db_pool):
     prefix = f"test_acc_{test_id}_"
     yield prefix
     async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM auth_clearances WHERE auth_id IN "
+            "(SELECT auth_id FROM memories WHERE username LIKE $1)",
+            f"{prefix}%",
+        )
         await conn.execute(
             "DELETE FROM memory_audit_log WHERE memory_id IN "
             "(SELECT id FROM memories WHERE username LIKE $1)",
@@ -330,3 +336,74 @@ class TestOrgActivity:
         """Members cannot access org activity (should fail before 501)."""
         resp = await member_client.get("/api/access/organization/activity")
         assert resp.status_code == 403
+
+
+# ============================================================================
+# /api/access/resources/{type}/{id}/grants — clearance management
+# ============================================================================
+
+
+class TestResourceGrantPermissions:
+    """The grants table is managed under ACCESS_GRANT (admin+), not member share."""
+
+    async def test_member_cannot_list_grants(self, member_client, acc_memory):
+        resp = await member_client.get(
+            f"/api/access/resources/memory/{acc_memory['id']}/grants"
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_upsert_grant(self, member_client, acc_memory):
+        resp = await member_client.put(
+            f"/api/access/resources/memory/{acc_memory['id']}/grants",
+            json={"grantee_type": "organization", "role": "read"},
+        )
+        assert resp.status_code == 403
+
+    async def test_member_cannot_revoke_grant(self, member_client, acc_memory):
+        resp = await member_client.request(
+            "DELETE",
+            f"/api/access/resources/memory/{acc_memory['id']}/grants",
+            json={"grantee_type": "organization"},
+        )
+        assert resp.status_code == 403
+
+    async def test_admin_can_list_grants(self, admin_client, acc_memory):
+        resp = await admin_client.get(
+            f"/api/access/resources/memory/{acc_memory['id']}/grants"
+        )
+        assert resp.status_code == 200
+        assert "grants" in resp.json()
+
+    async def test_admin_can_share_member_memory_to_org(
+        self, admin_client, acc_memory
+    ):
+        """Admins manage grants across the org — the repository layer allows it."""
+        resp = await admin_client.put(
+            f"/api/access/resources/memory/{acc_memory['id']}/grants",
+            json={"grantee_type": "organization", "role": "read"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["grantee_type"] == "organization"
+        assert resp.json()["role"] == "read"
+
+    async def test_admin_cannot_touch_owner_grant(
+        self, admin_client, acc_memory, acc_member
+    ):
+        """The owner's own clearance row is fixed at owner, by design."""
+        resp = await admin_client.put(
+            f"/api/access/resources/memory/{acc_memory['id']}/grants",
+            json={
+                "grantee_type": "user",
+                "grantee_id": str(acc_member["id"]),
+                "role": "read",
+            },
+        )
+        assert resp.status_code == 403
+        assert "owner" in resp.json()["detail"].lower()
+
+    async def test_admin_grant_on_unknown_resource_not_found(self, admin_client):
+        resp = await admin_client.get(
+            f"/api/access/resources/memory/{uuid4()}/grants"
+        )
+        assert resp.status_code == 200
+        assert resp.json()["grants"] == []

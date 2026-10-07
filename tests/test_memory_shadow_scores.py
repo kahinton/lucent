@@ -210,6 +210,7 @@ class TestMemoryShadowScoreHelpers:
             signals={"in_degree": 0, "out_degree": 0},
             computed_at=computed_at,
             divergence_tag="gcp-forgets-vitality-keeps",
+            org_id=str(test_user["organization_id"]),
         )
         assert inserted is not None
         assert inserted["strategy"] == "gcp-v1"
@@ -224,13 +225,18 @@ class TestMemoryShadowScoreHelpers:
             signals={"in_degree": 9, "out_degree": 3},
             computed_at=computed_at,
             divergence_tag="gcp-protects-vitality-archives",
+            org_id=str(test_user["organization_id"]),
         )
         assert upserted is not None
         assert upserted["score"] == pytest.approx(0.90, rel=1e-6)
         assert upserted["shadow_action"] == "protected_hub"
         assert upserted["signals"]["in_degree"] == 9
 
-        latest = await repo.get_latest_shadow_score(memory_id=memory["id"], strategy="gcp-v1")
+        latest = await repo.get_latest_shadow_score(
+            memory_id=memory["id"],
+            strategy="gcp-v1",
+            org_id=str(test_user["organization_id"]),
+        )
         assert latest is not None
         assert latest["computed_at"] == computed_at
         assert latest["divergence_tag"] == "gcp-protects-vitality-archives"
@@ -272,9 +278,14 @@ class TestLdrDeleteObservation:
             organization_id=test_user["organization_id"],
         )
 
-        deleted = await repo.delete(source["id"])
+        deleted = await repo.delete(
+            source["id"], organization_id=test_user["organization_id"]
+        )
         assert deleted is True
-        assert await repo.get(source["id"]) is None
+        assert (
+            await repo.get(source["id"], organization_id=test_user["organization_id"])
+            is None
+        )
 
         async with db_pool.acquire() as conn:
             shadow_count = await conn.fetchval(
@@ -331,9 +342,16 @@ class TestLdrDeleteObservation:
             organization_id=test_user["organization_id"],
         )
 
-        deleted = await repo.delete(source["id"], ldr_canonical_id=canonical["id"])
+        deleted = await repo.delete(
+            source["id"],
+            ldr_canonical_id=canonical["id"],
+            organization_id=test_user["organization_id"],
+        )
         assert deleted is True
-        assert await repo.get(source["id"]) is None
+        assert (
+            await repo.get(source["id"], organization_id=test_user["organization_id"])
+            is None
+        )
 
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(

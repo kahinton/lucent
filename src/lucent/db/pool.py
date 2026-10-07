@@ -16,15 +16,18 @@ statement, a live-verified asyncpg behavior); the pool ``reset`` hook clears
 any residue when a connection is returned.
 """
 
-import asyncio
+import functools
 import hashlib
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
-import re
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Final
 from uuid import UUID
 
 import asyncpg
@@ -33,8 +36,8 @@ from asyncpg import Connection, Pool
 from lucent.db.scope_audit import (
     ScopeAuditedConnection,
     ScopeAuditedPool,
-    effective_scope,
     audit_enabled,
+    effective_scope,
 )
 from lucent.logging import get_logger
 
@@ -48,9 +51,7 @@ _asyncpg_instrumented: bool = False
 # Tenant session context (see module docstring).
 # ---------------------------------------------------------------------------
 TENANT_GUCS = ("app.user_id", "app.org_id", "app.role", "app.auth_context")
-_tenant_scope: ContextVar[dict[str, str] | None] = ContextVar(
-    "tenant_scope", default=None
-)
+_tenant_scope: ContextVar[dict[str, str] | None] = ContextVar("tenant_scope", default=None)
 
 
 class TenantScopeError(RuntimeError):
@@ -107,13 +108,16 @@ def _tenant_guc_scrub() -> str:
     """SQL that clears tenant context from a pooled connection.
 
     Sets every GUC to empty at session level, so any later raw acquire does
-    not inherit a stale scope.
+    not inherit a stale scope. Includes every GUC any acquire may set:
+    the tenant trio, the authorized-pool clearance context, and the group
+    list the clearance rewrite reads.
     """
     return (
         "SELECT set_config('app.user_id', '', false), "
         "set_config('app.org_id', '', false), "
         "set_config('app.role', '', false), "
-        "set_config('app.auth_context', '', false);"
+        "set_config('app.auth_context', '', false), "
+        "set_config('app.auth_group_ids', '', false);"
     )
 
 
@@ -195,9 +199,7 @@ def _uninstrument_asyncpg() -> None:
         logger.warning("OTEL: Failed to uninstrument asyncpg: %s", e)
 
 
-async def init_db(
-    database_url: str | None = None, *, run_migrations: bool = True
-) -> Pool:
+async def init_db(database_url: str | None = None, *, run_migrations: bool = True) -> Pool:
     """Initialize the database connection pool and run migrations.
 
     Args:
@@ -274,9 +276,7 @@ async def _reset_connection(conn: Connection) -> None:
     try:
         await conn.execute(_tenant_guc_scrub())
     except Exception:  # pragma: no cover - pool reset must never raise
-        logger.debug(
-            "tenant context scrub on connection return failed", exc_info=True
-        )
+        logger.debug("tenant context scrub on connection return failed", exc_info=True)
 
 
 async def _run_migrations(pool: Pool) -> None:
@@ -316,17 +316,15 @@ async def _run_migrations(pool: Pool) -> None:
         skipped_count = 0
 
         for migration_file in migration_files:
-
             if migration_file.name in applied:
                 # Verify checksum to detect post-application drift.
                 current_checksum = _file_checksum(migration_file)
                 recorded = applied[migration_file.name]
                 if recorded and current_checksum != recorded:
                     logger.warning(
-                        "Migration %s modified after application "
-                        "(recorded: %s, current: %s)",
+                        "Migration %s modified after application (recorded: %s, current: %s)",
                         migration_file.name,
-        (recorded or "")[:12],
+                        (recorded or "")[:12],
                         current_checksum[:12],
                     )
                 skipped_count += 1
@@ -337,8 +335,7 @@ async def _run_migrations(pool: Pool) -> None:
             async with conn.transaction():
                 await conn.execute(sql)
                 await conn.execute(
-                    "INSERT INTO schema_migrations (name, checksum) "
-                    "VALUES ($1, $2)",
+                    "INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)",
                     migration_file.name,
                     checksum,
                 )
@@ -382,16 +379,12 @@ async def _rollback_migrations(
     async with pool.acquire() as conn:
         await _bootstrap_schema_migrations(conn, migration_files)
 
-        rows = await conn.fetch(
-            "SELECT name, checksum FROM schema_migrations ORDER BY name DESC"
-        )
+        rows = await conn.fetch("SELECT name, checksum FROM schema_migrations ORDER BY name DESC")
         if not rows:
             logger.info("Rollback requested, but no applied migrations were found")
             return 0
 
-        applied: dict[str, str | None] = {
-            row["name"]: row["checksum"] for row in rows
-        }
+        applied: dict[str, str | None] = {row["name"]: row["checksum"] for row in rows}
         applied_names = [row["name"] for row in rows]
 
         if target_name:
@@ -413,8 +406,7 @@ async def _rollback_migrations(
                 )
                 if not allow_irreversible:
                     raise RuntimeError(
-                        f"Migration {migration_name} cannot be rolled back: "
-                        "forward file missing"
+                        f"Migration {migration_name} cannot be rolled back: forward file missing"
                     )
                 continue
 
@@ -422,8 +414,7 @@ async def _rollback_migrations(
             recorded = applied.get(migration_name)
             if recorded and current_checksum != recorded:
                 logger.warning(
-                    "Rollback for %s using modified forward migration "
-                    "(recorded: %s, current: %s)",
+                    "Rollback for %s using modified forward migration (recorded: %s, current: %s)",
                     migration_name,
                     recorded[:12],
                     current_checksum[:12],
@@ -433,14 +424,14 @@ async def _rollback_migrations(
             down_file = migration_file.with_name(f"{migration_file.stem}.down.sql")
 
             if not down_file.exists() or up_metadata.get("rollback") == "irreversible":
-                reason = "marked irreversible" if up_metadata.get("rollback") == "irreversible" else "missing .down.sql file"
-                logger.warning(
-                    "Migration %s is irreversible (%s)", migration_name, reason
+                reason = (
+                    "marked irreversible"
+                    if up_metadata.get("rollback") == "irreversible"
+                    else "missing .down.sql file"
                 )
+                logger.warning("Migration %s is irreversible (%s)", migration_name, reason)
                 if not allow_irreversible:
-                    raise RuntimeError(
-                        f"Migration {migration_name} is irreversible ({reason})"
-                    )
+                    raise RuntimeError(f"Migration {migration_name} is irreversible ({reason})")
                 continue
 
             down_metadata = _parse_migration_metadata(down_file)
@@ -451,24 +442,20 @@ async def _rollback_migrations(
                 )
                 if not allow_irreversible:
                     raise RuntimeError(
-                        f"Migration {migration_name} is irreversible "
-                        "(rollback metadata)"
+                        f"Migration {migration_name} is irreversible (rollback metadata)"
                     )
                 continue
 
             warning = down_metadata.get("warning")
             if warning:
-                logger.warning(
-                    "Rollback warning for %s: %s", migration_name, warning
-                )
+                logger.warning("Rollback warning for %s: %s", migration_name, warning)
 
             rollback_sql = down_file.read_text()
             if not rollback_sql.strip():
                 logger.warning("Rollback file for %s is empty", migration_name)
                 if not allow_irreversible:
                     raise RuntimeError(
-                        f"Migration {migration_name} is irreversible "
-                        "(empty rollback file)"
+                        f"Migration {migration_name} is irreversible (empty rollback file)"
                     )
                 continue
 
@@ -534,9 +521,7 @@ async def _bootstrap_schema_migrations(
                     checksum,
                     name,
                 )
-        logger.info(
-            "Migrated %d entries from legacy _migrations table", len(migrated)
-        )
+        logger.info("Migrated %d entries from legacy _migrations table", len(migrated))
 
     await conn.execute("DROP TABLE _migrations")
     logger.info("Dropped legacy _migrations table")
@@ -550,9 +535,7 @@ def _file_checksum(path: Path) -> str:
 def _discover_forward_migration_files(migrations_dir: Path) -> list[Path]:
     """Return sorted forward migration files, excluding rollback files."""
     return sorted(
-        path
-        for path in migrations_dir.glob("*.sql")
-        if not path.name.endswith(".down.sql")
+        path for path in migrations_dir.glob("*.sql") if not path.name.endswith(".down.sql")
     )
 
 
@@ -589,15 +572,18 @@ async def scoped_acquire(
     """Acquire a connection bound to tenant context for its statements.
 
     Sets ``app.user_id`` / ``app.org_id`` / ``app.role`` **session-local**
-    before yielding, and scrubs them on release. Verified against live
-    asyncpg behavior (scratch-cluster probe, this wave): transaction-local
-    ``set_config(..., true)`` set before yielding **vanishes before the
-    caller's first statement**, because asyncpg runs each top-level
-    ``execute()``/``fetch()`` in its own implicit transaction that commits
-    immediately. Session-local values survive implicit transactions, apply
-    to every statement in the block, and are cleared by the scrub below
-    plus the pool reset hook (``_reset_connection``) as a backstop — so no
-    tenant context ever leaks to the next acquire on the pooled connection.
+    before yielding. Verified against live asyncpg behavior (scratch-cluster
+    probe, this wave): transaction-local ``set_config(..., true)`` set before
+    yielding **vanishes before the caller's first statement**, because asyncpg
+    runs each top-level ``execute()``/``fetch()`` in its own implicit
+    transaction that commits immediately. Session-local values survive
+    implicit transactions, apply to every statement in the block, and are
+    cleared on the connection's return by the pool reset hook
+    (``_reset_connection``) — this function only ever rides the process pool
+    (:func:`get_pool`), so no separate release-side scrub round trip happens
+    here (one round trip per block, halved 2026-10-06; tenant context never
+    leaks to the next acquire). ``scoped_acquire_on`` keeps its own scrub
+    because it accepts foreign pools without the reset hook.
     Explicit parameters win; with no explicit parameters the task's scope
     (``set_tenant_scope``) is used.
 
@@ -608,9 +594,7 @@ async def scoped_acquire(
     scope = current_tenant_scope()
     resolved_user = str(user_id) if user_id else (scope or {}).get("user_id", "")
     resolved_org = (
-        str(organization_id)
-        if organization_id
-        else (scope or {}).get("organization_id", "")
+        str(organization_id) if organization_id else (scope or {}).get("organization_id", "")
     )
     resolved_role = role or (scope or {}).get("role", "member")
 
@@ -639,10 +623,7 @@ async def scoped_acquire(
             resolved_org,
             resolved_role or "member",
         )
-        try:
-            yield conn
-        finally:
-            await conn.execute(_tenant_guc_scrub())
+        yield conn
 
 
 @asynccontextmanager
@@ -664,9 +645,7 @@ async def scoped_acquire_on(
     scope = current_tenant_scope()
     resolved_user = str(user_id) if user_id else (scope or {}).get("user_id", "")
     resolved_org = (
-        str(organization_id)
-        if organization_id
-        else (scope or {}).get("organization_id", "")
+        str(organization_id) if organization_id else (scope or {}).get("organization_id", "")
     )
     resolved_role = role or (scope or {}).get("role", "member")
 
@@ -711,6 +690,511 @@ async def get_pool() -> Pool:
     if _pool is None:
         raise RuntimeError("Database pool not initialized. Call init_db() first.")
     return _pool
+
+
+# ---------------------------------------------------------------------------
+# Authorization-aware pool access
+# ---------------------------------------------------------------------------
+
+IDENTIFIER_PATTERN: Final[str] = r"[A-Za-z_][A-Za-z0-9_]*"
+SQL_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {
+        "and",
+        "as",
+        "case",
+        "cross",
+        "else",
+        "end",
+        "except",
+        "fetch",
+        "for",
+        "from",
+        "full",
+        "group",
+        "having",
+        "inner",
+        "intersect",
+        "into",
+        "join",
+        "lateral",
+        "left",
+        "limit",
+        "natural",
+        "offset",
+        "on",
+        "order",
+        "outer",
+        "returning",
+        "right",
+        "select",
+        "set",
+        "then",
+        "true",
+        "union",
+        "using",
+        "when",
+        "where",
+        "window",
+        "with",
+    }
+)
+
+
+def _table_reference_pattern(table: str) -> re.Pattern[str]:
+    """Regex matching every SQL position that can hold a table reference.
+
+    Covers FROM/JOIN position and comma-separated FROM lists
+    (``FROM tasks a, tasks b``), plus a quoted-identifier form. The
+    negative lookahead rejects qualified columns (``tasks.owner_id``) and
+    prefix-named tables (``tasks_extra``), which are never table positions.
+    """
+    escaped = re.escape(table)
+    return re.compile(
+        r"(?:\b(?:FROM|JOIN)\s+|,\s*)"
+        rf"(?:public\s*\.\s*)?(?:\"{escaped}\"|{escaped})(?![A-Za-z0-9_$.])",
+        flags=re.IGNORECASE,
+    )
+
+
+def _count_table_references(query: str, table: str) -> int:
+    """Count table-position references to ``table``: FROM/JOIN and comma lists.
+
+    ``FROM tasks a, tasks b`` and ``JOIN tasks ...`` both count. A bare
+    ``tasks`` after a comma in another position (``ORDER BY title, projects``)
+    counts too — the SQL positions are ambiguous to a regex, and a missed
+    reference would run unscoped; queries like that fail closed instead.
+
+    Used to detect references the rewrite pattern would have to leave
+    untouched (quoted identifiers cannot be re-scoped): any occurrence the
+    rewrite does not consume makes the caller fail the whole query.
+    """
+    return len(_table_reference_pattern(table).findall(query))
+
+
+@dataclass(frozen=True)
+class AuthPrincipal:
+    """The explicit database authorization context for one request."""
+
+    user_id: UUID
+    username: str
+    organization_id: UUID
+    group_ids: tuple[UUID, ...] = ()
+
+
+@dataclass(frozen=True)
+class AuthTablePolicy:
+    """How one resource table is authorized by auth-ID clearances.
+
+    ``direct_columns`` is useful for resources that also retain legacy
+    ownership columns. An empty tuple means the resource must be granted
+    through ``auth_clearances``.
+    """
+
+    table: str
+    auth_id_column: str = "auth_id"
+    direct_columns: tuple[str, ...] = ("user_id", "organization_id")
+
+    def __post_init__(self) -> None:
+        # Validate at construction: a policy with an unmappable direct column
+        # must fail loudly where it is declared, not in the middle of a query.
+        self.validate()
+
+    def validate(self) -> None:
+        if not self.table or not re.fullmatch(IDENTIFIER_PATTERN, self.table):
+            raise ValueError("table must be a non-empty SQL identifier")
+        if self.auth_id_column and not re.fullmatch(IDENTIFIER_PATTERN, self.auth_id_column):
+            raise ValueError("auth_id_column must be a SQL identifier")
+        for column in self.direct_columns:
+            if not re.fullmatch(IDENTIFIER_PATTERN, column):
+                raise ValueError(f"direct column is not a SQL identifier: {column}")
+            if column not in DIRECT_COLUMN_GUCS:
+                raise ValueError(
+                    f"direct column has no principal session context mapping: {column}; "
+                    f"supported columns are {', '.join(sorted(DIRECT_COLUMN_GUCS))}"
+                )
+        if len(set(self.direct_columns)) != len(self.direct_columns):
+            raise ValueError("direct_columns must be unique")
+
+
+DIRECT_COLUMN_GUCS: Final[dict[str, str]] = {
+    # Only these resource columns map onto a principal context GUC. Anything
+    # else in direct_columns would compile to `current_setting('app.<column>')`
+    # — a GUC nothing ever sets, i.e. a silently always-false predicate.
+    "user_id": "app.user_id",
+    "organization_id": "app.org_id",
+}
+
+
+class AuthAccessRole(str, Enum):
+    """Resource access role granted to one principal."""
+
+    READ = "read"
+    WRITE = "write"
+    OWNER = "owner"
+
+
+AUTH_ACCESS_ROLE_RANKS: Final[dict[AuthAccessRole, int]] = {
+    AuthAccessRole.READ: 1,
+    AuthAccessRole.WRITE: 2,
+    AuthAccessRole.OWNER: 3,
+}
+
+
+@functools.lru_cache(maxsize=256)
+def _authorized_table_sql(policy: AuthTablePolicy) -> str:
+    """Compile the clearance-scoped SQL for one resource table.
+
+    Cached: the output depends only on the (frozen, hashable) policy.
+    """
+    resource = "resource"
+    authorization = "clearance"
+    predicates = [f"{authorization}.authorized IS NOT NULL"]
+    for column in policy.direct_columns:
+        predicates.append(
+            f"{resource}.{column} = current_setting('{DIRECT_COLUMN_GUCS[column]}', true)::uuid"
+        )
+    where_predicate = "(" + " OR ".join(predicates) + ")"
+    return f"""
+        SELECT {resource}.*
+        FROM {policy.table} AS {resource}
+        LEFT JOIN LATERAL (
+            SELECT 1 AS authorized
+            FROM (
+                SELECT
+                    current_setting('app.user_id', true)::uuid AS user_id,
+                    current_setting('app.org_id', true)::uuid AS org_id,
+                    COALESCE(
+                        string_to_array(
+                            NULLIF(current_setting('app.auth_group_ids', true), ''),
+                            ','
+                        )::uuid[],
+                        ARRAY[]::uuid[]
+                    ) AS group_ids
+            ) AS principal
+            JOIN auth_clearances AS {authorization}
+              ON {authorization}.auth_id = {resource}.{policy.auth_id_column}
+             AND CASE {authorization}.role
+                   WHEN 'read' THEN {AUTH_ACCESS_ROLE_RANKS[AuthAccessRole.READ]}
+                   WHEN 'write' THEN {AUTH_ACCESS_ROLE_RANKS[AuthAccessRole.WRITE]}
+                   WHEN 'owner' THEN {AUTH_ACCESS_ROLE_RANKS[AuthAccessRole.OWNER]}
+                   ELSE 0
+                 END >= CASE current_setting('app.auth_context', true)
+                   WHEN 'read' THEN {AUTH_ACCESS_ROLE_RANKS[AuthAccessRole.READ]}
+                   WHEN 'write' THEN {AUTH_ACCESS_ROLE_RANKS[AuthAccessRole.WRITE]}
+                   WHEN 'owner' THEN {AUTH_ACCESS_ROLE_RANKS[AuthAccessRole.OWNER]}
+                   ELSE 0
+                 END
+             AND CASE {authorization}.principal_type
+                   WHEN 'user' THEN {authorization}.principal_id = principal.user_id
+                   WHEN 'group' THEN {authorization}.principal_id = ANY(principal.group_ids)
+                   WHEN 'org' THEN {authorization}.principal_id = principal.org_id
+                   ELSE FALSE
+                 END
+            LIMIT 1
+        ) AS {authorization} ON TRUE
+        WHERE {where_predicate}
+    """
+
+
+@dataclass(frozen=True)
+class AuthorizedDatabasePool:
+    """A pool whose configured resource queries are auth-ID scoped."""
+
+    pool: Pool
+    principal: AuthPrincipal
+    table_policies: tuple[AuthTablePolicy, ...]
+    required_role: AuthAccessRole | str = AuthAccessRole.READ
+
+    @property
+    def table_names(self) -> tuple[str, ...]:
+        return tuple(policy.table for policy in self.table_policies)
+
+    def _authorized_table_sql(self, policy: AuthTablePolicy) -> str:
+        return _authorized_table_sql(policy)
+
+    def _prepare_query(self, query: str) -> str:
+        return _cached_prepare_query(self.table_policies, query)
+
+    def _reject_shadowed_tables(self, query: str) -> None:
+        _reject_shadowed_tables(self.table_policies, query)
+
+    def _reject_manual_auth_tables(self, query: str) -> None:
+        _reject_manual_auth_tables(self.table_policies, query)
+
+    def _reject_writes(self, query: str) -> None:
+        _reject_writes(self.table_policies, query)
+
+    @asynccontextmanager
+    async def acquire(self) -> AsyncIterator["AuthorizedDatabaseConnection"]:
+        """Acquire a connection carrying this principal's clearance context.
+
+        One round trip: a single statement sets all four session-local GUCs.
+        The release-side scrub is the pool reset hook's job
+        (``_reset_connection``, which now also clears ``app.auth_group_ids``)
+        — this pool only wraps the process pool, and dropping the in-block
+        scrub halves the per-acquire round trips.
+        """
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                "SELECT set_config('app.user_id', $1, false), "
+                "set_config('app.org_id', $2, false), "
+                "set_config('app.auth_group_ids', $3, false), "
+                "set_config('app.auth_context', $4, false);",
+                str(self.principal.user_id),
+                str(self.principal.organization_id),
+                ",".join(str(group_id) for group_id in self.principal.group_ids),
+                AuthAccessRole(self.required_role).value,
+            )
+            yield AuthorizedDatabaseConnection(connection, self)
+
+
+@functools.lru_cache(maxsize=2048)
+def _cached_prepare_query(
+    table_policies: tuple[AuthTablePolicy, ...], query: str
+) -> str:
+    """Rewrite configured table references while preserving outer SQL.
+
+    Fail-closed: every FROM/JOIN-position reference to a configured table
+    must be rewritten. Quoted references (``FROM "projects"``, which the
+    rewrite cannot safely re-scope) are detected by reference counting and
+    rejected rather than silently left unscoped.
+
+    Cached by (policies, query): the rewrite is deterministic and the safety
+    checks below depend only on the same inputs, so a cache hit skips them
+    without changing any outcome. lru_cache does not memoize exceptions, so
+    rejected queries keep raising AuthorizedQueryError on every call.
+    """
+    _reject_shadowed_tables(table_policies, query)
+    _reject_manual_auth_tables(table_policies, query)
+    _reject_writes(table_policies, query)
+    rewritten = query
+    matched = False
+    for policy in table_policies:
+        total_references = _count_table_references(query, policy.table)
+        authorized_sql = _authorized_table_sql(policy).strip()
+        pattern = (
+            r"(?P<lead>\b(?:FROM|JOIN)\s+|,\s*)"
+            r"(?:public\s*\.\s*)?"
+            rf"(?P<table>{re.escape(policy.table)})(?![A-Za-z0-9_$.])"
+            rf"(?P<alias>\s+(?:AS\s+)?"
+            rf"(?P<alias_name>(?!(?:{'|'.join(SQL_KEYWORDS)}))\b"
+            rf"{IDENTIFIER_PATTERN}))?"
+        )
+
+        def replace(match: re.Match[str]) -> str:
+            nonlocal matched
+            matched = True
+            alias = match.group("alias_name") or policy.table
+            # Drop any schema qualifier: the replacement is a subquery,
+            # which cannot carry a "public." prefix.
+            return f"{match.group('lead')}({authorized_sql}) AS {alias}"
+
+        rewritten, rewritten_count = re.subn(
+            pattern, replace, rewritten, flags=re.IGNORECASE
+        )
+        if rewritten_count < total_references:
+            raise AuthorizedQueryError(
+                f"Authorized table {policy.table} must be referenced with "
+                "an unquoted identifier; quoted references cannot be "
+                "re-scoped safely"
+            )
+        if rewritten_count:
+            matched = True
+    if not matched:
+        raise AuthorizedQueryError(
+            "Authorized connection only supports configured tables: "
+            + ", ".join(policy.table for policy in table_policies)
+        )
+    return rewritten
+
+
+def _reject_shadowed_tables(table_policies: tuple[AuthTablePolicy, ...], query: str) -> None:
+    for policy in table_policies:
+        pattern = (
+            rf"\b(?:WITH|,)\s+{re.escape(policy.table)}"
+            rf"(?:\s*\([^)]*\))?\s+AS\s+(?:NOT\s+)?MATERIALIZED\s*\("
+            rf"|\b(?:WITH|,)\s+{re.escape(policy.table)}"
+            rf"(?:\s*\([^)]*\))?\s+AS\s*\("
+        )
+        if re.search(pattern, query, flags=re.IGNORECASE):
+            raise AuthorizedQueryError(
+                f"A CTE shadows authorized table {policy.table}; use a distinct CTE name"
+            )
+
+
+def _reject_manual_auth_tables(table_policies: tuple[AuthTablePolicy, ...], query: str) -> None:
+    if re.search(r"\bauth_clearances\b|\bauth_ids\b", query, flags=re.IGNORECASE):
+        raise AuthorizedQueryError(
+            "Manual auth-table references are not allowed on authorized connections"
+        )
+
+
+def _reject_writes(table_policies: tuple[AuthTablePolicy, ...], query: str) -> None:
+    if re.search(r"\bset_config\s*\(", query, flags=re.IGNORECASE):
+        raise AuthorizedQueryError("Authorized connections cannot change principal context")
+    if re.search(r"\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE)\b", query, flags=re.IGNORECASE):
+        raise AuthorizedQueryError("Authorized database connections are read-only")
+
+
+@dataclass
+class AuthorizedDatabaseConnection:
+    """Connection wrapper applying the pool's authorization contract."""
+
+    _connection: Connection
+    _pool: AuthorizedDatabasePool
+
+    @property
+    def principal(self) -> AuthPrincipal:
+        return self._pool.principal
+
+    async def fetch(self, query: str, *parameters: object) -> list[asyncpg.Record]:
+        return await self._query("fetch", query, parameters)
+
+    async def fetchrow(self, query: str, *parameters: object) -> asyncpg.Record | None:
+        return await self._query("fetchrow", query, parameters)
+
+    async def fetchval(self, query: str, *parameters: object) -> Any | None:
+        return await self._query("fetchval", query, parameters)
+
+    async def _query(self, method_name: str, query: str, parameters: tuple[object, ...]) -> Any:
+        prepared_query = self._pool._prepare_query(query)
+        return await getattr(self._connection, method_name)(prepared_query, *parameters)
+
+
+class AuthorizedQueryError(RuntimeError):
+    """Raised when a query is unsafe for automatic auth-ID authorization."""
+
+
+def _normalize_table_policies(
+    table_policies: str | AuthTablePolicy | tuple[AuthTablePolicy, ...],
+) -> tuple[AuthTablePolicy, ...]:
+    """Normalize string shorthand into validated, de-duplicated policies."""
+    policies = (table_policies,) if isinstance(table_policies, AuthTablePolicy) else table_policies
+    if isinstance(policies, str):
+        policies = (AuthTablePolicy(table=policies),)
+    normalized: list[AuthTablePolicy] = []
+    seen_tables: set[str] = set()
+    for policy in policies:
+        if isinstance(policy, str):
+            policy = AuthTablePolicy(table=policy)
+        policy.validate()
+        if policy.table.lower() in seen_tables:
+            raise ValueError(f"Duplicate authorized table policy: {policy.table}")
+        seen_tables.add(policy.table.lower())
+        normalized.append(policy)
+    if not normalized:
+        raise ValueError("At least one table policy is required")
+    return tuple(normalized)
+
+
+# Per-principal group sets, cached per process for 5 seconds — the same TTL
+# contract as the legacy AccessControlRepository cache. Keyed by (user_id,
+# organization_id) because `db/groups.py` is the only `user_groups` writer and
+# every membership mutation calls ``access_control.AccessControlService.
+# invalidate_user_groups`` (which also drops entries here), a cache entry can
+# only outlive a mutation that bypassed that invalidation.
+_GROUP_CACHE_TTL: Final[timedelta] = timedelta(seconds=5)
+_group_cache: Final[dict[tuple[str, str], tuple[datetime, tuple[UUID, ...]]]] = {}
+
+
+def invalidate_user_groups(user_id: UUID | str) -> None:
+    """Drop the cached group sets for one user (every organization)."""
+    user_key = str(user_id)
+    for cache_key in [key for key in _group_cache if key[0] == user_key]:
+        _group_cache.pop(cache_key, None)
+
+
+async def _resolve_group_ids(
+    pool: Pool,
+    user_id: UUID,
+    organization_id: UUID,
+) -> tuple[UUID, ...]:
+    """Resolve the caller's groups within one organization (5s TTL cache)."""
+    cache_key = (str(user_id), str(organization_id))
+    now = datetime.now(UTC)
+    cached = _group_cache.get(cache_key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    group_rows = await pool.fetch(
+        "SELECT user_groups.group_id "
+        "FROM user_groups JOIN groups ON groups.id = user_groups.group_id "
+        "WHERE user_groups.user_id = $1 AND groups.organization_id = $2 "
+        "ORDER BY user_groups.group_id",
+        user_id,
+        organization_id,
+    )
+    group_ids = tuple(UUID(str(group_row["group_id"])) for group_row in group_rows)
+    _group_cache[cache_key] = (now + _GROUP_CACHE_TTL, group_ids)
+    return group_ids
+
+
+async def get_authorized_pool_for_user(
+    pool: Pool,
+    user: dict[str, Any],
+    table_policies: str | AuthTablePolicy | tuple[AuthTablePolicy, ...],
+    required_role: AuthAccessRole | str = AuthAccessRole.READ,
+) -> AuthorizedDatabasePool:
+    """Return an authorized pool for an already-authenticated user record."""
+    required_role = AuthAccessRole(required_role)
+
+    normalized = _normalize_table_policies(table_policies)
+
+    try:
+        user_id = UUID(str(user["id"]))
+        organization_id = UUID(str(user["organization_id"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Authenticated user is missing a valid identity scope") from exc
+
+    username = str(user.get("display_name") or user.get("email") or user_id)
+    principal = AuthPrincipal(
+        user_id=user_id,
+        username=username,
+        organization_id=organization_id,
+        group_ids=await _resolve_group_ids(pool, user_id, organization_id),
+    )
+    return AuthorizedDatabasePool(pool, principal, tuple(normalized), required_role)
+
+
+async def get_authorized_pool(
+    username: str,
+    table_policies: str | AuthTablePolicy | tuple[AuthTablePolicy, ...],
+    required_role: AuthAccessRole | str = AuthAccessRole.READ,
+) -> AuthorizedDatabasePool:
+    """Return a pool whose queries are authorized for ``username``."""
+    if not username.strip():
+        raise ValueError("username is required for authorized pool access")
+    required_role = AuthAccessRole(required_role)
+
+    pool = await get_pool()
+    policies = (table_policies,) if isinstance(table_policies, AuthTablePolicy) else table_policies
+    if isinstance(policies, str):
+        policies = (AuthTablePolicy(table=policies),)
+    normalized = _normalize_table_policies(policies)
+
+    rows = await pool.fetch(
+        "SELECT id AS user_id, COALESCE(display_name, email, id::text) AS username, "
+        "organization_id "
+        "FROM users "
+        "WHERE COALESCE(display_name, email) = $1 AND is_active IS TRUE "
+        "ORDER BY organization_id",
+        username,
+    )
+    if not rows or rows[0]["organization_id"] is None:
+        raise ValueError(f"Unable to resolve active principal for username: {username}")
+    organization_id = UUID(str(rows[0]["organization_id"]))
+    if any(UUID(str(row["organization_id"])) != organization_id for row in rows):
+        raise ValueError(f"Ambiguous principal across organizations for username: {username}")
+    return await get_authorized_pool_for_user(
+        pool,
+        {
+            "id": rows[0]["user_id"],
+            "organization_id": rows[0]["organization_id"],
+            "display_name": rows[0]["username"],
+        },
+        normalized,
+        required_role,
+    )
 
 
 async def close_db() -> None:

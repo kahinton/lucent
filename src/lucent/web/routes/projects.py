@@ -12,20 +12,34 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import get_pool
-from lucent.db.projects import ProjectNotFoundError, ProjectRepository
+from lucent.db.projects import (
+    ProjectNotFoundError,
+    ProjectRepository,
+    get_authorized_projects_pool,
+)
 
 from ._shared import _check_csrf, _get_csrf_for_request, get_user_context, templates
 
 router = APIRouter()
 
 
+async def _authorized_repo(pool, user) -> ProjectRepository:
+    """Build a ProjectRepository using auth-ID-aware project reads."""
+    authorized_pool = await get_authorized_projects_pool(
+        pool,
+        {
+            "id": str(user.id),
+            "organization_id": str(user.organization_id),
+        },
+    )
+    return ProjectRepository(authorized_pool)
+
+
 @router.get("/projects", response_class=HTMLResponse)
 async def projects_list(request: Request):
     user = await get_user_context(request)
-    repo = ProjectRepository(await get_pool())
-    result = await repo.list_owned(
-        org_id=str(user.organization_id), user_id=str(user.id)
-    )
+    repo = await _authorized_repo(await get_pool(), user)
+    result = await repo.list_owned()
     return templates.TemplateResponse(
         request,
         "projects.html",
@@ -42,12 +56,11 @@ async def projects_list(request: Request):
 async def project_detail(request: Request, project_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = ProjectRepository(pool)
-    project = await repo.get_owned_with_counts(
-        project_id, org_id=str(user.organization_id), user_id=str(user.id)
-    )
+    authorized_repo = await _authorized_repo(pool, user)
+    project = await authorized_repo.get_owned_with_counts(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    repo = ProjectRepository(pool)
     sessions = (await repo.list_sessions_in_project(
         project_id, org_id=str(user.organization_id), user_id=str(user.id)
     ))["items"]
@@ -211,9 +224,8 @@ async def project_new_chat(
     await _check_csrf(request, csrf_token)
     user = await get_user_context(request)
     pool = await get_pool()
-    project = await ProjectRepository(pool).get_owned(
-        project_id, org_id=str(user.organization_id), user_id=str(user.id)
-    )
+    authorized_repo = await _authorized_repo(pool, user)
+    project = await authorized_repo.get_owned(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
     from lucent.db.llm_sessions import LLMSessionRepository
@@ -236,12 +248,11 @@ async def project_new_chat(
 async def project_add_chats_page(request: Request, project_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = ProjectRepository(pool)
-    project = await repo.get_owned(
-        project_id, org_id=str(user.organization_id), user_id=str(user.id)
-    )
+    authorized_repo = await _authorized_repo(pool, user)
+    project = await authorized_repo.get_owned(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    repo = ProjectRepository(pool)
     sessions = (await repo.list_unfiled_sessions(
         org_id=str(user.organization_id), user_id=str(user.id)
     ))["items"]
@@ -284,12 +295,11 @@ async def project_add_chats(
 async def project_add_files_page(request: Request, project_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = ProjectRepository(pool)
-    project = await repo.get_owned(
-        project_id, org_id=str(user.organization_id), user_id=str(user.id)
-    )
+    authorized_repo = await _authorized_repo(pool, user)
+    project = await authorized_repo.get_owned(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    repo = ProjectRepository(pool)
     files = (await repo.list_unfiled_files(
         org_id=str(user.organization_id), user_id=str(user.id)
     ))["items"]
@@ -378,12 +388,11 @@ async def project_add_memories_page(
 ):
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = ProjectRepository(pool)
-    project = await repo.get_owned(
-        project_id, org_id=str(user.organization_id), user_id=str(user.id)
-    )
+    authorized_repo = await _authorized_repo(pool, user)
+    project = await authorized_repo.get_owned(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    repo = ProjectRepository(pool)
     type_filter = type if type in MEMORY_TYPES else ""
     unfiled = await repo.list_unfiled_memories(
         org_id=str(user.organization_id), user_id=str(user.id), limit=200
@@ -434,12 +443,11 @@ async def project_add_memories(
 async def project_add_interactions_page(request: Request, project_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
-    repo = ProjectRepository(pool)
-    project = await repo.get_owned(
-        project_id, org_id=str(user.organization_id), user_id=str(user.id)
-    )
+    authorized_repo = await _authorized_repo(pool, user)
+    project = await authorized_repo.get_owned(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    repo = ProjectRepository(pool)
     interactions = (await repo.list_unfiled_interactions(
         org_id=str(user.organization_id), user_id=str(user.id)
     ))["items"]

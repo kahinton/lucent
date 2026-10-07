@@ -567,7 +567,12 @@ class TestDockerBackendDevcontainerIntegration:
 
     @pytest.mark.asyncio
     async def test_create_without_repo_skips_devcontainer(self):
-        """Sandboxes without repos should not attempt devcontainer detection."""
+        """Sandboxes without repos should not attempt devcontainer detection.
+
+        An empty managed-tool workspace cannot contain a devcontainer (see
+        the ``if config.repo_url`` guard in ``DockerBackend.create``), so
+        ``_detect_devcontainer`` must never be invoked for them.
+        """
         backend, mock_client = self._make_backend()
         container = self._mock_container(mock_client)
         self._mock_exec(container)
@@ -580,7 +585,7 @@ class TestDockerBackendDevcontainerIntegration:
 
         assert info.status == SandboxStatus.READY
         assert info.devcontainer is None
-        mock_detect.assert_called_once()
+        mock_detect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_with_repo_no_devcontainer(self):

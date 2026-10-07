@@ -10,9 +10,12 @@ from uuid import UUID
 
 import asyncpg
 
-from lucent.db.pool import scoped_acquire
+from lucent.db.pool import AuthorizedDatabasePool, scoped_acquire
+from lucent.db.sandbox_template import SANDBOX_AUTH_POLICY, get_authorized_sandboxes_pool
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["SANDBOX_AUTH_POLICY", "SandboxRepository", "get_authorized_sandboxes_pool"]
 
 
 def _sanitize_runtime_config(config: dict | None) -> dict:
@@ -84,7 +87,13 @@ class SandboxRepository:
         destroyed_at: datetime | None = None,
         organization_id: str | None = None,
     ) -> dict | None:
-        """Update sandbox status and optional metadata."""
+        """Update sandbox status and optional metadata.
+
+        organization_id=None is the system-infra branch: lifecycle
+        bookkeeping (create ready/failed, stop, destroy) runs ahead of any
+        user context — the row ID came from the provisioning path itself,
+        never from user input.
+        """
         sets = ["status = $2", "updated_at = NOW()"]
         params: list[Any] = [UUID(sandbox_id), status]
         idx = 3
@@ -113,18 +122,34 @@ class SandboxRepository:
         async with scoped_acquire(
             organization_id=organization_id, role="system" if not organization_id else None
         ) as conn:
+            query = f"UPDATE sandboxes SET {', '.join(sets)} WHERE id = $1"
+            if organization_id:
+                # Fresh slot: optional fields already consume $3, $4, ...
+                params.append(UUID(organization_id))
+                query += f" AND organization_id = ${len(params)}"
             row = await conn.fetchrow(
-                f"UPDATE sandboxes SET {', '.join(sets)} WHERE id = $1 RETURNING *",
+                query + " RETURNING *",
                 *params,
             )
             return dict(row) if row else None
 
     async def get(self, sandbox_id: str, organization_id: str | None = None) -> dict | None:
-        """Get a sandbox by ID."""
+        """Get a sandbox by ID.
+
+        User-facing callers pass organization_id so another org's row is
+        simply absent. None is the system-infra branch (SandboxManager
+        lifecycle bookkeeping) — it reaches every row and must stay
+        reserved for callers with no user behind them.
+        """
         async with scoped_acquire(
             organization_id=organization_id, role="system" if not organization_id else None
         ) as conn:
-            row = await conn.fetchrow("SELECT * FROM sandboxes WHERE id = $1", UUID(sandbox_id))
+            query = "SELECT * FROM sandboxes WHERE id = $1"
+            params: list[object] = [UUID(sandbox_id)]
+            if organization_id:
+                query += " AND organization_id = $2"
+                params.append(UUID(organization_id))
+            row = await conn.fetchrow(query, *params)
             return dict(row) if row else None
 
     async def find_reusable_for_request(
@@ -272,7 +297,12 @@ class SandboxRepository:
             }
 
     async def list_active(self, organization_id: str | None = None, limit: int = 25, offset: int = 0) -> dict:
-        """List non-destroyed sandboxes."""
+        """List non-destroyed sandboxes (legacy org-wide read).
+
+        The usage path — a member's own sandboxes — uses the clearance-driven
+        ``list_sandboxes_accessible_by`` below; admin/owner listings keep
+        using org-scoped ``list_all``/``list_active``.
+        """
         async with scoped_acquire(organization_id=organization_id) as conn:
             if organization_id:
                 count_row = await conn.fetchrow(
@@ -306,3 +336,77 @@ class SandboxRepository:
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
+
+    # ── Clearance-driven usage reads ──────────────────────────────────────
+    #
+    # Sandbox instances are "only yours" (Kyle, 2026-10-01): members see and
+    # control only sandboxes created for them; admins/owners manage all via
+    # the legacy org-scoped listings above. Ownership clearances are filed by
+    # the 123 owner trigger (created_by); explicit grants live in
+    # auth_clearances. A plain pool is fail-closed.
+
+    async def _authorized_fetchrow(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, *params)
+
+    async def _authorized_fetch(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(query, *params)
+
+    async def list_sandboxes_accessible_by(
+        self,
+        user_id: str,
+        organization_id: str,
+        *,
+        exclude_destroyed: bool = True,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
+        """List sandboxes cleared for *use* by the pool's principal.
+
+        Clearance-driven and default-deny on an authorized pool. The org
+        predicate stays in the caller's SQL (defense in depth); the
+        destroyed filter stays the caller's lifecycle filter.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Sandbox usage reads require an AuthorizedDatabasePool "
+                "built for the sandboxes policy (usage is clearance-driven "
+                "and default-deny)"
+            )
+        params: list[Any] = [UUID(organization_id)]
+        status_clause = ""
+        if exclude_destroyed:
+            status_clause = f" AND sb.status != ${len(params) + 1}"
+            params.append("destroyed")
+        count_query = (
+            f"SELECT COUNT(*) AS total FROM sandboxes sb "
+            f"WHERE sb.organization_id = $1{status_clause}"
+        )
+        query = (
+            f"SELECT sb.* FROM sandboxes sb "
+            f"WHERE sb.organization_id = $1{status_clause} "
+            f"ORDER BY sb.created_at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        )
+        params_with_page = [*params, limit, offset]
+
+        count_row = await self._authorized_fetchrow(count_query, *params)
+        total_count = count_row["total"] if count_row else 0
+        rows = await self._authorized_fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def get_usable_sandbox(self, sandbox_id: str) -> dict | None:
+        """By-ID *usage* probe: the sandbox must be cleared for this principal."""
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError("Sandbox usage reads require an AuthorizedDatabasePool")
+        row = await self._authorized_fetchrow(
+            "SELECT * FROM sandboxes WHERE id = $1",
+            UUID(sandbox_id),
+        )
+        return dict(row) if row else None

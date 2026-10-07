@@ -16,6 +16,26 @@ from lucent.db.groups import GroupRepository
 from lucent.db.sandbox_template import SandboxTemplateRepository
 
 
+async def usage_repo_for(db_pool, user_id: str, org_id: str) -> DefinitionRepository:
+    """Clearance-driven definition repo for a principal (usage is default-deny)."""
+    from lucent.db.definitions import get_authorized_definitions_pool
+
+    authorized = await get_authorized_definitions_pool(
+        db_pool, {"id": user_id, "organization_id": org_id}
+    )
+    return DefinitionRepository(authorized)
+
+
+async def tmpl_usage_repo_for(db_pool, user_id: str, org_id: str):
+    """Clearance-driven sandbox-template repo for a principal."""
+    from lucent.db.sandbox_template import get_authorized_templates_pool
+
+    authorized = await get_authorized_templates_pool(
+        db_pool, {"id": user_id, "organization_id": org_id}
+    )
+    return SandboxTemplateRepository(authorized)
+
+
 @pytest_asyncio.fixture
 async def def_repo(db_pool):
     return DefinitionRepository(db_pool)
@@ -162,7 +182,7 @@ class TestCheckConstraints:
 class TestAgentOwnership:
     @pytest.mark.asyncio
     async def test_create_with_user_owner(
-        self, def_repo, test_organization, test_user, clean_test_data,
+        self, def_repo, db_pool, test_organization, test_user, clean_test_data,
     ):
         user_id = str(test_user["id"])
         org_id = str(test_organization["id"])
@@ -354,7 +374,7 @@ class TestAccessibleBy:
 
     @pytest.mark.asyncio
     async def test_user_sees_own_agents(
-        self, def_repo, test_organization, test_user, clean_test_data,
+        self, def_repo, db_pool, test_organization, test_user, clean_test_data,
     ):
         org_id = str(test_organization["id"])
         user_id = str(test_user["id"])
@@ -367,13 +387,15 @@ class TestAccessibleBy:
             status="active",
             owner_user_id=user_id,
         )
-        result = await def_repo.list_agents_accessible_by(user_id, org_id)
+        result = await (await usage_repo_for(db_pool, user_id, org_id)).list_agents_accessible_by(
+            user_id, org_id
+        )
         names = [a["name"] for a in result["items"]]
         assert f"{clean_test_data}my_agent" in names
 
     @pytest.mark.asyncio
     async def test_user_sees_group_agents(
-        self, def_repo, group_repo, test_organization, test_user,
+        self, def_repo, group_repo, db_pool, test_organization, test_user,
         second_user, clean_test_data,
     ):
         org_id = str(test_organization["id"])
@@ -383,7 +405,9 @@ class TestAccessibleBy:
         group = await group_repo.create_group(
             name=f"{clean_test_data}team", org_id=org_id,
         )
-        await group_repo.add_member(str(group["id"]), user2_id)
+        await group_repo.add_member(
+            str(group["id"]), user2_id, organization_id=str(org_id)
+        )
 
         # Agent owned by the group, created by user1
         await def_repo.create_agent(
@@ -396,14 +420,17 @@ class TestAccessibleBy:
             owner_group_id=str(group["id"]),
         )
 
-        # user2 is a group member — should see the agent
-        result = await def_repo.list_agents_accessible_by(user2_id, org_id)
+        # user2 is a group member — should see the agent (the 126 group
+        # clearance trigger files the grant)
+        result = await (await usage_repo_for(db_pool, user2_id, org_id)).list_agents_accessible_by(
+            user2_id, org_id
+        )
         names = [a["name"] for a in result["items"]]
         assert f"{clean_test_data}group_agent" in names
 
     @pytest.mark.asyncio
     async def test_user_cannot_see_other_user_agents(
-        self, def_repo, test_organization, test_user, second_user, clean_test_data,
+        self, def_repo, db_pool, test_organization, test_user, second_user, clean_test_data,
     ):
         org_id = str(test_organization["id"])
         user1_id = str(test_user["id"])
@@ -420,7 +447,9 @@ class TestAccessibleBy:
         )
 
         # user2 should NOT see user1's agent
-        result = await def_repo.list_agents_accessible_by(user2_id, org_id)
+        result = await (await usage_repo_for(db_pool, user2_id, org_id)).list_agents_accessible_by(
+            user2_id, org_id
+        )
         names = [a["name"] for a in result["items"]]
         assert f"{clean_test_data}private_agent" not in names
 
@@ -442,13 +471,15 @@ class TestAccessibleBy:
                 test_organization["id"],
             )
 
-        result = await def_repo.list_agents_accessible_by(user2_id, org_id)
+        result = await (await usage_repo_for(db_pool, user2_id, org_id)).list_agents_accessible_by(
+            user2_id, org_id
+        )
         names = [a["name"] for a in result["items"]]
         assert f"{clean_test_data}builtin_agent" in names
 
     @pytest.mark.asyncio
     async def test_skills_accessible_by(
-        self, def_repo, test_organization, test_user, second_user, clean_test_data,
+        self, def_repo, db_pool, test_organization, test_user, second_user, clean_test_data,
     ):
         org_id = str(test_organization["id"])
         user1_id = str(test_user["id"])
@@ -464,18 +495,22 @@ class TestAccessibleBy:
             owner_user_id=user1_id,
         )
         # user2 should not see user1's skill
-        result = await def_repo.list_skills_accessible_by(user2_id, org_id)
+        result = await (await usage_repo_for(db_pool, user2_id, org_id)).list_skills_accessible_by(
+            user2_id, org_id
+        )
         names = [s["name"] for s in result["items"]]
         assert f"{clean_test_data}private_skill" not in names
 
         # user1 should see it
-        result = await def_repo.list_skills_accessible_by(user1_id, org_id)
+        result = await (await usage_repo_for(db_pool, user1_id, org_id)).list_skills_accessible_by(
+            user1_id, org_id
+        )
         names = [s["name"] for s in result["items"]]
         assert f"{clean_test_data}private_skill" in names
 
     @pytest.mark.asyncio
     async def test_mcp_servers_accessible_by(
-        self, def_repo, test_organization, test_user, second_user, clean_test_data,
+        self, def_repo, db_pool, test_organization, test_user, second_user, clean_test_data,
     ):
         org_id = str(test_organization["id"])
         user1_id = str(test_user["id"])
@@ -491,7 +526,8 @@ class TestAccessibleBy:
             status="active",
             owner_user_id=user1_id,
         )
-        result = await def_repo.list_mcp_servers_accessible_by(user2_id, org_id)
+        repo = await usage_repo_for(db_pool, user2_id, org_id)
+        result = await repo.list_mcp_servers_accessible_by(user2_id, org_id)
         names = [m["name"] for m in result["items"]]
         assert f"{clean_test_data}private_mcp" not in names
 
@@ -581,7 +617,8 @@ class TestSandboxTemplateOwnership:
 
     @pytest.mark.asyncio
     async def test_list_accessible_by(
-        self, tmpl_repo, test_organization, test_user, second_user, clean_test_data,
+        self, db_pool, tmpl_repo, test_organization, test_user, second_user,
+        clean_test_data,
     ):
         org_id = str(test_organization["id"])
         user1_id = str(test_user["id"])
@@ -593,15 +630,32 @@ class TestSandboxTemplateOwnership:
             created_by=user1_id,
             owner_user_id=user1_id,
         )
-        # user1 sees it
-        result = await tmpl_repo.list_accessible_by(user1_id, org_id)
+        # user1 sees it (clearance-driven usage read, 123 owner trigger)
+        result = await (await tmpl_usage_repo_for(db_pool, user1_id, org_id)) \
+            .list_templates_accessible_by(user1_id, org_id)
         names = [t["name"] for t in result["items"]]
         assert f"{clean_test_data}private_tmpl" in names
 
         # user2 does not
-        result = await tmpl_repo.list_accessible_by(user2_id, org_id)
+        result = await (await tmpl_usage_repo_for(db_pool, user2_id, org_id)) \
+            .list_templates_accessible_by(user2_id, org_id)
         names = [t["name"] for t in result["items"]]
         assert f"{clean_test_data}private_tmpl" not in names
+
+    @pytest.mark.asyncio
+    async def test_list_usable_templates_needs_authorized_pool(
+        self, db_pool, tmpl_repo, test_organization, test_user, clean_test_data,
+    ):
+        """A plain pool is default-deny for usage reads (no legacy fallback)."""
+        from lucent.db.pool import AuthorizedDatabasePool
+
+        plan_repo = SandboxTemplateRepository(db_pool)
+        if isinstance(db_pool, AuthorizedDatabasePool):
+            pytest.skip("db pool fixture is an authorized pool in this environment")
+        with pytest.raises(TypeError, match="AuthorizedDatabasePool"):
+            await plan_repo.list_templates_accessible_by(
+                str(test_user["id"]), str(test_organization["id"]),
+            )
 
 
 # ── Backfill Verification ─────────────────────────────────────────────────

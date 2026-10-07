@@ -102,6 +102,12 @@ async def test_hook_repository_grants_active_hooks_to_agents(repo, auth_user):
         status="proposed",
         owner_user_id=str(auth_user["id"]),
     )
+    # Hook approval is two-step under the clearance migration:
+    # proposed -> owner_approved (owner sign-off) -> active (admin sign-off).
+    owner_approved = await repo.approve_hook(
+        str(hook["id"]), str(auth_user["organization_id"]), str(auth_user["id"])
+    )
+    assert owner_approved["status"] == "owner_approved"
     await repo.approve_hook(
         str(hook["id"]), str(auth_user["organization_id"]), str(auth_user["id"])
     )
@@ -135,10 +141,13 @@ async def test_sync_built_in_hooks_grants_default_hook_to_existing_agents(repo, 
     assert await repo.get_agent_hooks(str(agent["id"])) == []
 
     synced = await repo.sync_built_in_hooks(str(auth_user["organization_id"]))
-    assert synced == 1
+    assert synced == 2
 
     hooks = await repo.get_agent_hooks(str(agent["id"]))
-    assert [h["name"] for h in hooks] == ["file-memory-lookup"]
+    assert [h["name"] for h in hooks] == [
+        "file-memory-lookup",
+        "message-memory-lookup",
+    ]
 
 
 @pytest.mark.asyncio
@@ -156,7 +165,10 @@ async def test_create_agent_gets_default_hook_when_builtin_exists(repo, auth_use
     )
 
     hooks = await repo.get_agent_hooks(str(agent["id"]))
-    assert [h["name"] for h in hooks] == ["file-memory-lookup"]
+    assert [h["name"] for h in hooks] == [
+        "file-memory-lookup",
+        "message-memory-lookup",
+    ]
 
 
 @pytest.mark.asyncio
@@ -177,7 +189,10 @@ async def test_active_agent_with_grants_includes_default_hooks(repo, auth_user):
     )
 
     assert agent is not None
-    assert [h["name"] for h in agent["hooks"]] == ["file-memory-lookup"]
+    assert [h["name"] for h in agent["hooks"]] == [
+        "file-memory-lookup",
+        "message-memory-lookup",
+    ]
 
 
 @pytest.mark.asyncio
@@ -205,12 +220,21 @@ async def test_hook_mcp_tools_create_and_grant_after_human_approval(mcp, auth_us
     )
     assert hook["status"] == "proposed"
 
+    # Two-step approval: owner sign-off lands as 'owner_approved'; the
+    # admin's second approval activates the hook.
     approved = await repo.approve_hook(
         str(hook["id"]),
         str(auth_user["organization_id"]),
         str(auth_user["id"]),
     )
-    assert approved["status"] == "active"
+    assert approved["status"] == "owner_approved"
+
+    activated = await repo.approve_hook(
+        str(hook["id"]),
+        str(auth_user["organization_id"]),
+        str(auth_user["id"]),
+    )
+    assert activated["status"] == "active"
 
     grant = await _call(
         mcp,

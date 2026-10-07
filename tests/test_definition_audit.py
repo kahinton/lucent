@@ -432,7 +432,10 @@ class TestGrantRevokeAudit:
     async def test_revoke_skill_audit(self, db_pool, def_repo, da_org, da_user):
         agent = await _create_test_agent(def_repo, da_org["id"], da_user["id"])
         skill = await _create_test_skill(def_repo, da_org["id"], da_user["id"])
-        await def_repo.grant_skill(str(agent["id"]), str(skill["id"]))
+        await def_repo.grant_skill(
+            str(agent["id"]), str(skill["id"]),
+            org_id=str(da_org["id"]), user_id=str(da_user["id"]),
+        )
 
         revoked = await def_repo.revoke_skill(
             str(agent["id"]), str(skill["id"]),
@@ -469,7 +472,10 @@ class TestGrantRevokeAudit:
     async def test_revoke_mcp_server_audit(self, db_pool, def_repo, da_org, da_user):
         agent = await _create_test_agent(def_repo, da_org["id"], da_user["id"])
         mcp = await _create_test_mcp(def_repo, da_org["id"], da_user["id"])
-        await def_repo.grant_mcp_server(str(agent["id"]), str(mcp["id"]))
+        await def_repo.grant_mcp_server(
+            str(agent["id"]), str(mcp["id"]),
+            org_id=str(da_org["id"]), user_id=str(da_user["id"]),
+        )
 
         revoked = await def_repo.revoke_mcp_server(
             str(agent["id"]), str(mcp["id"]),
@@ -489,7 +495,10 @@ class TestGrantRevokeAudit:
     ):
         agent = await _create_test_agent(def_repo, da_org["id"], da_user["id"])
         mcp = await _create_test_mcp(def_repo, da_org["id"], da_user["id"])
-        await def_repo.grant_mcp_server(str(agent["id"]), str(mcp["id"]))
+        await def_repo.grant_mcp_server(
+            str(agent["id"]), str(mcp["id"]),
+            org_id=str(da_org["id"]), user_id=str(da_user["id"]),
+        )
 
         updated = await def_repo.update_mcp_tool_grants(
             str(agent["id"]),
@@ -509,10 +518,10 @@ class TestGrantRevokeAudit:
         assert entry["context"]["agent_id"] == str(agent["id"])
         assert entry["context"]["allowed_tools"] == ["tool_a", "tool_b"]
 
-    async def test_grant_skill_no_org_skips_audit(
+    async def test_grant_skill_no_org_fails_closed(
         self, db_pool, def_repo, da_org, da_user,
     ):
-        """Grant without org_id should still succeed but skip audit."""
+        """Grant without org_id is refused (fail closed) and writes no audit."""
         agent = await _create_test_agent(def_repo, da_org["id"], da_user["id"])
         skill = await _create_test_skill(def_repo, da_org["id"], da_user["id"])
 
@@ -521,7 +530,8 @@ class TestGrantRevokeAudit:
         grant_before = [e for e in entries_before if e["action_type"] == DEFINITION_GRANT]
 
         ok = await def_repo.grant_skill(str(agent["id"]), str(skill["id"]))
-        assert ok is True
+        # Tenant-scoped writes are now fail closed: no context, no grant.
+        assert ok is False
 
         entries_after = await _fetch_audit_entries(db_pool, da_org["id"])
         grant_after = [e for e in entries_after if e["action_type"] == DEFINITION_GRANT]
@@ -717,10 +727,12 @@ class TestNoAuditBackwardCompat:
         )
         ok = await def_repo_no_audit.grant_skill(
             str(agent["id"]), str(skill["id"]),
+            org_id=str(da_org["id"]),
         )
         assert ok is True
         revoked = await def_repo_no_audit.revoke_skill(
             str(agent["id"]), str(skill["id"]),
+            org_id=str(da_org["id"]),
         )
         assert revoked is True
 
@@ -790,7 +802,10 @@ class TestContextRichness:
     ):
         agent = await _create_test_agent(def_repo, da_org["id"], da_user["id"])
         mcp = await _create_test_mcp(def_repo, da_org["id"], da_user["id"])
-        await def_repo.grant_mcp_server(str(agent["id"]), str(mcp["id"]))
+        await def_repo.grant_mcp_server(
+            str(agent["id"]), str(mcp["id"]),
+            org_id=str(da_org["id"]), user_id=str(da_user["id"]),
+        )
 
         await def_repo.update_mcp_tool_grants(
             str(agent["id"]),

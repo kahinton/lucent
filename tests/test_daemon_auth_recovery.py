@@ -196,20 +196,24 @@ def test_detects_mcp_auth_failure_from_tool_error_response():
 async def test_run_session_remints_scoped_memory_key_after_auth_failure(monkeypatch):
     daemon = LucentDaemon()
     daemon.instance_id = "instance-retry-once"
-    daemon_module.MCP_CONFIG = {
+    # Seed via monkeypatch, never a bare assignment: this module state is
+    # shared process-wide and a leaked carrier corrupts later test files.
+    monkeypatch.setattr(daemon_module, "MCP_CONFIG", {
         "memory-server": {
             "type": "http",
             "url": "http://mcp",
             "headers": {"Authorization": "Bearer old-key"},
             "tools": ["*"],
         }
-    }
+    })
 
     call_count = {"n": 0}
     seen_headers: list[str] = []
     seen_scope_headers: list[dict[str, str]] = []
 
-    async def _inner(session_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs):
+    async def _inner(
+        session_name, _system, _prompt, model=None, mcp_config_override=None, **_kwargs
+    ):
         call_count["n"] += 1
         if mcp_config_override and mcp_config_override.get("memory-server"):
             headers = mcp_config_override["memory-server"]["headers"]
@@ -233,14 +237,14 @@ async def test_run_session_remints_scoped_memory_key_after_auth_failure(monkeypa
 
     async def _recover(_instance_id: str, *, force_rotate: bool = False) -> bool:
         recover_calls["n"] += 1
-        daemon_module.MCP_CONFIG = {
+        monkeypatch.setattr(daemon_module, "MCP_CONFIG", {
             "memory-server": {
                 "type": "http",
                 "url": "http://mcp",
                 "headers": {"Authorization": "Bearer new-key"},
                 "tools": ["*"],
             }
-        }
+        })
         return True
 
     mint_calls: list[dict[str, object]] = []
@@ -249,14 +253,22 @@ async def test_run_session_remints_scoped_memory_key_after_auth_failure(monkeypa
         mint_calls.append(kwargs)
         return "hs_scoped_new"
 
+    async def _allow_model(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(daemon, "_run_session_inner", _inner)
     monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
     monkeypatch.setattr(daemon_module, "_mint_scoped_api_key", _mint)
+    monkeypatch.setattr(
+        daemon_module, "_assert_model_accessible_by_user", _allow_model
+    )
 
     result = await daemon.run_session(
         "auth-recovery-test",
         "system",
         "prompt",
+        model="test-model",
+        audit_context={"organization_id": "org-1", "user_id": "user-1"},
         mcp_config_override={
             "memory-server": {
                 "type": "http",
@@ -310,13 +322,21 @@ async def test_run_session_refuses_unscoped_memory_override_after_auth_failure(
         recover_calls["n"] += 1
         return True
 
+    async def _allow_model(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(daemon, "_run_session_inner", _inner)
     monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
+    monkeypatch.setattr(
+        daemon_module, "_assert_model_accessible_by_user", _allow_model
+    )
 
     result = await daemon.run_session(
         "auth-unscoped-override-test",
         "system",
         "prompt",
+        model="test-model",
+        audit_context={"organization_id": "org-1", "user_id": "user-1"},
         mcp_config_override={
             "memory-server": {
                 "type": "http",
@@ -346,10 +366,20 @@ async def test_run_session_auth_retry_guard_prevents_infinite_loop(monkeypatch):
         recover_calls["n"] += 1
         return True
 
+    async def _allow_model(*_args, **_kwargs):
+        return None
+
     monkeypatch.setattr(daemon, "_run_session_inner", _inner)
     monkeypatch.setattr(daemon_module, "_handle_auth_failure", _recover)
+    monkeypatch.setattr(daemon_module, "_assert_model_accessible_by_user", _allow_model)
 
-    result = await daemon.run_session("auth-guard-test", "system", "prompt")
+    result = await daemon.run_session(
+        "auth-guard-test",
+        "system",
+        "prompt",
+        model="test-model",
+        audit_context={"organization_id": "org-1", "user_id": "user-1"},
+    )
 
     assert result is None
     assert recover_calls["n"] == 1
@@ -425,9 +455,19 @@ async def test_run_session_stops_after_second_empty_response(monkeypatch):
         attempts["count"] += 1
         return None
 
-    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+    async def _allow_model(*_args, **_kwargs):
+        return None
 
-    result = await daemon.run_session("empty-response-guard-test", "system", "prompt")
+    monkeypatch.setattr(daemon, "_run_session_inner", _inner)
+    monkeypatch.setattr(daemon_module, "_assert_model_accessible_by_user", _allow_model)
+
+    result = await daemon.run_session(
+        "empty-response-guard-test",
+        "system",
+        "prompt",
+        model="test-model",
+        audit_context={"organization_id": "org-1", "user_id": "user-1"},
+    )
 
     assert result is None
     assert attempts["count"] == 2

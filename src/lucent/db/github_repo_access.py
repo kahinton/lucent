@@ -24,7 +24,9 @@ class GitHubRepoAccessRepository:
     async def get_cached(
         self, *, user_id: UUID, repo_full_name: str
     ) -> dict[str, Any] | None:
-        async with scoped_acquire_on(self.pool, user_id=user_id) as conn:
+        # Keyed on the globally-unique user_id — no tenant binding needed
+        # (same pattern as resolve_user_org below).
+        async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
                 SELECT has_access, checked_at, expires_at
@@ -45,7 +47,7 @@ class GitHubRepoAccessRepository:
         checked_at: datetime,
         expires_at: datetime,
     ) -> None:
-        async with scoped_acquire_on(self.pool, user_id=user_id) as conn:
+        async with self.pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO github_repo_access_cache (

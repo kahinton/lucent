@@ -16,8 +16,8 @@ from uuid import UUID
 import asyncpg
 from asyncpg import Pool
 
-from lucent.logging import get_logger
 from lucent.db.pool import scoped_acquire
+from lucent.logging import get_logger
 
 logger = get_logger("db.user")
 
@@ -134,15 +134,15 @@ class UserRepository:
         query = """
             INSERT INTO memories (username, type, content, tags,
                 importance, related_memory_ids, metadata,
-                user_id, organization_id, shared)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
+                user_id, organization_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, username, type, content, tags, importance, related_memory_ids, metadata,
                       created_at, updated_at, deleted_at, user_id,
-                      organization_id, shared, last_accessed_at
+                      organization_id, last_accessed_at
         """
 
         try:
-            async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
+            async with self.pool.acquire() as conn:  # system-infra: intentionally scope-less, audited site
                 row = await conn.fetchrow(
                     query,
                     name,  # username
@@ -178,7 +178,7 @@ class UserRepository:
         query = """
             SELECT id, username, type, content, tags, importance, related_memory_ids, metadata,
                    created_at, updated_at, deleted_at, user_id,
-                   organization_id, shared, last_accessed_at
+                   organization_id, last_accessed_at
             FROM memories
             WHERE type = 'individual'
               AND deleted_at IS NULL
@@ -247,7 +247,7 @@ class UserRepository:
             WHERE id = $1
         """
 
-        # rls: users is on migration 116's global-exempt list.
+        # users is a cross-tenant identity table (no per-tenant predicate); reads/writes here bind by unique id/external_id.
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, str(user_id))
 
@@ -257,7 +257,10 @@ class UserRepository:
         return self._row_to_dict(row)
 
     async def get_password_hash(self, user_id: UUID) -> str | None:
-        async with scoped_acquire(organization_id=None, user_id=user_id, role="member") as conn:
+        # users is a cross-tenant identity table (no per-tenant predicate);
+        # reads/writes bind by unique id. scoped_acquire is unusable here:
+        # its member branch fail-closed requires an organization_id.
+        async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT password_hash FROM users WHERE id = $1",
                 str(user_id),
@@ -265,7 +268,10 @@ class UserRepository:
         return None if row is None else row["password_hash"]
 
     async def is_force_password_change(self, user_id: UUID) -> bool:
-        async with scoped_acquire(organization_id=None, user_id=user_id, role="member") as conn:
+        # users is a cross-tenant identity table (no per-tenant predicate);
+        # reads/writes bind by unique id. scoped_acquire is unusable here:
+        # its member branch fail-closed requires an organization_id.
+        async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT force_password_change FROM users WHERE id = $1",
                 str(user_id),
@@ -289,7 +295,7 @@ class UserRepository:
             WHERE external_id = $1 AND provider = $2
         """
 
-        # rls: users is on migration 116's global-exempt list.
+        # users is a cross-tenant identity table (no per-tenant predicate); reads/writes here bind by unique id/external_id.
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, external_id, provider)
 
@@ -325,7 +331,9 @@ class UserRepository:
         existing = await self.get_by_external_id(external_id, provider)
         if existing:
             # Ensure individual memory exists for existing users (backfill)
-            individual_memory = await self._get_individual_memory_for_user(existing["id"])
+            individual_memory = await self._get_individual_memory_for_user(
+                existing["id"], existing["organization_id"]
+            )
             if not individual_memory:
                 await self._create_individual_memory_for_user(existing)
             return existing, False
@@ -405,7 +413,7 @@ class UserRepository:
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
 
-        # rls: users is on migration 116's global-exempt list.
+        # users is a cross-tenant identity table (no per-tenant predicate); reads/writes here bind by unique id/external_id.
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, *params)
 
@@ -427,7 +435,9 @@ class UserRepository:
         Args:
             user: The updated user record.
         """
-        individual_memory = await self._get_individual_memory_for_user(user["id"])
+        individual_memory = await self._get_individual_memory_for_user(
+            user["id"], user.get("organization_id")
+        )
         if not individual_memory:
             # If no individual memory exists, create one
             await self._create_individual_memory_for_user(user)
@@ -463,7 +473,7 @@ class UserRepository:
         """
 
         try:
-            async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
+            async with self.pool.acquire() as conn:  # system-infra: intentionally scope-less, audited site
                 await conn.execute(
                     query,
                     content,
@@ -486,10 +496,10 @@ class UserRepository:
             WHERE id = $1
         """
 
-        # rls: users is on migration 116's global-exempt list and this write
+        # users is a cross-tenant identity table and this write
         # touches nothing else — a raw acquire keeps login working on
-        # scope-less sessions (member-scoped acquire without org would
-        # fail closed and 500 every login/api-key auth post-cutover).
+        # sessions without tenant context (scoped_acquire would fail
+        # closed and break every login / api-key auth).
         async with self.pool.acquire() as conn:
             await conn.execute(query, str(user_id))
 
@@ -515,7 +525,10 @@ class UserRepository:
                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
         """
 
-        async with scoped_acquire(user_id=user_id) as conn:
+        # users is a cross-tenant identity table (no per-tenant predicate);
+        # a raw acquire matches update()/update_last_login() and keeps role
+        # changes working on sessions without tenant context.
+        async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query, new_role, str(user_id))
 
         if row is None:
@@ -583,10 +596,15 @@ class UserRepository:
             )
         return dict(row) if row else None
 
-    async def get_display_names_by_ids(self, user_ids: list[UUID]) -> dict[str, str]:
+    async def get_display_names_by_ids(
+        self,
+        user_ids: list[UUID],
+        *,
+        organization_id: str | UUID,
+    ) -> dict[str, str]:
         if not user_ids:
             return {}
-        async with scoped_acquire() as conn:
+        async with scoped_acquire(organization_id=organization_id) as conn:
             rows = await conn.fetch(
                 "SELECT id, COALESCE(display_name, email, 'Unknown user') AS owner_name "
                 "FROM users WHERE id = ANY($1::uuid[])",
@@ -624,8 +642,14 @@ class UserRepository:
         Returns:
             True if the user was deleted, False if not found.
         """
-        # First, soft-delete the associated individual memory
-        await self._soft_delete_individual_memory_for_user(user_id)
+        # First, soft-delete the associated individual memory. The user's
+        # own organization_id scopes that write.
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return False
+        await self._soft_delete_individual_memory_for_user(
+            user_id, user.get("organization_id")
+        )
 
         query = """
             DELETE FROM users
@@ -633,7 +657,10 @@ class UserRepository:
             RETURNING id
         """
 
-        async with scoped_acquire(user_id=user_id) as conn:
+        # users is a cross-tenant identity table (no per-tenant predicate);
+        # raw acquire matches update()/update_role() — the individual-memory
+        # soft-delete above already ran under the user's org context.
+        async with self.pool.acquire() as conn:
             result = await conn.fetchrow(query, str(user_id))
 
         return result is not None

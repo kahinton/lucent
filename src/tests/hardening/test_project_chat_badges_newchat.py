@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import lucent
 from lucent.db.projects import ProjectRepository
 from lucent.db.projects import _require_scope
 
@@ -485,7 +487,8 @@ def test_session_rows_render_project_badge():
     """Sidebar + drawer render one shared row builder; the badge markup is
     driven by project_id with project_name preferred, and the project meta
     text moved OUT of the meta line (badge replaces it)."""
-    with open("/app/src/lucent/web/templates/chat.html", encoding="utf-8") as fh:
+    templates = Path(lucent.__file__).parent / "web" / "templates"
+    with open(templates / "chat.html", encoding="utf-8") as fh:
         src = fh.read()
     assert src.count("renderSessionList") >= 2  # definition + call sites
     # Single row builder drives both surfaces (sidebar and drawer share
@@ -503,7 +506,8 @@ def test_session_rows_render_project_badge():
 
 def test_new_chat_form_in_project_detail_template():
     """project_detail.html posts to the dedicated route with CSRF."""
-    with open("/app/src/lucent/web/templates/project_detail.html", encoding="utf-8") as fh:
+    templates = Path(lucent.__file__).parent / "web" / "templates"
+    with open(templates / "project_detail.html", encoding="utf-8") as fh:
         src = fh.read()
     assert '/projects/{{ project.id }}/new-chat"' in src
     assert "csrf_field_name" in src

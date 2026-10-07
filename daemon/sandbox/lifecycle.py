@@ -330,32 +330,29 @@ async def _resolve_sandbox_template(
     org_id: str,
     requesting_user_id: str,
 ) -> dict | None:
-    """Resolve an approved sandbox template accessible to the requesting user."""
     try:
         from lucent.db import get_pool
+        from lucent.db.sandbox_template import (
+            SandboxTemplateRepository,
+            get_authorized_templates_pool,
+        )
 
         pool = await get_pool()
-    except Exception:
-        runtime.log("Sandbox ACL check skipped (no DB pool in daemon)", "DEBUG")
-        return None
-    try:
-        from lucent.access_control import AccessControlService
-        from lucent.db.sandbox_template import SandboxTemplateRepository
-
-        access_control = AccessControlService(pool)
-        if not await access_control.can_access(
-            requesting_user_id, "sandbox_template", template_id, org_id
-        ):
+        # Usage is clearance-driven and default-deny: dispatch on behalf of
+        # the task's requesting user needs a clearance on the template (own /
+        # group / built-in org grant), not merely a shared organization.
+        template_pool = await get_authorized_templates_pool(
+            pool,
+            {"id": str(requesting_user_id), "organization_id": str(org_id)},
+        )
+        repository = SandboxTemplateRepository(template_pool)
+        template = await repository.get_usable_template(template_id)
+        if not template:
             runtime.log(
-                f"Sandbox template {template_id[:8]} not accessible to requesting "
-                f"user {requesting_user_id[:8]}",
+                f"Sandbox template {template_id[:8]} not found or not cleared for "
+                f"requesting user {requesting_user_id[:8]}",
                 "WARN",
             )
-            return None
-        repository = SandboxTemplateRepository(pool)
-        template = await repository.get(template_id, org_id)
-        if not template:
-            runtime.log(f"Sandbox template {template_id[:8]} not found", "WARN")
             return None
         if template.get("status") and template["status"] != "approved":
             runtime.log(
@@ -371,7 +368,8 @@ async def _resolve_sandbox_template(
             # "host-gateway"); to_sandbox_config only includes the key when
             # the template row has it, so inject defensively for older rows.
             config["extra_hosts"] = dict(template["extra_hosts"] or {})
-        await repository.mark_used(template_id, org_id)
+        # mark_used is system-path telemetry; run it on the unscoped pool.
+        await SandboxTemplateRepository(pool).mark_used(template_id, org_id)
         runtime.log(
             f"Resolved sandbox template '{template.get('name', template_id[:8])}' "
             "for dispatch"

@@ -37,9 +37,11 @@ def _owner_args_for_context(
     user_role: str | None,
     memory_scope: str | None,
 ) -> dict:
-    if user_role == "daemon" and memory_scope != "user":
-        return {"shared_with_org": True}
-    return {"owner_user_id": str(user_id)}
+    # Scoped contexts pin the acting user; unscoped daemon contexts fall
+    # through to the repository default (org owner attached).
+    if user_role != "daemon" or memory_scope == "user":
+        return {"owner_user_id": str(user_id)}
+    return {}
 
 
 def register_tool_audit_tools(mcp: FastMCP) -> None:

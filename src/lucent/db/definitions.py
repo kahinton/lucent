@@ -1,12 +1,21 @@
 """Repository for agent, skill, MCP server, hook, and managed tool definitions.
 
 Handles CRUD, approval workflow, and access grants.
+
+*Use* of definitions (pickers, task/schedule dropdowns, definition tools) is
+clearance-driven and default-deny: a definition is usable only when the
+principal has an explicit read clearance — its owner or owner-group, an
+explicit user/group grant, a built-in's automatic org-wide grant (removable
+by an org owner/admin), or a whole-org grant. Management surfaces (definitions
+UI, approvals, grants) stay on the org-scoped legacy path, role-gated at the
+routes; runtime composition (what an agent pulls in when it runs) still
+trusts the agent.
 """
 
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from asyncpg import Pool
@@ -15,12 +24,26 @@ from jsonschema.validators import validator_for
 
 from lucent.db.admin_audit import (
     DEFINITION_APPROVE as ADMIN_DEFINITION_APPROVE,
+)
+from lucent.db.admin_audit import (
     DEFINITION_CREATE as ADMIN_DEFINITION_CREATE,
+)
+from lucent.db.admin_audit import (
     DEFINITION_DELETE as ADMIN_DEFINITION_DELETE,
+)
+from lucent.db.admin_audit import (
     DEFINITION_GRANT as ADMIN_DEFINITION_GRANT,
+)
+from lucent.db.admin_audit import (
     DEFINITION_REJECT as ADMIN_DEFINITION_REJECT,
+)
+from lucent.db.admin_audit import (
     DEFINITION_REVOKE as ADMIN_DEFINITION_REVOKE,
+)
+from lucent.db.admin_audit import (
     DEFINITION_UPDATE as ADMIN_DEFINITION_UPDATE,
+)
+from lucent.db.admin_audit import (
     AdminAuditRepository,
     resolve_audit_actor,
 )
@@ -34,9 +57,48 @@ from lucent.db.audit import (
     DEFINITION_UPDATE,
     AuditRepository,
 )
-from lucent.db.pool import scoped_acquire
+from lucent.db.pool import (
+    AuthorizedDatabasePool,
+    AuthTablePolicy,
+    get_authorized_pool_for_user,
+    scoped_acquire_on,
+)
 
 logger = logging.getLogger(__name__)
+
+AGENT_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy("agent_definitions", direct_columns=())
+SKILL_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy("skill_definitions", direct_columns=())
+MCP_SERVER_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy("mcp_server_configs", direct_columns=())
+HOOK_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy("hook_definitions", direct_columns=())
+MANAGED_TOOL_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy("managed_tool_definitions", direct_columns=())
+DEFINITIONS_AUTH_POLICIES: Final[tuple[AuthTablePolicy, ...]] = (
+    AGENT_AUTH_POLICY,
+    SKILL_AUTH_POLICY,
+    MCP_SERVER_AUTH_POLICY,
+    HOOK_AUTH_POLICY,
+    MANAGED_TOOL_AUTH_POLICY,
+)
+
+
+async def get_authorized_definitions_pool(
+    pool: Pool,
+    user: dict[str, Any],
+    required_clearance: str = "read",
+) -> AuthorizedDatabasePool:
+    """Return a pool whose definition reads are clearance-gated (usage path).
+
+    Default deny: only definitions the principal is explicitly cleared for
+    resolve here — their own or their group's (via the migration-123 owner
+    triggers), built-ins with their automatic org-wide grant (removable by an
+    org owner/admin), and explicit user/group/org grants. Management surfaces
+    stay on the org-scoped legacy path; they are role-gated at the routes.
+    """
+    return await get_authorized_pool_for_user(
+        pool,
+        user,
+        DEFINITIONS_AUTH_POLICIES,
+        required_clearance,
+    )
 
 BUILTIN_PROTECTION_MSG = (
     "Built-in definitions cannot be modified by the daemon. "
@@ -138,10 +200,18 @@ class DefinitionRepository:
         user_param: str,
         role_param: str,
     ) -> str:
-        """Return the requester ACL for private and organization-shared definitions."""
+        """Return the requester ACL for private and organization-shared definitions.
+
+        This is the MANAGEMENT/legacy path (definitions CRUD, detail, grants,
+        proposals): org admin/owner roles keep the legacy org-wide view over
+        every instance definition in their org.
+        Usage paths don't go through here — they are clearance-driven via the
+        ``*_accessible_by`` listers on authorized pools (default-deny).
+        """
         prefix = f"{alias}." if alias else ""
         return (
-            f"({prefix}scope = 'built-in' "
+            f"({role_param} IN ('admin', 'owner') "
+            f"OR {prefix}scope = 'built-in' "
             f"OR {prefix}owner_user_id = {user_param} "
             f"OR {prefix}owner_group_id IN ("
             f"SELECT group_id FROM user_groups WHERE user_id = {user_param}) "
@@ -163,22 +233,32 @@ class DefinitionRepository:
         """Default ownership for new instance definitions.
 
         Human-created definitions default to the creator. Daemon-created
-        instance definitions default to org-shared because the daemon is an
-        actor, not a useful capability owner in the UI/ACL model.
+        instance definitions are owned by the org's owner user — the daemon
+        is an actor, not a capability owner, but every instance row should
+        end up with an owner attached so its clearance exists and admins
+        have someone to grant from (Kyle, 2026-09-30).
         """
         if scope == "built-in" or shared_with_org or not created_by:
             return None
         try:
-            async with scoped_acquire(organization_id=org_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
                 role = await conn.fetchval(
                     "SELECT role FROM users WHERE id = $1 AND organization_id = $2",
                     UUID(created_by),
                     UUID(org_id),
                 )
+                if role == "daemon":
+                    owner_row = await conn.fetchrow(
+                        "SELECT id FROM users "
+                        "WHERE organization_id = $1 AND role = 'owner' "
+                        "ORDER BY created_at LIMIT 1",
+                        UUID(org_id),
+                    )
+                    return str(owner_row["id"]) if owner_row else None
         except Exception:
             role = None
-        if role == "daemon":
-            return None
         return created_by
 
     @staticmethod
@@ -352,7 +432,9 @@ class DefinitionRepository:
         """
         if requester_role != "daemon":
             return
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             scope = await conn.fetchval(
                 f"SELECT scope FROM {table} WHERE id = $1 AND organization_id = $2",
                 item_id, org_id,
@@ -512,7 +594,9 @@ class DefinitionRepository:
         """
         params_with_page = [*params, limit, offset]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -557,7 +641,9 @@ class DefinitionRepository:
         """ + acl_sql + """
             GROUP BY a.id
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, *params)
         return self._normalize_definition_row(row)
 
@@ -591,7 +677,9 @@ class DefinitionRepository:
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 query, name, description, content, status, scope, created_by, org_id,
                 owner_user_id, owner_group_id, proposal_reason,
@@ -628,7 +716,9 @@ class DefinitionRepository:
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, *params)
         result = self._normalize_definition_row(row)
         if result:
@@ -652,7 +742,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, agent_id, org_id, approved_by)
         result = self._normalize_definition_row(row)
         if result:
@@ -669,7 +761,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, agent_id, org_id, approved_by)
         result = self._normalize_definition_row(row)
         if result:
@@ -680,7 +774,9 @@ class DefinitionRepository:
         return result
 
     async def delete_agent(self, agent_id: str, org_id: str) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM agent_definitions WHERE id = $1 AND organization_id = $2",
                 agent_id,
@@ -742,7 +838,9 @@ class DefinitionRepository:
         """
         params_with_page = [*params, limit, offset]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -768,7 +866,9 @@ class DefinitionRepository:
             acl_sql = " AND " + self._definition_access_condition(
                 "", "$3", "$4"
             )
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM skill_definitions WHERE id = $1 AND organization_id = $2" + acl_sql,
                 *params,
@@ -805,7 +905,9 @@ class DefinitionRepository:
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 query, name, description, content, status, scope, created_by, org_id,
                 owner_user_id, owner_group_id, proposal_reason,
@@ -825,7 +927,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, skill_id, org_id, approved_by)
         result = self._normalize_definition_row(row)
         if result:
@@ -842,7 +946,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, skill_id, org_id, approved_by)
         result = self._normalize_definition_row(row)
         if result:
@@ -853,7 +959,9 @@ class DefinitionRepository:
         return result
 
     async def delete_skill(self, skill_id: str, org_id: str) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM skill_definitions WHERE id = $1 AND organization_id = $2",
                 skill_id,
@@ -905,7 +1013,9 @@ class DefinitionRepository:
         """
         params_with_page = [*params, limit, offset]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -931,7 +1041,9 @@ class DefinitionRepository:
             acl_sql = " AND " + self._definition_access_condition(
                 "", "$3", "$4"
             )
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM mcp_server_configs WHERE id = $1 AND organization_id = $2" + acl_sql,
                 *params,
@@ -976,7 +1088,9 @@ class DefinitionRepository:
         """
         params_with_page = [*params, limit, offset]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -1002,7 +1116,9 @@ class DefinitionRepository:
             acl_sql = " AND " + self._definition_access_condition(
                 "", "$3", "$4"
             )
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM hook_definitions WHERE id = $1 AND organization_id = $2" + acl_sql,
                 *params,
@@ -1044,7 +1160,9 @@ class DefinitionRepository:
                     $13, $14::jsonb)
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 query,
                 name,
@@ -1107,7 +1225,9 @@ class DefinitionRepository:
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, *params)
         result = self._normalize_hook_row(row)
         if result:
@@ -1145,7 +1265,9 @@ class DefinitionRepository:
                 WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
                 RETURNING *
             """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, hook_id, org_id, approved_by)
         result = self._normalize_hook_row(row)
         if result:
@@ -1164,7 +1286,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status IN ('proposed', 'owner_approved')
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, hook_id, org_id, approved_by)
         result = self._normalize_hook_row(row)
         if result:
@@ -1175,7 +1299,9 @@ class DefinitionRepository:
         return result
 
     async def delete_hook(self, hook_id: str, org_id: str) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM hook_definitions WHERE id = $1 AND organization_id = $2",
                 hook_id,
@@ -1195,7 +1321,9 @@ class DefinitionRepository:
         self, organization_id: str
     ) -> list[dict]:
         """List MCP server config env rows for credential migration."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             rows = await conn.fetch(
                 """
                 SELECT id, organization_id, owner_user_id, owner_group_id, env_vars
@@ -1210,7 +1338,9 @@ class DefinitionRepository:
         self, config_id: str, organization_id: str, env_vars: dict
     ) -> bool:
         """Replace an MCP server config's environment variables."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             result = await conn.execute(
                 """
                 UPDATE mcp_server_configs
@@ -1262,7 +1392,9 @@ class DefinitionRepository:
         """
         params_with_page = [*params, limit, offset]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, *params)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, *params_with_page)
@@ -1278,7 +1410,9 @@ class DefinitionRepository:
         self, organization_id: str
     ) -> list[dict]:
         """List managed-tool env rows that may contain plaintext credentials."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             rows = await conn.fetch(
                 """
                 SELECT id, organization_id, owner_user_id, owner_group_id, env_vars
@@ -1293,15 +1427,17 @@ class DefinitionRepository:
         self, tool_id: str, organization_id: str, env_vars: dict
     ) -> bool:
         """Replace a managed tool's environment variables after migration."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             result = await conn.execute(
                 """
                 UPDATE managed_tool_definitions
-                SET env_vars = $2::jsonb, updated_at = NOW()
+                SET env_vars = $3::jsonb, updated_at = NOW()
                 WHERE id = $1 AND organization_id = $2
                 """,
-                tool_id,
-                organization_id,
+                UUID(str(tool_id)),
+                UUID(str(organization_id)),
                 json.dumps(env_vars),
             )
         return result != "UPDATE 0"
@@ -1320,7 +1456,9 @@ class DefinitionRepository:
             acl_sql = " AND " + self._definition_access_condition(
                 "", "$3", "$4"
             )
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM managed_tool_definitions "
                 "WHERE id = $1 AND organization_id = $2" + acl_sql,
@@ -1342,7 +1480,9 @@ class DefinitionRepository:
             acl_sql = " AND " + self._definition_access_condition(
                 "", "$3", "$4"
             )
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM managed_tool_definitions "
                 "WHERE name = $1 AND organization_id = $2" + acl_sql,
@@ -1420,7 +1560,9 @@ class DefinitionRepository:
                     $17, $18, $19, $20, $21, $22::jsonb)
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 query,
                 name,
@@ -1520,7 +1662,9 @@ class DefinitionRepository:
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, *params)
         result = self._normalize_tool_row(row)
         if result:
@@ -1544,7 +1688,9 @@ class DefinitionRepository:
             WHERE id = $2 AND organization_id = $3
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, json.dumps(tools_list), tool_id, org_id)
         result = self._normalize_tool_row(row)
         if result:
@@ -1567,7 +1713,9 @@ class DefinitionRepository:
             FROM managed_tool_definitions
             WHERE id = $1 AND organization_id = $2
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, tool_id, org_id)
         if row is None:
             return None
@@ -1603,7 +1751,9 @@ class DefinitionRepository:
                 WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
                 RETURNING *
             """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, tool_id, org_id, approved_by)
         result = self._normalize_tool_row(row)
         if result:
@@ -1624,7 +1774,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status IN ('proposed', 'owner_approved')
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, tool_id, org_id, approved_by)
         result = self._normalize_tool_row(row)
         if result:
@@ -1635,7 +1787,9 @@ class DefinitionRepository:
         return result
 
     async def delete_managed_tool(self, tool_id: str, org_id: str) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM managed_tool_definitions WHERE id = $1 AND organization_id = $2",
                 tool_id,
@@ -1655,7 +1809,9 @@ class DefinitionRepository:
         config_override: dict | None = None,
     ) -> bool:
         try:
-            async with scoped_acquire(organization_id=org_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
                 await conn.execute(
                     "INSERT INTO agent_managed_tools (agent_id, tool_id, config_override) "
                     "VALUES ($1, $2, $3::text::jsonb) "
@@ -1682,7 +1838,9 @@ class DefinitionRepository:
         self, agent_id: str, tool_id: str,
         org_id: str | None = None, user_id: str | None = None,
     ) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM agent_managed_tools WHERE agent_id = $1 AND tool_id = $2",
                 agent_id,
@@ -1705,12 +1863,16 @@ class DefinitionRepository:
             WHERE amt.agent_id = $1 AND t.status = 'active'
             ORDER BY t.name
         """
-        async with scoped_acquire(organization_id=org_id, role="system" if not org_id else None) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id, role="system" if not org_id else None
+        ) as conn:
             rows = await conn.fetch(query, agent_id)
         return [self._normalize_tool_row(r) for r in rows]
 
     async def is_managed_tool_granted_to_agent(self, agent_id: str, tool_id: str, org_id: str | None = None) -> bool:
-        async with scoped_acquire(organization_id=org_id, role="system" if not org_id else None) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id, role="system" if not org_id else None
+        ) as conn:
             return bool(await conn.fetchval(
                 "SELECT EXISTS(SELECT 1 FROM agent_managed_tools "
                 "WHERE agent_id = $1 AND tool_id = $2)",
@@ -1727,7 +1889,9 @@ class DefinitionRepository:
         agent_id: str | None = None,
         input_payload: dict | None = None,
     ) -> dict:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 """
                 INSERT INTO managed_tool_runs
@@ -1754,7 +1918,9 @@ class DefinitionRepository:
         duration_ms: int | None = None,
         org_id: str | None = None,
     ) -> dict | None:
-        async with scoped_acquire(organization_id=org_id, role="system" if not org_id else None) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id, role="system" if not org_id else None
+        ) as conn:
             row = await conn.fetchrow(
                 """
                 UPDATE managed_tool_runs
@@ -1810,7 +1976,9 @@ class DefinitionRepository:
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 query,
                 name,
@@ -1848,7 +2016,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
         result = self._normalize_mcp_row(row)
         if result:
@@ -1865,7 +2035,9 @@ class DefinitionRepository:
             WHERE id = $1 AND organization_id = $2 AND status = 'proposed'
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, server_id, org_id, approved_by)
         result = self._normalize_mcp_row(row)
         if result:
@@ -1882,7 +2054,9 @@ class DefinitionRepository:
         org_id: str | None = None, user_id: str | None = None,
     ) -> bool:
         try:
-            async with scoped_acquire(organization_id=org_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
                 await conn.execute(
                     "INSERT INTO agent_skills (agent_id, skill_id) "
                     "VALUES ($1, $2) ON CONFLICT DO NOTHING",
@@ -1905,7 +2079,9 @@ class DefinitionRepository:
         self, agent_id: str, skill_id: str,
         org_id: str | None = None, user_id: str | None = None,
     ) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM agent_skills WHERE agent_id = $1 AND skill_id = $2",
                 agent_id,
@@ -1926,7 +2102,9 @@ class DefinitionRepository:
         org_id: str | None = None, user_id: str | None = None,
     ) -> bool:
         try:
-            async with scoped_acquire(organization_id=org_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
                 await conn.execute(
                     "INSERT INTO agent_mcp_servers (agent_id, mcp_server_id) "
                     "VALUES ($1, $2) ON CONFLICT DO NOTHING",
@@ -1954,7 +2132,9 @@ class DefinitionRepository:
         self, agent_id: str, mcp_server_id: str,
         org_id: str | None = None, user_id: str | None = None,
     ) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM agent_mcp_servers WHERE agent_id = $1 AND mcp_server_id = $2",
                 agent_id,
@@ -1976,7 +2156,9 @@ class DefinitionRepository:
         config_override: dict | None = None,
     ) -> bool:
         try:
-            async with scoped_acquire(organization_id=org_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
                 await conn.execute(
                     "INSERT INTO agent_hooks (agent_id, hook_id, config_override) "
                     "VALUES ($1, $2, $3::text::jsonb) "
@@ -2002,7 +2184,9 @@ class DefinitionRepository:
         self, agent_id: str, hook_id: str,
         org_id: str | None = None, user_id: str | None = None,
     ) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM agent_hooks WHERE agent_id = $1 AND hook_id = $2",
                 agent_id,
@@ -2025,7 +2209,9 @@ class DefinitionRepository:
             WHERE ags.agent_id = $1 AND s.status = 'active'
             ORDER BY s.name
         """
-        async with scoped_acquire(organization_id=org_id, role="system" if not org_id else None) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id, role="system" if not org_id else None
+        ) as conn:
             rows = await conn.fetch(query, agent_id)
         return [self._normalize_definition_row(r) for r in rows]
 
@@ -2036,7 +2222,9 @@ class DefinitionRepository:
             WHERE agm.agent_id = $1 AND m.status = 'active'
             ORDER BY m.name
         """
-        async with scoped_acquire(organization_id=org_id, role="system" if not org_id else None) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id, role="system" if not org_id else None
+        ) as conn:
             rows = await conn.fetch(query, agent_id)
         return [self._normalize_mcp_row(r) for r in rows]
 
@@ -2047,13 +2235,17 @@ class DefinitionRepository:
             WHERE ah.agent_id = $1 AND h.status = 'active'
             ORDER BY h.name
         """
-        async with scoped_acquire(organization_id=org_id, role="system" if not org_id else None) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id, role="system" if not org_id else None
+        ) as conn:
             rows = await conn.fetch(query, agent_id)
         return [self._normalize_hook_row(r) for r in rows]
 
     async def grant_default_hooks_to_agent(self, agent_id: str, org_id: str) -> int:
         """Grant built-in default hooks to one agent without overriding explicit config."""
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 """
                 INSERT INTO agent_hooks (agent_id, hook_id)
@@ -2073,7 +2265,9 @@ class DefinitionRepository:
 
     async def grant_default_hooks_to_all_agents(self, org_id: str) -> int:
         """Ensure every agent in an organization has the built-in default hooks."""
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 """
                 INSERT INTO agent_hooks (agent_id, hook_id)
@@ -2101,7 +2295,9 @@ class DefinitionRepository:
     ) -> bool:
         """Set which tools an agent can use from an MCP server. None = all."""
         val = json.dumps(allowed_tools) if allowed_tools is not None else None
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "UPDATE agent_mcp_servers SET allowed_tools = $3 "
                 "WHERE agent_id = $1 AND mcp_server_id = $2",
@@ -2142,7 +2338,9 @@ class DefinitionRepository:
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, *params)
         result = self._normalize_definition_row(row)
         if result:
@@ -2187,7 +2385,9 @@ class DefinitionRepository:
             WHERE id = ${len(params) - 1} AND organization_id = ${len(params)}
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, *params)
         result = self._normalize_mcp_row(row)
         if result:
@@ -2204,7 +2404,9 @@ class DefinitionRepository:
         return result
 
     async def delete_mcp_server(self, server_id: str, org_id: str) -> bool:
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(
                 "DELETE FROM mcp_server_configs WHERE id = $1 AND organization_id = $2",
                 server_id,
@@ -2233,7 +2435,9 @@ class DefinitionRepository:
             WHERE id = $2 AND organization_id = $3
             RETURNING *
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(
                 query,
                 tools_list,
@@ -2261,7 +2465,9 @@ class DefinitionRepository:
             FROM mcp_server_configs
             WHERE id = $1 AND organization_id = $2
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             row = await conn.fetchrow(query, server_id, org_id)
         if row is None:
             return None
@@ -2281,175 +2487,264 @@ class DefinitionRepository:
             SET discovered_tools = NULL, tools_discovered_at = NULL, updated_at = NOW()
             WHERE id = $1 AND organization_id = $2
         """
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             result = await conn.execute(query, server_id, org_id)
         return result == "UPDATE 1"
 
     # ── Access Control Queries ───────────────────────────────────────────
 
-    async def list_agents_accessible_by(
-        self, user_id: str, org_id: str,
+    # ── Clearance-driven usage reads ──────────────────────────────────────
+
+    async def _accessible_definitions(
+        self,
+        *,
+        table: str,
+        alias: str,
+        org_id: str,
         status: str | None = "active",
+        search: str | None = None,
         limit: int = 100,
         offset: int = 0,
-        requester_role: str | None = None,
+        normalize,
     ) -> dict:
-        """List agents accessible to a user: owned, group-owned, or built-in."""
-        role = self._role_value(requester_role)
-        base = """
-            FROM agent_definitions
-            WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
-        params: list[Any] = [org_id, user_id, role]
-        if status:
-            params.append(status)
-            base += f" AND status = ${len(params)}"
+        """List definitions cleared for *use* by the pool's principal.
 
-        count_query = f"SELECT COUNT(*) AS total {base}"
-        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        Shared implementation for the five definition families. On an
+        authorized pool this is clearance-driven and default-deny — the
+        ownership (123), group (126) and built-in org grants (126) plus
+        explicit grants all live in auth_clearances. A plain pool is
+        fail-closed. The status filter and org predicate stay in the caller's
+        SQL: status is the caller's lifecycle filter, org is defense in depth.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Definition usage reads require an AuthorizedDatabasePool "
+                "built for the definitions policies (usage is "
+                "clearance-driven and default-deny)"
+            )
+        params: list[Any] = [UUID(org_id)]
+        status_clause = ""
+        if status:
+            status_clause = f" AND {alias}.status = ${len(params) + 1}"
+            params.append(status)
+        search_clause = ""
+        term = (search or "").strip()
+        if term:
+            params.append(f"%{term}%")
+            search_clause = (
+                f" AND ({alias}.name ILIKE ${len(params)} "
+                f"OR {alias}.description ILIKE ${len(params)} "
+                f"OR {alias}.content ILIKE ${len(params)})"
+            )
+        count_query = (
+            f"SELECT COUNT(*) AS total FROM {table} {alias} "
+            f"WHERE {alias}.organization_id = $1{status_clause}{search_clause}"
+        )
+        query = (
+            f"SELECT {alias}.* FROM {table} {alias} "
+            f"WHERE {alias}.organization_id = $1{status_clause}{search_clause} "
+            f"ORDER BY {alias}.name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        )
         params_with_page = [*params, limit, offset]
 
-        async with scoped_acquire(organization_id=org_id) as conn:
-            count_row = await conn.fetchrow(count_query, *params)
-            total_count = count_row["total"] if count_row else 0
-            rows = await conn.fetch(query, *params_with_page)
+        count_row = await self._authorized_conn_fetchrow(count_query, *params)
+        total_count = count_row["total"] if count_row else 0
+        rows = await self._authorized_conn_fetch(query, *params_with_page)
         return {
-            "items": [self._normalize_definition_row(r) for r in rows],
+            "items": [normalize(r) for r in rows],
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
         }
+
+    async def _authorized_conn_fetchrow(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, *params)
+
+    async def _authorized_conn_fetch(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(query, *params)
+
+    async def _usable_by_id(self, table: str, resource_id: str, normalize) -> dict | None:
+        """By-ID *usage* lookup: the row must be cleared for this principal.
+
+        Requires an authorized pool — the clearance subquery decides, and an
+        ungranted definition is simply absent. Management callers use the
+        org-scoped get_* instead.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError("Definition usage reads require an AuthorizedDatabasePool")
+        row = await self._authorized_conn_fetchrow(
+            f"SELECT * FROM {table} WHERE id = $1", resource_id
+        )
+        return normalize(row) if row else None
+
+    async def _usable_by_name(
+        self, table: str, name: str, org_id: str, normalize,
+    ) -> dict | None:
+        """By-name *usage* lookup within the org; clearance decides."""
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError("Definition usage reads require an AuthorizedDatabasePool")
+        row = await self._authorized_conn_fetchrow(
+            f"SELECT * FROM {table} WHERE organization_id = $1 AND name = $2",
+            UUID(org_id),
+            name,
+        )
+        return normalize(row) if row else None
+
+    async def list_agents_accessible_by(
+        self,
+        user_id: str,
+        org_id: str,
+        *,
+        status: str | None = "active",
+        limit: int = 100,
+        offset: int = 0,
+        requester_role: str | None = None,
+    ) -> dict:
+        """List agents cleared for *use* by the principal.
+
+        ``user_id``/``requester_role`` are accepted for compatibility but a
+        role grants nothing — owners/admins get agents only via explicit
+        grants, like everyone else.
+        """
+        return await self._accessible_definitions(
+            table="agent_definitions",
+            alias="a",
+            org_id=org_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+            normalize=self._normalize_definition_row,
+        )
 
     async def list_skills_accessible_by(
-        self, user_id: str, org_id: str,
+        self,
+        user_id: str,
+        org_id: str,
+        *,
         status: str | None = "active",
+        search: str | None = None,
         limit: int = 100,
         offset: int = 0,
         requester_role: str | None = None,
     ) -> dict:
-        """List skills accessible to a user: owned, group-owned, or built-in."""
-        role = self._role_value(requester_role)
-        base = """
-            FROM skill_definitions
-            WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
-        params: list[Any] = [org_id, user_id, role]
-        if status:
-            params.append(status)
-            base += f" AND status = ${len(params)}"
-
-        count_query = f"SELECT COUNT(*) AS total {base}"
-        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
-        params_with_page = [*params, limit, offset]
-
-        async with scoped_acquire(organization_id=org_id) as conn:
-            count_row = await conn.fetchrow(count_query, *params)
-            total_count = count_row["total"] if count_row else 0
-            rows = await conn.fetch(query, *params_with_page)
-        return {
-            "items": [self._normalize_definition_row(r) for r in rows],
-            "total_count": total_count,
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(rows) < total_count,
-        }
+        """List skills cleared for *use* by the principal (see agents)."""
+        return await self._accessible_definitions(
+            table="skill_definitions",
+            alias="s",
+            org_id=org_id,
+            status=status,
+            search=search,
+            limit=limit,
+            offset=offset,
+            normalize=self._normalize_definition_row,
+        )
 
     async def list_mcp_servers_accessible_by(
-        self, user_id: str, org_id: str,
+        self,
+        user_id: str,
+        org_id: str,
+        *,
         status: str | None = "active",
         limit: int = 100,
         offset: int = 0,
         requester_role: str | None = None,
     ) -> dict:
-        """List MCP servers accessible to a user: owned, group-owned, or built-in."""
-        role = self._role_value(requester_role)
-        base = """
-            FROM mcp_server_configs
-            WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
-        params: list[Any] = [org_id, user_id, role]
-        if status:
-            params.append(status)
-            base += f" AND status = ${len(params)}"
-
-        count_query = f"SELECT COUNT(*) AS total {base}"
-        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
-        params_with_page = [*params, limit, offset]
-
-        async with scoped_acquire(organization_id=org_id) as conn:
-            count_row = await conn.fetchrow(count_query, *params)
-            total_count = count_row["total"] if count_row else 0
-            rows = await conn.fetch(query, *params_with_page)
-        return {
-            "items": [self._normalize_definition_row(r) for r in rows],
-            "total_count": total_count,
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(rows) < total_count,
-        }
+        """List MCP servers cleared for *use* by the principal (see agents)."""
+        return await self._accessible_definitions(
+            table="mcp_server_configs",
+            alias="ms",
+            org_id=org_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+            normalize=self._normalize_definition_row,
+        )
 
     async def list_hooks_accessible_by(
-        self, user_id: str, org_id: str,
+        self,
+        user_id: str,
+        org_id: str,
+        *,
         status: str | None = "active",
         limit: int = 100,
         offset: int = 0,
         requester_role: str | None = None,
     ) -> dict:
-        """List hooks accessible to a user: owned, group-owned, or built-in."""
-        role = self._role_value(requester_role)
-        base = """
-            FROM hook_definitions
-            WHERE organization_id = $1
-            AND (
-                scope = 'built-in'
-                OR owner_user_id = $2
-                OR owner_group_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
-                OR (scope = 'instance' AND owner_user_id IS NULL AND owner_group_id IS NULL)
-                OR $3 IN ('admin', 'owner')
-            )
-        """
-        params: list[Any] = [org_id, user_id, role]
-        if status:
-            params.append(status)
-            base += f" AND status = ${len(params)}"
+        """List hooks cleared for *use* by the principal (see agents)."""
+        return await self._accessible_definitions(
+            table="hook_definitions",
+            alias="h",
+            org_id=org_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+            normalize=self._normalize_hook_row,
+        )
 
-        count_query = f"SELECT COUNT(*) AS total {base}"
-        query = f"SELECT * {base} ORDER BY name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
-        params_with_page = [*params, limit, offset]
+    async def list_managed_tools_accessible_by(
+        self,
+        user_id: str,
+        org_id: str,
+        *,
+        status: str | None = "active",
+        limit: int = 100,
+        offset: int = 0,
+        requester_role: str | None = None,
+    ) -> dict:
+        """List managed tools cleared for *use* by the principal (see agents)."""
+        return await self._accessible_definitions(
+            table="managed_tool_definitions",
+            alias="mt",
+            org_id=org_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+            normalize=self._normalize_definition_row,
+        )
 
-        async with scoped_acquire(organization_id=org_id) as conn:
-            count_row = await conn.fetchrow(count_query, *params)
-            total_count = count_row["total"] if count_row else 0
-            rows = await conn.fetch(query, *params_with_page)
-        return {
-            "items": [self._normalize_hook_row(r) for r in rows],
-            "total_count": total_count,
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(rows) < total_count,
-        }
+    async def get_usable_agent(self, agent_id: str) -> dict | None:
+        """By-ID *usage* lookup for agents; clearance decides."""
+        return await self._usable_by_id(
+            "agent_definitions", agent_id, self._normalize_definition_row
+        )
+
+    async def get_usable_skill(self, skill_id: str) -> dict | None:
+        return await self._usable_by_id(
+            "skill_definitions", skill_id, self._normalize_definition_row
+        )
+
+    async def get_usable_mcp_server(self, config_id: str) -> dict | None:
+        return await self._usable_by_id(
+            "mcp_server_configs", config_id, self._normalize_definition_row
+        )
+
+    async def get_usable_hook(self, hook_id: str) -> dict | None:
+        return await self._usable_by_id("hook_definitions", hook_id, self._normalize_hook_row)
+
+    async def get_usable_managed_tool(self, tool_id: str) -> dict | None:
+        return await self._usable_by_id(
+            "managed_tool_definitions", tool_id, self._normalize_definition_row
+        )
+
+    async def get_usable_skill_by_name(self, name: str, org_id: str) -> dict | None:
+        return await self._usable_by_name(
+            "skill_definitions", name, org_id, self._normalize_definition_row
+        )
+
+    async def get_usable_hook_by_name(self, name: str, org_id: str) -> dict | None:
+        return await self._usable_by_name(
+            "hook_definitions", name, org_id, self._normalize_hook_row
+        )
+
+    async def get_usable_managed_tool_by_name(self, name: str, org_id: str) -> dict | None:
+        return await self._usable_by_name(
+            "managed_tool_definitions", name, org_id, self._normalize_definition_row
+        )
 
     # ── Bulk/convenience ──────────────────────────────────────────────────
 
@@ -2531,7 +2826,9 @@ class DefinitionRepository:
             f"AND {visibility}"
             for table in tables
         )
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             total = await conn.fetchval(
                 f"SELECT COALESCE(SUM(total), 0) FROM ({counts}) proposal_counts",
                 org_id,
@@ -2542,7 +2839,9 @@ class DefinitionRepository:
 
     async def get_active_agent_with_grants(self, agent_name: str, org_id: str) -> dict | None:
         """Get an active agent by name with its skills and MCP servers loaded."""
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             agent = await conn.fetchrow(
                 "SELECT * FROM agent_definitions "
                 "WHERE name = $1 AND organization_id = $2 AND status = 'active'",
@@ -2604,18 +2903,34 @@ class DefinitionRepository:
                 for line in fm_match.group(1).splitlines():
                     if line.startswith("description:"):
                         description = line.split(":", 1)[1].strip().strip("'\"")
-            async with scoped_acquire(organization_id=org_id) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
+                # Update-then-insert (a plain ON CONFLICT DO UPDATE would fire
+                # the BEFORE INSERT auth_id trigger on the conflict path,
+                # leaking an unused auth_ids row every sync).
+                await conn.execute(
+                    """
+                    UPDATE skill_definitions
+                    SET content = $3, description = $2, scope = 'built-in',
+                        updated_at = NOW()
+                    WHERE (name, organization_id) = ($1, $4)
+                      AND scope = 'built-in'
+                """,
+                    name,
+                    description,
+                    raw,
+                    org_id,
+                )
                 await conn.execute(
                     """
                     INSERT INTO skill_definitions
                         (name, description, content, status, scope, organization_id)
-                    VALUES ($1, $2, $3, 'active', 'built-in', $4)
-                    ON CONFLICT (name, organization_id) DO UPDATE
-                        SET content = EXCLUDED.content,
-                            description = EXCLUDED.description,
-                            scope = 'built-in',
-                            updated_at = NOW()
-                        WHERE skill_definitions.scope = 'built-in'
+                    SELECT $1::varchar, $2::varchar, $3, 'active', 'built-in', $4::uuid
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM skill_definitions
+                        WHERE name = $1 AND organization_id = $4
+                    )
                 """,
                     name,
                     description,
@@ -2665,19 +2980,20 @@ class DefinitionRepository:
                             skill_names.append(m.group(1).strip())
                         elif line.strip() and not line.startswith(" "):
                             in_skill_names = False
-            async with scoped_acquire(organization_id=org_id) as conn:
-                # Upsert the agent definition
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
+                # Upsert the agent definition (update-then-insert: a plain
+                # ON CONFLICT DO UPDATE fires the BEFORE INSERT auth_id
+                # trigger on the conflict path, leaking an unused auth_ids row
+                # every sync).
                 agent_row = await conn.fetchrow(
                     """
-                    INSERT INTO agent_definitions
-                        (name, description, content, status, scope, organization_id)
-                    VALUES ($1, $2, $3, 'active', 'built-in', $4)
-                    ON CONFLICT (name, organization_id) DO UPDATE
-                        SET content = EXCLUDED.content,
-                            description = EXCLUDED.description,
-                            scope = 'built-in',
-                            updated_at = NOW()
-                        WHERE agent_definitions.scope = 'built-in'
+                    UPDATE agent_definitions
+                    SET content = $3, description = $2, scope = 'built-in',
+                        updated_at = NOW()
+                    WHERE (name, organization_id) = ($1, $4)
+                      AND scope = 'built-in'
                     RETURNING id
                 """,
                     name,
@@ -2685,6 +3001,23 @@ class DefinitionRepository:
                     raw,
                     org_id,
                 )
+                if not agent_row:
+                    agent_row = await conn.fetchrow(
+                        """
+                        INSERT INTO agent_definitions
+                            (name, description, content, status, scope, organization_id)
+                        SELECT $1::varchar, $2::varchar, $3, 'active', 'built-in', $4::uuid
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM agent_definitions
+                            WHERE name = $1 AND organization_id = $4
+                        )
+                        RETURNING id
+                    """,
+                        name,
+                        description,
+                        raw,
+                        org_id,
+                    )
                 if not agent_row:
                     # Agent exists but is not built-in scope (user-created) —
                     # don't touch its skill mappings.
@@ -2777,24 +3110,41 @@ class DefinitionRepository:
                 },
             },
         ]
-        async with scoped_acquire(organization_id=org_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
             for hook in builtins:
+                # Update-then-insert (a plain ON CONFLICT DO UPDATE would fire
+                # the BEFORE INSERT auth_id trigger on the conflict path,
+                # leaking an unused auth_ids row every sync).
+                await conn.execute(
+                    """
+                    UPDATE hook_definitions
+                    SET description = $2, trigger_event = $3, action_type = $4,
+                        content = $5, config = $6::text::jsonb,
+                        status = 'active', scope = 'built-in', updated_at = NOW()
+                    WHERE (name, organization_id) = ($1, $7)
+                      AND scope = 'built-in'
+                    """,
+                    hook["name"],
+                    hook["description"],
+                    hook["trigger_event"],
+                    hook["action_type"],
+                    hook["content"],
+                    json.dumps(hook["config"]),
+                    org_id,
+                )
                 await conn.execute(
                     """
                     INSERT INTO hook_definitions
                         (name, description, trigger_event, action_type, content,
                          config, status, scope, organization_id)
-                    VALUES ($1, $2, $3, $4, $5, $6::text::jsonb, 'active', 'built-in', $7)
-                    ON CONFLICT (name, organization_id) DO UPDATE
-                        SET description = EXCLUDED.description,
-                            trigger_event = EXCLUDED.trigger_event,
-                            action_type = EXCLUDED.action_type,
-                            content = EXCLUDED.content,
-                            config = EXCLUDED.config,
-                            status = 'active',
-                            scope = 'built-in',
-                            updated_at = NOW()
-                        WHERE hook_definitions.scope = 'built-in'
+                    SELECT $1::varchar, $2::varchar, $3, $4, $5,
+                           $6::text::jsonb, 'active', 'built-in', $7
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM hook_definitions
+                        WHERE name = $1 AND organization_id = $7
+                    )
                     """,
                     hook["name"],
                     hook["description"],

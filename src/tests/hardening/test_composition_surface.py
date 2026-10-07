@@ -236,6 +236,10 @@ def test_dispatch_refused_and_telemetry_emitted_when_carrier_absent(stub_daemon,
     """Grants + wiped MCP_CONFIG → composition_surface event + fail-fast refusal."""
     events = _Events()
     minted = _install_loop_stubs(monkeypatch, events, scoped_key=None)
+    # Make the wipe hermetic: other test files have historically leaked a
+    # memory-server carrier into the module-level MCP_CONFIG, which would
+    # silently flip this test to the carrier-present path.
+    monkeypatch.setattr(dm, "MCP_CONFIG", {})
     # Pre-condition honesty: MCP_CONFIG wipe is what kills the carrier.
     assert dm.MCP_CONFIG.get("memory-server") is None
 

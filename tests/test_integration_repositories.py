@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from lucent.db.pool import clear_tenant_scope, set_tenant_scope
 from lucent.integrations.repositories import (
     _INTEGRATION_TRANSITIONS,
     _USER_LINK_TRANSITIONS,
@@ -20,6 +21,19 @@ from lucent.integrations.repositories import (
     PairingChallengeRepo,
     UserLinkRepo,
 )
+
+
+@pytest.fixture(autouse=True)
+def _live_tenant_context():
+    """Bind a tenant scope like a live request would.
+
+    The repos' own-pool acquisition (``scoped_acquire_on``) resolves the org
+    half of the tenant guard from the ambient task scope on paths that only
+    take ``user_id``; mocked tests have no request context otherwise.
+    """
+    set_tenant_scope(user_id=str(uuid4()), organization_id=str(uuid4()))
+    yield
+    clear_tenant_scope()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -487,24 +501,33 @@ class TestUserLinkRepoRead:
         pool = _make_pool(fetchrow_return=row)
         repo = UserLinkRepo(pool)
 
-        result = await repo.resolve_identity("slack", "U_EXT_123")
+        result = await repo.resolve_identity(
+            _uuid(), "U_EXT_123", organization_id=_uuid(),
+        )
         assert result is not None
         assert result["status"] == "active"
 
     @pytest.mark.asyncio
-    async def test_resolve_identity_with_workspace(self) -> None:
+    async def test_resolve_by_external_identity_with_workspace(self) -> None:
         row = _link_row(status="active")
         pool = _make_pool(fetchrow_return=row)
         repo = UserLinkRepo(pool)
 
-        result = await repo.resolve_identity("slack", "U_EXT_123", "T_WS")
+        result = await repo.resolve_by_external_identity(
+            "slack", "U_EXT_123",
+            external_workspace_id="T_WS",
+            organization_id=_uuid(),
+        )
         assert result is not None
+        assert result["status"] == "active"
 
     @pytest.mark.asyncio
     async def test_resolve_identity_not_found(self) -> None:
         pool = _make_pool()
         repo = UserLinkRepo(pool)
-        result = await repo.resolve_identity("slack", "UNKNOWN")
+        result = await repo.resolve_identity(
+            _uuid(), "UNKNOWN", organization_id=_uuid(),
+        )
         assert result is None
 
 

@@ -1,19 +1,21 @@
-"""API endpoints for Projects — user-owned workspaces grouping chats, files,
-and standing instructions.
+"""API endpoints for Projects.
 
-Every endpoint authenticates the caller and passes the authenticated
-(organization_id, id) pair into ProjectRepository, where scoping is enforced
-by construction (see lucent.db.projects). There is no unscoped code path.
+Project reads use the auth-ID-aware pool; mutations use the legacy
+explicitly scoped pool until write policies are introduced.
 """
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import get_pool
-from lucent.db.projects import ProjectNotFoundError, ProjectRepository
+from lucent.db.projects import (
+    ProjectNotFoundError,
+    ProjectRepository,
+    get_authorized_projects_pool,
+)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -43,9 +45,12 @@ def _project_dict(row) -> dict:
     return item
 
 
-async def _owned_project_or_404(repo: ProjectRepository, project_id: UUID, user) -> dict:
-    """Load the caller's own project or 404 — cross-tenant ids are invisible."""
-    project = await repo.get_owned(project_id, org_id=_scope(user)[0], user_id=_scope(user)[1])
+async def _owned_project_or_404(
+    repo: ProjectRepository,
+    project_id: UUID,
+) -> dict:
+    """Load a project visible through the caller's auth context or 404."""
+    project = await repo.get_owned(project_id)
     if not project:
         raise HTTPException(404, "Project not found")
     return project
@@ -99,10 +104,8 @@ async def list_projects(
 ):
     """List the caller's projects with member counts."""
     user, pool = await _get_session_user(request)
-    org_id, user_id = _scope(user)
-    result = await ProjectRepository(pool).list_owned(
-        org_id=org_id,
-        user_id=user_id,
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="read")
+    result = await ProjectRepository(authorized_pool).list_owned(
         limit=max(1, min(limit, 200)),
         offset=max(0, offset),
     )
@@ -114,9 +117,9 @@ async def list_projects(
 async def get_project(request: Request, project_id: UUID):
     """Get one owned project, with member counts."""
     user, pool = await _get_session_user(request)
-    org_id, user_id = _scope(user)
-    project = await ProjectRepository(pool).get_owned_with_counts(
-        project_id, org_id=org_id, user_id=user_id
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="read")
+    project = await ProjectRepository(authorized_pool).get_owned_with_counts(
+        project_id
     )
     if not project:
         raise HTTPException(404, "Project not found")
@@ -127,12 +130,14 @@ async def get_project(request: Request, project_id: UUID):
 async def update_project(request: Request, project_id: UUID, body: ProjectUpdate):
     """Rename a project and/or edit its standing instructions."""
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    authorized_repo = ProjectRepository(authorized_pool)
+    await _owned_project_or_404(authorized_repo, project_id)
     org_id, user_id = _scope(user)
     provided = body.model_fields_set
     if not provided & {"name", "instructions"}:
         raise HTTPException(422, "Nothing to update: provide name and/or instructions")
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     project = None
     if "name" in provided:
         if body.name is None:
@@ -154,6 +159,8 @@ async def update_project(request: Request, project_id: UUID, body: ProjectUpdate
 async def delete_project(request: Request, project_id: UUID):
     """Delete a project. Member chats and files are un-filed, never deleted."""
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     org_id, user_id = _scope(user)
     deleted = await ProjectRepository(pool).delete_owned(
         project_id, org_id=org_id, user_id=user_id
@@ -173,9 +180,11 @@ async def add_sessions_to_project(
     the truth without distinguishing other users' ids.
     """
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    authorized_repo = ProjectRepository(authorized_pool)
+    await _owned_project_or_404(authorized_repo, project_id)
     org_id, user_id = _scope(user)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_sessions_project_bulk(
         [str(s) for s in body.session_ids],
         project_id,
@@ -191,9 +200,10 @@ async def remove_sessions_from_project(
 ):
     """Move chats out of a project (bulk, back to unfiled)."""
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     org_id, user_id = _scope(user)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_sessions_project_bulk(
         [str(s) for s in body.session_ids],
         None,
@@ -213,9 +223,10 @@ async def add_files_to_project(
     truth without distinguishing other users' ids.
     """
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     org_id, user_id = _scope(user)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_files_project_bulk(
         [str(f) for f in body.file_ids],
         project_id,
@@ -232,8 +243,9 @@ async def remove_files_from_project(
     """Move durable files out of a project (bulk, back to unfiled)."""
     user, pool = await _get_session_user(request)
     org_id, user_id = _scope(user)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_files_project_bulk(
         [str(f) for f in body.file_ids],
         None,
@@ -291,8 +303,9 @@ async def add_memories_to_project(
     """
     user, pool = await _get_session_user(request)
     org_id, user_id = _scope(user)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_memories_project_bulk(
         [str(m) for m in body.memory_ids],
         project_id,
@@ -308,9 +321,10 @@ async def remove_memories_from_project(
 ):
     """Detach memories from a project (bulk, back to unfiled)."""
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     org_id, user_id = _scope(user)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_memories_project_bulk(
         [str(m) for m in body.memory_ids],
         None,
@@ -350,9 +364,10 @@ async def add_interactions_to_project(
     untouched.
     """
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     org_id, user_id = _scope(user)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_interactions_project_bulk(
         [str(i) for i in body.interaction_ids],
         project_id,
@@ -368,9 +383,10 @@ async def remove_interactions_from_project(
 ):
     """Move handoffs out of a project (bulk, back to unfiled)."""
     user, pool = await _get_session_user(request)
+    authorized_pool = await get_authorized_projects_pool(pool, user, required_clearance="write")
+    await _owned_project_or_404(ProjectRepository(authorized_pool), project_id)
     org_id, user_id = _scope(user)
     repo = ProjectRepository(pool)
-    await _owned_project_or_404(repo, project_id, user)
     moved = await repo.set_interactions_project_bulk(
         [str(i) for i in body.interaction_ids],
         None,

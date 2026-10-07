@@ -277,27 +277,22 @@ async def dashboard(request: Request):
     accessible_goals = goal_result["memories"]
     goal_ids = [UUID(str(goal["id"])) for goal in accessible_goals]
 
-    from lucent.db.definitions import DefinitionRepository
+    from lucent.db.definitions import DefinitionRepository, get_authorized_definitions_pool
 
-    def_repo = DefinitionRepository(pool)
-    agents_result = await def_repo.list_agents(
-        org_id,
-        status="active",
-        requester_user_id=str(user.id),
-        requester_role=role_value,
+    # Composer options are usage picks — clearance-driven and default-deny.
+    def_pool = await get_authorized_definitions_pool(
+        pool, {"id": str(user.id), "organization_id": str(org_id)}
     )
-    skills_result = await def_repo.list_skills(
-        org_id,
-        status="active",
-        requester_user_id=str(user.id),
-        requester_role=role_value,
+    def_repo = DefinitionRepository(def_pool)
+    agents_result = await def_repo.list_agents_accessible_by(
+        str(user.id), org_id, status="active"
+    )
+    skills_result = await def_repo.list_skills_accessible_by(
+        str(user.id), org_id, status="active"
     )
     active_mcp_servers = (
-        await def_repo.list_mcp_servers(
-            org_id,
-            status="active",
-            requester_user_id=str(user.id),
-            requester_role=role_value,
+        await def_repo.list_mcp_servers_accessible_by(
+            str(user.id), org_id, status="active"
         )
     )["total_count"]
 

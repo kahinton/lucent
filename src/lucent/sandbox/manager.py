@@ -140,6 +140,7 @@ class SandboxManager:
                 task_id=effective_config.task_id,
                 request_id=effective_config.request_id,
                 organization_id=effective_config.organization_id,
+                created_by=effective_config.requesting_user_id,
             )
             # Update status if ready or failed
             if info.status == SandboxStatus.READY:
@@ -241,11 +242,16 @@ class SandboxManager:
         self._touch(sandbox_id)
         return await self._backend.list_files(sandbox_id, path)
 
-    async def get(self, sandbox_id: str) -> dict | None:
-        """Get sandbox record from DB."""
+    async def get(self, sandbox_id: str, organization_id: str | None = None) -> dict | None:
+        """Get sandbox record from DB.
+
+        User-facing callers (API/web routes, request tools) pass
+        organization_id so another org's row is simply absent; the
+        system-infra lifecycle paths keep the org-less lookup.
+        """
         try:
             repo = await self._repo()
-            return await repo.get(sandbox_id)
+            return await repo.get(sandbox_id, organization_id)
         except Exception:
             logger.debug("Failed to get sandbox %s from DB", sandbox_id, exc_info=True)
             return None

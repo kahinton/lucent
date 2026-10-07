@@ -27,9 +27,25 @@ import asyncio
 import uuid
 from typing import Any
 
+import pytest
+
 from lucent.db.requests import RequestRepository
+from lucent.db.pool import clear_tenant_scope, set_tenant_scope
 
 ORG_ID = "0f9abaa4-7489-47ab-8d6c-7c5be8d69d51"
+
+
+@pytest.fixture(autouse=True)
+def _daemon_tenant_context():
+    """Bind the ambient tenant scope a live daemon task runs under.
+
+    The no-org branch of the reaper/preflight relies on the ambient
+    ContextVar scope (role=daemon) exactly as the real daemon loop sets it;
+    without it the fail-closed tenant guard refuses the acquire.
+    """
+    set_tenant_scope(user_id=str(uuid.uuid4()), organization_id=None, role="daemon")
+    yield
+    clear_tenant_scope()
 
 # The shared activity-staleness predicate, normalized. $1 is the stale
 # threshold in seconds in every query variant (org and no-org branches alike).
@@ -66,6 +82,8 @@ class _RecordingConn:
 
     async def fetchval(self, query: str, *params: Any) -> int:
         self._record("fetchval", query, *params)
+        if "SELECT 1 FROM TASKS" in _norm(query):
+            return 1  # task-existence probe: the task is real
         return 0
 
     async def fetchrow(self, query: str, *params: Any) -> dict | None:

@@ -19,7 +19,6 @@ can run simultaneously, contributing to the same intelligence.
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
 import platform
@@ -41,19 +40,18 @@ if __package__ in {None, ""}:
 import httpx
 
 from lucent.mcp_config import build_internal_mcp_server, build_scoped_internal_mcp_server
-from lucent.db.daemon import DaemonRepository
-from lucent.prompts.memory_usage import render_active_user_context
+
+from daemon.api import daemon_keys, key_verification, organization, scoped_keys
+from daemon.api import definitions as definition_loading
+from daemon.api.instances import InstanceAPI
+from daemon.api.memory import MemoryAPI
+from daemon.api.tasks import TaskAPI
 from daemon.db_scope import connect_scoped
+from daemon.decomposition.capability import DecompositionHelpersMixin
+from daemon.dispatch import policy as task_policy
 from daemon.observability.tools import (
-    _BASE_TASK_MEMORY_SERVER_TOOLS,
-    _CAPABILITY_ACTIVATION_AGENT_TYPES,
-    _DEFINITION_ACTIVATION_TOOLS,
-    _HANDOFF_TOOL_REQUIRED_PATTERNS,
-    _HANDOFF_TOOL_REQUIRED_SIGNALS,
     _MEMORY_CAPTURE_TOOLS,
     _MEMORY_SEARCH_TOOLS,
-    _TASK_MEMORY_SERVER_TOOLS,
-    _WORK_ACTIVATION_TOOLS,
     _build_mcp_tool_summary,
     _is_memory_server_tool,
     _is_operational_tool_call,
@@ -62,30 +60,24 @@ from daemon.observability.tools import (
     _redact_secrets,
     _summarize_memory_tool_params,
 )
-from daemon.api import definitions as definition_loading
-from daemon.api.memory import MemoryAPI
-from daemon.api.instances import InstanceAPI
-from daemon.api.tasks import TaskAPI
-from daemon.api import scoped_keys
-from daemon.api import key_verification
-from daemon.api import daemon_keys
-from daemon.dispatch import policy as task_policy
-from daemon.api import organization
-from daemon.runtime import environment as runtime_environment
-from daemon.decomposition.capability import DecompositionHelpersMixin
 from daemon.prompts.system import (
     EXPERIENCE_COMPRESSION_PROMPT,
     LEARNING_EXTRACTION_PROMPT,
-    MEMORY_VITALITY_SCORING_PROMPT,
     SHADOW_FORGET_SCORING_PROMPT,
+)
+from daemon.prompts.system import (
     build_cognitive_prompt as _build_cognitive_prompt,
+)
+from daemon.prompts.system import (
     build_subagent_prompt as _build_subagent_prompt,
 )
+from daemon.runtime import environment as runtime_environment
+from lucent.db.daemon import DaemonRepository
+from lucent.prompts.memory_usage import render_active_user_context
 
 if TYPE_CHECKING:
     import asyncpg
 
-    from lucent.sandbox.models import SandboxConfig
 
 # ---------------------------------------------------------------------------
 # Dev ergonomics — auto-load VAULT_ADDR/VAULT_TOKEN when running on the host
@@ -107,7 +99,8 @@ def _auto_load_vault_env() -> None:
 _auto_load_vault_env()
 
 from lucent.auth import set_current_user
-from lucent.memory_scope import (
+from lucent.memory_scope import (  # noqa: F401  (scope constants are read as
+    # `runtime.<attr>` by daemon/api/scoped_keys.py through the module proxy)
     MEMORY_SCOPE_HEADER,
     MEMORY_SCOPE_ORG_SHARED_ONLY,
     MEMORY_SCOPE_USER,
@@ -115,8 +108,7 @@ from lucent.memory_scope import (
     ORG_ID_HEADER,
     VALID_MEMORY_SCOPES,
 )
-from lucent.secrets import SecretRegistry, initialize_secret_provider
-from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
+from lucent.secrets import initialize_secret_provider
 from lucent.secrets.utils import resolve_env_vars as resolve_secret_env_vars
 
 # Import LLM engine abstraction — the daemon no longer calls CopilotClient directly
@@ -159,15 +151,15 @@ except (ImportError, Exception):
     parse_assessment_output = None
 
 # Structured output contract validation/extraction helpers.
-from daemon.validation.output import process_task_output, validate_consolidation_execution
+from daemon.dispatch.policy import TaskValidationMixin
+from daemon.review.lifecycle import RequestReviewMixin
 from daemon.runtime.autonomic import AutonomicMixin
 from daemon.runtime.cognitive import CognitiveCycleMixin
 from daemon.runtime.configuration import RuntimeConfigurationMixin
 from daemon.runtime.loops import RuntimeLoopsMixin
 from daemon.runtime.scheduling import SchedulingMixin
-from daemon.dispatch.policy import TaskValidationMixin
-from daemon.review.lifecycle import RequestReviewMixin
 from daemon.sandbox.lifecycle import SandboxLifecycleMixin
+from daemon.validation.output import process_task_output
 
 # OpenTelemetry instrumentation (optional — graceful when not available)
 try:
@@ -415,6 +407,7 @@ async def _accessible_models_for_user(
 ) -> list[Any]:
     """Return enabled, tool-capable models the task owner can use."""
     from lucent.db import ModelRepository, UserRepository, get_pool
+    from lucent.db.models import get_authorized_models_pool
     from lucent.model_registry import list_models
 
     pool = await get_pool()
@@ -426,10 +419,14 @@ async def _accessible_models_for_user(
     ):
         raise ModelAccessDeniedError("Task owner is not an active user in this organization")
 
-    accessible = await ModelRepository(pool).list_models_accessible_by(
+    # Usage is clearance-driven and default-deny: the daemon may only run a
+    # model its owner was granted; a role grants nothing.
+    model_pool = await get_authorized_models_pool(
+        pool, {"id": str(user_id), "organization_id": str(org_id)}
+    )
+    accessible = await ModelRepository(model_pool).list_models_accessible_by(
         user_id,
         org_id,
-        requester_role=str(user.get("role") or "member"),
         enabled_only=True,
         limit=500,
     )
@@ -1797,8 +1794,9 @@ class LucentDaemon(
             # the org GUC is bound only when the operator binding is already
             # a UUID — a name would make policy ::uuid casts error instead
             # of failing closed, and boot reads need no org GUC at all.
-            from lucent.db.pool import clear_tenant_scope, set_tenant_scope
             from uuid import UUID as _UUID
+
+            from lucent.db.pool import clear_tenant_scope, set_tenant_scope
 
             _boot_org = DAEMON_ORG or None
             if _boot_org:
@@ -1930,6 +1928,11 @@ class LucentDaemon(
         runtime state such as enabled/next_run_at.
         Uses direct DB connection (same pattern as key provisioning).
         """
+        # Local import: module imports asyncpg only under TYPE_CHECKING, and
+        # this path used to crash at runtime with "name 'asyncpg' is not
+        # defined" — seeding silently never replaced missing schedules.
+        import asyncpg
+
         try:
             conn = await asyncpg.connect(DATABASE_URL)
             try:
@@ -2750,7 +2753,6 @@ class LucentDaemon(
         (`approved`). All three states share the same failure mode: a
         request with zero tasks is incomplete work.
         """
-        import asyncpg
 
         try:
             conn = await connect_scoped(DATABASE_URL, organization_id=org_id)
@@ -3155,9 +3157,6 @@ class LucentDaemon(
             return await DaemonRepository(conn).get_terminal_request_status(request_id)
         except Exception:
             return None
-        if not row:
-            return None
-        return str(row["status"])
 
     async def _count_tasks_for_request(
         self,

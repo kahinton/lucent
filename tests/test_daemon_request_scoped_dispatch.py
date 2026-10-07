@@ -607,14 +607,17 @@ async def test_dispatch_memory_server_config_carries_user_scope_headers(monkeypa
     monkeypatch.setattr("daemon.daemon.build_subagent_prompt", _prompt)
     monkeypatch.setattr("daemon.daemon._mint_scoped_api_key", _mint)
     monkeypatch.setattr("daemon.daemon._select_model_for_user", _model_for_owner)
-    daemon_module.MCP_CONFIG = {
+    # Seed via monkeypatch, never a bare assignment: the daemon module is
+    # shared process-wide and a leaked MCP_CONFIG carrier corrupts later
+    # test files (e.g. the composition-surface hardening suite).
+    monkeypatch.setattr(daemon_module, "MCP_CONFIG", {
         "memory-server": {
             "type": "http",
             "url": "http://mcp",
             "headers": {"Authorization": "Bearer daemon-key"},
             "tools": ["*"],
         }
-    }
+    })
 
     await daemon._dispatch_tracked_tasks(max_tasks=1)
 

@@ -466,7 +466,7 @@ async def test_update_template(client, db_pool, web_user, web_prefix):
     assert "/sandboxes" in resp.headers["location"]
 
     # Verify the update persisted
-    updated = await repo.get(str(tpl["id"]))
+    updated = await repo.get(str(tpl["id"]), str(org["id"]))
     assert updated["description"] == "updated"
 
 
@@ -491,7 +491,7 @@ async def test_update_template_clears_branch_without_repository(
     )
 
     assert response.status_code == 303
-    updated = await repo.get(str(tpl["id"]))
+    updated = await repo.get(str(tpl["id"]), str(org["id"]))
     assert updated["repo_url"] is None
     assert updated["branch"] is None
 
@@ -568,7 +568,7 @@ async def test_delete_template(client, db_pool, web_user, web_prefix):
     assert "/sandboxes" in resp.headers["location"]
 
     # Verify the template was actually deleted
-    deleted = await repo.get(str(tpl["id"]))
+    deleted = await repo.get(str(tpl["id"]), str(org["id"]))
     assert deleted is None
 
 
@@ -591,7 +591,7 @@ async def test_delete_template_without_csrf_fails(client, db_pool, web_user, web
     assert resp.status_code == 403
 
     # Verify template still exists
-    still_exists = await repo.get(str(tpl["id"]))
+    still_exists = await repo.get(str(tpl["id"]), str(org["id"]))
     assert still_exists is not None
 
 

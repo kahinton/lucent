@@ -1005,6 +1005,8 @@ class TestMemoryRestore:
             content="Edited content",
             tags=["restore-test", "edited"],
             importance=7,
+            organization_id=org["id"],
+            user_id=user["id"],
         )
 
         await audit_repo.log(

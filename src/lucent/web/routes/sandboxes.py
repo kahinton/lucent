@@ -13,10 +13,9 @@ from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.db.groups import GroupRepository
 from lucent.db.user import UserRepository
-from lucent.db.pool import scoped_acquire_on
 from lucent.logging import get_logger
-from lucent.secrets import SecretRegistry, resolve_env_vars
 from lucent.sandbox.models import validate_extra_hosts
+from lucent.secrets import SecretRegistry, resolve_env_vars
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
@@ -94,10 +93,12 @@ async def _resolve_owner_maps(user_id: str, org_id: str, pool, items: list[dict]
     if user_ids:
         user_map = await UserRepository(pool).get_display_names_by_ids(
             [UUID(uid) for uid in user_ids],
+            organization_id=org_id,
         )
     if group_ids:
         group_map = await GroupRepository(pool).get_names_by_ids(
             [UUID(gid) for gid in group_ids],
+            organization_id=org_id,
         )
     return user_map, group_map
 
@@ -173,31 +174,40 @@ async def sandboxes_page(
     pool = await get_pool()
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
-    tpl_repo = SandboxTemplateRepository(pool)
     role_value = user.role if isinstance(user.role, str) else user.role.value
     total_count = 0
     try:
         if org_id:
-            if active_tab == "templates":
+            if role_value in ("admin", "owner"):
+                # Management view: admins/owners see every org template.
+                tpl_repo = SandboxTemplateRepository(pool)
+                limit = per_page if active_tab == "templates" else 1000
                 tpl_result = await tpl_repo.list_accessible_by(
                     str(user.id),
                     org_id,
-                    limit=per_page,
-                    offset=offset,
+                    limit=limit,
+                    offset=offset if active_tab == "templates" else 0,
                     user_role=role_value,
                 )
-                template_list = tpl_result["items"]
-                total_count = tpl_result["total_count"]
             else:
-                # For instances tab, load all templates (for launch modal + name enrichment)
-                tpl_result = await tpl_repo.list_accessible_by(
+                # Usage view: members see only templates cleared for their
+                # use (built-in org grants, ownership, group grants).
+                from lucent.db.sandbox_template import get_authorized_templates_pool
+
+                tpl_pool = await get_authorized_templates_pool(
+                    pool, {"id": str(user.id), "organization_id": str(org_id)}
+                )
+                tpl_repo = SandboxTemplateRepository(tpl_pool)
+                limit = per_page if active_tab == "templates" else 1000
+                tpl_result = await tpl_repo.list_templates_accessible_by(
                     str(user.id),
                     org_id,
-                    limit=1000,
-                    offset=0,
-                    user_role=role_value,
+                    limit=limit,
+                    offset=offset if active_tab == "templates" else 0,
                 )
-                template_list = tpl_result["items"]
+            template_list = tpl_result["items"]
+            if active_tab == "templates":
+                total_count = tpl_result["total_count"]
         else:
             template_list = []
     except Exception:
@@ -209,19 +219,42 @@ async def sandboxes_page(
     user_map, group_map = await _resolve_owner_maps(str(user.id), org_id, pool, template_list)
     template_list = _attach_owner_names(template_list, user_map, group_map)
 
-    # Load instances only when on instances tab
+    # Load instances only when on instances tab. Admins/owners manage every
+    # org sandbox; members see only theirs (clearance-driven, "only yours").
     sandbox_list = []
-    if active_tab == "instances":
+    if active_tab == "instances" and org_id:
         from lucent.sandbox.manager import get_sandbox_manager
 
         manager = get_sandbox_manager()
         try:
-            if show == "active":
-                sb_result = await manager.list_active(org_id, limit=per_page, offset=offset)
+            if role_value in ("admin", "owner"):
+                if show == "active":
+                    sb_result = await manager.list_active(
+                        org_id, limit=per_page, offset=offset
+                    )
+                else:
+                    sb_result = await manager.list_all(org_id, limit=per_page, offset=offset)
+                sandbox_list = sb_result["items"]
+                total_count = sb_result["total_count"]
             else:
-                sb_result = await manager.list_all(org_id, limit=per_page, offset=offset)
-            sandbox_list = sb_result["items"]
-            total_count = sb_result["total_count"]
+                from lucent.db.sandbox import (
+                    SandboxRepository,
+                    get_authorized_sandboxes_pool,
+                )
+
+                sb_pool = await get_authorized_sandboxes_pool(
+                    pool,
+                    {"id": str(user.id), "organization_id": str(org_id)},
+                )
+                sb_repo = SandboxRepository(sb_pool)
+                sb_result = await sb_repo.list_sandboxes_accessible_by(
+                    str(user.id),
+                    str(org_id),
+                    limit=per_page,
+                    offset=offset,
+                )
+                sandbox_list = sb_result["items"]
+                total_count = sb_result["total_count"]
         except Exception:
             logger.debug("Failed to load sandbox list", exc_info=True)
             sandbox_list = []
@@ -504,18 +537,18 @@ async def launch_sandbox_web(
     _require_org_membership(user)
     await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
-    from lucent.db.sandbox_template import SandboxTemplateRepository
+    from lucent.db.sandbox_template import (
+        SandboxTemplateRepository,
+        get_authorized_templates_pool,
+    )
     from lucent.sandbox.manager import get_sandbox_manager
     from lucent.sandbox.models import SandboxConfig
 
-    tpl_repo = SandboxTemplateRepository(pool)
-    role_value = user.role if isinstance(user.role, str) else user.role.value
-    tpl = await tpl_repo.get_accessible(
-        template_id,
-        str(user.organization_id),
-        str(user.id),
-        user_role=role_value,
+    tpl_pool = await get_authorized_templates_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
     )
+    tpl_repo = SandboxTemplateRepository(tpl_pool)
+    tpl = await tpl_repo.get_usable_template(template_id)
     if not tpl:
         raise HTTPException(404, "Template not found")
     if tpl.get("status") != "approved":
@@ -540,10 +573,30 @@ async def launch_sandbox_web(
         allowed_hosts=tpl.get("allowed_hosts") or [],
         timeout_seconds=tpl.get("timeout_seconds", 1800),
         organization_id=str(user.organization_id),
+        requesting_user_id=str(user.id),
     )
     manager = get_sandbox_manager()
     await manager.create(config)
     return RedirectResponse("/sandboxes?tab=instances", status_code=303)
+
+
+async def _get_sandbox_for_user_web(manager, user, sandbox_id: str) -> dict:
+    """Fetch a sandbox for stop/destroy: owner or admin/owner only.
+
+    Previously any org member could stop/destroy any org sandbox; the
+    "only yours" decision (2026-10-01) restricts control to the owner,
+    with admins/owners keeping full management.
+    """
+    sandbox = await manager.get(sandbox_id, str(user.organization_id))
+    if not sandbox or str(sandbox.get("organization_id", "")) != str(user.organization_id):
+        raise HTTPException(404, "Sandbox not found")
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    created_by = sandbox.get("created_by")
+    if role_value not in ("admin", "owner") and (
+        not created_by or str(created_by) != str(user.id)
+    ):
+        raise HTTPException(404, "Sandbox not found")
+    return sandbox
 
 
 @router.post("/sandboxes/{sandbox_id}/stop")
@@ -554,11 +607,8 @@ async def stop_sandbox_web(request: Request, sandbox_id: str):
     await _check_csrf(request)
     from lucent.sandbox.manager import get_sandbox_manager
 
-    manager = get_sandbox_manager()
-    sandbox = await manager.get(sandbox_id)
-    if not sandbox or str(sandbox.get("organization_id", "")) != str(user.organization_id):
-        raise HTTPException(404, "Sandbox not found")
-    await manager.stop(sandbox_id)
+    await _get_sandbox_for_user_web(get_sandbox_manager(), user, sandbox_id)
+    await get_sandbox_manager().stop(sandbox_id)
     return RedirectResponse("/sandboxes?tab=instances", status_code=303)
 
 
@@ -570,11 +620,8 @@ async def destroy_sandbox_web(request: Request, sandbox_id: str):
     await _check_csrf(request)
     from lucent.sandbox.manager import get_sandbox_manager
 
-    manager = get_sandbox_manager()
-    sandbox = await manager.get(sandbox_id)
-    if not sandbox or str(sandbox.get("organization_id", "")) != str(user.organization_id):
-        raise HTTPException(404, "Sandbox not found")
-    await manager.destroy(sandbox_id)
+    await _get_sandbox_for_user_web(get_sandbox_manager(), user, sandbox_id)
+    await get_sandbox_manager().destroy(sandbox_id)
     return RedirectResponse("/sandboxes?tab=instances", status_code=303)
 
 
@@ -593,7 +640,7 @@ async def exec_sandbox_web(request: Request, sandbox_id: str):
     from lucent.sandbox.manager import get_sandbox_manager
 
     manager = get_sandbox_manager()
-    sandbox = await manager.get(sandbox_id)
+    sandbox = await manager.get(sandbox_id, str(user.organization_id))
     if not sandbox or str(sandbox.get("organization_id", "")) != str(user.organization_id):
         raise HTTPException(404, "Sandbox not found")
 

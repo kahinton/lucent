@@ -59,6 +59,23 @@ def _require_admin_for_stdio(
         raise HTTPException(403, "Stdio MCP servers require admin or owner role")
 
 
+async def _can_manage(
+    pool, user: AuthenticatedUser, definition_type: str, definition_id: str
+) -> bool:
+    """Management gate for definitions: admin/owner role OR can_modify.
+
+    Management surfaces keep the legacy admin/owner org-wide path — access is
+    not clearance-driven here. Only members,
+    owners of the resource, and group admins fall through to ``can_modify``.
+    """
+    if user.role.value in ("admin", "owner"):
+        return True
+    acl = AccessControlService(pool)
+    return await acl.can_modify(
+        str(user.id), definition_type, definition_id, str(user.organization_id)
+    )
+
+
 async def _require_definition_approval_access(
     pool,
     user: AuthenticatedUser,
@@ -66,9 +83,8 @@ async def _require_definition_approval_access(
     definition_id: str,
 ) -> dict:
     """Authorize a definition owner or the administrator performing final approval."""
-    acl = AccessControlService(pool)
     org_id = str(user.organization_id)
-    if not await acl.can_modify(str(user.id), definition_type, definition_id, org_id):
+    if not await _can_manage(pool, user, definition_type, definition_id):
         raise HTTPException(404, "Definition not found")
     repo = DefinitionRepository(pool)
     getters = {
@@ -301,8 +317,7 @@ async def get_agent(agent_id: str, user: AuthenticatedUser):
 @router.patch("/agents/{agent_id}")
 async def update_agent(agent_id: str, body: CreateAgent, user: AuthenticatedUser):
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "agent", agent_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "agent", agent_id):
         raise HTTPException(404, "Agent not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     try:
@@ -348,8 +363,7 @@ async def delete_agent(agent_id: str, user: AuthenticatedUser):
     if user.role.value not in ("admin", "owner"):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "agent", agent_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "agent", agent_id):
         raise HTTPException(404, "Agent not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.delete_agent(agent_id, str(user.organization_id)):
@@ -554,8 +568,7 @@ async def delete_skill(skill_id: str, user: AuthenticatedUser):
     if user.role.value not in ("admin", "owner"):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "skill", skill_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "skill", skill_id):
         raise HTTPException(404, "Skill not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.delete_skill(skill_id, str(user.organization_id)):
@@ -628,8 +641,7 @@ async def update_mcp_server(server_id: str, body: UpdateMCPServer, user: Authent
             except SSRFError as exc:
                 raise HTTPException(400, str(exc))
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "mcp_server", server_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "mcp_server", server_id):
         raise HTTPException(404, "MCP server not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     existing = await repo.get_mcp_server(
@@ -785,8 +797,7 @@ async def get_hook(hook_id: str, user: AuthenticatedUser):
 @router.patch("/hooks/{hook_id}")
 async def update_hook(hook_id: str, body: UpdateHook, user: AuthenticatedUser):
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "hook", hook_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "hook", hook_id):
         raise HTTPException(404, "Hook not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     updates = body.model_dump(exclude_none=True)
@@ -840,8 +851,7 @@ async def delete_hook(hook_id: str, user: AuthenticatedUser):
     if user.role.value not in ("admin", "owner"):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "hook", hook_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "hook", hook_id):
         raise HTTPException(404, "Hook not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.delete_hook(hook_id, str(user.organization_id)):
@@ -938,8 +948,7 @@ async def get_managed_tool(tool_id: str, user: AuthenticatedUser):
 @router.patch("/tools/{tool_id}")
 async def update_managed_tool(tool_id: str, body: UpdateManagedTool, user: AuthenticatedUser):
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "managed_tool", tool_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "managed_tool", tool_id):
         raise HTTPException(404, "Managed tool not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     updates = body.model_dump(exclude_none=True)
@@ -993,8 +1002,7 @@ async def delete_managed_tool(tool_id: str, user: AuthenticatedUser):
     if user.role.value not in ("admin", "owner"):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    if not await acl.can_modify(str(user.id), "managed_tool", tool_id, str(user.organization_id)):
+    if not await _can_manage(pool, user, "managed_tool", tool_id):
         raise HTTPException(404, "Managed tool not found")
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     if not await repo.delete_managed_tool(tool_id, str(user.organization_id)):

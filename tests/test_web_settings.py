@@ -6,6 +6,7 @@ Tests:
 - POST /settings/api-keys/{key_id}/revoke  (revoke API key)
 """
 
+import re
 from uuid import uuid4
 
 import asyncpg
@@ -488,16 +489,14 @@ async def test_runtime_model_setting_rejects_unknown_model(
 
 
 @pytest.mark.asyncio
-async def test_models_settings_updates_and_displays_group_access(
+async def test_models_edit_no_longer_sets_ownership(
     client, db_pool, web_user
 ):
+    """Models belong to the organization (131): the Edit form no longer
+    carries an 'Available to' selector, and submitted owner_scope values are
+    ignored — access only comes from grants in the Manage access modal."""
     user, org, _token = web_user
     await _promote_web_user(db_pool, web_user)
-    group = await GroupRepository(db_pool).create_group(
-        "Model Reviewers",
-        str(org["id"]),
-        created_by=str(user["id"]),
-    )
     local_user = await UserRepository(db_pool).create(
         external_id=f"model-user-{org['id']}",
         provider="local",
@@ -524,35 +523,6 @@ async def test_models_settings_updates_and_displays_group_access(
                 "category": "general",
                 "api_model_id": model_id,
                 "context_window": "0",
-                "owner_scope": f"group:{group['id']}",
-                "supports_tools": "true",
-            },
-        ),
-        follow_redirects=False,
-    )
-
-    assert response.status_code == 303
-    model = await ModelRepository(db_pool).get_model(model_id)
-    assert model["owner_user_id"] is None
-    assert model["owner_group_id"] == group["id"]
-
-    page = await client.get("/settings/models")
-    assert page.status_code == 200
-    assert "Configure model availability and who can use each model." in page.text
-    assert "Model Reviewers" in page.text
-    assert f'data-owner-scope="group:{group["id"]}"' in page.text
-    assert f'value="user:{local_user["id"]}">User: Model User' in page.text
-
-    response = await client.post(
-        f"/settings/models/{model_id}/edit",
-        data=_csrf_data(
-            client,
-            {
-                "name": "Group Model",
-                "provider": "test-provider",
-                "category": "general",
-                "api_model_id": model_id,
-                "context_window": "0",
                 "owner_scope": f"user:{local_user['id']}",
                 "supports_tools": "true",
             },
@@ -562,11 +532,15 @@ async def test_models_settings_updates_and_displays_group_access(
 
     assert response.status_code == 303
     model = await ModelRepository(db_pool).get_model(model_id)
-    assert model["owner_user_id"] == local_user["id"]
+    assert model["owner_user_id"] is None
     assert model["owner_group_id"] is None
+
     page = await client.get("/settings/models")
-    assert "Model User" in page.text
-    assert f'data-owner-scope="user:{local_user["id"]}"' in page.text
+    assert page.status_code == 200
+    assert "Configure model availability and who can use each model." in page.text
+    assert 'name="owner_scope"' not in page.text
+    assert "Available to" not in page.text
+    assert f'id="access-modal-{model_id}"' in page.text
 
 
 @pytest.mark.asyncio
@@ -740,3 +714,226 @@ def test_runtime_daemon_git_flags_registered(monkeypatch):
         ) is not None
     finally:
         runtime_settings.clear_runtime_setting_cache()
+
+
+# ---------------------------------------------------------------------------
+# Model grant management (access panel on the models settings page)
+# ---------------------------------------------------------------------------
+
+
+async def _model_clearances(db_pool, model_id):
+    """Clearances filed on a model's auth id, as (type, principal_id, role)."""
+    return await db_pool.fetch(
+        """SELECT acl.principal_type, acl.principal_id, acl.role
+           FROM auth_clearances acl
+           JOIN models m ON m.auth_id = acl.auth_id
+           WHERE m.id = $1""",
+        model_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_models_grant_and_revoke_org_access(
+    client, db_pool, web_user
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    model_id = f"grant-model-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test-provider",
+        "Grant Model",
+        org_id=str(org["id"]),
+    )
+
+    resp = await client.post(
+        f"/settings/models/{model_id}/grants",
+        data=_csrf_data(client, {"grantee_type": "organization"}),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "success=" in resp.headers["location"]
+    rows = await _model_clearances(db_pool, model_id)
+    assert (
+        "org",
+        org["id"],
+        "read",
+    ) in [(r["principal_type"], r["principal_id"], r["role"]) for r in rows]
+
+    page = await client.get("/settings/models")
+    assert page.status_code == 200
+    # The inline column shows the state at a glance...
+    assert "Manage access" in page.text
+    assert f'id="access-modal-{model_id}"' in page.text
+    # ...and the per-model modal separates has-access from give-access.
+    assert "Who already has access" in page.text
+    assert "Give access" in page.text
+    assert "Entire organization" in page.text
+    # Every revoke form must carry the fields the route requires, and every
+    # csrf input must have a real token (the page context supplies it — an
+    # empty value is silently rejected on submit).
+    assert 'name="csrf_token" value=""' not in page.text
+
+    # Replay the browser flow: take the Remove form exactly as the modal
+    # rendered it and submit those fields (a regression here shipped empty
+    # inputs once — 422 on every real browser revoke).
+    form_region = page.text.split(
+        f'/settings/models/{model_id}/grants/revoke">', 1
+    )[1]
+    granted_type = re.search(r'name="grantee_type" value="([^"]*)"', form_region)
+    granted_id = re.search(r'name="grantee_id" value="([^"]*)"', form_region)
+    assert granted_type and granted_id
+    assert granted_type.group(1) == "org"
+    assert granted_id.group(1) == ""
+
+    revoke = await client.post(
+        f"/settings/models/{model_id}/grants/revoke",
+        data={
+            CSRF_FIELD_NAME: client._csrf_token,  # type: ignore[attr-defined]
+            "grantee_type": granted_type.group(1),
+            "grantee_id": granted_id.group(1),
+        },
+        follow_redirects=False,
+    )
+    assert revoke.status_code == 303
+    assert "success=" in revoke.headers["location"]
+    rows = await _model_clearances(db_pool, model_id)
+    assert [r["principal_type"] for r in rows if r["principal_type"] == "org"] == []
+
+
+@pytest.mark.asyncio
+async def test_models_grant_user_and_group_read(
+    client, db_pool, web_user
+):
+    user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    member = await UserRepository(db_pool).create(
+        external_id=f"grant-{org['id']}",
+        provider="local",
+        organization_id=org["id"],
+        email=f"grant-{org['id']}@example.com",
+        display_name="Grant Member",
+        role="member",
+    )
+    group = await GroupRepository(db_pool).create_group(
+        "Grant Group",
+        str(org["id"]),
+        created_by=str(user["id"]),
+    )
+    model_id = f"grant-people-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test-provider",
+        "Grant People Model",
+        org_id=str(org["id"]),
+    )
+
+    resp = await client.post(
+        f"/settings/models/{model_id}/grants",
+        data=_csrf_data(
+            client,
+            {"grantee_type": "user", "grantee_id": str(member["id"]), "role": "read"},
+        ),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    resp = await client.post(
+        f"/settings/models/{model_id}/grants",
+        data=_csrf_data(
+            client,
+            {"grantee_type": "group", "grantee_id": str(group["id"])},
+        ),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    rows = await _model_clearances(db_pool, model_id)
+    triples = [
+        (r["principal_type"], r["principal_id"], r["role"]) for r in rows
+    ]
+    assert ("user", member["id"], "read") in triples
+    assert ("group", group["id"], "read") in triples
+
+    page = await client.get("/settings/models")
+    assert f'id="access-modal-{model_id}"' in page.text
+    assert "Grant Member" in page.text
+    assert "Grant Group" in page.text
+    # The revoke forms inside the modal must repeat the grant's identity
+    # (the empty grantee_id is expected for organization rows only).
+    assert f'<input type="hidden" name="grantee_id" value="{member["id"]}">' in page.text
+    assert f'<input type="hidden" name="grantee_id" value="{group["id"]}">' in page.text
+
+    # A role other than read/write is ignored at the web layer (read enforced).
+    weird = await client.post(
+        f"/settings/models/{model_id}/grants",
+        data=_csrf_data(
+            client,
+            {"grantee_type": "user", "grantee_id": str(member["id"]), "role": "owner"},
+        ),
+        follow_redirects=False,
+    )
+    assert weird.status_code == 303
+    rows = await _model_clearances(db_pool, model_id)
+    matches = [
+        r for r in rows
+        if r["principal_type"] == "user" and r["principal_id"] == member["id"]
+    ]
+    assert len(matches) == 1
+    assert matches[0]["role"] == "read"
+
+
+@pytest.mark.asyncio
+async def test_models_grant_unknown_principal_redirects_error(
+    client, db_pool, web_user
+):
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+    model_id = f"grant-ghost-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test-provider",
+        "Grant Ghost Model",
+        org_id=str(org["id"]),
+    )
+
+    resp = await client.post(
+        f"/settings/models/{model_id}/grants",
+        data=_csrf_data(
+            client,
+            {"grantee_type": "user", "grantee_id": str(uuid4())},
+        ),
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error=" in resp.headers["location"]
+
+
+@pytest.mark.asyncio
+async def test_models_grant_requires_csrf_and_admin(
+    client, db_pool, web_user
+):
+    """No CSRF → 403; and the default (member) user is rejected by the
+    admin gate before anything is granted."""
+    _user, org, _token = web_user
+    model_id = f"grant-guard-{org['id']}"
+    await ModelRepository(db_pool).create_model(
+        model_id,
+        "test-provider",
+        "Grant Guard Model",
+        org_id=str(org["id"]),
+    )
+
+    no_csrf = await client.post(
+        f"/settings/models/{model_id}/grants",
+        data={"grantee_type": "organization"},
+        follow_redirects=False,
+    )
+    assert no_csrf.status_code == 403
+
+    non_admin = await client.post(
+        f"/settings/models/{model_id}/grants",
+        data=_csrf_data(client, {"grantee_type": "organization"}),
+        follow_redirects=False,
+    )
+    assert non_admin.status_code == 403
+    assert await _model_clearances(db_pool, model_id) == []

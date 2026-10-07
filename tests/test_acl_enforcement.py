@@ -216,7 +216,9 @@ class TestAgentACLRead:
         # Create group and add other user
         group_repo = GroupRepository(db_pool)
         group = await group_repo.create_group(f"{acl_prefix}groupX", str(org["id"]))
-        await group_repo.add_member(str(group["id"]), str(other["id"]))
+        await group_repo.add_member(
+            str(group["id"]), str(other["id"]), organization_id=str(org["id"])
+        )
 
         # Create agent owned by a group
         pool = await get_pool()
@@ -255,7 +257,9 @@ class TestAgentACLRead:
         # Create group, add other user, create group-owned agent
         group_repo = GroupRepository(db_pool)
         group = await group_repo.create_group(f"{acl_prefix}groupY", str(org["id"]))
-        await group_repo.add_member(str(group["id"]), str(other["id"]))
+        await group_repo.add_member(
+            str(group["id"]), str(other["id"]), organization_id=str(org["id"])
+        )
 
         pool = await get_pool()
         repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
@@ -281,7 +285,9 @@ class TestAgentACLRead:
             assert resp.status_code == 200
 
         # Remove other user from group
-        await group_repo.remove_member(str(group["id"]), str(other["id"]))
+        await group_repo.remove_member(
+            str(group["id"]), str(other["id"]), organization_id=str(org["id"])
+        )
 
         # Invalidate group cache
         from lucent.access_control import AccessControlService

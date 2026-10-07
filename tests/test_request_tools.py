@@ -6,7 +6,7 @@ Tests auth context enforcement, JSON serialization, and error handling.
 """
 
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -48,30 +48,75 @@ async def auth_user(test_user):
 
 
 @pytest_asyncio.fixture
-async def available_model(db_pool):
-    from lucent.db.models import ModelRepository
-    from lucent.model_registry import list_models
+async def available_model(db_pool, test_user):
+    """An enabled model the test user can see.
 
-    model = list_models()[0]
+    Migration 131 made models default-no-access (and the catalog's
+    provider-discovered rows are org-less + disabled), so the fixture pins
+    the model to the test organization, enables it, and files the explicit
+    org-read clearance the models grant UI writes. Teardown restores the
+    prior row exactly.
+    """
+    from lucent.db.models import ModelRepository
+    from lucent.model_registry import MODELS
+
+    # Explicit catalog entry — do NOT use list_models() here: with the
+    # per-test pristine registry (conftest), module state is never polluted
+    # by earlier tests' DB loads, and a DB load against a fresh test database
+    # can still be empty at fixture time. MODELS is import-time static.
+    model = MODELS[0]
     repo = ModelRepository(db_pool)
     existing = await repo.get_model(model.id)
-    if existing:
-        await repo.update_model(
-            model.id,
-            is_enabled=True,
-            organization_id=None,
-            owner_user_id=None,
-            owner_group_id=None,
-        )
-    else:
+    # Catalog rows seeded by other tests carry organization_id NULL — guard
+    # against the None (stringified "None" would explode UUID() at teardown).
+    existing_org = existing["organization_id"] if existing else None
+    prior_org = str(existing_org) if existing_org is not None else None
+    prior_enabled = existing["is_enabled"] if existing else None
+    if not existing:
         await repo.create_model(
             model.id,
             model.provider,
             model.name,
             category=model.category,
             supports_tools=model.supports_tools,
+            org_id=str(test_user["organization_id"]),
         )
+    org_uuid = UUID(str(test_user["organization_id"]))
+    await db_pool.execute(
+        "UPDATE models SET organization_id = $2, is_enabled = true WHERE id = $1",
+        model.id,
+        org_uuid,
+    )
+    await db_pool.execute(
+        """
+        INSERT INTO auth_clearances
+            (auth_id, role, principal_type, principal_id, granted_by)
+        SELECT m.auth_id, 'read', 'org', m.organization_id, $3
+        FROM models m WHERE m.id = $1 AND m.organization_id = $2
+        ON CONFLICT DO NOTHING
+        """,
+        model.id,
+        org_uuid,
+        UUID(str(test_user["id"])),
+    )
     yield model
+    await db_pool.execute(
+        """
+        DELETE FROM auth_clearances acl USING models m
+        WHERE acl.auth_id = m.auth_id AND m.id = $1
+          AND acl.principal_type = 'org'
+        """,
+        model.id,
+    )
+    if existing:
+        await db_pool.execute(
+            "UPDATE models SET organization_id = $2, is_enabled = $3 WHERE id = $1",
+            model.id,
+            UUID(prior_org) if prior_org else None,
+            prior_enabled,
+        )
+    else:
+        await db_pool.execute("DELETE FROM models WHERE id = $1", model.id)
     if existing:
         await repo.update_model(
             model.id,
@@ -302,13 +347,16 @@ class TestCreateTask:
         assert "private-code" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_with_model(self, mcp, auth_user, request_id, db_pool, monkeypatch):
-        """Known model from hardcoded registry is accepted in strict mode."""
+    async def test_with_model(
+        self, mcp, auth_user, request_id, db_pool, monkeypatch, available_model
+    ):
+        """A granted, enabled model from the registry is accepted in strict mode."""
         from lucent import model_registry
-        from lucent.model_registry import MODELS
 
         monkeypatch.setattr(model_registry, "_db_models", None)
-        monkeypatch.setattr(model_registry, "_MODEL_BY_ID", {m.id: m for m in MODELS})
+        monkeypatch.setattr(
+            model_registry, "_MODEL_BY_ID", {available_model.id: available_model}
+        )
         async with db_pool.acquire() as conn:
             await conn.execute(
                 self._UPSERT_AGENT_DEFINITION_SQL,
@@ -324,11 +372,11 @@ class TestCreateTask:
                 "request_id": request_id,
                 "title": "With Model",
                 "agent_type": "code",
-                "model": "claude-sonnet-4.6",
+                "model": available_model.id,
             },
         )
         assert "id" in result
-        assert result["model"] == "claude-sonnet-4.6"
+        assert result["model"] == available_model.id
 
     @pytest.mark.asyncio
     async def test_unknown_model_rejected(self, mcp, auth_user, request_id, db_pool):

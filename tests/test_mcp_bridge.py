@@ -222,13 +222,32 @@ async def test_bridge_reconnects_once_after_session_termination(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unreachable_server_is_skipped_without_opening_mcp_session(monkeypatch):
-    """An unavailable optional server must not block tool discovery indefinitely."""
+async def test_unreachable_server_fails_loudly_without_opening_mcp_session(
+    monkeypatch, capsys
+):
+    """An unavailable server must never silently compose an empty tool surface.
+
+    The preflight TCP probe raises; discovery retries exhaust, then
+    ``discover_tools`` raises LOUDLY (structured LUCENT_EVENT on stderr) and
+    no MCP session is ever opened. Callers (e.g.
+    ``langchain_engine`` composition) catch the raise and skip the server.
+    """
     async def refuse_connection(*_args, **_kwargs):
         raise ConnectionRefusedError("connection refused")
 
     bridge = MCPToolBridge("http://localhost:3100", skip_url_validation=True)
     monkeypatch.setattr("lucent.llm.mcp_bridge.asyncio.open_connection", refuse_connection)
+    # Keep the multi-attempt retry loop exercised but the test fast.
+    monkeypatch.setattr("lucent.llm.mcp_bridge.MCP_DISCOVERY_ATTEMPTS", 2)
+    monkeypatch.setattr("lucent.llm.mcp_bridge.MCP_DISCOVERY_RETRY_BACKOFF_SECONDS", 0.0)
 
-    assert await bridge.discover_tools() == []
+    with pytest.raises(RuntimeError, match="unreachable at localhost:3100"):
+        await bridge.discover_tools()
+
+    # No MCP session was ever opened — the preflight refused before that.
     assert bridge._session is None
+
+    # The failure was loud: a structured discovery-loss event on stderr.
+    stderr = capsys.readouterr().err
+    assert "MCP_DISCOVERY_FAILED" in stderr
+    assert "localhost:3100" in stderr

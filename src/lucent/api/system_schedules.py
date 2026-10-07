@@ -75,10 +75,9 @@ _last_vitality_scoring_at_by_org: dict[str, datetime] = {}
 async def retire_vitality_scoring_workflow_schedules() -> int:
     """Remove retired built-in vitality workflows from the visible workflow table.
 
-    System-infra path: runs under the RLS ``app.role='system'`` session
-    branch (the permissive branch every migration-116 policy carries), so it
-    reaches every org's system schedules without per-org context. The scope
-    is deliberately session-local with an explicit scrub on release.
+    System-infra path: runs under the ``app.role='system'`` session branch,
+    so it reaches every org's system schedules without per-org context.
+    The scope is deliberately session-local with an explicit scrub on release.
     """
     pool = await get_pool()
     if pool is None:

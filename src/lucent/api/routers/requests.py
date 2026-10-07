@@ -8,9 +8,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from jsonschema import ValidationError, validate
 from pydantic import BaseModel, Field
 
-from lucent.db.pool import scoped_acquire, scoped_acquire_on
 from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_PATTERN
+from lucent.db.pool import scoped_acquire
 from lucent.rbac import Role
 from lucent.settings import custom_tooling_enabled, sandboxes_enabled
 
@@ -676,15 +676,17 @@ async def create_task(
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 
-    # Validate that agent_type or agent_definition_id resolves to an approved definition
-    def_repo = DefinitionRepository(pool)
+    # Validate that agent_type or agent_definition_id resolves to an approved definition.
+    # Usage is clearance-driven and default-deny: only agents this principal
+    # is granted may be dispatched.
+    from lucent.db.definitions import get_authorized_definitions_pool
+
+    agent_pool = await get_authorized_definitions_pool(
+        pool, {"id": str(user.id), "organization_id": org_id}
+    )
+    def_repo = DefinitionRepository(agent_pool)
     if body.agent_definition_id:
-        agent_def = await def_repo.get_agent(
-            body.agent_definition_id,
-            org_id,
-            requester_user_id=str(user.id),
-            requester_role=user.role.value,
-        )
+        agent_def = await def_repo.get_usable_agent(body.agent_definition_id)
         if not agent_def or agent_def.get("status") != "active":
             raise HTTPException(
                 422,
@@ -693,12 +695,11 @@ async def create_task(
             )
     elif body.agent_type:
         agents = (
-            await def_repo.list_agents(
+            await def_repo.list_agents_accessible_by(
+                str(user.id),
                 org_id,
                 status="active",
                 limit=200,
-                requester_user_id=str(user.id),
-                requester_role=user.role.value,
             )
         )["items"]
         if not any(a["name"] == body.agent_type for a in agents):
@@ -1218,6 +1219,7 @@ async def add_task_event(
         body.event_type,
         body.detail,
         body.metadata,
+        org_id=str(user.organization_id),
     )
 
 

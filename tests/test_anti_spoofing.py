@@ -241,7 +241,7 @@ class TestMemoryUsernameSpoofing:
 
         # Clean up
         repo = MemoryRepository(db_pool)
-        await repo.delete(UUID(data["id"]))
+        await repo.delete(UUID(data["id"]), organization_id=user_a["organization_id"])
 
     async def test_mcp_create_memory_ignores_username_param(
         self, db_pool, user_a, user_b, spoof_prefix
@@ -283,7 +283,7 @@ class TestMemoryUsernameSpoofing:
 
             # Clean up
             repo = MemoryRepository(db_pool)
-            await repo.delete(UUID(data["id"]))
+            await repo.delete(UUID(data["id"]), organization_id=user_a["organization_id"])
         finally:
             set_current_user(None)
 
@@ -321,12 +321,12 @@ class TestCrossUserMemoryOps:
         assert resp.status_code in (403, 404)
 
         # Verify memory still exists
-        existing = await repo.get(mem["id"])
+        existing = await repo.get(mem["id"], organization_id=user_b["organization_id"])
         assert existing is not None
         assert existing.get("deleted_at") is None
 
         # Clean up
-        await repo.delete(mem["id"])
+        await repo.delete(mem["id"], organization_id=user_a["organization_id"])
 
     async def test_user_a_cannot_update_user_b_memory(
         self, db_pool, user_a, user_b, spoof_prefix
@@ -354,10 +354,10 @@ class TestCrossUserMemoryOps:
         assert resp.status_code == 403
 
         # Verify content unchanged
-        existing = await repo.get(mem["id"])
+        existing = await repo.get(mem["id"], organization_id=user_b["organization_id"])
         assert existing["content"] == f"{spoof_prefix}User B memory"
 
-        await repo.delete(mem["id"])
+        await repo.delete(mem["id"], organization_id=user_a["organization_id"])
 
 
 # ============================================================================
@@ -413,7 +413,7 @@ class TestCrossOrgTaskClaim:
             assert "not found" in data["error"].lower() or "not accessible" in data["error"].lower()
         finally:
             set_current_user(None)
-            await repo.delete(task["id"])
+            await repo.delete(task["id"], organization_id=user_a["organization_id"])
 
     async def test_release_claim_rejects_cross_org(
         self, db_pool, user_a, user_c, spoof_prefix
@@ -430,7 +430,9 @@ class TestCrossOrgTaskClaim:
             organization_id=user_a["organization_id"],
         )
         # Claim it legitimately
-        claimed = await repo.claim_task(task["id"], "legitimate-instance")
+        claimed = await repo.claim_task(
+            task["id"], "legitimate-instance", org_id=str(task["organization_id"])
+        )
         assert claimed is not None
 
         from mcp.server import MCPServer as FastMCP
@@ -460,7 +462,7 @@ class TestCrossOrgTaskClaim:
             assert "error" in data
         finally:
             set_current_user(None)
-            await repo.delete(task["id"])
+            await repo.delete(task["id"], organization_id=user_a["organization_id"])
 
 
 # ============================================================================
@@ -494,7 +496,7 @@ class TestHeaderSpoofing:
         assert data["username"] == user_a["display_name"]
 
         repo = MemoryRepository(db_pool)
-        await repo.delete(UUID(data["id"]))
+        await repo.delete(UUID(data["id"]), organization_id=user_a["organization_id"])
 
     async def test_x_user_id_does_not_affect_search(
         self, db_pool, user_a, user_b, spoof_prefix
@@ -529,7 +531,7 @@ class TestHeaderSpoofing:
         found_ids = [m["id"] for m in data["memories"]]
         assert str(mem["id"]) not in found_ids
 
-        await repo.delete(mem["id"])
+        await repo.delete(mem["id"], organization_id=user_a["organization_id"])
 
 
 # ============================================================================
@@ -661,7 +663,9 @@ class TestAdminImpersonation:
         from lucent.db import AuditRepository
 
         audit_repo = AuditRepository(db_pool)
-        result = await audit_repo.get_by_memory_id(UUID(data["id"]))
+        result = await audit_repo.get_by_memory_id(
+            UUID(data["id"]), organization_id=user_b["organization_id"]
+        )
         logs = result["entries"]
         assert len(logs) > 0
         audit_entry = logs[0]
@@ -670,7 +674,7 @@ class TestAdminImpersonation:
         assert ctx.get("is_impersonated") is True
 
         repo = MemoryRepository(db_pool)
-        await repo.delete(UUID(data["id"]))
+        await repo.delete(UUID(data["id"]), organization_id=user_b["organization_id"])
 
 
 # ============================================================================
@@ -707,8 +711,8 @@ class TestDaemonTaskAntiSpoofing:
         assert resp.status_code in (403, 404)
 
         # Verify task still exists
-        existing = await repo.get(task["id"])
+        existing = await repo.get(task["id"], organization_id=user_b["organization_id"])
         assert existing is not None
         assert existing.get("deleted_at") is None
 
-        await repo.delete(task["id"])
+        await repo.delete(task["id"], organization_id=user_a["organization_id"])

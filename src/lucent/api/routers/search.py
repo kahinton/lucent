@@ -49,7 +49,6 @@ def _memory_to_search_result(memory: dict[str, Any]) -> SearchResultMemory:
         similarity_score=memory.get("similarity_score"),
         user_id=memory.get("user_id"),
         organization_id=memory.get("organization_id"),
-        shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
         lifecycle_stage=memory.get("lifecycle_stage"),
     )

@@ -3,8 +3,9 @@
 import json
 from math import ceil
 from typing import Any
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.auth_providers import CSRF_COOKIE_NAME
@@ -21,6 +22,38 @@ ALLOWED_PER_PAGE = {10, 25, 50, 100}
 def _include_daemon_workflows(user) -> bool:
     role = user.role if isinstance(user.role, Role) else Role(str(user.role))
     return role >= Role.ADMIN
+
+
+def _role_value(user) -> str:
+    role = user.role if isinstance(user.role, Role) else Role(str(user.role))
+    return role.value
+
+
+async def _get_schedule_for_web(pool, user, schedule_id: str, *, write: bool = False):
+    """Fetch a schedule per the caller's role (usage vs management).
+
+    Members probe their clearances (default-deny); admins/owners keep the
+    legacy management read. ``write=True`` demands a write-level clearance for
+    mutating routes (read-only grantees can view, not act).
+    """
+    from lucent.db.schedules import (
+        ScheduleRepository,
+        get_authorized_schedules_pool,
+    )
+
+    repo = ScheduleRepository(pool)
+    org_id = str(user.organization_id)
+    if _include_daemon_workflows(user):
+        return await repo.get_schedule(
+            schedule_id, org_id, created_by=str(user.id),
+            include_daemon_created=True,
+        )
+    authorized = await get_authorized_schedules_pool(
+        pool,
+        {"id": str(user.id), "organization_id": org_id},
+        required_clearance="write" if write else "read",
+    )
+    return await ScheduleRepository(authorized).get_usable_schedule(schedule_id)
 
 
 def _annotate_workflow_execution(sched: dict[str, Any]) -> None:
@@ -75,7 +108,10 @@ async def schedules_list(
     """List all workflows with filtering. /schedules remains a compatibility alias."""
     user = await get_user_context(request)
     pool = await get_pool()
-    from lucent.db.schedules import ScheduleRepository
+    from lucent.db.schedules import (
+        ScheduleRepository,
+        get_authorized_schedules_pool,
+    )
 
     repo = ScheduleRepository(pool)
 
@@ -85,15 +121,28 @@ async def schedules_list(
 
     org_id = str(user.organization_id)
     enabled_filter = True if enabled == "true" else (False if enabled == "false" else None)
-    result = await repo.list_schedules(
-        org_id,
-        status=status,
-        enabled=enabled_filter,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-        limit=per_page,
-        offset=offset,
-    )
+    if _include_daemon_workflows(user):
+        result = await repo.list_schedules(
+            org_id,
+            status=status,
+            enabled=enabled_filter,
+            created_by=str(user.id),
+            include_daemon_created=True,
+            limit=per_page,
+            offset=offset,
+        )
+    else:
+        authorized = await get_authorized_schedules_pool(
+            pool, {"id": str(user.id), "organization_id": org_id}
+        )
+        result = await ScheduleRepository(authorized).list_schedules_accessible_by(
+            str(user.id),
+            org_id,
+            status=status,
+            enabled=enabled_filter,
+            limit=per_page,
+            offset=offset,
+        )
     schedules = result["items"]
     for sched in schedules:
         json_fields = (("actions", []), ("trigger_config", {}), ("request_template", {}))
@@ -107,11 +156,15 @@ async def schedules_list(
     total_count = result["total_count"]
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
-    summary = await repo.get_summary(
-        org_id,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    if _include_daemon_workflows(user):
+        summary = await repo.get_summary(
+            org_id, created_by=str(user.id), include_daemon_created=True
+        )
+    else:
+        authorized = await get_authorized_schedules_pool(
+            pool, {"id": str(user.id), "organization_id": org_id}
+        )
+        summary = await ScheduleRepository(authorized).get_summary_accessible_by(org_id)
     base_path = "/workflows" if request.url.path.startswith("/workflows") else "/schedules"
 
     return templates.TemplateResponse(
@@ -135,8 +188,11 @@ async def schedules_list(
 
 async def _workflow_form_options(pool, user) -> dict[str, Any]:
     from lucent.db.definitions import DefinitionRepository
-    from lucent.db.models import ModelRepository
-    from lucent.db.sandbox_template import SandboxTemplateRepository
+    from lucent.db.models import ModelRepository, get_authorized_models_pool
+    from lucent.db.sandbox_template import (
+        SandboxTemplateRepository,
+        get_authorized_templates_pool,
+    )
 
     role_value = user.role if isinstance(user.role, str) else user.role.value
     def_repo = DefinitionRepository(pool)
@@ -153,11 +209,14 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
         (agent for agent in active_agents if agent.get("name") == "workflow-composer"),
         None,
     )
+    model_pool = await get_authorized_models_pool(
+        pool,
+        {"id": str(user.id), "organization_id": str(user.organization_id)},
+    )
     model_rows = (
-        await ModelRepository(pool).list_models_accessible_by(
+        await ModelRepository(model_pool).list_models_accessible_by(
             str(user.id),
             str(user.organization_id),
-            requester_role=role_value,
         )
     )["items"]
     available_models = [
@@ -169,9 +228,16 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
         for model in model_rows
     ]
     available_models.sort(key=lambda m: m["id"])
-    sandbox_rows = await SandboxTemplateRepository(pool).list_dispatchable(
-        str(user.organization_id)
+    sandbox_pool = await get_authorized_templates_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
     )
+    sandbox_rows = (
+        await SandboxTemplateRepository(sandbox_pool).list_templates_accessible_by(
+            str(user.id),
+            str(user.organization_id),
+            status="approved",
+        )
+    )["items"]
     available_sandbox_templates = [
         {"id": str(template["id"]), "name": template["name"]}
         for template in sandbox_rows
@@ -210,6 +276,30 @@ def _form_value(values: list[str], index: int, default: str = "") -> str:
     if index >= len(values):
         return default
     return values[index].strip()
+
+
+async def _validate_action_template(repo, template_id: str | None) -> str | None:
+    """Per-action sandbox template validation (clearance probe, approved only).
+
+    ``repo`` must be a SandboxTemplateRepository built on an authorized
+    templates pool — the probe is clearance-driven and default-deny.
+    """
+    if not template_id:
+        return None
+    template = await repo.get_usable_template(template_id)
+    if not template:
+        raise HTTPException(
+            404,
+            f"Sandbox template {template_id} not found or not cleared for this user",
+        )
+    if template.get("status") != "approved":
+        raise HTTPException(
+            409,
+            f"Sandbox template '{template.get('name')}' has status "
+            f"{template.get('status')!r} — only 'approved' templates may be "
+            "scheduled. A human admin must approve it first.",
+        )
+    return template_id
 
 
 @router.post("/workflows/new", response_class=HTMLResponse)
@@ -269,8 +359,16 @@ async def workflow_create_from_wizard(request: Request):
     action_output_failures = _form_list(form, "action_output_failure")
     action_output_retries = _form_list(form, "action_output_retries")
     from lucent.access_control import AccessControlService
+    from lucent.db.sandbox_template import (
+        SandboxTemplateRepository,
+        get_authorized_templates_pool,
+    )
 
     access_control = AccessControlService(pool)
+    template_probe_pool = await get_authorized_templates_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+    )
+    template_probe_repo = SandboxTemplateRepository(template_probe_pool)
     actions = []
     max_actions = max(len(action_titles), len(action_prompts), 1)
     for idx in range(max_actions):
@@ -344,7 +442,9 @@ async def workflow_create_from_wizard(request: Request):
                 "agent_definition_id": _form_value(action_agent_definition_ids, idx) or None,
                 "model": action_model,
                 "reasoning_effort": _form_value(action_efforts, idx) or None,
-                "sandbox_template_id": _form_value(action_sandbox_templates, idx) or None,
+                "sandbox_template_id": await _validate_action_template(
+                    template_probe_repo, _form_value(action_sandbox_templates, idx) or None,
+                ),
                 "sandbox_config": sandbox_config or None,
                 "output_contract": output_contract,
                 "priority": _form_value(
@@ -423,12 +523,7 @@ async def schedule_detail(
     repo = ScheduleRepository(pool)
 
     org_id = str(user.organization_id)
-    sched = await repo.get_schedule(
-        schedule_id,
-        org_id,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    sched = await _get_schedule_for_web(pool, user, schedule_id)
     if not sched:
         raise HTTPException(404, "Workflow not found")
 
@@ -468,22 +563,30 @@ async def schedule_detail(
     run_total_pages = ceil(run_total_count / per_page) if run_total_count > 0 else 1
     page = min(page, run_total_pages)
 
-    def_repo = DefinitionRepository(pool)
-    role_value = user.role if isinstance(user.role, str) else user.role.value
+    # Usage picks are clearance-driven and default-deny — the agents a user
+    # may dispatch in schedules are only the ones they're granted.
+    from lucent.db.definitions import get_authorized_definitions_pool
+
+    agent_pool = await get_authorized_definitions_pool(
+        pool, {"id": str(user.id), "organization_id": str(org_id)}
+    )
+    def_repo = DefinitionRepository(agent_pool)
     active_agents = (
-        await def_repo.list_agents(
+        await def_repo.list_agents_accessible_by(
+            str(user.id),
             org_id,
             status="active",
-            requester_user_id=str(user.id),
-            requester_role=role_value,
         )
     )["items"]
 
-    from lucent.db.models import ModelRepository
+    from lucent.db.models import ModelRepository, get_authorized_models_pool
 
+    model_pool = await get_authorized_models_pool(
+        pool, {"id": str(user.id), "organization_id": str(org_id)}
+    )
     model_rows = (
-        await ModelRepository(pool).list_models_accessible_by(
-            str(user.id), org_id, requester_role=role_value
+        await ModelRepository(model_pool).list_models_accessible_by(
+            str(user.id), org_id
         )
     )["items"]
     available_models = [
@@ -496,25 +599,58 @@ async def schedule_detail(
     ]
     available_models.sort(key=lambda m: m["id"])
 
-    from lucent.db.sandbox_template import SandboxTemplateRepository
+    from lucent.db.sandbox_template import (
+        SandboxTemplateRepository,
+        get_authorized_templates_pool,
+    )
 
+    tpl_pool = await get_authorized_templates_pool(
+        pool, {"id": str(user.id), "organization_id": str(org_id)}
+    )
     available_sandbox_templates = [
         {"id": str(template["id"]), "name": template["name"]}
-        for template in await SandboxTemplateRepository(pool).list_dispatchable(org_id)
+        for template in (
+            await SandboxTemplateRepository(tpl_pool).list_templates_accessible_by(
+                str(user.id), str(org_id), status="approved"
+            )
+        )["items"]
     ]
 
     # Resolve sandbox template name if linked
     sandbox_template = None
     if sched.get("sandbox_template_id"):
-        from lucent.db.sandbox_template import SandboxTemplateRepository
-
-        tmpl_repo = SandboxTemplateRepository(pool)
-        sandbox_template = await tmpl_repo.get_accessible(
-            str(sched["sandbox_template_id"]),
-            org_id,
-            str(user.id),
-            user_role=role_value,
+        from lucent.db.sandbox_template import (
+            SandboxTemplateRepository,
+            get_authorized_templates_pool,
         )
+
+        tmp_pool = await get_authorized_templates_pool(
+            pool, {"id": str(user.id), "organization_id": str(org_id)}
+        )
+        sandbox_template = await SandboxTemplateRepository(
+            tmp_pool
+        ).get_usable_template(str(sched["sandbox_template_id"]))
+
+    # Access panel: who else may view/run this workflow. Admins/owners and
+    # the schedule's creator manage grants; the repository re-checks the
+    # same rule before every change.
+    can_manage_access = (
+        user.role in (Role.ADMIN, Role.OWNER)
+        or (sched.get("created_by") and str(sched["created_by"]) == str(user.id))
+    )
+    access_grants: list[dict[str, Any]] = []
+    access_users: list[dict[str, Any]] = []
+    access_groups: list[dict[str, Any]] = []
+    if can_manage_access:
+        from lucent.db.access_control import AuthAccessRepository
+        from lucent.db.groups import GroupRepository
+        from lucent.db.user import UserRepository
+
+        access_grants = await AuthAccessRepository(pool).list_grants(
+            "schedule", UUID(schedule_id), organization_id=user.organization_id
+        )
+        access_users = await UserRepository(pool).get_by_organization(user.organization_id)
+        access_groups = (await GroupRepository(pool).list_groups(org_id))["items"]
 
     return templates.TemplateResponse(
         request,
@@ -533,6 +669,10 @@ async def schedule_detail(
             "run_per_page": per_page,
             "run_total_pages": run_total_pages,
             "run_total_count": run_total_count,
+            "access_grants": access_grants,
+            "can_manage_access": can_manage_access,
+            "access_users": access_users,
+            "access_groups": access_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -546,14 +686,8 @@ async def workflow_trigger_now(request: Request, schedule_id: str):
     user = await get_user_context(request)
     pool = await get_pool()
     from lucent.api.routers.schedules import _trigger_schedule_execution
-    from lucent.db.schedules import ScheduleRepository
 
-    if not await ScheduleRepository(pool).get_schedule(
-        schedule_id,
-        str(user.organization_id),
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    ):
+    if not await _get_schedule_for_web(pool, user, schedule_id, write=True):
         raise HTTPException(404, "Workflow not found")
 
     await _trigger_schedule_execution(
@@ -579,17 +713,14 @@ async def schedule_toggle(request: Request, schedule_id: str):
     repo = ScheduleRepository(pool)
     org_id = str(user.organization_id)
 
-    sched = await repo.get_schedule(
-        schedule_id,
-        org_id,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    sched = await _get_schedule_for_web(pool, user, schedule_id, write=True)
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
     new_enabled = not sched["enabled"]
-    await repo.toggle_schedule(schedule_id, org_id, new_enabled)
+    await repo.toggle_schedule(
+        schedule_id, org_id, new_enabled, requester_role=_role_value(user)
+    )
 
     # Redirect back to referrer or detail page
     referer = request.headers.get("referer", "")
@@ -611,12 +742,7 @@ async def schedule_delete(request: Request, schedule_id: str):
     repo = ScheduleRepository(pool)
     org_id = str(user.organization_id)
 
-    if not await repo.get_schedule(
-        schedule_id,
-        org_id,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    ):
+    if not await _get_schedule_for_web(pool, user, schedule_id, write=True):
         raise HTTPException(404, "Workflow not found")
 
     try:
@@ -642,12 +768,7 @@ async def schedule_edit(request: Request, schedule_id: str):
     repo = ScheduleRepository(pool)
     org_id = str(user.organization_id)
 
-    sched = await repo.get_schedule(
-        schedule_id,
-        org_id,
-        created_by=str(user.id),
-        include_daemon_created=_include_daemon_workflows(user),
-    )
+    sched = await _get_schedule_for_web(pool, user, schedule_id, write=True)
     if not sched:
         raise HTTPException(404, "Schedule not found")
 
@@ -733,9 +854,18 @@ async def schedule_edit(request: Request, schedule_id: str):
         action_output_retries = _form_list(form, "action_output_retries")
         existing_actions = _form_list(form, "action_existing_json")
         from lucent.access_control import AccessControlService
+        from lucent.db.sandbox_template import (
+            SandboxTemplateRepository,
+            get_authorized_templates_pool,
+        )
         from lucent.model_registry import validate_model, validate_reasoning_effort
 
         access_control = AccessControlService(pool)
+        template_probe_repo = SandboxTemplateRepository(
+            await get_authorized_templates_pool(
+                pool, {"id": str(user.id), "organization_id": org_id}
+            )
+        )
         actions = []
         for idx in range(max(len(action_titles), len(action_prompts))):
             action_title = _form_value(action_titles, idx)
@@ -839,7 +969,10 @@ async def schedule_edit(request: Request, schedule_id: str):
                     "agent_definition_id": _form_value(action_agent_definition_ids, idx) or None,
                     "model": action_model,
                     "reasoning_effort": action_effort,
-                    "sandbox_template_id": _form_value(action_sandbox_templates, idx) or None,
+                    "sandbox_template_id": await _validate_action_template(
+                        template_probe_repo,
+                        _form_value(action_sandbox_templates, idx) or None,
+                    ),
                     "sandbox_config": sandbox_config or None,
                     "output_contract": output_contract,
                     "priority": _form_value(
@@ -910,7 +1043,105 @@ async def schedule_edit(request: Request, schedule_id: str):
         raise HTTPException(422, "reasoning_effort requires model")
 
     if updates:
-        await repo.update_schedule(schedule_id, org_id, **updates)
+        await repo.update_schedule(
+            schedule_id, org_id,
+            requester_role=_role_value(user), **updates,
+        )
+
+    base_path = "/workflows" if request.url.path.startswith("/workflows") else "/schedules"
+    return RedirectResponse(url=f"{base_path}/{schedule_id}", status_code=303)
+
+
+@router.post("/workflows/{schedule_id}/access", response_class=HTMLResponse)
+@router.post("/schedules/{schedule_id}/access", response_class=HTMLResponse)
+async def schedule_grant_access(
+    request: Request,
+    schedule_id: str,
+    grantee_type: str = Form(...),
+    role: str = Form("read"),
+    grantee_id: str = Form(""),
+):
+    """Grant organization/user/group access from the workflow detail page.
+
+    Members may grant on their own workflows; admins/owners on any — the
+    repository re-checks the row's owner before writing. System (server-side
+    built-in) schedules are daemon-owned and managed by admins only.
+    """
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    sched = await _get_schedule_for_web(pool, user, schedule_id)
+    if not sched:
+        raise HTTPException(404, "Workflow not found")
+    if not (
+        user.role in (Role.ADMIN, Role.OWNER)
+        or (sched.get("created_by") and str(sched["created_by"]) == str(user.id))
+    ):
+        raise HTTPException(403, "Only the workflow's owner or an admin can manage access")
+
+    from lucent.db.access_control import AuthAccessRepository
+
+    try:
+        grantee = UUID(grantee_id) if grantee_id else None
+        await AuthAccessRepository(pool).upsert_grant(
+            "schedule",
+            UUID(schedule_id),
+            grantee_type=grantee_type,
+            grantee_id=grantee,
+            role=role if role in ("read", "write") else "read",
+            granted_by=user.id,
+            organization_id=user.organization_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(404, detail)
+        raise HTTPException(422, detail)
+
+    base_path = "/workflows" if request.url.path.startswith("/workflows") else "/schedules"
+    return RedirectResponse(url=f"{base_path}/{schedule_id}", status_code=303)
+
+
+@router.post("/workflows/{schedule_id}/access/revoke", response_class=HTMLResponse)
+@router.post("/schedules/{schedule_id}/access/revoke", response_class=HTMLResponse)
+async def schedule_revoke_access(
+    request: Request,
+    schedule_id: str,
+    grantee_type: str = Form(...),
+    grantee_id: str = Form(""),
+):
+    """Remove one access grant from the workflow detail page."""
+    await _check_csrf(request)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    sched = await _get_schedule_for_web(pool, user, schedule_id)
+    if not sched:
+        raise HTTPException(404, "Workflow not found")
+    if not (
+        user.role in (Role.ADMIN, Role.OWNER)
+        or (sched.get("created_by") and str(sched["created_by"]) == str(user.id))
+    ):
+        raise HTTPException(403, "Only the workflow's owner or an admin can manage access")
+
+    from lucent.db.access_control import AuthAccessRepository
+
+    try:
+        grantee = UUID(grantee_id) if grantee_id else None
+        revoked = await AuthAccessRepository(pool).revoke_grant(
+            "schedule",
+            UUID(schedule_id),
+            grantee_type=grantee_type,
+            grantee_id=grantee,
+            granted_by=user.id,
+            organization_id=user.organization_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(404, detail)
+        raise HTTPException(422, detail)
+    if not revoked:
+        raise HTTPException(404, "Access grant not found")
 
     base_path = "/workflows" if request.url.path.startswith("/workflows") else "/schedules"
     return RedirectResponse(url=f"{base_path}/{schedule_id}", status_code=303)

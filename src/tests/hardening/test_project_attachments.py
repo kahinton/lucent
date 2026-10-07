@@ -457,9 +457,12 @@ def _hook_metadata(execution) -> dict[str, Any]:
 async def test_boost_moves_project_memory_into_capped_injection():
     """A project-attached memory below the cap displaces a lower-scoring
     non-project memory — boost is order-only, never additive."""
-    project_mem = _memory("33333333-3333-3333-3333-333333333333", 0.35, "project goal memory")
+    # Scores inside the injection score-spread window (max_score_drop 0.15:
+    # every candidate must sit within 0.15 of the window's best — the rule
+    # came after these hardening tests; intent unchanged, just calibrated).
+    project_mem = _memory("33333333-3333-3333-3333-333333333333", 0.72, "project goal memory")
     strong_mem = _memory("44444444-4444-4444-4444-444444444444", 0.80, "strong unrelated memory")
-    weak_mem = _memory("55555555-5555-5555-5555-555555555555", 0.32, "weak unrelated memory")
+    weak_mem = _memory("55555555-5555-5555-5555-555555555555", 0.68, "weak unrelated memory")
     bridge = FakeBridge([strong_mem, weak_mem, project_mem])
     state: dict[str, Any] = {
         "_project_context": {
@@ -495,8 +498,8 @@ async def test_boost_moves_project_memory_into_capped_injection():
 async def test_boost_off_without_project_context():
     """No threaded project context → no reordering, legacy behavior intact."""
     strong_mem = _memory("44444444-4444-4444-4444-444444444444", 0.80, "strong unrelated memory")
-    weak_mem = _memory("55555555-5555-5555-5555-555555555555", 0.32, "weak unrelated memory")
-    project_mem = _memory("33333333-3333-3333-3333-333333333333", 0.35, "project goal memory")
+    weak_mem = _memory("55555555-5555-5555-5555-555555555555", 0.70, "weak unrelated memory")
+    project_mem = _memory("33333333-3333-3333-3333-333333333333", 0.68, "project goal memory")
     bridge = FakeBridge([strong_mem, weak_mem, project_mem])
     manager = HookManager(session_state={})
     outcome = await manager.before_model_call(
@@ -584,10 +587,11 @@ def test_boost_helper_fail_closed():
 async def test_boost_displaces_lowest_when_cap_binding():
     """With the cap binding, a project-attached memory genuinely displaces the
     lowest-ranked non-project candidate — not merely a reorder of survivors."""
+    # Score-spread-compatible (all within 0.15 of the 0.80 window best).
     a = _memory("44444444-4444-4444-4444-444444444444", 0.80, "strong a")
-    b = _memory("55555555-5555-5555-5555-555555555555", 0.55, "strong b")
-    c = _memory("66666666-6666-6666-6666-666666666666", 0.50, "strong c")
-    project = _memory("33333333-3333-3333-3333-333333333333", 0.35, "project goal")
+    b = _memory("55555555-5555-5555-5555-555555555555", 0.72, "strong b")
+    c = _memory("66666666-6666-6666-6666-666666666666", 0.68, "strong c")
+    project = _memory("33333333-3333-3333-3333-333333333333", 0.66, "project goal")
     state: dict[str, Any] = {
         "_project_context": {
             "project": {"id": "p", "name": "Apollo"},
@@ -634,7 +638,8 @@ async def test_boost_fills_byte_budget_in_boosted_order():
     take, while the other result keeps its search-preview line."""
     a_id = "44444444-4444-4444-4444-444444444444"
     p_id = "33333333-3333-3333-3333-333333333333"
-    results = [_memory(a_id, 0.80, "alpha preview"), _memory(p_id, 0.40, "project preview")]
+    # Score-spread-compatible: the project memory is within 0.15 of the best.
+    results = [_memory(a_id, 0.80, "alpha preview"), _memory(p_id, 0.75, "project preview")]
 
     def bridge_with_full_contents() -> FakeBridge:
         bridge = FakeBridge(results)
@@ -697,7 +702,7 @@ async def test_boost_end_to_end_from_real_attachment_state(pool, env):
     # put the attached memory first purely from the threaded context.
     bridge = FakeBridge([
         _memory("77777777-7777-7777-7777-777777777777", 0.80, "unrelated strong"),
-        _memory(str(attached_id), 0.40, "project launch checklist"),
+        _memory(str(attached_id), 0.75, "project launch checklist"),
     ])
     manager = HookManager(session_state={"_project_context": context})
     outcome = await manager.before_model_call(

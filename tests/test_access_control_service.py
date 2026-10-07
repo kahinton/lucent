@@ -62,6 +62,7 @@ async def cleanup_acl_data(db_pool, test_organization, acl_prefix):
     yield
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM models WHERE id LIKE $1", f"{acl_prefix}%")
+        await conn.execute("DELETE FROM skill_definitions WHERE name LIKE $1", f"{acl_prefix}%")
         await conn.execute("DELETE FROM agent_definitions WHERE name LIKE $1", f"{acl_prefix}%")
         await conn.execute(
             "DELETE FROM user_groups WHERE user_id IN "
@@ -97,7 +98,9 @@ async def test_access_control_service_resolution(db_pool, test_organization, acl
         org_id=org_id,
         created_by=user1_id,
     )
-    await group_repo.add_member(str(group["id"]), user2_id)
+    await group_repo.add_member(
+            str(group["id"]), user2_id, organization_id=str(org_id)
+        )
     group_agent = await def_repo.create_agent(
         name=f"{acl_prefix}group_agent",
         description="group",
@@ -172,14 +175,28 @@ async def test_access_control_service_resolution(db_pool, test_organization, acl
     )
     assert await acl.can_access(admin_id, "skill", str(private_skill["id"]), org_id) is False
     assert await acl.can_modify(owner_id, "skill", str(private_skill["id"]), org_id) is False
+    # get_skill is the MANAGEMENT path (definitions CRUD/detail/grants):
+    # admins/owners keep the legacy org-wide view over instance definitions
+    # (docs/auth-pattern-migration.md), so the admin READ sees the row. The
+    # USAGE-side clearance check above stays default-deny for the same skill.
     assert await def_repo.get_skill(
         str(private_skill["id"]),
         org_id,
         requester_user_id=admin_id,
         requester_role="admin",
+    ) is not None
+    # Members still get None on the management path — only the admin/owner
+    # role branch is org-wide.
+    assert await def_repo.get_skill(
+        str(private_skill["id"]),
+        org_id,
+        requester_user_id=admin_id,
+        requester_role="member",
     ) is None
 
-    await group_repo.remove_member(str(group["id"]), user2_id)
+    await group_repo.remove_member(
+            str(group["id"]), user2_id, organization_id=str(org_id)
+        )
     assert await acl.can_access(user2_id, "agent", str(group_agent["id"]), org_id) is False
 
 
@@ -198,7 +215,9 @@ async def test_model_access_control_resolution(
     group = await group_repo.create_group(
         name=f"{acl_prefix}models", org_id=org_id, created_by=user1_id
     )
-    await group_repo.add_member(str(group["id"]), user2_id)
+    await group_repo.add_member(
+            str(group["id"]), user2_id, organization_id=str(org_id)
+        )
     private_model = await model_repo.create_model(
         model_id=f"{acl_prefix}private",
         provider="test",
@@ -233,7 +252,9 @@ async def test_model_access_control_resolution(
     assert group_model["id"] in accessible
     assert shared_model["id"] in accessible
 
-    await group_repo.remove_member(str(group["id"]), user2_id)
+    await group_repo.remove_member(
+            str(group["id"]), user2_id, organization_id=str(org_id)
+        )
     assert await acl.can_access(user2_id, "model", group_model["id"], org_id) is False
 
 

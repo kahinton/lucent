@@ -99,7 +99,7 @@ class TestFeedbackStorage:
     """Tests for feedback metadata on daemon memories."""
 
     @pytest.mark.asyncio
-    async def test_approve_feedback(self, db_pool, daemon_memory):
+    async def test_approve_feedback(self, db_pool, fb_user, daemon_memory):
         """Approve feedback stores correct metadata."""
         repo = MemoryRepository(db_pool)
         feedback = {
@@ -109,13 +109,17 @@ class TestFeedbackStorage:
         }
         existing_metadata = daemon_memory.get("metadata") or {}
         updated_metadata = {**existing_metadata, "feedback": feedback}
-        result = await repo.update(memory_id=daemon_memory["id"], metadata=updated_metadata)
+        result = await repo.update(
+            memory_id=daemon_memory["id"],
+            metadata=updated_metadata,
+            organization_id=fb_user["organization_id"],
+        )
 
         assert result["metadata"]["feedback"]["status"] == "approved"
         assert result["metadata"]["feedback"]["reviewed_by"] == "test-user"
 
     @pytest.mark.asyncio
-    async def test_reject_feedback_with_comment(self, db_pool, daemon_memory):
+    async def test_reject_feedback_with_comment(self, db_pool, fb_user, daemon_memory):
         """Reject feedback with comment stores both."""
         repo = MemoryRepository(db_pool)
         feedback = {
@@ -126,13 +130,17 @@ class TestFeedbackStorage:
         }
         existing_metadata = daemon_memory.get("metadata") or {}
         updated_metadata = {**existing_metadata, "feedback": feedback}
-        result = await repo.update(memory_id=daemon_memory["id"], metadata=updated_metadata)
+        result = await repo.update(
+            memory_id=daemon_memory["id"],
+            metadata=updated_metadata,
+            organization_id=fb_user["organization_id"],
+        )
 
         assert result["metadata"]["feedback"]["status"] == "rejected"
         assert result["metadata"]["feedback"]["comment"] == "Wrong approach, use async instead"
 
     @pytest.mark.asyncio
-    async def test_comment_without_verdict(self, db_pool, daemon_memory):
+    async def test_comment_without_verdict(self, db_pool, fb_user, daemon_memory):
         """Comment-only feedback preserves pending status."""
         repo = MemoryRepository(db_pool)
         feedback = {
@@ -143,22 +151,34 @@ class TestFeedbackStorage:
         }
         existing_metadata = daemon_memory.get("metadata") or {}
         updated_metadata = {**existing_metadata, "feedback": feedback}
-        result = await repo.update(memory_id=daemon_memory["id"], metadata=updated_metadata)
+        result = await repo.update(
+            memory_id=daemon_memory["id"],
+            metadata=updated_metadata,
+            organization_id=fb_user["organization_id"],
+        )
 
         assert result["metadata"]["feedback"]["status"] == "pending"
         assert "still thinking" in result["metadata"]["feedback"]["comment"]
 
     @pytest.mark.asyncio
-    async def test_reset_feedback(self, db_pool, daemon_memory):
+    async def test_reset_feedback(self, db_pool, fb_user, daemon_memory):
         """Reset clears feedback back to pending."""
         repo = MemoryRepository(db_pool)
         # First approve
         meta1 = {**(daemon_memory.get("metadata") or {}), "feedback": {"status": "approved"}}
-        await repo.update(memory_id=daemon_memory["id"], metadata=meta1)
+        await repo.update(
+            memory_id=daemon_memory["id"],
+            metadata=meta1,
+            organization_id=fb_user["organization_id"],
+        )
 
         # Then reset
         meta2 = {**(daemon_memory.get("metadata") or {}), "feedback": {"status": "pending"}}
-        result = await repo.update(memory_id=daemon_memory["id"], metadata=meta2)
+        result = await repo.update(
+            memory_id=daemon_memory["id"],
+            metadata=meta2,
+            organization_id=fb_user["organization_id"],
+        )
 
         assert result["metadata"]["feedback"]["status"] == "pending"
 
@@ -170,7 +190,11 @@ class TestFeedbackStorage:
 
         feedback = {"status": "approved", "reviewed_at": "2026-03-07 23:00 UTC"}
         meta = {**(daemon_memory.get("metadata") or {}), "feedback": feedback}
-        await repo.update(memory_id=daemon_memory["id"], metadata=meta)
+        await repo.update(
+            memory_id=daemon_memory["id"],
+            metadata=meta,
+            organization_id=fb_user["organization_id"],
+        )
 
         await audit_repo.log(
             memory_id=daemon_memory["id"],
@@ -184,7 +208,9 @@ class TestFeedbackStorage:
         )
 
         # Verify audit entry exists
-        entries = await audit_repo.get_by_memory_id(daemon_memory["id"])
+        entries = await audit_repo.get_by_memory_id(
+            daemon_memory["id"], organization_id=fb_user["organization_id"]
+        )
         feedback_entries = [
             e
             for e in entries["entries"]
@@ -299,12 +325,13 @@ class TestDaemonTaskLifecycle:
         assert pending_task["id"] in task_ids
 
     @pytest.mark.asyncio
-    async def test_claim_and_complete_task(self, db_pool, pending_task):
+    async def test_claim_and_complete_task(self, db_pool, fb_user, pending_task):
         """Full lifecycle: claim → complete."""
         repo = MemoryRepository(db_pool)
+        org_id = fb_user["organization_id"]
 
         # Claim
-        claimed = await repo.claim_task(pending_task["id"], "test-instance")
+        claimed = await repo.claim_task(pending_task["id"], "test-instance", org_id=org_id)
         assert claimed is not None
         assert "pending" not in claimed["tags"]
         assert "claimed-by-test-instance" in claimed["tags"]
@@ -312,29 +339,36 @@ class TestDaemonTaskLifecycle:
         # Complete: replace claim tag with completed
         new_tags = [t for t in claimed["tags"] if not t.startswith("claimed-by-")]
         new_tags.append("completed")
-        result = await repo.update(memory_id=pending_task["id"], tags=new_tags)
+        result = await repo.update(
+            memory_id=pending_task["id"], tags=new_tags, organization_id=org_id
+        )
 
         assert "completed" in result["tags"]
         assert "pending" not in result["tags"]
         assert not any(t.startswith("claimed-by-") for t in result["tags"])
 
     @pytest.mark.asyncio
-    async def test_cancel_pending_task(self, db_pool, pending_task):
+    async def test_cancel_pending_task(self, db_pool, fb_user, pending_task):
         """Pending task can be soft-deleted (cancelled)."""
         repo = MemoryRepository(db_pool)
-        await repo.delete(pending_task["id"])
+        org_id = fb_user["organization_id"]
+        await repo.delete(pending_task["id"], organization_id=org_id)
 
         # Should not be findable
-        result = await repo.get(pending_task["id"])
+        result = await repo.get(pending_task["id"], organization_id=org_id)
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_task_result_in_metadata(self, db_pool, pending_task):
+    async def test_task_result_in_metadata(self, db_pool, fb_user, pending_task):
         """Task result is stored in metadata."""
         repo = MemoryRepository(db_pool)
         meta = dict(pending_task.get("metadata") or {})
         meta["result"] = "Found 3 patterns worth consolidating."
-        result = await repo.update(memory_id=pending_task["id"], metadata=meta)
+        result = await repo.update(
+            memory_id=pending_task["id"],
+            metadata=meta,
+            organization_id=fb_user["organization_id"],
+        )
 
         assert result["metadata"]["result"] == "Found 3 patterns worth consolidating."
 
@@ -474,7 +508,12 @@ class TestDaemonMessages:
         metadata = dict(msg.get("metadata") or {})
         metadata["acknowledged_at"] = "2026-03-07 23:15 UTC"
 
-        result = await repo.update(memory_id=msg["id"], tags=tags, metadata=metadata)
+        result = await repo.update(
+            memory_id=msg["id"],
+            tags=tags,
+            metadata=metadata,
+            organization_id=fb_user["organization_id"],
+        )
 
         assert "acknowledged" in result["tags"]
         assert "pending" not in result["tags"]

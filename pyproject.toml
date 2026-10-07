@@ -83,7 +83,14 @@ select = ["E", "F", "I", "N", "W"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
-testpaths = ["tests"]
+testpaths = ["tests", "src/tests"]
+# Standard `pytest` runs unit tests only. DB-backed tests are auto-marked
+# "integration" by tests/conftest.py's fixture-graph classifier (any test
+# pulling in the `db_pool` fixture, directly or transitively) — the mark can't
+# drift from reality because it is derived, not hand-maintained. Run the
+# database suite explicitly: `pytest -m integration` (needs the isolated
+# test database container; run scripts/dev-test-db.sh — see tests/conftest.py).
+addopts = "-m 'not integration'"
 markers = [
     "unit: tests that do not require the PostgreSQL test database",
     "integration: tests whose fixture graph uses the PostgreSQL test database",

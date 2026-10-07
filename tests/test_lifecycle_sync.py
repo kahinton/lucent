@@ -77,7 +77,11 @@ class TestGoalLifecycleSyncOnUpdate:
         goal = await _create_goal(repo, prefix, test_user, status="active")
         assert goal["lifecycle_stage"] == "active"
 
-        updated = await repo.update(goal["id"], metadata={"status": "completed"})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "completed"}
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == "archived"
@@ -92,7 +96,11 @@ class TestGoalLifecycleSyncOnUpdate:
         goal = await _create_goal(repo, prefix, test_user, status="active")
         assert goal["lifecycle_stage"] == "active"
 
-        updated = await repo.update(goal["id"], metadata={"status": "abandoned"})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "abandoned"}
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == "archived"
@@ -107,7 +115,11 @@ class TestGoalLifecycleSyncOnUpdate:
         goal = await _create_goal(repo, prefix, test_user, status="active")
         assert goal["lifecycle_stage"] == "active"
 
-        updated = await repo.update(goal["id"], metadata={"status": "cancelled"})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "cancelled"}
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == "archived"
@@ -120,7 +132,11 @@ class TestGoalLifecycleSyncOnUpdate:
         repo = MemoryRepository(db_pool)
 
         goal = await _create_goal(repo, prefix, test_user, status="active")
-        updated = await repo.update(goal["id"], metadata={"status": "done"})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "done"}
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == "archived"
@@ -138,7 +154,11 @@ class TestGoalLifecycleSyncOnUpdate:
         goal = await _create_goal(repo, prefix, test_user, status="active")
         assert goal["lifecycle_stage"] == "active"
 
-        updated = await repo.update(goal["id"], metadata={"status": "paused"})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "paused"}
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == "active"
@@ -152,11 +172,19 @@ class TestGoalLifecycleSyncOnUpdate:
 
         # Create and archive the goal
         goal = await _create_goal(repo, prefix, test_user, status="active")
-        archived = await repo.update(goal["id"], metadata={"status": "completed"})
+        archived = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "completed"}
+        )
         assert archived["lifecycle_stage"] == "archived"
 
         # Reactivate it
-        reactivated = await repo.update(goal["id"], metadata={"status": "active"})
+        reactivated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "active"}
+        )
 
         assert reactivated is not None
         assert reactivated["lifecycle_stage"] == "active"
@@ -174,7 +202,11 @@ class TestGoalLifecycleSyncOnUpdate:
         assert goal["lifecycle_stage"] == "active"
 
         # Update content only — no metadata
-        updated = await repo.update(goal["id"], content="Updated goal description")
+        updated = await repo.update(
+            goal["id"],
+            content="Updated goal description",
+            organization_id=test_user["organization_id"],
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == "active"  # unchanged
@@ -193,6 +225,7 @@ class TestGoalLifecycleSyncOnUpdate:
         updated = await repo.update(
             goal["id"],
             metadata={"priority": "high", "notes": "important goal"},
+            organization_id=test_user["organization_id"],
         )
 
         assert updated is not None
@@ -211,6 +244,7 @@ class TestGoalLifecycleSyncOnUpdate:
         updated = await repo.update(
             goal["id"],
             metadata={"status": "some-unknown-status"},
+            organization_id=test_user["organization_id"],
         )
 
         assert updated is not None
@@ -236,7 +270,11 @@ class TestNonGoalLifecycleIsolation:
         exp = await _create_experience(repo, prefix, test_user, status="active")
         original_stage = exp["lifecycle_stage"]
 
-        updated = await repo.update(exp["id"], metadata={"status": "completed"})
+        updated = await repo.update(
+            exp["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "completed"}
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == original_stage  # unchanged
@@ -262,7 +300,11 @@ class TestNonGoalLifecycleIsolation:
         )
         original_stage = tech["lifecycle_stage"]
 
-        updated = await repo.update(tech["id"], metadata={"status": "completed"})
+        updated = await repo.update(
+            tech["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "completed"}
+        )
 
         assert updated is not None
         assert updated["lifecycle_stage"] == original_stage
@@ -374,7 +416,11 @@ class TestStatusNormalization:
         repo = MemoryRepository(db_pool)
 
         goal = await _create_goal(repo, prefix, test_user, status="active")
-        updated = await repo.update(goal["id"], metadata={"status": "COMPLETED"})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "COMPLETED"}
+        )
 
         assert updated["lifecycle_stage"] == "archived"
 
@@ -385,7 +431,11 @@ class TestStatusNormalization:
         repo = MemoryRepository(db_pool)
 
         goal = await _create_goal(repo, prefix, test_user, status="active")
-        updated = await repo.update(goal["id"], metadata={"status": "Abandoned"})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "Abandoned"}
+        )
 
         assert updated["lifecycle_stage"] == "archived"
 
@@ -396,7 +446,11 @@ class TestStatusNormalization:
         repo = MemoryRepository(db_pool)
 
         goal = await _create_goal(repo, prefix, test_user, status="active")
-        updated = await repo.update(goal["id"], metadata={"status": "  completed  "})
+        updated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "  completed  "}
+        )
 
         assert updated["lifecycle_stage"] == "archived"
 
@@ -419,27 +473,51 @@ class TestFullLifecycleRoundTrip:
         assert goal["lifecycle_stage"] == "active"
 
         # 2. Pause it — should stay active
-        paused = await repo.update(goal["id"], metadata={"status": "paused"})
+        paused = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "paused"}
+        )
         assert paused["lifecycle_stage"] == "active"
 
         # 3. Complete it — should archive
-        completed = await repo.update(goal["id"], metadata={"status": "completed"})
+        completed = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "completed"}
+        )
         assert completed["lifecycle_stage"] == "archived"
 
         # 4. Reactivate it — should go back to active
-        reactivated = await repo.update(goal["id"], metadata={"status": "active"})
+        reactivated = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "active"}
+        )
         assert reactivated["lifecycle_stage"] == "active"
 
         # 5. Cancel it — should archive again
-        cancelled = await repo.update(goal["id"], metadata={"status": "cancelled"})
+        cancelled = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "cancelled"}
+        )
         assert cancelled["lifecycle_stage"] == "archived"
 
         # 6. Reactivate again — should work
-        reactivated2 = await repo.update(goal["id"], metadata={"status": "active"})
+        reactivated2 = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "active"}
+        )
         assert reactivated2["lifecycle_stage"] == "active"
 
         # 7. Abandon it — should archive
-        abandoned = await repo.update(goal["id"], metadata={"status": "abandoned"})
+        abandoned = await repo.update(
+            goal["id"],
+            organization_id=test_user["organization_id"],
+            metadata={"status": "abandoned"}
+        )
         assert abandoned["lifecycle_stage"] == "archived"
 
 
@@ -489,7 +567,7 @@ class TestBackfillMigration063:
             (goal_cancelled["id"], "archived"),
             (goal_done["id"], "archived"),
         ]:
-            row = await repo.get(goal_id)
+            row = await repo.get(goal_id, organization_id=test_user["organization_id"])
             assert row["lifecycle_stage"] == expected_status, (
                 f"Expected lifecycle_stage={expected_status} for goal {goal_id} "
                 f"(status={row['metadata']['status']}), got {row['lifecycle_stage']}"
@@ -497,7 +575,7 @@ class TestBackfillMigration063:
 
         # Verify: active and paused goals are still active
         for goal_id in [goal_active["id"], goal_paused["id"]]:
-            row = await repo.get(goal_id)
+            row = await repo.get(goal_id, organization_id=test_user["organization_id"])
             assert row["lifecycle_stage"] == "active", (
                 f"Expected lifecycle_stage=active for goal {goal_id} "
                 f"(status={row['metadata']['status']}), got {row['lifecycle_stage']}"
@@ -524,7 +602,7 @@ class TestBackfillMigration063:
             await conn.execute(migration_sql)
             await conn.execute(migration_sql)  # second run should be a no-op
 
-        row = await repo.get(goal["id"])
+        row = await repo.get(goal["id"], organization_id=test_user["organization_id"])
         assert row["lifecycle_stage"] == "archived"
 
     @pytest.mark.asyncio
@@ -540,7 +618,7 @@ class TestBackfillMigration063:
         async with db_pool.acquire() as conn:
             await conn.execute(migration_sql)
 
-        row = await repo.get(exp["id"])
+        row = await repo.get(exp["id"], organization_id=test_user["organization_id"])
         assert row["lifecycle_stage"] == "active"  # experience should not be archived
 
     @pytest.mark.asyncio

@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -228,15 +228,15 @@ class TestStatusTransitionGuards:
         req = await wf_repo.create_request(title="R", org_id=org)
 
         claimed_task = await _create_task(wf_repo, org, str(req["id"]), title="claimed")
-        await wf_repo.claim_task(str(claimed_task["id"]), "d1")
-        completed_claimed = await wf_repo.complete_task(str(claimed_task["id"]), "ok")
+        await wf_repo.claim_task(str(claimed_task["id"]), "d1", org_id=org)
+        completed_claimed = await wf_repo.complete_task(str(claimed_task["id"]), "ok", org_id=org)
         assert completed_claimed is not None
         assert completed_claimed["status"] == "completed"
 
         running_task = await _create_task(wf_repo, org, str(req["id"]), title="running")
-        await wf_repo.claim_task(str(running_task["id"]), "d1")
-        await wf_repo.start_task(str(running_task["id"]))
-        completed_running = await wf_repo.complete_task(str(running_task["id"]), "ok")
+        await wf_repo.claim_task(str(running_task["id"]), "d1", org_id=org)
+        await wf_repo.start_task(str(running_task["id"]), org_id=org)
+        completed_running = await wf_repo.complete_task(str(running_task["id"]), "ok", org_id=org)
         assert completed_running is not None
         assert completed_running["status"] == "completed"
 
@@ -246,17 +246,17 @@ class TestStatusTransitionGuards:
         req = await wf_repo.create_request(title="R", org_id=org)
 
         pending_task = await _create_task(wf_repo, org, str(req["id"]), title="pending")
-        assert await wf_repo.complete_task(str(pending_task["id"]), "x") is None
+        assert await wf_repo.complete_task(str(pending_task["id"]), "x", org_id=org) is None
 
         completed_task = await _create_task(wf_repo, org, str(req["id"]), title="completed")
-        await wf_repo.claim_task(str(completed_task["id"]), "d1")
-        await wf_repo.complete_task(str(completed_task["id"]), "done")
-        assert await wf_repo.complete_task(str(completed_task["id"]), "again") is None
+        await wf_repo.claim_task(str(completed_task["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(completed_task["id"]), "done", org_id=org)
+        assert await wf_repo.complete_task(str(completed_task["id"]), "again", org_id=org) is None
 
         failed_task = await _create_task(wf_repo, org, str(req["id"]), title="failed")
-        await wf_repo.claim_task(str(failed_task["id"]), "d1")
-        await wf_repo.fail_task(str(failed_task["id"]), "boom")
-        assert await wf_repo.complete_task(str(failed_task["id"]), "nope") is None
+        await wf_repo.claim_task(str(failed_task["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(failed_task["id"]), "boom", org_id=org)
+        assert await wf_repo.complete_task(str(failed_task["id"]), "nope", org_id=org) is None
 
     @pytest.mark.asyncio
     async def test_fail_task_succeeds_for_claimed_and_running(self, wf_repo, wf_org):
@@ -264,17 +264,17 @@ class TestStatusTransitionGuards:
         req = await wf_repo.create_request(title="R", org_id=org)
 
         claimed_task = await _create_task(wf_repo, org, str(req["id"]), title="claimed")
-        await wf_repo.claim_task(str(claimed_task["id"]), "d1")
-        failed_claimed = await wf_repo.fail_task(str(claimed_task["id"]), "err")
+        await wf_repo.claim_task(str(claimed_task["id"]), "d1", org_id=org)
+        failed_claimed = await wf_repo.fail_task(str(claimed_task["id"]), "err", org_id=org)
         assert failed_claimed is not None
         assert failed_claimed["status"] == "failed"
 
         running_req = await wf_repo.create_request(title="R running", org_id=org)
         running_task = await _create_task(wf_repo, org, str(running_req["id"]), title="running")
-        await wf_repo.claim_task(str(running_task["id"]), "d1")
-        started = await wf_repo.start_task(str(running_task["id"]))
+        await wf_repo.claim_task(str(running_task["id"]), "d1", org_id=org)
+        started = await wf_repo.start_task(str(running_task["id"]), org_id=org)
         assert started is not None
-        failed_running = await wf_repo.fail_task(str(running_task["id"]), "err")
+        failed_running = await wf_repo.fail_task(str(running_task["id"]), "err", org_id=org)
         assert failed_running is not None
         assert failed_running["status"] == "failed"
 
@@ -284,24 +284,24 @@ class TestStatusTransitionGuards:
         req = await wf_repo.create_request(title="R", org_id=org)
 
         pending_task = await _create_task(wf_repo, org, str(req["id"]), title="pending")
-        assert await wf_repo.fail_task(str(pending_task["id"]), "x") is None
+        assert await wf_repo.fail_task(str(pending_task["id"]), "x", org_id=org) is None
 
         completed_task = await _create_task(wf_repo, org, str(req["id"]), title="completed")
-        await wf_repo.claim_task(str(completed_task["id"]), "d1")
-        await wf_repo.complete_task(str(completed_task["id"]), "ok")
-        assert await wf_repo.fail_task(str(completed_task["id"]), "x") is None
+        await wf_repo.claim_task(str(completed_task["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(completed_task["id"]), "ok", org_id=org)
+        assert await wf_repo.fail_task(str(completed_task["id"]), "x", org_id=org) is None
 
         failed_task = await _create_task(wf_repo, org, str(req["id"]), title="failed")
-        await wf_repo.claim_task(str(failed_task["id"]), "d1")
-        await wf_repo.fail_task(str(failed_task["id"]), "first")
-        assert await wf_repo.fail_task(str(failed_task["id"]), "second") is None
+        await wf_repo.claim_task(str(failed_task["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(failed_task["id"]), "first", org_id=org)
+        assert await wf_repo.fail_task(str(failed_task["id"]), "second", org_id=org) is None
 
     @pytest.mark.asyncio
     async def test_ensure_request_in_progress_accepts_planned_status(self, wf_repo, wf_org):
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="R", org_id=org)
-        await wf_repo.update_request_status(str(req["id"]), "planned")
-        await wf_repo._ensure_request_in_progress(str(req["id"]))
+        await wf_repo.update_request_status(str(req["id"]), "planned", org_id=org)
+        await wf_repo._ensure_request_in_progress(str(req["id"]), org_id=org)
         updated = await wf_repo.get_request(str(req["id"]), org)
         assert updated is not None
         assert updated["status"] == "in_progress"
@@ -314,11 +314,11 @@ class TestRequestStatusReconciliation:
         req = await wf_repo.create_request(title="R1", org_id=org)
         t1 = await _create_task(wf_repo, org, str(req["id"]), title="t1")
         t2 = await _create_task(wf_repo, org, str(req["id"]), title="t2")
-        await wf_repo.claim_task(str(t1["id"]), "d1")
-        await wf_repo.complete_task(str(t1["id"]), "ok")
-        await wf_repo.claim_task(str(t2["id"]), "d1")
-        await wf_repo.complete_task(str(t2["id"]), "ok")
-        await wf_repo.update_request_status(str(req["id"]), "in_progress")
+        await wf_repo.claim_task(str(t1["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(t1["id"]), "ok", org_id=org)
+        await wf_repo.claim_task(str(t2["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(t2["id"]), "ok", org_id=org)
+        await wf_repo.update_request_status(str(req["id"]), "in_progress", org_id=org)
 
         fixed = await wf_repo.reconcile_request_statuses(org_id=org)
         updated = await wf_repo.get_request(str(req["id"]), org)
@@ -331,11 +331,11 @@ class TestRequestStatusReconciliation:
         req = await wf_repo.create_request(title="R2", org_id=org)
         t1 = await _create_task(wf_repo, org, str(req["id"]), title="t1")
         t2 = await _create_task(wf_repo, org, str(req["id"]), title="t2")
-        await wf_repo.claim_task(str(t1["id"]), "d1")
-        await wf_repo.fail_task(str(t1["id"]), "no")
-        await wf_repo.claim_task(str(t2["id"]), "d1")
-        await wf_repo.fail_task(str(t2["id"]), "no")
-        await wf_repo.update_request_status(str(req["id"]), "in_progress")
+        await wf_repo.claim_task(str(t1["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(t1["id"]), "no", org_id=org)
+        await wf_repo.claim_task(str(t2["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(t2["id"]), "no", org_id=org)
+        await wf_repo.update_request_status(str(req["id"]), "in_progress", org_id=org)
 
         fixed = await wf_repo.reconcile_request_statuses(org_id=org)
         updated = await wf_repo.get_request(str(req["id"]), org)
@@ -347,8 +347,8 @@ class TestRequestStatusReconciliation:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="R3", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]), title="active")
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.update_request_status(str(req["id"]), "pending")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.update_request_status(str(req["id"]), "pending", org_id=org)
 
         fixed = await wf_repo.reconcile_request_statuses(org_id=org)
         updated = await wf_repo.get_request(str(req["id"]), org)
@@ -362,9 +362,9 @@ class TestRequestStatusReconciliation:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="Rework", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]), title="done")
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.complete_task(str(task["id"]), "ok")
-        await wf_repo.update_request_status(str(req["id"]), "needs_rework")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(task["id"]), "ok", org_id=org)
+        await wf_repo.update_request_status(str(req["id"]), "needs_rework", org_id=org)
 
         await wf_repo.reconcile_request_statuses(org_id=org)
 
@@ -378,12 +378,12 @@ class TestRequestStatusReconciliation:
         done_task = await _create_task(wf_repo, org, str(req["id"]), title="done")
         run_task = await _create_task(wf_repo, org, str(req["id"]), title="run")
 
-        await wf_repo.claim_task(str(done_task["id"]), "d1")
-        await wf_repo.complete_task(str(done_task["id"]), "ok")
+        await wf_repo.claim_task(str(done_task["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(done_task["id"]), "ok", org_id=org)
 
-        await wf_repo.claim_task(str(run_task["id"]), "d1")
-        await wf_repo.start_task(str(run_task["id"]))
-        await wf_repo.update_request_status(str(req["id"]), "in_progress")
+        await wf_repo.claim_task(str(run_task["id"]), "d1", org_id=org)
+        await wf_repo.start_task(str(run_task["id"]), org_id=org)
+        await wf_repo.update_request_status(str(req["id"]), "in_progress", org_id=org)
 
         await wf_repo.reconcile_request_statuses(org_id=org)
         updated = await wf_repo.get_request(str(req["id"]), org)
@@ -396,7 +396,7 @@ class TestTaskCompletionBody:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="Body R1", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
 
         resp = await wf_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -411,7 +411,7 @@ class TestTaskCompletionBody:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="Body R2", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
 
         resp = await wf_client.post(f"/api/requests/tasks/{task['id']}/complete")
         assert resp.status_code == 422
@@ -421,7 +421,7 @@ class TestTaskCompletionBody:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="Body R3", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
 
         task_id = task["id"]
         resp = await wf_client.post(
@@ -438,7 +438,7 @@ class TestTaskCompletionBody:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="Body R4", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
 
         response = await wf_client.post(
             f"/api/requests/tasks/{task['id']}/needs-review",
@@ -602,7 +602,15 @@ class TestReviewQueueVisibility:
         assert fetched.json()["content"] == f"{wf_prefix}shared memory"
 
     @pytest.mark.asyncio
-    async def test_daemon_auto_sharing_logic(self, wf_daemon_client, wf_prefix):
+    async def test_daemon_auto_sharing_logic(self, wf_daemon_client, db_pool, wf_prefix):
+        # The memories.shared column was retired in migration 132 and the
+        # daemon no longer force-shares what it authors
+        # (docs/auth-pattern-migration.md, 2026-10-01): sharing is the
+        # owner's explicit choice, so a daemon memory filed with
+        # shared=False stays owner-private — the org-read clearance is the
+        # state, not a response field. Tags still normalize for the daemon
+        # caller: prohibited tags map (pending-review → needs-review) plus
+        # the auto-added daemon tag.
         resp = await wf_daemon_client.post(
             "/api/memories",
             json={
@@ -615,9 +623,13 @@ class TestReviewQueueVisibility:
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["shared"] is True
         assert "daemon" in data["tags"]
         assert "needs-review" in data["tags"]
+        from lucent.db import MemoryRepository
+
+        assert not await MemoryRepository(db_pool).is_org_shared(
+            UUID(data["id"]), UUID(data["organization_id"])
+        )
 
     @pytest.mark.asyncio
     async def test_non_shared_memories_invisible_to_other_users(
@@ -685,7 +697,7 @@ class TestRequestLifecycleStateMachine:
         assert req["status"] == "pending"
 
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "daemon-1")
+        await wf_repo.claim_task(str(task["id"]), "daemon-1", org_id=org)
 
         updated = await wf_repo.get_request(str(req["id"]), org)
         assert updated["status"] == "in_progress"
@@ -698,15 +710,15 @@ class TestRequestLifecycleStateMachine:
         t1 = await _create_task(wf_repo, org, str(req["id"]), title="t1")
         t2 = await _create_task(wf_repo, org, str(req["id"]), title="t2")
 
-        await wf_repo.claim_task(str(t1["id"]), "d1")
-        await wf_repo.complete_task(str(t1["id"]), "result 1")
+        await wf_repo.claim_task(str(t1["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(t1["id"]), "result 1", org_id=org)
 
         # After completing one of two, request should still be in_progress
         mid = await wf_repo.get_request(str(req["id"]), org)
         assert mid["status"] == "in_progress"
 
-        await wf_repo.claim_task(str(t2["id"]), "d1")
-        await wf_repo.complete_task(str(t2["id"]), "result 2")
+        await wf_repo.claim_task(str(t2["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(t2["id"]), "result 2", org_id=org)
 
         final = await wf_repo.get_request(str(req["id"]), org)
         assert final["status"] == "review"
@@ -721,11 +733,11 @@ class TestRequestLifecycleStateMachine:
         t1 = await _create_task(wf_repo, org, str(req["id"]), title="t1")
         t2 = await _create_task(wf_repo, org, str(req["id"]), title="t2")
 
-        await wf_repo.claim_task(str(t1["id"]), "d1")
-        await wf_repo.complete_task(str(t1["id"]), "ok")
+        await wf_repo.claim_task(str(t1["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(t1["id"]), "ok", org_id=org)
 
-        await wf_repo.claim_task(str(t2["id"]), "d1")
-        await wf_repo.fail_task(str(t2["id"]), "error")
+        await wf_repo.claim_task(str(t2["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(t2["id"]), "error", org_id=org)
 
         final = await wf_repo.get_request(str(req["id"]), org)
         assert final["status"] == "failed"
@@ -734,10 +746,10 @@ class TestRequestLifecycleStateMachine:
     async def test_planned_status_transitions_to_in_progress(self, wf_repo, wf_org):
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="Lifecycle R4", org_id=org)
-        await wf_repo.update_request_status(str(req["id"]), "planned")
+        await wf_repo.update_request_status(str(req["id"]), "planned", org_id=org)
 
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
 
         updated = await wf_repo.get_request(str(req["id"]), org)
         assert updated["status"] == "in_progress"
@@ -780,8 +792,8 @@ class TestSequenceOrderGating:
         assert str(t1["id"]) not in pending_ids
 
         # Complete t0 → t1 should now be pending
-        await wf_repo.claim_task(str(t0["id"]), "d1")
-        await wf_repo.complete_task(str(t0["id"]), "done")
+        await wf_repo.claim_task(str(t0["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(t0["id"]), "done", org_id=org)
 
         pending_after = await wf_repo.list_pending_tasks(org)
         pending_ids_after = {str(t["id"]) for t in pending_after["items"]}
@@ -825,8 +837,8 @@ class TestSequenceOrderGating:
             sequence_order=1, description="second",
         )
 
-        await wf_repo.claim_task(str(t0["id"]), "d1")
-        await wf_repo.fail_task(str(t0["id"]), "crash")
+        await wf_repo.claim_task(str(t0["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(t0["id"]), "crash", org_id=org)
 
         pending = await wf_repo.list_pending_tasks(org)
         pending_ids = {str(t["id"]) for t in pending["items"]}
@@ -842,8 +854,8 @@ class TestTaskResultStorage:
         req = await wf_repo.create_request(title="Result R1", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        completed = await wf_repo.complete_task(str(task["id"]), "task output data")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        completed = await wf_repo.complete_task(str(task["id"]), "task output data", org_id=org)
 
         assert completed["result"] == "task output data"
         assert completed["status"] == "completed"
@@ -854,8 +866,8 @@ class TestTaskResultStorage:
         req = await wf_repo.create_request(title="Result R2", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        failed = await wf_repo.fail_task(str(task["id"]), "error details")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        failed = await wf_repo.fail_task(str(task["id"]), "error details", org_id=org)
 
         assert failed["error"] == "error details"
         assert failed["status"] == "failed"
@@ -876,11 +888,13 @@ class TestTaskResultStorage:
             sequence_order=1, description="second",
         )
 
-        await wf_repo.claim_task(str(t0["id"]), "d1")
-        await wf_repo.complete_task(str(t0["id"]), '{"findings": ["issue1", "issue2"]}')
+        await wf_repo.claim_task(str(t0["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(
+            str(t0["id"]), '{"findings": ["issue1", "issue2"]}', org_id=org
+        )
 
         # Agent for t1 can read completed tasks to get prior results
-        completed_tasks = await wf_repo.list_tasks(req_id, status="completed")
+        completed_tasks = await wf_repo.list_tasks(req_id, status="completed", org_id=org)
         assert len(completed_tasks["items"]) == 1
         assert completed_tasks["items"][0]["result"] == '{"findings": ["issue1", "issue2"]}'
 
@@ -891,8 +905,8 @@ class TestTaskResultStorage:
         req = await wf_repo.create_request(title="Result R4", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.complete_task(str(task["id"]), "full output")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.complete_task(str(task["id"]), "full output", org_id=org)
 
         full = await wf_repo.get_request_with_tasks(str(req["id"]), org)
         assert full["tasks"][0]["result"] == "full output"
@@ -908,8 +922,8 @@ class TestTaskReleaseAndRetry:
         req = await wf_repo.create_request(title="Release R1", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        released = await wf_repo.release_task(str(task["id"]))
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        released = await wf_repo.release_task(str(task["id"]), org_id=org)
 
         assert released["status"] == "pending"
         assert released["claimed_by"] is None
@@ -921,9 +935,9 @@ class TestTaskReleaseAndRetry:
         req = await wf_repo.create_request(title="Release R2", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.start_task(str(task["id"]))
-        released = await wf_repo.release_task(str(task["id"]))
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.start_task(str(task["id"]), org_id=org)
+        released = await wf_repo.release_task(str(task["id"]), org_id=org)
 
         assert released["status"] == "pending"
 
@@ -933,7 +947,7 @@ class TestTaskReleaseAndRetry:
         req = await wf_repo.create_request(title="Release R3", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        result = await wf_repo.release_task(str(task["id"]))
+        result = await wf_repo.release_task(str(task["id"]), org_id=org)
         assert result is None
 
     @pytest.mark.asyncio
@@ -942,9 +956,9 @@ class TestTaskReleaseAndRetry:
         req = await wf_repo.create_request(title="Retry R1", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.fail_task(str(task["id"]), "first attempt failed")
-        retried = await wf_repo.retry_task(str(task["id"]))
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(task["id"]), "first attempt failed", org_id=org)
+        retried = await wf_repo.retry_task(str(task["id"]), org_id=org)
 
         assert retried["status"] == "pending"
         assert retried["result"] is None
@@ -957,7 +971,7 @@ class TestTaskReleaseAndRetry:
         req = await wf_repo.create_request(title="Retry R2", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        result = await wf_repo.retry_task(str(task["id"]))
+        result = await wf_repo.retry_task(str(task["id"]), org_id=org)
         assert result is None
 
     @pytest.mark.asyncio
@@ -968,13 +982,13 @@ class TestTaskReleaseAndRetry:
         req = await wf_repo.create_request(title="Retry R3", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.fail_task(str(task["id"]), "error")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(task["id"]), "error", org_id=org)
 
         failed_req = await wf_repo.get_request(str(req["id"]), org)
         assert failed_req["status"] == "failed"
 
-        await wf_repo.retry_task(str(task["id"]))
+        await wf_repo.retry_task(str(task["id"]), org_id=org)
         restored_req = await wf_repo.get_request(str(req["id"]), org)
         assert restored_req["status"] == "in_progress"
 
@@ -988,11 +1002,11 @@ class TestTaskEventAuditTrail:
         req = await wf_repo.create_request(title="Event R1", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.start_task(str(task["id"]))
-        await wf_repo.complete_task(str(task["id"]), "done")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.start_task(str(task["id"]), org_id=org)
+        await wf_repo.complete_task(str(task["id"]), "done", org_id=org)
 
-        events = await wf_repo.list_task_events(str(task["id"]))
+        events = await wf_repo.list_task_events(str(task["id"]), org_id=org)
         event_types = [e["event_type"] for e in events["items"]]
         assert "created" in event_types
         assert "claimed" in event_types
@@ -1005,13 +1019,13 @@ class TestTaskEventAuditTrail:
         req = await wf_repo.create_request(title="Event R2", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
 
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.release_task(str(task["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d2")
-        await wf_repo.fail_task(str(task["id"]), "err")
-        await wf_repo.retry_task(str(task["id"]))
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.release_task(str(task["id"]), org_id=org)
+        await wf_repo.claim_task(str(task["id"]), "d2", org_id=org)
+        await wf_repo.fail_task(str(task["id"]), "err", org_id=org)
+        await wf_repo.retry_task(str(task["id"]), org_id=org)
 
-        events = await wf_repo.list_task_events(str(task["id"]))
+        events = await wf_repo.list_task_events(str(task["id"]), org_id=org)
         event_types = [e["event_type"] for e in events["items"]]
         assert "released" in event_types
         assert "retried" in event_types
@@ -1048,8 +1062,8 @@ class TestTaskMemoryLinks:
             organization_id=wf_org["id"],
         )
 
-        await wf_repo.link_memory(str(task["id"]), str(memory["id"]), "created")
-        links = await wf_repo.list_task_memories(str(task["id"]))
+        await wf_repo.link_memory(str(task["id"]), str(memory["id"]), "created", org_id=org)
+        links = await wf_repo.list_task_memories(str(task["id"]), org_id=org)
 
         assert len(links["items"]) == 1
         assert str(links["items"][0]["memory_id"]) == str(memory["id"])
@@ -1084,7 +1098,7 @@ class TestTaskMemoryLinks:
             organization_id=wf_org["id"],
         )
 
-        await wf_repo.link_memory(str(task["id"]), str(memory["id"]), "created")
+        await wf_repo.link_memory(str(task["id"]), str(memory["id"]), "created", org_id=org)
 
         full = await wf_repo.get_request_with_tasks(str(req["id"]), org)
         assert len(full["tasks"][0]["memories"]) == 1
@@ -1127,7 +1141,25 @@ class TestDaemonTagEnforcementViaAPI:
         assert "custom-tag" in resp.json()["tags"]
 
     @pytest.mark.asyncio
-    async def test_daemon_caller_always_shared(self, wf_daemon_client, wf_prefix):
+    async def test_daemon_caller_always_shared(
+        self, wf_daemon_client, wf_daemon_user, db_pool, wf_org, wf_prefix
+    ):
+        # Retired semantics (migration 132 + the 2026-10-01 owner contract,
+        # docs/auth-pattern-migration.md): the daemon no longer force-shares
+        # what it authors. A daemon key's write attributes to the org's first
+        # owner and stays owner-private until the owner shares it; the daemon
+        # key itself files a ('read','user') clearance on what it authored so
+        # its own org_shared_only searches still reach its artifacts.
+        from lucent.db import MemoryRepository
+
+        owner = await UserRepository(db_pool).create(
+            external_id=f"{wf_prefix}owner",
+            provider="local",
+            organization_id=wf_org["id"],
+            email=f"{wf_prefix}owner@test.com",
+            display_name=f"{wf_prefix}Owner",
+            role="owner",
+        )
         resp = await wf_daemon_client.post(
             "/api/memories",
             json={
@@ -1139,10 +1171,26 @@ class TestDaemonTagEnforcementViaAPI:
             },
         )
         assert resp.status_code == 201
-        assert resp.json()["shared"] is True
+        data = resp.json()
+        assert UUID(data["user_id"]) == owner["id"]
+        assert "daemon" in data["tags"]
+        memory_id = UUID(data["id"])
+        assert not await MemoryRepository(db_pool).is_org_shared(memory_id, wf_org["id"])
+        async with db_pool.acquire() as conn:
+            daemon_reader = await conn.fetchval(
+                """SELECT 1 FROM auth_clearances c
+                   JOIN memories m ON c.auth_id = m.auth_id
+                   WHERE m.id = $1 AND c.role = 'read'
+                     AND c.principal_type = 'user' AND c.principal_id = $2""",
+                memory_id,
+                str(wf_daemon_user["id"]),
+            )
+        assert daemon_reader is not None
 
     @pytest.mark.asyncio
-    async def test_non_daemon_caller_respects_shared_flag(self, wf_client, wf_prefix):
+    async def test_non_daemon_caller_respects_shared_flag(
+        self, wf_client, db_pool, wf_user, wf_prefix
+    ):
         resp = await wf_client.post(
             "/api/memories",
             json={
@@ -1154,7 +1202,13 @@ class TestDaemonTagEnforcementViaAPI:
             },
         )
         assert resp.status_code == 201
-        assert resp.json()["shared"] is False
+        # The response no longer carries shared (column retired in 132);
+        # the org clearance is the state.
+        from lucent.db import MemoryRepository
+
+        assert not await MemoryRepository(db_pool).is_org_shared(
+            UUID(resp.json()["id"]), wf_user["organization_id"]
+        )
 
 
 class TestFeedbackProcessing:
@@ -1185,7 +1239,7 @@ class TestFeedbackProcessing:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="API Complete", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
 
         resp = await wf_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -1199,7 +1253,7 @@ class TestFeedbackProcessing:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="API Release", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
 
         resp = await wf_client.post(f"/api/requests/tasks/{task['id']}/release")
         assert resp.status_code == 200
@@ -1210,8 +1264,8 @@ class TestFeedbackProcessing:
         org = str(wf_org["id"])
         req = await wf_repo.create_request(title="API Retry", org_id=org)
         task = await _create_task(wf_repo, org, str(req["id"]))
-        await wf_repo.claim_task(str(task["id"]), "d1")
-        await wf_repo.fail_task(str(task["id"]), "boom")
+        await wf_repo.claim_task(str(task["id"]), "d1", org_id=org)
+        await wf_repo.fail_task(str(task["id"]), "boom", org_id=org)
 
         resp = await wf_client.post(f"/api/requests/tasks/{task['id']}/retry")
         assert resp.status_code == 200

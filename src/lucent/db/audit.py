@@ -10,7 +10,8 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
-from lucent.db.pool import scoped_acquire
+
+from lucent.db.pool import scoped_acquire_on
 
 # Integration event type constants (Section 9 of integration design).
 # Security events get dedicated action_types for direct queryability.
@@ -137,7 +138,9 @@ class AuditRepository:
                       version, snapshot
         """
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             row = await conn.fetchrow(
                 query,
                 str(memory_id),
@@ -188,7 +191,9 @@ class AuditRepository:
             WHERE memory_id = $1
         """
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, str(memory_id))
             total_count = count_row["total"] if count_row else 0
 
@@ -212,6 +217,7 @@ class AuditRepository:
         since: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
+        organization_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Get all audit entries for actions by a specific user.
 
@@ -221,13 +227,38 @@ class AuditRepository:
             since: Optional filter to entries after this time.
             limit: Maximum entries to return.
             offset: Pagination offset.
+            organization_id: Caller org — required on request paths, where
+                no task tenant scope exists.
 
         Returns:
             Dict with entries list and pagination info.
         """
         return await self._get_filtered_entries(
             "user_id", user_id, action_type, since, limit, offset,
-            organization_id=None, user_id=user_id,
+            organization_id=organization_id, user_id=user_id,
+        )
+
+    async def log_access_change(
+        self,
+        resource_id: UUID,
+        action_type: str,
+        *,
+        user_id: UUID | None,
+        organization_id: UUID | None,
+        old_values: dict[str, Any] | None = None,
+        new_values: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Store a resource access change in the shared audit table."""
+        return await self.log(
+            resource_id,
+            action_type,
+            user_id=user_id,
+            organization_id=organization_id,
+            changed_fields=["access"],
+            old_values=old_values,
+            new_values=new_values,
+            context=context,
         )
 
     async def get_by_organization_id(
@@ -237,6 +268,7 @@ class AuditRepository:
         since: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
+        user_id: UUID | None = None,
     ) -> dict[str, Any]:
         """Get all audit entries for an organization.
 
@@ -246,13 +278,15 @@ class AuditRepository:
             since: Optional filter to entries after this time.
             limit: Maximum entries to return.
             offset: Pagination offset.
+            user_id: Caller user id — scope binding for the pool acquire;
+                omit on system paths without a user context.
 
         Returns:
             Dict with entries list and pagination info.
         """
         return await self._get_filtered_entries(
             "organization_id", organization_id, action_type, since, limit, offset,
-            organization_id=organization_id, user_id=None,
+            organization_id=organization_id, user_id=user_id,
         )
 
     async def _get_filtered_entries(
@@ -317,7 +351,9 @@ class AuditRepository:
 
         params.extend([limit, offset])
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, *params[:-2])
             total_count = count_row["total"] if count_row else 0
 
@@ -387,7 +423,9 @@ class AuditRepository:
 
         params.append(limit)
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_dict(row) for row in rows]
@@ -429,7 +467,9 @@ class AuditRepository:
             WHERE memory_id = $1 AND version IS NOT NULL
         """
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             count_row = await conn.fetchrow(count_query, str(memory_id))
             total_count = count_row["total"] if count_row else 0
 
@@ -468,7 +508,9 @@ class AuditRepository:
             LIMIT 1
         """
 
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             row = await conn.fetchrow(query, str(memory_id), version)
 
         if row is None:

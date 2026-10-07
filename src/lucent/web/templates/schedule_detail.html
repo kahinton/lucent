@@ -713,6 +713,84 @@ document.getElementById('add-workflow-step')?.addEventListener('click', () => {
 refreshWorkflowSteps();
 </script>
 
+<!-- Access -->
+{% if can_manage_access %}
+<div class="bg-white rounded-lg border border-gray-200 mb-6">
+    <div class="px-4 py-3 border-b border-gray-100">
+        <h2 class="text-lg font-semibold text-gray-900">Access</h2>
+        <p class="mt-1 text-xs text-gray-500">The workflow's creator and organization admins can always see it. Others need a grant below.</p>
+    </div>
+    <div class="px-4 py-4">
+        <div class="grid gap-3 md:grid-cols-3">
+            <form method="post" action="{{ base_path }}/{{ sched.id }}/access">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="grantee_type" value="organization">
+                <input type="hidden" name="role" value="read">
+                <button type="submit" class="w-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100">Share with organization</button>
+            </form>
+            {% if access_users | selectattr('id', 'ne', sched.created_by|string) | list %}
+            <form method="post" action="{{ base_path }}/{{ sched.id }}/access" class="flex gap-2">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="grantee_type" value="user">
+                <select name="grantee_id" class="min-w-0 flex-1 rounded-md border border-gray-300 px-2 py-2 text-sm">
+                    {% for access_user in access_users if access_user.id|string != (sched.created_by|string) %}
+                    <option value="{{ access_user.id }}">{{ access_user.display_name or access_user.email or access_user.id }}</option>
+                    {% endfor %}
+                </select>
+                <select name="role" class="rounded-md border border-gray-300 px-2 py-2 text-sm">
+                    <option value="read">Can view</option>
+                    <option value="write">Can run</option>
+                </select>
+                <button type="submit" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Add user</button>
+            </form>
+            {% endif %}
+            {% if access_groups %}
+            <form method="post" action="{{ base_path }}/{{ sched.id }}/access" class="flex gap-2">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="grantee_type" value="group">
+                <select name="grantee_id" class="min-w-0 flex-1 rounded-md border border-gray-300 px-2 py-2 text-sm">
+                    {% for access_group in access_groups %}
+                    <option value="{{ access_group.id }}">{{ access_group.name }}</option>
+                    {% endfor %}
+                </select>
+                <select name="role" class="rounded-md border border-gray-300 px-2 py-2 text-sm">
+                    <option value="read">Can view</option>
+                    <option value="write">Can run</option>
+                </select>
+                <button type="submit" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Add group</button>
+            </form>
+            {% endif %}
+        </div>
+
+        {% if access_grants %}
+        <div class="mt-4 space-y-2">
+            {% for grant in access_grants %}
+            <div class="flex items-center justify-between gap-3 rounded-md border border-gray-200 bg-white px-3 py-2 text-sm">
+                <span class="min-w-0 truncate text-gray-700">
+                    {% if grant.principal_type == 'owner' %}{{ grant.user_display_name or grant.user_email or grant.principal_id }} (creator)
+                    {% elif grant.principal_type == 'org' %}Entire organization
+                    {% elif grant.principal_type == 'user' %}{{ grant.user_display_name or grant.user_email or grant.principal_id }}
+                    {% else %}{{ grant.group_name or grant.principal_id }}{% endif %}
+                    {% if grant.principal_type != 'owner' %}<span class="ml-1 text-xs text-gray-400">({{ 'can run' if grant.role == 'write' else 'can view' }})</span>{% endif %}
+                </span>
+                {% if grant.principal_type == 'owner' %}
+                <span class="rounded px-2 py-1 text-xs text-gray-400">Creator</span>
+                {% else %}
+                <form method="post" action="{{ base_path }}/{{ sched.id }}/access/revoke">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="grantee_type" value="{{ grant.principal_type }}">
+                    <input type="hidden" name="grantee_id" value="{{ grant.principal_id if grant.principal_type != 'org' }}">
+                    <button type="submit" class="rounded px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50">Remove</button>
+                </form>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
 <!-- Run History -->
 <div class="bg-white rounded-lg border border-gray-200">
     <div class="px-4 py-3 border-b border-gray-100">

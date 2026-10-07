@@ -60,7 +60,6 @@ def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
         deleted_at=memory.get("deleted_at"),
         user_id=memory.get("user_id"),
         organization_id=memory.get("organization_id"),
-        shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
         access_count=memory.get("access_count", 0),
     )

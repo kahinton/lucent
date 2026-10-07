@@ -320,6 +320,8 @@ async def cancel_task(
             detail="You can only cancel your own tasks",
         )
 
-    await repo.delete(task_id)
+    await repo.delete(
+        task_id, organization_id=user.organization_id, user_id=user.id
+    )
 
     return SuccessResponse(success=True, message=f"Task {task_id} cancelled")

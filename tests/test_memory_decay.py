@@ -352,8 +352,12 @@ async def test_maintenance_cycle_dry_run_no_side_effects(db_pool, test_user, cle
     assert report["total_scored"] >= 2
 
     # Verify no side effects (still active, not soft-deleted).
-    persisted_old = await memory_repo.get(old_memory["id"])
-    persisted_goal = await memory_repo.get(goal_memory["id"])
+    persisted_old = await memory_repo.get(
+        old_memory["id"], organization_id=test_user["organization_id"]
+    )
+    persisted_goal = await memory_repo.get(
+        goal_memory["id"], organization_id=test_user["organization_id"]
+    )
     assert persisted_old is not None and persisted_old["deleted_at"] is None
     assert persisted_goal is not None and persisted_goal["deleted_at"] is None
 

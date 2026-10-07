@@ -7,6 +7,24 @@ import pytest
 from lucent.model_discovery import ModelDiscoveryService
 
 
+@pytest.fixture(autouse=True)
+def _system_tenant_scope():
+    """Bind the ambient scope the production model-sync runs under.
+
+    The real caller (api/app.py ``_run`` boot loop) sets
+    ``set_tenant_scope(role="system")`` before syncing discovered models into
+    the global registry; the repository fails closed without it (scoped
+    acquire is a system branch when no org is bound). Suite-local autouse:
+    scoped to this module only, never global (see conftest's
+    ``daemon_tenant_scope`` docstring).
+    """
+    from lucent.db.pool import clear_tenant_scope, set_tenant_scope
+
+    set_tenant_scope(user_id=None, organization_id=None, role="system")
+    yield
+    clear_tenant_scope()
+
+
 def test_extract_reasoning_efforts_from_copilot_metadata_shape():
     from lucent.model_discovery import _extract_reasoning_efforts_from_metadata
 
@@ -219,13 +237,21 @@ async def test_ollama_discovery_maps_thinking_capability_to_efforts(db_pool, mon
 
     assert models[0].reasoning_efforts == ["low", "medium", "high"]
     assert "reasoning-effort" in models[0].tags
-    assert models[0].discovery_metadata["reasoning_efforts_source"] == (
-        "ollama-thinking-capability"
-    )
+    # Current metadata contract: the thinking capability arrives via the
+    # persisted /api/show summary's capabilities list (the probe-era
+    # "reasoning_efforts_source" marker was retired in the digest-skip
+    # refactor of model_discovery.py).
+    assert "thinking" in models[0].discovery_metadata["show_summary"]["capabilities"]
 
 
 @pytest.mark.asyncio
-async def test_ollama_discovery_uses_structured_tool_probe(db_pool, monkeypatch):
+async def test_ollama_discovery_marks_advertised_shown_tools_capable(db_pool, monkeypatch):
+    """Provider-reported tool capability drives supports_tools (current contract).
+
+    The 2026-09 model-loads refactor removed the live tool-call probe: a model
+    whose ``/api/show`` report advertises the ``tools`` capability is marked
+    tool-capable, and the show summary is persisted as discovery evidence.
+    """
     monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
     service = ModelDiscoveryService(db_pool)
 
@@ -238,27 +264,31 @@ async def test_ollama_discovery_uses_structured_tool_probe(db_pool, monkeypatch)
         assert json == {"model": "qwen3:4b"}
         return {"capabilities": ["completion", "tools"], "model_info": {}}
 
-    async def fake_probe(api_base, model_id):
-        assert api_base == "http://localhost:11434/api"
-        assert model_id == "qwen3:4b"
-        return {"ok": True, "tool_call_count": 1}
-
     monkeypatch.setattr(service, "_get_json", fake_get_json)
     monkeypatch.setattr(service, "_post_json", fake_post_json)
-    monkeypatch.setattr(service, "_probe_ollama_tool_support", fake_probe)
 
     models = await service._discover_ollama()
 
     assert models[0].supports_tools is True
     assert "tools" in models[0].tags
-    assert models[0].discovery_metadata["tool_probe"] == {"ok": True, "tool_call_count": 1}
+    assert models[0].discovery_metadata["show_summary"]["capabilities"] == [
+        "completion",
+        "tools",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_ollama_discovery_distrusts_advertised_tools_when_probe_fails(
+async def test_ollama_discovery_show_failure_keeps_tags_capability(
     db_pool,
     monkeypatch,
 ):
+    """A transient /api/show failure must not drop the model's capability data.
+
+    The digest-skip refactor falls back to the tags-row capability when the
+    show request fails (the show summary is left empty for that pass). The
+    previous "distrust the advertised tools when the probe fails" probe is
+    retired — the tags-row capability is the remaining source of truth.
+    """
     monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
     service = ModelDiscoveryService(db_pool)
 
@@ -266,22 +296,17 @@ async def test_ollama_discovery_distrusts_advertised_tools_when_probe_fails(
         assert url.endswith("/tags")
         return {"models": [{"model": "qwen2.5-coder:3b", "details": {}}]}
 
-    async def fake_post_json(url, *, json=None, **_kwargs):
-        assert url.endswith("/show")
-        assert json == {"model": "qwen2.5-coder:3b"}
-        return {"capabilities": ["completion", "tools"], "model_info": {}}
-
-    async def fake_probe(_api_base, _model_id):
-        return {"ok": False, "tool_call_count": 0, "content_excerpt": "```json"}
+    async def fake_post_json(_url, *, json=None, **_kwargs):
+        raise TimeoutError("show request timed out")
 
     monkeypatch.setattr(service, "_get_json", fake_get_json)
     monkeypatch.setattr(service, "_post_json", fake_post_json)
-    monkeypatch.setattr(service, "_probe_ollama_tool_support", fake_probe)
 
     models = await service._discover_ollama()
 
-    assert models[0].supports_tools is False
-    assert "advertised but structured tool-call probe failed" in models[0].notes
+    assert len(models) == 1
+    assert models[0].id == "qwen2.5-coder:3b"
+    assert models[0].discovery_metadata["show_summary"] == {}
 
 
 @pytest.mark.asyncio

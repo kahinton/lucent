@@ -378,7 +378,7 @@ class TestScheduleDetail:
     async def test_run_history_uses_ten_items_per_page(self, client, schedule, monkeypatch):
         observed = {}
 
-        async def list_runs(_self, schedule_id, *, limit, offset):
+        async def list_runs(_self, schedule_id, *, limit, offset, org_id=None):
             observed.update(schedule_id=schedule_id, limit=limit, offset=offset)
             return {"items": [], "total_count": 0}
 
@@ -794,3 +794,204 @@ class TestScheduleEdit:
             follow_redirects=False,
         )
         assert resp.status_code == 403
+
+
+async def _schedule_clearances(db_pool, schedule_id):
+    """Clearances filed on a schedule's auth id, as (type, principal_id, role)."""
+    return await db_pool.fetch(
+        """SELECT acl.principal_type, acl.principal_id, acl.role
+           FROM auth_clearances acl
+           JOIN schedules s ON s.auth_id = acl.auth_id
+           WHERE s.id = $1
+           ORDER BY acl.principal_type, acl.principal_id""",
+        schedule_id,
+    )
+
+
+class TestScheduleAccess:
+    """Grant management on the workflow/schedule detail page."""
+
+    async def test_detail_shows_access_panel_for_creator(self, client, schedule):
+        resp = await client.get(f"/schedules/{schedule['id']}")
+        assert resp.status_code == 200
+        assert "Share with organization" in resp.text
+        assert "Add user" in resp.text
+        assert "Access" in resp.text
+
+    async def test_creator_grants_and_revokes_org_access(
+        self, client, schedule, db_pool, web_user
+    ):
+        _user, org, _token = web_user
+
+        resp = await client.post(
+            f"/schedules/{schedule['id']}/access",
+            data=_csrf_data(client, {"grantee_type": "organization"}),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert f"/schedules/{schedule['id']}" in resp.headers.get("location", "")
+        rows = await _schedule_clearances(db_pool, schedule["id"])
+        assert (
+            "org",
+            org["id"],
+            "read",
+        ) in [(r["principal_type"], r["principal_id"], r["role"]) for r in rows]
+
+        detail = await client.get(f"/schedules/{schedule['id']}")
+        assert "Entire organization" in detail.text
+
+        resp = await client.post(
+            f"/schedules/{schedule['id']}/access/revoke",
+            data=_csrf_data(client, {"grantee_type": "organization"}),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        rows = await _schedule_clearances(db_pool, schedule["id"])
+        assert [r["principal_type"] for r in rows if r["principal_type"] == "org"] == []
+
+    async def test_creator_grants_user_write_access(
+        self, client, schedule, db_pool, web_user, web_prefix
+    ):
+        user, org, _token = web_user
+        other_user = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}grant-user",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}grant-user@test.com",
+            display_name="Grant User",
+        )
+
+        resp = await client.post(
+            f"/schedules/{schedule['id']}/access",
+            data=_csrf_data(
+                client,
+                {
+                    "grantee_type": "user",
+                    "grantee_id": str(other_user["id"]),
+                    "role": "write",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        rows = await _schedule_clearances(db_pool, schedule["id"])
+        matches = [
+            r for r in rows
+            if r["principal_type"] == "user"
+            and r["principal_id"] == other_user["id"]
+            and r["role"] == "write"
+        ]
+        assert len(matches) == 1
+
+        revoked = await client.post(
+            f"/schedules/{schedule['id']}/access/revoke",
+            data=_csrf_data(
+                client,
+                {"grantee_type": "user", "grantee_id": str(other_user["id"])},
+            ),
+            follow_redirects=False,
+        )
+        assert revoked.status_code == 303
+        rows = await _schedule_clearances(db_pool, schedule["id"])
+        user_rows = [r for r in rows if r["principal_type"] == "user"]
+        assert [r["principal_id"] for r in user_rows] == [user["id"]]
+
+    async def test_invalid_role_falls_back_to_read(
+        self, client, schedule, db_pool, web_user, web_prefix
+    ):
+        _user, org, _token = web_user
+        other_user = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}grant-user2",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}grant-user2@test.com",
+            display_name="Grant User Two",
+        )
+        resp = await client.post(
+            f"/schedules/{schedule['id']}/access",
+            data=_csrf_data(
+                client,
+                {
+                    "grantee_type": "user",
+                    "grantee_id": str(other_user["id"]),
+                    "role": "admin",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        rows = await _schedule_clearances(db_pool, schedule["id"])
+        matches = [
+            r for r in rows
+            if r["principal_type"] == "user" and r["principal_id"] == other_user["id"]
+        ]
+        assert len(matches) == 1
+        assert matches[0]["role"] == "read"
+
+    async def test_unknown_grantee_returns_404(self, client, schedule):
+        resp = await client.post(
+            f"/schedules/{schedule['id']}/access",
+            data=_csrf_data(
+                client,
+                {
+                    "grantee_type": "user",
+                    "grantee_id": str(uuid4()),
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 404
+
+    async def test_grant_no_csrf_fails(self, client, schedule):
+        resp = await client.post(
+            f"/schedules/{schedule['id']}/access",
+            data={"grantee_type": "organization"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+    async def test_org_grantee_member_can_view_but_not_manage(
+        self, client, schedule, db_pool, web_user, web_prefix
+    ):
+        """Once the workflow is org-shared, other members can view the page,
+        but the grant panel stays hidden and mutating access fails with 403."""
+        user, org, _token = web_user
+        other_user = await UserRepository(db_pool).create(
+            external_id=f"{web_prefix}viewer",
+            provider="local",
+            organization_id=org["id"],
+            email=f"{web_prefix}viewer@test.com",
+            display_name="Viewer User",
+        )
+        other_token = await create_session(db_pool, other_user["id"])
+        app = create_app()
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            cookies={SESSION_COOKIE_NAME: other_token},
+        ) as other_client:
+            before = await other_client.get(f"/schedules/{schedule['id']}")
+            assert before.status_code == 404
+
+            grant = await client.post(
+                f"/schedules/{schedule['id']}/access",
+                data=_csrf_data(client, {"grantee_type": "organization"}),
+                follow_redirects=False,
+            )
+            assert grant.status_code == 303
+
+            page = await other_client.get(f"/schedules/{schedule['id']}")
+            assert page.status_code == 200
+            assert page.text.count("Share with organization") == 0
+
+            attempt = await other_client.post(
+                f"/schedules/{schedule['id']}/access",
+                data={
+                    CSRF_FIELD_NAME: "test-csrf-token-abc123",
+                    "grantee_type": "organization",
+                },
+                follow_redirects=False,
+            )
+            assert attempt.status_code == 403
+        _ = user

@@ -622,7 +622,9 @@ class TestWebRoutesAndUx:
             owner_user_id=str(user["id"]),
         )
         await mcpd_repo.approve_mcp_server(str(mcpd_http_server["id"]), str(org["id"]), str(user["id"]))
-        await mcpd_repo.grant_mcp_server(str(agent["id"]), str(mcpd_http_server["id"]))
+        await mcpd_repo.grant_mcp_server(
+            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+        )
         await mcpd_repo.save_discovered_tools(
             str(mcpd_http_server["id"]),
             [{"name": "tool_discovered", "description": "desc", "input_schema": {}}],
@@ -648,7 +650,9 @@ class TestWebRoutesAndUx:
             created_by=str(user["id"]),
             owner_user_id=str(user["id"]),
         )
-        await mcpd_repo.grant_mcp_server(str(agent["id"]), str(mcpd_http_server["id"]))
+        await mcpd_repo.grant_mcp_server(
+            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+        )
 
         resp = await web_client.post(
             f"/definitions/agents/{agent['id']}/mcp-tools/{mcpd_http_server['id']}",
@@ -678,7 +682,9 @@ class TestWebRoutesAndUx:
             created_by=str(user["id"]),
             owner_user_id=str(user["id"]),
         )
-        await mcpd_repo.grant_mcp_server(str(agent["id"]), str(mcpd_http_server["id"]))
+        await mcpd_repo.grant_mcp_server(
+            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+        )
 
         resp = await web_client.post(
             f"/definitions/agents/{agent['id']}/mcp-tools/{mcpd_http_server['id']}",
@@ -708,7 +714,9 @@ class TestWebRoutesAndUx:
             created_by=str(user["id"]),
             owner_user_id=str(user["id"]),
         )
-        await mcpd_repo.grant_mcp_server(str(agent["id"]), str(mcpd_http_server["id"]))
+        await mcpd_repo.grant_mcp_server(
+            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+        )
 
         resp = await web_client.post(
             f"/definitions/agents/{agent['id']}/mcp-tools/{mcpd_http_server['id']}",

@@ -214,12 +214,14 @@ class IntegrationRepository:
         provider: str,
         external_user_id: str,
         external_workspace_id: str | None = None,
+        organization_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Find the active link for an external identity tuple."""
-        return await self._user_links.resolve_identity(
-            provider=provider,
-            external_user_id=external_user_id,
+        return await self._user_links.resolve_by_external_identity(
+            provider,
+            external_user_id,
             external_workspace_id=external_workspace_id,
+            organization_id=organization_id,
         )
 
     async def list_user_links(

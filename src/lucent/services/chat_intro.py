@@ -106,6 +106,7 @@ async def gather_work_context(user) -> dict[str, Any]:
     caller can fall back to the default intro instead of an empty summary.
     """
     from lucent.db import get_pool
+    from lucent.db.memory import MemoryRepository
     from lucent.db.requests import RequestRepository
 
     pool = await get_pool()

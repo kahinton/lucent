@@ -8,13 +8,20 @@ import hashlib
 import hmac
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 from asyncpg import Pool
 
 from lucent.secrets.utils import validate_sandbox_config_references
-from lucent.db.pool import runner_guc_preamble, scoped_acquire, tenant_guc_scrub
+from lucent.db.pool import (
+    AuthTablePolicy,
+    AuthorizedDatabasePool,
+    get_authorized_pool_for_user,
+    runner_guc_preamble,
+    scoped_acquire,
+    tenant_guc_scrub,
+)
 
 ALLOWED_SCHEDULE_COLUMNS = frozenset(
     {
@@ -57,6 +64,30 @@ SYSTEM_SCHEDULE_PROTECTION_MSG = (
     "Built-in system schedules cannot be modified by the daemon. "
     "Update the on-disk source file instead."
 )
+
+
+# ── Clearance-driven usage reads ──────────────────────────────────────────
+#
+# Schedules follow the definitions/sandbox pattern: *use* (a user listing or
+# opening their own workflows, triggering, attaching) is clearance-driven and
+# default-deny — ownership (123) and explicit user/group grants live in
+# auth_clearances. A plain pool is fail-closed. Management reads (admin
+# route listings, summary, run history) stay on the legacy org-scoped path
+# with their `include_daemon_created` gates. System schedules are infra:
+# never cleared for members.
+
+SCHEDULE_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy(
+    "schedules", direct_columns=()
+)
+
+
+async def get_authorized_schedules_pool(
+    pool: Pool, user: dict[str, Any], required_clearance: str = "read"
+) -> AuthorizedDatabasePool:
+    """Authorized pool for schedule usage reads as this principal."""
+    return await get_authorized_pool_for_user(
+        pool, user, SCHEDULE_AUTH_POLICY, required_clearance
+    )
 
 
 def webhook_secret_hash(secret: str | None) -> str | None:
@@ -780,18 +811,30 @@ class ScheduleRepository:
             return dict(row) if row else None
 
     async def get_schedule_by_id(self, schedule_id: str) -> dict | None:
-        """Load a workflow by ID without org context.
+        """Load an ACTIVE WEBHOOK workflow by ID without org context.
 
         This is only used for unauthenticated webhook ingress where the shared
-        secret check happens immediately after lookup. Authenticated API/UI paths
-        should continue using get_schedule(schedule_id, org_id). The system
-        branch is required because schedules is RLS-bound (shape b) and this
-        lookup runs before any tenant context exists; the shared-secret check
-        immediately after is the actual access control.
+        secret check happens immediately after lookup. The query itself is
+        narrowed to webhook-type, enabled, active workflows so the pre-secret
+        lookup can never observe (or reveal) any other schedule row — a
+        paused, completed, or non-webhook row reads as "not found", and no
+        other workflow state is reachable without context. Authenticated
+        API/UI paths continue using get_schedule(schedule_id, org_id). The
+        system branch is required because the lookup runs before any tenant
+        context exists; the shared-secret check immediately after is the
+        actual access control.
+
+        This is the ONE documented pre-auth by-ID fetch in the system.
         """
         async with scoped_acquire(role="system") as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM schedules WHERE id = $1::uuid",
+                """
+                SELECT * FROM schedules
+                WHERE id = $1::uuid
+                  AND trigger_type = 'webhook'
+                  AND enabled = true
+                  AND status = 'active'
+                """,
                 schedule_id,
             )
         return dict(row) if row else None
@@ -1541,3 +1584,110 @@ class ScheduleRepository:
                      *params,
             )
             return dict(row)
+
+    # ── Clearance-driven usage reads ──────────────────────────────────────
+
+    async def _authorized_fetchrow(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, *params)
+
+    async def _authorized_fetch(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(query, *params)
+
+    async def list_schedules_accessible_by(
+        self,
+        user_id: str,
+        org_id: str,
+        *,
+        trigger_type: str | None = None,
+        status: str | None = None,
+        enabled: bool | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> dict:
+        """List schedules cleared for *use* by the pool's principal.
+
+        Clearance-driven and default-deny on an authorized pool; a role
+        grants nothing. The org predicate stays in the caller's SQL
+        (defense in depth); status/enabled filters stay the caller's
+        lifecycle filters.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Schedule usage reads require an AuthorizedDatabasePool "
+                "built for the schedules policy (usage is clearance-driven "
+                "and default-deny)"
+            )
+        params: list[Any] = [org_id]
+        conditions = ["sc.organization_id = $1::uuid"]
+        if trigger_type is not None:
+            conditions.append(f"sc.trigger_type = ${len(params) + 1}")
+            params.append(trigger_type)
+        if status is not None:
+            conditions.append(f"sc.status = ${len(params) + 1}")
+            params.append(status)
+        if enabled is not None:
+            conditions.append(f"sc.enabled = ${len(params) + 1}")
+            params.append(enabled)
+
+        where = " AND ".join(conditions)
+        count_query = f"SELECT COUNT(*) AS total FROM schedules sc WHERE {where}"
+        query = (
+            f"SELECT sc.* FROM schedules sc WHERE {where} "
+            "ORDER BY "
+            "CASE WHEN sc.enabled AND sc.status = 'active' THEN 0 ELSE 1 END, "
+            f"sc.next_run_at ASC NULLS LAST LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        )
+        params_with_page = [*params, limit, offset]
+
+        count_row = await self._authorized_fetchrow(count_query, *params)
+        total_count = count_row["total"] if count_row else 0
+        rows = await self._authorized_fetch(query, *params_with_page)
+        return {
+            "items": [dict(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def get_summary_accessible_by(self, org_id: str) -> dict:
+        """Summary counts over the schedules cleared for *use* by the pool's
+        principal (same shape as `get_summary`; a role grants nothing)."""
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Schedule usage reads require an AuthorizedDatabasePool "
+                "built for the schedules policy (usage is clearance-driven "
+                "and default-deny)"
+            )
+        row = await self._authorized_fetchrow(
+            """SELECT
+               count(*) AS total,
+               count(*) FILTER (WHERE sc.enabled AND sc.status = 'active') AS active,
+               count(*) FILTER (WHERE NOT sc.enabled OR sc.status = 'paused') AS paused,
+               count(*) FILTER (WHERE sc.status = 'completed') AS completed,
+               count(*) FILTER (WHERE sc.next_run_at <= now() AND sc.enabled
+                   AND sc.status = 'active') AS due_now,
+               count(*) FILTER (WHERE sc.schedule_type = 'once') AS one_time,
+               count(*) FILTER (WHERE sc.schedule_type = 'interval') AS interval,
+               count(*) FILTER (WHERE sc.schedule_type = 'cron') AS cron,
+               count(*) FILTER (WHERE sc.trigger_type = 'schedule') AS scheduled,
+               count(*) FILTER (WHERE sc.trigger_type = 'webhook') AS webhook,
+               count(*) FILTER (WHERE sc.trigger_type = 'manual') AS manual,
+               count(*) FILTER (WHERE sc.trigger_type = 'integration_event')
+                   AS integration_event
+               FROM schedules sc WHERE sc.organization_id = $1::uuid""",
+            org_id,
+        )
+        return dict(row) if row else {}
+
+    async def get_usable_schedule(self, schedule_id: str) -> dict | None:
+        """By-ID *usage* probe: the schedule must be cleared for this principal."""
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError("Schedule usage reads require an AuthorizedDatabasePool")
+        row = await self._authorized_fetchrow(
+            "SELECT sc.* FROM schedules sc WHERE id = $1::uuid",
+            schedule_id,
+        )
+        return dict(row) if row else None

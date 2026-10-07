@@ -82,7 +82,9 @@ async def _candidate_scopes(organization_id: str, user_id: str) -> list[SecretSc
     scopes = [SecretScope(organization_id=organization_id, owner_user_id=user_id)]
     try:
         pool = await get_pool()
-        groups = await GroupRepository(pool).get_user_group_ids(user_id)
+        groups = await GroupRepository(pool).get_user_group_ids(
+            user_id, organization_id=organization_id
+        )
         for group_id in groups:
             scopes.append(SecretScope(organization_id=organization_id, owner_group_id=group_id))
     except Exception:
@@ -93,7 +95,18 @@ async def _candidate_scopes(organization_id: str, user_id: str) -> list[SecretSc
 async def resolve_secret_reference(
     value: str, secret_provider: SecretProvider, *, env_key: str = ""
 ) -> str:
-    """Resolve a single secret:// reference string to its secret value."""
+    """Resolve a single secret:// reference string to its secret value.
+
+    For the built-in (database) provider the read is clearance-driven —
+    exactly the rows the secrets listings show the user (owned, group
+    shares, explicit grants). A granted secret is therefore usable in
+    env references, not just visible in lists, and a non-granted row
+    stays undecryptable (fail closed: no scope-probing fallback).
+
+    External providers (vault/aws/azure/transit) keep the legacy
+    candidate-scope probing: their values do not live in Lucent's
+    database, so clearances do not apply.
+    """
     user = get_current_user()
     if not user or not user.get("organization_id") or not user.get("id"):
         raise ValueError("Cannot resolve secret references without authenticated user context")
@@ -103,13 +116,20 @@ async def resolve_secret_reference(
         target = f" for env var '{env_key}'" if env_key else ""
         raise ValueError(f"Invalid secret reference{target}: missing key name")
 
+    target = f" for env var '{env_key}'" if env_key else ""
+    if hasattr(secret_provider, "get_secret_row"):
+        row = await secret_provider.get_secret_row(
+            secret_key, {"id": user["id"], "organization_id": user["organization_id"]}
+        )
+        if row is not None:
+            return secret_provider.decrypt_value(row["encrypted_value"])
+        raise KeyError(f"Secret not found{target} (reference '{secret_key}')")
+
     scopes = await _candidate_scopes(str(user["organization_id"]), str(user["id"]))
     for scope in scopes:
         secret_value = await secret_provider.get(secret_key, scope)
         if secret_value is not None:
             return secret_value
-
-    target = f" for env var '{env_key}'" if env_key else ""
     raise KeyError(f"Secret not found{target} (reference '{secret_key}')")
 
 

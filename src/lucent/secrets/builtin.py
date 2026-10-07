@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+
 from cryptography.fernet import Fernet, InvalidToken
 
 from lucent.secrets.base import SecretProvider, SecretScope
@@ -60,6 +61,28 @@ class BuiltinSecretProvider(SecretProvider):
             return self._fernet.decrypt(ciphertext).decode("utf-8")
         except InvalidToken:
             raise SecretKeyError("Decryption failed — wrong key or corrupted data")
+
+    def decrypt_value(self, ciphertext: bytes) -> str:
+        """Decrypt a ciphertext fetched separately (clearance-driven read path)."""
+        return self._decrypt(ciphertext)
+
+    async def get_secret_row(self, key: str, user: dict) -> dict | None:
+        """Fetch a secret row the user is cleared for, on the clearance path.
+
+        Returns the raw row (id, encrypted_value, owner fields) or None —
+        the clearance rules are exactly the secrets listings' rules. This
+        is the value-path counterpart of the clearance listing; call sites
+        decrypt via ``decrypt_value``.
+        """
+        from lucent.db.secrets import SecretRepository, get_authorized_secrets_pool
+
+        pool = await get_authorized_secrets_pool(
+            self._pool,
+            {"id": str(user.get("id")), "organization_id": str(user.get("organization_id"))},
+        )
+        return await SecretRepository(pool).get_usable_encrypted_value(
+            key, str(user.get("organization_id"))
+        )
 
     async def get(self, key: str, scope: SecretScope) -> str | None:
         encrypted_value = await self._repository.get_encrypted_value(key, scope)

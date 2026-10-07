@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from asyncpg import Connection
+# No eager asyncpg import: this module loads lazily (first daemon-service-user
+# provisioning) and tests stub asyncpg down to just ``connect``. ``conn`` is
+# untyped, so nothing here needs the real classes.
 
 
 async def ensure_daemon_service_user(

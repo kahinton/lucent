@@ -2,15 +2,44 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from asyncpg import Connection, Pool
 
-from lucent.db.pool import scoped_acquire, scoped_acquire_on
+from lucent.db.pool import (
+    AuthorizedDatabasePool,
+    AuthTablePolicy,
+    get_authorized_pool_for_user,
+    scoped_acquire_on,
+)
 
 if TYPE_CHECKING:
     from lucent.secrets.base import SecretScope
+
+
+SECRETS_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy("secrets", direct_columns=())
+
+
+async def get_authorized_secrets_pool(
+    pool: Pool,
+    user: dict[str, Any],
+    required_clearance: str = "read",
+) -> "AuthorizedDatabasePool":
+    """Return a pool whose secret reads use auth-ID clearances.
+
+    Clearance-driven reads see secrets the principal owns (migration 123),
+    ones shared with their groups (migration 124, read role) or granted to
+    them. Scope-predicated provider access and writes stay on the scoped
+    pool — the authorized connection is read-only and system_managed secrets
+    carry no clearances.
+    """
+    return await get_authorized_pool_for_user(
+        pool,
+        user,
+        SECRETS_AUTH_POLICY,
+        required_clearance,
+    )
 
 
 class SecretRepository:
@@ -112,38 +141,100 @@ class SecretRepository:
             )
         return None if row is None else str(row["id"])
 
+    async def get_usable_encrypted_value(
+        self,
+        key: str,
+        organization_id: str,
+    ) -> dict[str, Any] | None:
+        """By-key value fetch on the clearance path.
+
+        Requires an ``AuthorizedDatabasePool``: exactly the rows the
+        clearance-driven listings show (owned via migration 123, group
+        shares via 124, granted explicitly — no role-based org-wide
+        branch) are readable here. The org predicate stays as defense in
+        depth; ``app.user_id`` (bound on every authorized connection)
+        orders the caller's own row first, matching the legacy
+        own-before-group probe order.
+
+        Fail closed on a plain pool rather than widening to org scope;
+        system_managed secrets have no clearances and stay reachable only
+        through their scoped system paths.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Clearance-driven secret value fetch requires an "
+                "AuthorizedDatabasePool built for the secrets policy"
+            )
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT s.id, s.encrypted_value, s.owner_user_id, s.owner_group_id
+                FROM secrets s
+                WHERE s.key = $1 AND s.organization_id = $2
+                ORDER BY (
+                    s.owner_user_id = NULLIF(current_setting('app.user_id', true), '')::uuid
+                ) DESC NULLS LAST,
+                s.created_at ASC
+                LIMIT 1
+                """,
+                key,
+                UUID(organization_id),
+            )
+        return dict(row) if row else None
+
+    async def list_keys_cleared(self, organization_id: str) -> list[dict[str, Any]]:
+        """Clearance-driven key listing (no values), mirroring list_scoped.
+
+        Requires an ``AuthorizedDatabasePool``; same rules as the web
+        listing — owner (123), group shares (124), and grants.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Clearance-driven secret listing requires an "
+                "AuthorizedDatabasePool built for the secrets policy"
+            )
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT s.key, s.owner_user_id, s.owner_group_id
+                FROM secrets s
+                WHERE s.organization_id = $1
+                ORDER BY s.key ASC
+                """,
+                UUID(organization_id),
+            )
+        return [dict(row) for row in rows]
+
     async def list_scoped(
         self,
         *,
         organization_id: str,
-        user_id: str,
-        group_ids: list[str],
-        role: str,
         limit: int,
         offset: int,
     ) -> tuple[int, list[dict[str, Any]]]:
+        """Paginated clearance-driven listing of secrets, with owner names.
+
+        Requires an ``AuthorizedDatabasePool``: what the caller sees comes
+        from auth_clearances (owned via migration 123, group-shared with a
+        read role via migration 124, granted explicitly) and nothing else —
+        there is no role-based org-wide branch. Fail closed when the caller
+        forgot the authorized pool rather than widening to org scope.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Clearance-driven secret listing requires an "
+                "AuthorizedDatabasePool built for the secrets policy"
+            )
+        # Ownership (123), group shares (124) and grants are all expressed in
+        # auth_clearances. The org predicate stays as defense in depth —
+        # auth_ids are globally unique, so this should never filter anything.
         total = 0
         items: list[dict[str, Any]] = []
-        async with scoped_acquire(
-            organization_id=organization_id,
-            user_id=user_id,
-            role="member",
-        ) as conn:
+        async with self.pool.acquire() as conn:
             count_row = await conn.fetchrow(
-                """
-                SELECT COUNT(*) AS total
-                FROM secrets s
-                WHERE s.organization_id = $1
-                  AND (
-                    s.owner_user_id = $2
-                    OR s.owner_group_id = ANY($3::uuid[])
-                    OR $4 IN ('admin', 'owner')
-                  )
-                """,
+                "SELECT COUNT(*) AS total FROM secrets s "
+                "WHERE s.organization_id = $1",
                 UUID(organization_id),
-                UUID(user_id),
-                group_ids,
-                role,
             )
             total = count_row["total"] if count_row else 0
             rows = await conn.fetch(
@@ -159,18 +250,10 @@ class SecretRepository:
                 LEFT JOIN users u ON u.id = s.owner_user_id
                 LEFT JOIN groups g ON g.id = s.owner_group_id
                 WHERE s.organization_id = $1
-                  AND (
-                    s.owner_user_id = $2
-                    OR s.owner_group_id = ANY($3::uuid[])
-                    OR $4 IN ('admin', 'owner')
-                  )
                 ORDER BY s.created_at DESC, s.key ASC
-                LIMIT $5 OFFSET $6
+                LIMIT $2 OFFSET $3
                 """,
                 UUID(organization_id),
-                UUID(user_id),
-                group_ids,
-                role,
                 limit,
                 offset,
             )

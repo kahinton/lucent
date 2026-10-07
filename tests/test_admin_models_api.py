@@ -112,47 +112,74 @@ async def test_custom_reasoning_effort_values_are_allowed(models_client, mdl_pre
 
 
 @pytest.mark.asyncio
-async def test_model_owner_user_must_belong_to_organization(
+async def test_model_owner_fields_are_retired(
     models_client, db_pool, mdl_prefix
 ):
-    from lucent.db import OrganizationRepository, UserRepository
+    """Models belong to the organization (131): payloads carrying the old
+    owner fields are rejected, and edits clear any stale ownership."""
+    from lucent.db import ModelRepository
 
     async with db_pool.acquire() as conn:
-        organization_id = await conn.fetchval(
-            "SELECT organization_id FROM users WHERE external_id = $1",
-            f"{mdl_prefix}admin",
+        admin_id = await conn.fetchval(
+            "SELECT id FROM users WHERE external_id = $1", f"{mdl_prefix}admin"
         )
-    owner = await UserRepository(db_pool).create(
-        external_id=f"{mdl_prefix}owner",
-        provider="local",
-        organization_id=organization_id,
-        email=f"{mdl_prefix}owner@test.com",
-    )
+
+    model_id = f"{mdl_prefix}ownerless"
     create = await models_client.post(
         "/api/admin/models",
         json={
-            "model_id": f"{mdl_prefix}user-owned",
+            "model_id": model_id,
             "provider": "openai",
-            "name": "User Owned",
-            "owner_user_id": str(owner["id"]),
+            "name": "Org Model",
+            "owner_user_id": str(uuid4()),
         },
     )
-    assert create.status_code == 201
-    assert create.json()["owner_user_id"] == str(owner["id"])
+    assert create.status_code == 422
+    assert "not permitted" in create.text
+    assert "owner_user_id" in create.text
 
-    other_org = await OrganizationRepository(db_pool).create(name=f"{mdl_prefix}other-org")
-    outsider = await UserRepository(db_pool).create(
-        external_id=f"{mdl_prefix}outsider",
-        provider="local",
-        organization_id=other_org["id"],
-        email=f"{mdl_prefix}outsider@test.com",
+    plain = await models_client.post(
+        "/api/admin/models",
+        json={
+            "model_id": model_id,
+            "provider": "openai",
+            "name": "Org Model",
+        },
     )
+    assert plain.status_code == 201
+    model = await ModelRepository(db_pool).get_model(model_id)
+    assert model["owner_user_id"] is None
+
+    # Seed a stale owner out-of-band; the UPDATE trigger files an owner
+    # clearance for it, and the next API edit must sweep both away.
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE models SET owner_user_id = $2 WHERE id = $1",
+            model_id,
+            admin_id,
+        )
+    async with db_pool.acquire() as conn:
+        owner_rows = await conn.fetch(
+            """SELECT 1 FROM auth_clearances acl JOIN models m ON m.auth_id = acl.auth_id
+               WHERE m.id = $1 AND acl.role = 'owner'""",
+            model_id,
+        )
+    assert owner_rows
+
     update = await models_client.put(
-        f"/api/admin/models/{mdl_prefix}user-owned",
-        json={"owner_user_id": str(outsider["id"])},
+        f"/api/admin/models/{model_id}",
+        json={"name": "Org Model v2"},
     )
-    assert update.status_code == 400
-    assert update.json()["detail"] == "Owner user is not in this organization"
+    assert update.status_code == 200
+    assert update.json()["owner_user_id"] is None
+    assert update.json()["owner_group_id"] is None
+    async with db_pool.acquire() as conn:
+        owner_rows = await conn.fetch(
+            """SELECT 1 FROM auth_clearances acl JOIN models m ON m.auth_id = acl.auth_id
+               WHERE m.id = $1 AND acl.role = 'owner'""",
+            model_id,
+        )
+    assert owner_rows == []
 
 
 @pytest.mark.asyncio
@@ -246,3 +273,32 @@ async def test_discover_models_endpoint_syncs_configured_providers(
 
     assert resp.status_code == 200
     assert resp.json()["upserted_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_model_management_is_org_predicated(models_client, mdl_prefix, db_pool):
+    """Management by-ID reads/writes never reach another organization's model."""
+    from lucent.db import OrganizationRepository
+    from lucent.db.models import ModelRepository
+
+    repo = ModelRepository(db_pool)
+    other_org = await OrganizationRepository(db_pool).create(name=f"{mdl_prefix}other-org")
+    other_model_id = f"{mdl_prefix}foreign"
+    await repo.create_model(
+        model_id=other_model_id,
+        provider="openai",
+        name="Foreign",
+        category="general",
+        org_id=str(other_org["id"]),
+    )
+
+    update = await models_client.put(
+        f"/api/admin/models/{other_model_id}", json={"name": "Hijack"}
+    )
+    assert update.status_code == 404
+
+    updated = await repo.get_model(other_model_id, str(other_org["id"]))
+    assert updated["name"] == "Foreign"
+
+    assert await repo.delete_model(other_model_id, str(uuid4())) is False
+    assert await repo.get_model(other_model_id, str(other_org["id"])) is not None

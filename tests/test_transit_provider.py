@@ -277,6 +277,11 @@ class TestGet:
 # ---------------------------------------------------------------------------
 
 
+def _calls_with_sql(conn, needle: str):
+    """execute() calls whose SQL contains *needle* (GUC preamble/scrub excluded)."""
+    return [c for c in conn.execute.call_args_list if needle in str(c.args[0])]
+
+
 class TestSet:
     @pytest.mark.asyncio
     async def test_set_inserts_new_secret(self):
@@ -292,8 +297,15 @@ class TestSet:
             mock_post.return_value = encrypt_resp
             await provider.set("api-key", "my-secret", _user_scope())
 
-        # First call is UPDATE (returns UPDATE 0), second is INSERT
-        assert conn.execute.call_count == 2
+        # Upsert contract: UPDATE first; when it matches no row ("UPDATE 0")
+        # an INSERT follows in the same transaction.
+        updates = _calls_with_sql(conn, "UPDATE secrets")
+        inserts = _calls_with_sql(conn, "INSERT INTO secrets")
+        assert len(updates) == 1
+        assert len(inserts) == 1
+        assert updates[0].args[-1] == "api-key"  # key is the UPDATE's last parameter
+        assert inserts[0].args[1] == "api-key"
+        assert conn.transaction.called
 
     @pytest.mark.asyncio
     async def test_set_updates_existing_secret(self):
@@ -309,8 +321,12 @@ class TestSet:
             mock_post.return_value = encrypt_resp
             await provider.set("api-key", "new-value", _user_scope())
 
-        # Only UPDATE, no INSERT
-        assert conn.execute.call_count == 1
+        # Row matched: ciphertext written via UPDATE only, no INSERT.
+        updates = _calls_with_sql(conn, "UPDATE secrets")
+        assert len(updates) == 1
+        assert updates[0].args[-2] == b"vault:v1:updated"
+        assert updates[0].args[-1] == "api-key"
+        assert not _calls_with_sql(conn, "INSERT INTO secrets")
 
     @pytest.mark.asyncio
     async def test_set_stores_ciphertext_as_bytes(self):
@@ -326,9 +342,10 @@ class TestSet:
             mock_post.return_value = encrypt_resp
             await provider.set("key", "value", _user_scope())
 
-        # Check the INSERT call contains bytes
-        insert_call = conn.execute.call_args_list[1]
-        encrypted_arg = insert_call[0][2]  # second positional arg is encrypted_value
+        # Check the INSERT call stores the ciphertext as UTF-8 bytes
+        # (third positional arg after the SQL and the key).
+        insert_call = _calls_with_sql(conn, "INSERT INTO secrets")[0]
+        encrypted_arg = insert_call.args[2]
         assert isinstance(encrypted_arg, bytes)
         assert encrypted_arg == b"vault:v1:ct"
 

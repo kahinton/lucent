@@ -70,7 +70,9 @@ async def group_detail(request: Request, group_id: UUID):
         raise HTTPException(status_code=404, detail="Group not found")
 
     members = await repo.list_members(str(group_id), org_id)
-    is_group_admin = await repo.is_group_admin(str(user.id), str(group_id))
+    is_group_admin = await repo.is_group_admin(
+        str(user.id), str(group_id), organization_id=org_id
+    )
 
     # Get org users for the add-member dropdown (exclude current members)
     user_repo = UserRepository(pool)
@@ -169,7 +171,9 @@ async def edit_group(
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    is_group_admin = await repo.is_group_admin(str(user.id), str(group_id))
+    is_group_admin = await repo.is_group_admin(
+        str(user.id), str(group_id), organization_id=org_id
+    )
     if not _can_manage(user) and not is_group_admin:
         raise HTTPException(status_code=403, detail="Permission denied")
 
@@ -246,7 +250,9 @@ async def add_member(
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    is_group_admin = await repo.is_group_admin(str(user.id), str(group_id))
+    is_group_admin = await repo.is_group_admin(
+        str(user.id), str(group_id), organization_id=org_id
+    )
     if not _can_manage(user) and not is_group_admin:
         raise HTTPException(status_code=403, detail="Permission denied")
 
@@ -263,7 +269,9 @@ async def add_member(
                 status_code=303,
             )
 
-        await repo.add_member(str(group_id), user_id.strip(), role=role)
+        await repo.add_member(
+            str(group_id), user_id.strip(), role=role, organization_id=org_id
+        )
         audit_repo = AdminAuditRepository(pool)
         await audit_repo.log_for_user(
             user, request,
@@ -303,11 +311,13 @@ async def remove_member(request: Request, group_id: UUID, member_id: UUID):
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    is_group_admin = await repo.is_group_admin(str(user.id), str(group_id))
+    is_group_admin = await repo.is_group_admin(
+        str(user.id), str(group_id), organization_id=org_id
+    )
     if not _can_manage(user) and not is_group_admin:
         raise HTTPException(status_code=403, detail="Permission denied")
 
-    if not await repo.remove_member(str(group_id), str(member_id)):
+    if not await repo.remove_member(str(group_id), str(member_id), organization_id=org_id):
         return RedirectResponse(
             f"/settings/groups/{group_id}?error={quote('Member not found.')}", status_code=303
         )

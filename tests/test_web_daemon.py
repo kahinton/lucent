@@ -289,6 +289,19 @@ async def test_feedback_approve_fires_pg_notify(client, review_memory, db_pool):
     def _on_notify(_conn, _pid, channel, payload):
         notifications.append((channel, payload))
 
+    def _feedback_wakes():
+        """The channel is shared with live-system triggers (request inserts,
+        review creation), so select this memory's feedback wake by payload."""
+        wakes = []
+        for _channel, payload_text in notifications:
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") == "feedback" and payload.get("memory_id") == str(memory_id):
+                wakes.append(payload)
+        return wakes
+
     async with db_pool.acquire() as listener:
         await listener.add_listener("request_ready", _on_notify)
         try:
@@ -302,11 +315,10 @@ async def test_feedback_approve_fires_pg_notify(client, review_memory, db_pool):
         finally:
             await listener.remove_listener("request_ready", _on_notify)
 
-    assert len(notifications) >= 1
-    payload = json.loads(notifications[0][1])
-    assert payload["type"] == "feedback"
+    wakes = _feedback_wakes()
+    assert len(wakes) >= 1
+    payload = wakes[0]
     assert payload["action"] == "approve"
-    assert payload["memory_id"] == str(memory_id)
 
 
 @pytest.mark.asyncio
@@ -321,6 +333,19 @@ async def test_feedback_reject_fires_pg_notify(client, review_memory, db_pool):
     def _on_notify(_conn, _pid, channel, payload):
         notifications.append((channel, payload))
 
+    def _feedback_wakes():
+        """The channel is shared with live-system triggers (request inserts,
+        review creation), so select this memory's feedback wake by payload."""
+        wakes = []
+        for _channel, payload_text in notifications:
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") == "feedback" and payload.get("memory_id") == str(memory_id):
+                wakes.append(payload)
+        return wakes
+
     async with db_pool.acquire() as listener:
         await listener.add_listener("request_ready", _on_notify)
         try:
@@ -333,9 +358,9 @@ async def test_feedback_reject_fires_pg_notify(client, review_memory, db_pool):
         finally:
             await listener.remove_listener("request_ready", _on_notify)
 
-    assert len(notifications) >= 1
-    payload = json.loads(notifications[0][1])
-    assert payload["type"] == "feedback"
+    wakes = _feedback_wakes()
+    assert len(wakes) >= 1
+    payload = wakes[0]
     assert payload["action"] == "reject"
 
 
@@ -343,6 +368,7 @@ async def test_feedback_reject_fires_pg_notify(client, review_memory, db_pool):
 async def test_feedback_comment_does_not_fire_pg_notify(client, review_memory, db_pool):
     """Comment action should NOT fire pg_notify — it relies on polling."""
     import asyncio
+    import json
 
     memory_id = review_memory["id"]
     notifications: list[tuple[str, str]] = []
@@ -362,7 +388,18 @@ async def test_feedback_comment_does_not_fire_pg_notify(client, review_memory, d
         finally:
             await listener.remove_listener("request_ready", _on_notify)
 
-    assert len(notifications) == 0, "comment should not trigger wake notify"
+    # The channel is shared with live-system traffic (request-insert triggers,
+    # review-creation notifies), so assert on feedback wakes for THIS memory
+    # rather than channel silence.
+    for payload_text in notifications:
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            continue
+        assert not (
+            payload.get("type") == "feedback"
+            and payload.get("memory_id") == str(memory_id)
+        ), "comment should not trigger wake notify"
 
 
 @pytest.mark.asyncio

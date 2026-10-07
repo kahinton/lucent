@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from typing import Any, Literal
-from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lucent.api.deps import AuthenticatedUser
 from lucent.db import get_pool
@@ -30,8 +29,9 @@ class ModelUpsertRequest(BaseModel):
     reasoning_efforts: list[str] = Field(default_factory=list)
     is_enabled: bool = True
     engine: Literal["copilot", "langchain"] | None = None
-    owner_user_id: UUID | None = None
-    owner_group_id: UUID | None = None
+    # Models belong to the organization (131): owner fields are retired, and
+    # old payloads carrying them are rejected loudly rather than ignored.
+    model_config = ConfigDict(extra="forbid")
 
     @field_validator("engine", mode="before")
     @classmethod
@@ -57,8 +57,8 @@ class ModelPatchRequest(BaseModel):
     reasoning_efforts: list[str] | None = None
     is_enabled: bool | None = None
     engine: Literal["copilot", "langchain"] | None = None
-    owner_user_id: UUID | None = None
-    owner_group_id: UUID | None = None
+    # See ModelUpsertRequest: owner fields are retired (131).
+    model_config = ConfigDict(extra="forbid")
 
     @field_validator("engine", mode="before")
     @classmethod
@@ -118,42 +118,19 @@ async def _refresh_runtime_registry(pool) -> None:
         return
 
 
-async def _validate_model_owners(
-    pool,
-    organization_id: UUID | None,
-    owner_user_id: UUID | None,
-    owner_group_id: UUID | None,
-) -> None:
-    if owner_user_id and owner_group_id:
-        raise HTTPException(status_code=400, detail="Choose either a user or group owner")
-    if not organization_id and (owner_user_id or owner_group_id):
-        raise HTTPException(status_code=400, detail="Model ownership requires an organization")
-    if owner_user_id:
-        from lucent.db.user import UserRepository
-
-        owner = await UserRepository(pool).get_by_id(owner_user_id)
-        if not owner or owner["organization_id"] != organization_id:
-            raise HTTPException(status_code=400, detail="Owner user is not in this organization")
-    if owner_group_id:
-        from lucent.db.groups import GroupRepository
-
-        owner = await GroupRepository(pool).get_group(str(owner_group_id), str(organization_id))
-        if not owner:
-            raise HTTPException(status_code=400, detail="Owner group is not in this organization")
-
-
 @router.get("")
 async def list_models(user: AuthenticatedUser, limit: int = 100, offset: int = 0):
     user.require_scope("read")
+    _require_admin_user(user)
     pool = await get_pool()
-    repo = ModelRepository(pool)
     if not user.organization_id:
         return {"items": [], "total_count": 0, "offset": offset, "limit": limit, "has_more": False}
-    role = user.role.value if hasattr(user.role, "value") else str(user.role)
-    return await repo.list_models_accessible_by(
-        str(user.id),
-        str(user.organization_id),
-        requester_role=role,
+    # Management semantics: admins must see every org model — enabled and
+    # disabled, granted or not — so they can manage grants and the approval
+    # toggle. *Use* is what the clearance-driven paths (picker, chat turn,
+    # daemon) decide; this view stays org-scoped legacy.
+    return await ModelRepository(pool).list_models(
+        org_id=str(user.organization_id),
         enabled_only=False,
         limit=limit,
         offset=offset,
@@ -166,15 +143,11 @@ async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
     _require_admin_user(user)
     pool = await get_pool()
     repo = ModelRepository(pool)
+    # Existence check stays global on purpose: model IDs are unique across
+    # the whole registry, so an ID taken by another org must still 409.
     existing = await repo.get_model(body.model_id)
     if existing:
         raise HTTPException(status_code=409, detail="Model ID already exists")
-    await _validate_model_owners(
-        pool,
-        user.organization_id,
-        body.owner_user_id,
-        body.owner_group_id,
-    )
     try:
         warnings = validate_engine_override(body.provider, body.engine)
     except ValueError as e:
@@ -196,8 +169,6 @@ async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
         engine=body.engine,
         discovery_source="manual",
         is_custom=True,
-        owner_user_id=str(body.owner_user_id) if body.owner_user_id else None,
-        owner_group_id=str(body.owner_group_id) if body.owner_group_id else None,
     )
     await _refresh_runtime_registry(pool)
     return _to_response(model, warnings=warnings)
@@ -227,25 +198,11 @@ async def update_model(model_id: str, body: ModelPatchRequest, user: Authenticat
     _require_admin_user(user)
     pool = await get_pool()
     repo = ModelRepository(pool)
-    existing = await repo.get_model(model_id)
+    # Management by-ID reads are org-predicated: another org's model by ID
+    # is simply absent.
+    existing = await repo.get_model(model_id, str(user.organization_id))
     if not existing:
         raise HTTPException(status_code=404, detail="Model not found")
-    owner_user_id = (
-        body.owner_user_id
-        if "owner_user_id" in body.model_fields_set
-        else existing.get("owner_user_id")
-    )
-    owner_group_id = (
-        body.owner_group_id
-        if "owner_group_id" in body.model_fields_set
-        else existing.get("owner_group_id")
-    )
-    await _validate_model_owners(
-        pool,
-        user.organization_id,
-        owner_user_id,
-        owner_group_id,
-    )
     provider = body.provider if "provider" in body.model_fields_set else existing["provider"]
     engine = body.engine if "engine" in body.model_fields_set else existing.get("engine")
     try:
@@ -253,14 +210,18 @@ async def update_model(model_id: str, body: ModelPatchRequest, user: Authenticat
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     updates = body.model_dump(exclude_unset=True)
-    if "owner_user_id" in updates or "owner_group_id" in updates:
-        updates["organization_id"] = user.organization_id
+    # Models belong to the organization (131): an edit through this route
+    # clears any stale ownership instead of preserving it.
+    updates["owner_user_id"] = None
+    updates["owner_group_id"] = None
     # Any save through this route is a human-authored edit: flag the row so
     # sync_discovered_models' manual/is_custom CASE guards preserve it from
     # being overwritten on the next provider sync.
     if existing.get("discovery_source") != "manual" and not existing.get("is_custom"):
         updates["is_custom"] = True
-    updated = await repo.update_model(model_id, **updates)
+    updated = await repo.update_model(
+        model_id, organization_id=str(user.organization_id), **updates
+    )
     if not updated:
         raise HTTPException(status_code=404, detail="Model not found")
     await _refresh_runtime_registry(pool)

@@ -77,21 +77,29 @@ class TestMemoryRepository:
                 organization_id=test_user["organization_id"],
             )
 
-    async def test_get_memory(self, db_pool, test_memory):
+    async def test_get_memory(self, db_pool, test_memory, test_user):
         """Test retrieving a memory by ID."""
         repo = MemoryRepository(db_pool)
 
-        memory = await repo.get(test_memory["id"])
+        memory = await repo.get(
+            test_memory["id"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
 
         assert memory is not None
         assert memory["id"] == test_memory["id"]
         assert memory["content"] == test_memory["content"]
 
-    async def test_get_nonexistent_memory(self, db_pool):
+    async def test_get_nonexistent_memory(self, db_pool, test_user):
         """Test retrieving a memory that doesn't exist."""
         repo = MemoryRepository(db_pool)
 
-        memory = await repo.get(uuid4())
+        memory = await repo.get(
+            uuid4(),
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
 
         assert memory is None
 
@@ -135,7 +143,12 @@ class TestMemoryRepository:
         )
 
         # Share it using the set_shared method
-        await repo.set_shared(memory["id"], other_user["id"], shared=True)
+        await repo.set_shared(
+            memory["id"],
+            other_user["id"],
+            shared=True,
+            organization_id=test_organization["id"],
+        )
 
         # Should be accessible to test_user in same org
         accessible = await repo.get_accessible(
@@ -193,7 +206,11 @@ class TestMemoryRepository:
             org_id=str(test_organization["id"]),
             created_by=str(test_user["id"]),
         )
-        await group_repo.add_member(str(group["id"]), str(ungranted_user["id"]))
+        await group_repo.add_member(
+            str(group["id"]),
+            str(ungranted_user["id"]),
+            organization_id=str(test_organization["id"]),
+        )
         await repo.grant_access(
             memory["id"],
             test_organization["id"],
@@ -205,9 +222,13 @@ class TestMemoryRepository:
             memory["id"], ungranted_user["id"], test_organization["id"]
         ) is not None
 
-    async def test_daemon_owned_memory_is_always_visible_to_owner(
+    async def test_daemon_authored_memory_is_private_until_shared(
         self, db_pool, test_user, test_organization, clean_test_data
     ):
+        """Clearance semantics: a daemon-authored memory stays private to its
+        author until the org share files a read clearance — admins and owners
+        keep their org-wide management view, but the clearance read path
+        only follows clearances."""
         repo = MemoryRepository(db_pool)
         user_repo = UserRepository(db_pool)
         daemon_user = await user_repo.create(
@@ -232,13 +253,25 @@ class TestMemoryRepository:
             email=f"{clean_test_data}owner@test.com",
             role="owner",
         )
+        member_user = await user_repo.create(
+            external_id=f"{clean_test_data}member",
+            provider="local",
+            organization_id=test_organization["id"],
+            email=f"{clean_test_data}member@test.com",
+            role="member",
+        )
+        # Daemon writes are attributed to the org's owner (the daemon works
+        # for the owner) and the daemon key keeps a read clearance on what it
+        # authored, so its org_shared_only searches still reach it.
         memory = await repo.create(
-            username=f"{clean_test_data}daemon",
+            username="Lucent Daemon",
             type="experience",
             content=f"{clean_test_data} daemon-only private memory",
-            user_id=daemon_user["id"],
+            tags=["daemon", "review-outcome"],
+            user_id=owner_user["id"],
             organization_id=test_organization["id"],
             shared=False,
+            daemon_reader_id=daemon_user["id"],
         )
 
         member_result = await repo.get_accessible(
@@ -267,6 +300,16 @@ class TestMemoryRepository:
         )
         assert memory["id"] in {result["id"] for result in owner_search["memories"]}
 
+        daemon_search = await repo.search(
+            query=f"{clean_test_data} daemon-only",
+            requesting_user_id=daemon_user["id"],
+            requesting_org_id=test_organization["id"],
+            memory_scope="org_shared_only",
+        )
+        assert memory["id"] in {result["id"] for result in daemon_search["memories"]}
+
+        # A daemon-tagged memory created with shared=True files an org read
+        # clearance: the share, not the daemon tag, drives member visibility.
         scoped_daemon_memory = await repo.create(
             username="Lucent Daemon",
             type="experience",
@@ -276,12 +319,16 @@ class TestMemoryRepository:
             organization_id=test_organization["id"],
             shared=True,
         )
-        member_scoped_daemon_result = await repo.get_accessible(
-            scoped_daemon_memory["id"],
-            test_user["id"],
-            test_organization["id"],
-        )
-        assert member_scoped_daemon_result is None
+        for member in (test_user, member_user):
+            shared_result = await repo.get_accessible(
+                scoped_daemon_memory["id"],
+                member["id"],
+                test_organization["id"],
+            )
+            assert shared_result is not None
+        # Clearance reads follow grants, not role: the admin sees the shared
+        # memory through the org grant, but the private daemon memory through
+        # nothing at all.
         admin_scoped_daemon_result = await repo.get_accessible(
             scoped_daemon_memory["id"],
             admin_user["id"],
@@ -289,15 +336,15 @@ class TestMemoryRepository:
         )
         assert admin_scoped_daemon_result is not None
 
-        for privileged_user in (admin_user, owner_user, daemon_user):
+        for viewer in (admin_user, member_user):
             accessible = await repo.get_accessible(
-                memory["id"], privileged_user["id"], test_organization["id"]
+                memory["id"], viewer["id"], test_organization["id"]
             )
-            if privileged_user["id"] in {owner_user["id"], daemon_user["id"]}:
-                assert accessible is not None
-            else:
-                assert accessible is None
+            assert accessible is None, f"{viewer['id']} reached a private daemon memory"
 
+        # The owner's view always follows its own clearance: the author stays
+        # visible even through the org-shared-only scope (that scope only
+        # narrows daemon keys, which see org grants alone).
         owner_scoped_result = await repo.get_accessible(
             memory["id"],
             owner_user["id"],
@@ -314,7 +361,7 @@ class TestMemoryRepository:
         )
         assert admin_scoped_result is None
 
-    async def test_update_memory(self, db_pool, test_memory):
+    async def test_update_memory(self, db_pool, test_memory, test_user):
         """Test updating a memory."""
         repo = MemoryRepository(db_pool)
 
@@ -322,6 +369,8 @@ class TestMemoryRepository:
             test_memory["id"],
             content="Updated content",
             importance=9,
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
         )
 
         assert updated is not None
@@ -329,16 +378,24 @@ class TestMemoryRepository:
         assert updated["importance"] == 9
         assert updated["updated_at"] > test_memory["updated_at"]
 
-    async def test_soft_delete_memory(self, db_pool, test_memory):
+    async def test_soft_delete_memory(self, db_pool, test_memory, test_user):
         """Test soft deleting a memory."""
         repo = MemoryRepository(db_pool)
 
-        deleted = await repo.delete(test_memory["id"])
+        deleted = await repo.delete(
+            test_memory["id"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
 
         assert deleted is True
 
         # Should not be retrievable via get
-        retrieved = await repo.get(test_memory["id"])
+        retrieved = await repo.get(
+            test_memory["id"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
         assert retrieved is None
 
     async def test_search_memories(self, db_pool, test_user, clean_test_data):
@@ -582,31 +639,41 @@ class TestMemoryRepository:
             organization_id=test_organization["id"],
         )
 
-        result = await repo.get_individual_memory_for_user(test_user["id"])
+        result = await repo.get_individual_memory_for_user(
+            test_user["id"], organization_id=test_user["organization_id"]
+        )
 
         assert result is not None
         assert result["type"] == "individual"
         assert result["user_id"] == test_user["id"]
 
-    async def test_delete_nonexistent_memory(self, db_pool):
+    async def test_delete_nonexistent_memory(self, db_pool, test_user):
         """Test deleting a memory that doesn't exist returns False."""
         repo = MemoryRepository(db_pool)
 
-        result = await repo.delete(uuid4())
+        result = await repo.delete(
+            uuid4(),
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
 
         assert result is False
 
-    async def test_update_no_changes(self, db_pool, test_memory):
+    async def test_update_no_changes(self, db_pool, test_memory, test_user):
         """Test update with no fields returns existing memory unchanged."""
         repo = MemoryRepository(db_pool)
 
-        result = await repo.update(test_memory["id"])
+        result = await repo.update(
+            test_memory["id"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
 
         assert result is not None
         assert result["content"] == test_memory["content"]
         assert result["importance"] == test_memory["importance"]
 
-    async def test_update_increments_version(self, db_pool, test_memory):
+    async def test_update_increments_version(self, db_pool, test_memory, test_user):
         """Test that update increments the version number."""
         repo = MemoryRepository(db_pool)
 
@@ -615,6 +682,8 @@ class TestMemoryRepository:
         updated = await repo.update(
             test_memory["id"],
             content="Version bump test",
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
         )
 
         assert updated is not None
@@ -690,7 +759,7 @@ class TestMemoryRepository:
         assert result is not None
         assert result["id"] == memory["id"]
 
-    async def test_update_with_version_conflict(self, db_pool, test_memory):
+    async def test_update_with_version_conflict(self, db_pool, test_memory, test_user):
         """Test that expected_version mismatch raises VersionConflictError."""
         from lucent.db import VersionConflictError
 
@@ -701,12 +770,14 @@ class TestMemoryRepository:
                 test_memory["id"],
                 content="Should fail",
                 expected_version=999,
+                organization_id=test_user["organization_id"],
+                user_id=test_user["id"],
             )
 
         assert exc_info.value.memory_id == test_memory["id"]
         assert exc_info.value.expected_version == 999
 
-    async def test_update_with_correct_version(self, db_pool, test_memory):
+    async def test_update_with_correct_version(self, db_pool, test_memory, test_user):
         """Test that update succeeds when expected_version matches."""
         repo = MemoryRepository(db_pool)
 
@@ -714,6 +785,8 @@ class TestMemoryRepository:
             test_memory["id"],
             content="Version matched",
             expected_version=test_memory["version"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
         )
 
         assert updated is not None
@@ -734,7 +807,9 @@ class TestMemoryRepository:
             organization_id=test_user["organization_id"],
         )
 
-        claimed = await repo.claim_task(task["id"], "instance-1")
+        claimed = await repo.claim_task(
+            task["id"], "instance-1", org_id=str(test_user["organization_id"])
+        )
 
         assert claimed is not None
         assert "pending" not in claimed["tags"]
@@ -754,8 +829,12 @@ class TestMemoryRepository:
             organization_id=test_user["organization_id"],
         )
 
-        await repo.claim_task(task["id"], "instance-1")
-        second_claim = await repo.claim_task(task["id"], "instance-2")
+        await repo.claim_task(
+            task["id"], "instance-1", org_id=str(test_user["organization_id"])
+        )
+        second_claim = await repo.claim_task(
+            task["id"], "instance-2", org_id=str(test_user["organization_id"])
+        )
 
         assert second_claim is None
 
@@ -773,8 +852,12 @@ class TestMemoryRepository:
             organization_id=test_user["organization_id"],
         )
 
-        await repo.claim_task(task["id"], "instance-1")
-        released = await repo.release_claim(task["id"], "instance-1")
+        await repo.claim_task(
+            task["id"], "instance-1", org_id=str(test_user["organization_id"])
+        )
+        released = await repo.release_claim(
+            task["id"], "instance-1", org_id=str(test_user["organization_id"])
+        )
 
         assert released is not None
         assert "pending" in released["tags"]
@@ -794,8 +877,12 @@ class TestMemoryRepository:
             organization_id=test_user["organization_id"],
         )
 
-        await repo.claim_task(task["id"], "instance-1")
-        released = await repo.release_claim(task["id"], "instance-2")
+        await repo.claim_task(
+            task["id"], "instance-1", org_id=str(test_user["organization_id"])
+        )
+        released = await repo.release_claim(
+            task["id"], "instance-2", org_id=str(test_user["organization_id"])
+        )
 
         assert released is None
 
@@ -803,19 +890,39 @@ class TestMemoryRepository:
         """Test toggling the shared flag on a memory."""
         repo = MemoryRepository(db_pool)
 
-        shared = await repo.set_shared(test_memory["id"], test_user["id"], shared=True)
+        shared = await repo.set_shared(
+            test_memory["id"],
+            test_user["id"],
+            shared=True,
+            organization_id=test_user["organization_id"],
+        )
         assert shared is not None
-        assert shared["shared"] is True
+        # Shared state is the org read clearance (shared column retired in 132).
+        assert shared["id"] in await repo.org_shared_ids(
+            [test_memory["id"]], test_user["organization_id"]
+        )
 
-        unshared = await repo.set_shared(test_memory["id"], test_user["id"], shared=False)
+        unshared = await repo.set_shared(
+            test_memory["id"],
+            test_user["id"],
+            shared=False,
+            organization_id=test_user["organization_id"],
+        )
         assert unshared is not None
-        assert unshared["shared"] is False
+        assert unshared["id"] not in await repo.org_shared_ids(
+            [test_memory["id"]], test_user["organization_id"]
+        )
 
-    async def test_set_shared_non_owner_denied(self, db_pool, test_memory):
+    async def test_set_shared_non_owner_denied(self, db_pool, test_memory, test_user):
         """Test that non-owner cannot change shared status."""
         repo = MemoryRepository(db_pool)
 
-        result = await repo.set_shared(test_memory["id"], uuid4(), shared=True)
+        result = await repo.set_shared(
+            test_memory["id"],
+            uuid4(),
+            shared=True,
+            organization_id=test_user["organization_id"],
+        )
         assert result is None
 
     async def test_search_with_importance_filter(self, db_pool, test_user, clean_test_data):
@@ -954,7 +1061,9 @@ class TestUserRepository:
         user_memories = [m for m in result["memories"] if m["user_id"] == user["id"]]
         assert len(user_memories) >= 1
         assert user_memories[0]["type"] == "individual"
-        assert user_memories[0]["shared"] is False
+        assert not await memory_repo.is_org_shared(
+            user_memories[0]["id"], test_organization["id"]
+        )
 
     async def test_get_user_by_id(self, db_pool, test_user):
         """Test retrieving a user by ID."""
@@ -1038,7 +1147,9 @@ class TestUserRepository:
         assert await user_repo.get_by_id(user["id"]) is None
 
         # Individual memory should be soft-deleted (not retrievable)
-        individual = await memory_repo.get_individual_memory_for_user(user["id"])
+        individual = await memory_repo.get_individual_memory_for_user(
+            user["id"], organization_id=test_organization["id"]
+        )
         assert individual is None
 
     async def test_update_role(self, db_pool, test_user):
@@ -1059,6 +1170,21 @@ class TestUserRepository:
         assert len(users) >= 1
         user_ids = [u["id"] for u in users]
         assert test_user["id"] in user_ids
+
+    async def test_get_display_names_by_ids(
+        self, db_pool, test_user, test_organization
+    ):
+        """Test looking up display names within an organization."""
+        repo = UserRepository(db_pool)
+
+        names = await repo.get_display_names_by_ids(
+            [UUID(str(test_user["id"]))],
+            organization_id=test_organization["id"],
+        )
+        expected = (
+            test_user["display_name"] or test_user["email"] or str(test_user["id"])
+        )
+        assert names == {str(test_user["id"]): expected}
 
     async def test_get_by_organization_with_role_filter(
         self, db_pool, test_user, test_organization
@@ -1228,12 +1354,16 @@ class TestApiKeyRepository:
             name="Get By ID Key",
         )
 
-        found = await repo.get_by_id(key_record["id"], test_user["id"])
+        found = await repo.get_by_id(
+            key_record["id"], test_user["id"], organization_id=test_user["organization_id"]
+        )
         assert found is not None
         assert found["id"] == key_record["id"]
 
         # Different user should get None
-        not_found = await repo.get_by_id(key_record["id"], uuid4())
+        not_found = await repo.get_by_id(
+            key_record["id"], uuid4(), organization_id=test_user["organization_id"]
+        )
         assert not_found is None
 
     async def test_update_name(self, db_pool, test_user):
@@ -1314,16 +1444,20 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="update",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
             changed_fields=["content"],
         )
         await repo.log(
             memory_id=test_memory["id"],
             action_type="update",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
             changed_fields=["tags"],
         )
 
-        result = await repo.get_by_memory_id(test_memory["id"])
+        result = await repo.get_by_memory_id(
+            test_memory["id"], organization_id=test_user["organization_id"]
+        )
 
         assert result["total_count"] >= 2
         assert len(result["entries"]) >= 2
@@ -1341,10 +1475,16 @@ class TestAuditRepository:
                 memory_id=test_memory["id"],
                 action_type="update",
                 user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
                 changed_fields=[f"field_{i}"],
             )
 
-        result = await repo.get_by_memory_id(test_memory["id"], limit=2, offset=0)
+        result = await repo.get_by_memory_id(
+            test_memory["id"],
+            limit=2,
+            offset=0,
+            organization_id=test_user["organization_id"],
+        )
 
         assert len(result["entries"]) == 2
         assert result["has_more"] is True
@@ -1360,7 +1500,9 @@ class TestAuditRepository:
             organization_id=test_user["organization_id"],
         )
 
-        result = await repo.get_by_user_id(test_user["id"])
+        result = await repo.get_by_user_id(
+            test_user["id"], organization_id=test_user["organization_id"]
+        )
 
         assert result["total_count"] >= 1
         assert all(e["user_id"] == test_user["id"] for e in result["entries"])
@@ -1373,14 +1515,20 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="create",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
         await repo.log(
             memory_id=test_memory["id"],
             action_type="update",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
-        result = await repo.get_by_user_id(test_user["id"], action_type="create")
+        result = await repo.get_by_user_id(
+            test_user["id"],
+            action_type="create",
+            organization_id=test_user["organization_id"],
+        )
 
         assert result["total_count"] >= 1
         assert all(e["action_type"] == "create" for e in result["entries"])
@@ -1428,14 +1576,19 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="create",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
         await repo.log(
             memory_id=test_memory["id"],
             action_type="delete",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
-        entries = await repo.get_recent(action_types=["delete"])
+        entries = await repo.get_recent(
+            action_types=["delete"],
+            organization_id=test_user["organization_id"],
+        )
 
         assert all(e["action_type"] == "delete" for e in entries)
 
@@ -1448,6 +1601,7 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="create",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
             version=1,
             snapshot={"content": "v1"},
         )
@@ -1455,11 +1609,14 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="update",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
             version=2,
             snapshot={"content": "v2"},
         )
 
-        result = await repo.get_versions(test_memory["id"])
+        result = await repo.get_versions(
+            test_memory["id"], organization_id=test_user["organization_id"]
+        )
 
         assert result["total_count"] >= 2
         # Versions should be ordered descending
@@ -1475,21 +1632,28 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="update",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
             version=1,
             snapshot=snapshot_data,
         )
 
-        result = await repo.get_version_snapshot(test_memory["id"], version=1)
+        result = await repo.get_version_snapshot(
+            test_memory["id"], version=1, organization_id=test_user["organization_id"]
+        )
 
         assert result is not None
         assert result["version"] == 1
         assert result["snapshot"] == snapshot_data
 
-    async def test_get_version_snapshot_not_found(self, db_pool, test_memory):
+    async def test_get_version_snapshot_not_found(self, db_pool, test_memory, test_user):
         """Test that missing version returns None."""
         repo = AuditRepository(db_pool)
 
-        result = await repo.get_version_snapshot(test_memory["id"], version=9999)
+        result = await repo.get_version_snapshot(
+            test_memory["id"],
+            version=9999,
+            organization_id=test_user["organization_id"],
+        )
 
         assert result is None
 
@@ -1501,6 +1665,7 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="update",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
             notes="Manual correction by admin",
             context={"ip": "127.0.0.1", "user_agent": "test"},
         )
@@ -1516,11 +1681,14 @@ class TestAuditRepository:
             memory_id=test_memory["id"],
             action_type="update",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
         # Query with a future date should return nothing
         future = datetime(2099, 1, 1, tzinfo=timezone.utc)
-        result = await repo.get_by_user_id(test_user["id"], since=future)
+        result = await repo.get_by_user_id(
+            test_user["id"], since=future, organization_id=test_user["organization_id"]
+        )
         assert result["total_count"] == 0
 
 
@@ -1543,7 +1711,11 @@ class TestAccessRepository:
         from lucent.db import MemoryRepository
 
         mem_repo = MemoryRepository(db_pool)
-        memory = await mem_repo.get(test_memory["id"])
+        memory = await mem_repo.get(
+            test_memory["id"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
 
         # Note: memory might be None if soft-deleted, but last_accessed_at should be set
         # In our case, test_memory should still be accessible
@@ -1580,7 +1752,11 @@ class TestAccessRepository:
 
         # Verify last_accessed_at was updated on all memories
         for mid in memory_ids:
-            m = await mem_repo.get(mid)
+            m = await mem_repo.get(
+                mid,
+                organization_id=test_user["organization_id"],
+                user_id=test_user["id"],
+            )
             assert m is not None
             assert m["last_accessed_at"] is not None
 
@@ -1607,7 +1783,9 @@ class TestAccessRepository:
                 organization_id=test_user["organization_id"],
             )
 
-        result = await repo.get_access_history(test_memory["id"])
+        result = await repo.get_access_history(
+            test_memory["id"], organization_id=test_user["organization_id"]
+        )
 
         assert result["total_count"] >= 3
         assert len(result["entries"]) >= 3
@@ -1624,9 +1802,15 @@ class TestAccessRepository:
                 memory_id=test_memory["id"],
                 access_type="view",
                 user_id=test_user["id"],
+                organization_id=test_user["organization_id"],
             )
 
-        result = await repo.get_access_history(test_memory["id"], limit=2, offset=0)
+        result = await repo.get_access_history(
+            test_memory["id"],
+            limit=2,
+            offset=0,
+            organization_id=test_user["organization_id"],
+        )
 
         assert len(result["entries"]) == 2
         assert result["has_more"] is True
@@ -1640,15 +1824,19 @@ class TestAccessRepository:
             memory_id=test_memory["id"],
             access_type="view",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
         await repo.log_access(
             memory_id=test_memory["id"],
             access_type="search_result",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
             context={"query": "test search"},
         )
 
-        results = await repo.get_search_history(test_memory["id"])
+        results = await repo.get_search_history(
+            test_memory["id"], organization_id=test_user["organization_id"]
+        )
 
         assert len(results) >= 1
         # Should only contain search_result entries
@@ -1665,7 +1853,9 @@ class TestAccessRepository:
             organization_id=test_user["organization_id"],
         )
 
-        results = await repo.get_user_activity(test_user["id"])
+        results = await repo.get_user_activity(
+            test_user["id"], organization_id=test_user["organization_id"]
+        )
 
         assert len(results) >= 1
         assert all(e["user_id"] == test_user["id"] for e in results)
@@ -1709,6 +1899,7 @@ class TestAccessRepository:
 
         results = await repo.get_most_accessed(
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
         assert len(results) >= 2
@@ -1725,11 +1916,14 @@ class TestAccessRepository:
             memory_id=test_memory["id"],
             access_type="view",
             user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
         )
 
         # Future date should yield no results
         future = datetime(2099, 1, 1, tzinfo=timezone.utc)
-        results = await repo.get_user_activity(test_user["id"], since=future)
+        results = await repo.get_user_activity(
+            test_user["id"], since=future, organization_id=test_user["organization_id"]
+        )
         assert len(results) == 0
 
     async def test_get_most_accessed_with_org_filter(self, db_pool, test_user, test_memory):
@@ -1787,7 +1981,11 @@ class TestAccessRepository:
             organization_id=test_user["organization_id"],
         )
 
-        results = await repo.get_least_accessed(user_id=test_user["id"], limit=10)
+        results = await repo.get_least_accessed(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            limit=10,
+        )
         never_entry = next(r for r in results if r["memory_id"] == never_accessed["id"])
         accessed_entry = next(r for r in results if r["memory_id"] == accessed["id"])
         assert never_entry["access_count"] == 0
@@ -1810,7 +2008,12 @@ class TestAccessRepository:
             organization_id=test_user["organization_id"],
         )
 
-        freq = await repo.get_access_frequency(bucket="day", user_id=test_user["id"], limit=10)
+        freq = await repo.get_access_frequency(
+            bucket="day",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            limit=10,
+        )
         assert len(freq) >= 1
         assert "bucket_start" in freq[0]
         assert "access_count" in freq[0]

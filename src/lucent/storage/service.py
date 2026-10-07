@@ -64,8 +64,8 @@ class UserFileService:
         )
 
         if task_id:
-            task = await RequestRepository(self.pool).get_task_with_request_owner(task_id, org_id)
-            if not task or str(task["created_by"] or "") != str(user_id):
+            task = await RequestRepository(self.pool).get_task(task_id, org_id)
+            if not task or str(task["requesting_user_id"] or "") != str(user_id):
                 raise ValueError("Task not found")
             request_id = str(task["request_id"])
         elif request_id:
@@ -108,8 +108,6 @@ class UserFileService:
             raise
 
         if task_id:
-            from lucent.db.requests import RequestRepository
-
             output = await RequestRepository(self.pool).create_task_output(
                 task_id=task_id,
                 org_id=org_id,
@@ -210,14 +208,10 @@ class UserFileService:
         user_id: str,
     ) -> str | None:
         if task_id:
-            request_id = await RequestRepository(self.pool).task_request_id_for_user(
-                task_id,
-                org_id=org_id,
-                user_id=user_id,
-            )
-            if not request_id:
+            task = await RequestRepository(self.pool).get_task(task_id, org_id)
+            if not task or str(task["requesting_user_id"] or "") != str(user_id):
                 raise ValueError("Task not found")
-            return request_id
+            return str(task["request_id"])
         if request_id:
             owns_request = await RequestRepository(self.pool).owns_request(
                 request_id,

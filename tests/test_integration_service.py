@@ -163,6 +163,8 @@ class TestResolveUser:
         }
         pool = _make_pool(link_row)
         svc = _make_service(pool)
+        svc._user_link_repo = MagicMock()
+        svc._user_link_repo.resolve_identity = AsyncMock(return_value=link_row)
         svc._user_repo = MagicMock()
         svc._user_repo.get_by_id = AsyncMock(return_value=user)
 
@@ -175,6 +177,8 @@ class TestResolveUser:
         """Returns None when no active link exists."""
         pool = _make_pool(None)
         svc = _make_service(pool)
+        svc._user_link_repo = MagicMock()
+        svc._user_link_repo.resolve_identity = AsyncMock(return_value=None)
 
         result = await svc.resolve_user(str(uuid4()), "U_UNKNOWN")
         assert result is None
@@ -185,6 +189,8 @@ class TestResolveUser:
         link_row = {"user_id": UUID(user_id), "status": "active"}
         pool = _make_pool(link_row)
         svc = _make_service(pool)
+        svc._user_link_repo = MagicMock()
+        svc._user_link_repo.resolve_identity = AsyncMock(return_value=link_row)
         svc._user_repo = MagicMock()
         svc._user_repo.get_by_id = AsyncMock(return_value=None)
 
@@ -395,11 +401,13 @@ class TestIntegrationRepository:
 
         pool = MagicMock()
         repo = IntegrationRepository(pool)
-        repo._user_links.resolve_identity = AsyncMock(return_value=_make_link())
+        repo._user_links.resolve_by_external_identity = AsyncMock(
+            return_value=_make_link()
+        )
 
         result = await repo.resolve_user_link("slack", "U_EXT_123")
         assert result is not None
-        repo._user_links.resolve_identity.assert_awaited_once()
+        repo._user_links.resolve_by_external_identity.assert_awaited_once()
 
     async def test_audit_safe_swallows_errors(self):
         """_audit_safe doesn't raise even if audit logging fails."""
@@ -815,7 +823,7 @@ async def test_dispatch_to_mcp_uses_user_scoped_bearer_key(monkeypatch):
     assert captured["tool_name"] == "search_memories"
     assert captured["payload"] == {"query": "find my context", "limit": 5}
     assert captured["closed"] is True
-    svc._revoke_mcp_key.assert_awaited_once_with(key_id)
+    svc._revoke_mcp_key.assert_awaited_once_with(key_id, org_id=org_id)
 
 
 class TestSanitizeInput:

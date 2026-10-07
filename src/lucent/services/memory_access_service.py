@@ -6,8 +6,8 @@ import asyncio
 from typing import Any
 from uuid import UUID
 
-from lucent.db.memory import MemoryRepository
 from lucent.db.github_repo_access import GitHubRepoAccessRepository
+from lucent.db.memory import MemoryRepository
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 
 
@@ -43,8 +43,12 @@ class MemoryAccessService:
         # Admins/owners always have full access (check per-call flag OR constructor flag)
         if (is_admin is True) or self._is_admin:
             return memory
-        # Shared memories are accessible to anyone in the org
-        if memory.get("shared"):
+        # Org-shared memories (org read clearance — the shared column was
+        # retired in migration 132) bypass the GitHub repo filter: anyone in
+        # the org can read what the org can.
+        if organization_id is not None and await self.repo.is_org_shared(
+            memory_id, organization_id
+        ):
             return memory
         filtered = await self.filter_memory(memory, user_id)
         if filtered is None:
@@ -206,7 +210,9 @@ class MemoryAccessService:
             # If the cache lookup fails for any reason, fall back to the
             # safest answer (no repo-tagged memories accessible).
             return []
-        return [row["repo_full_name"].lower() for row in rows]
+        # list_accessible_repo_full_names returns flat repo_full_name
+        # strings, not row dicts.
+        return [row.lower() for row in rows]
 
     async def search(self, *, user_id: UUID | None, **kwargs: Any) -> dict[str, Any]:
         accessible_repos = await self._resolve_accessible_repos(

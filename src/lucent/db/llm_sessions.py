@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from asyncpg import Pool
+
 from lucent.db.pool import scoped_acquire
 
 logger = logging.getLogger(__name__)
@@ -176,14 +177,27 @@ class LLMSessionRepository:
             )
         return dict(row) if row else None
 
-    async def list_request_relations(self, request_id: str) -> list[dict[str, Any]]:
-        async with scoped_acquire() as conn:
+    async def list_request_relations(
+        self, request_id: str, organization_id: str | UUID
+    ) -> list[dict[str, Any]]:
+        """Links from this request to LLM sessions, org-scoped.
+
+        The junction table carries no org/user columns of its own, so tenancy
+        is enforced by joining ``llm_sessions.organization_id`` — a stale link
+        to another org's session is dropped, not leaked. The org predicate
+        also keeps this runnable from request handlers (bare ``scoped_acquire``
+        has no tenant context there and would fail closed, silently hiding
+        every linked session).
+        """
+        async with scoped_acquire(organization_id=str(organization_id)) as conn:
             rows = await conn.fetch(
-                """SELECT session_id, relation
-                   FROM llm_session_requests
-                   WHERE request_id = $1
-                   ORDER BY created_at DESC""",
+                """SELECT r.session_id, r.relation
+                   FROM llm_session_requests r
+                   JOIN llm_sessions s ON s.id = r.session_id
+                   WHERE r.request_id = $1 AND s.organization_id = $2::uuid
+                   ORDER BY r.created_at DESC""",
                 request_id,
+                str(organization_id),
             )
         return [dict(row) for row in rows]
 

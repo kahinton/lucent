@@ -2,16 +2,47 @@
 
 import os
 from unittest.mock import patch
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 
-# Set test database URL before importing any db modules
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql://lucent:change-me-insecure-dev-password@localhost:5433/lucent",
+# Tests must never operate on the live application database. The app DB (the
+# `lucent` database on host port 5433, container `lucent-db`) can be running
+# on someone's machine and may hold real, sensitive data. The integration
+# suite (`pytest -m integration`) targets a completely separate, disposable
+# PostgreSQL container instead — see scripts/dev-test-db.sh, which creates
+# `lucent-test-db` on port 5434 with its own credentials and data volume.
+# The schema is NOT baked in: db_pool's first connection applies the full
+# migration set automatically (init_db runs migrations), so the container
+# only needs to exist and be empty.
+#
+# The guard below refuses any test-session URL whose database name is
+# `lucent` or whose host port is 5433, no matter what TEST_DATABASE_URL or
+# DATABASE_URL are set to. There is deliberately NO environment override —
+# the only way around it is editing this file, which should never be
+# necessary.
+_DEFAULT_TEST_DATABASE_URL = (
+    "postgresql://lucent_test:lucent-test-only@localhost:5434/lucent_test"
 )
+
+
+def _refuses_production_database(url: str) -> bool:
+    """True if the URL is aimed at the live application database."""
+    parsed = urlparse(url)
+    dbname = (parsed.path or "").lstrip("/").split("?")[0]
+    return dbname == "lucent" or parsed.port == 5433
+
+
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DATABASE_URL)
+if _refuses_production_database(TEST_DATABASE_URL):
+    raise RuntimeError(
+        f"Test database URL points at the live application database "
+        f"(dbname 'lucent' or host port 5433): {TEST_DATABASE_URL!r}. Tests "
+        f"are forbidden from operating on it. Run scripts/dev-test-db.sh to "
+        f"bring up the isolated test database instead."
+    )
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 # Disable effective rate limiting during tests
 os.environ.setdefault("LUCENT_RATE_LIMIT_PER_MINUTE", "999999")
@@ -43,6 +74,11 @@ def pytest_collection_modifyitems(items):
 
 async def _delete_test_organizations(conn, name_patterns: list[str]) -> None:
     """Delete test organizations after clearing non-cascading dependencies."""
+    # On a brand-new test container the session-start cleanup runs before
+    # db_pool applies any migrations — no schema yet, nothing to clean.
+    schema_ready = await conn.fetchval("SELECT to_regclass('public.organizations') IS NOT NULL")
+    if not schema_ready:
+        return
     restrictive_tables = {
         row["table_name"]
         for row in await conn.fetch(
@@ -104,6 +140,54 @@ def _bypass_ssrf_validation_in_tests(request):
         yield
 
 
+@pytest.fixture(autouse=True)
+def pristine_model_registry():
+    """Reset the model-registry module state to its import-time baseline.
+
+    ``load_models_from_db()`` rebinds module globals (``_db_models``,
+    ``_db_enabled_ids``, ``_MODEL_BY_ID``, ...) and nothing resets them, so one
+    test's database contents leaked into every later test's model resolution.
+    On a fresh test database a mid-session load of disabled-only rows turned
+    the shared ``available_model`` fixture's ``list_models()[0]`` into an
+    IndexError and model-dependent web/API tests into NoModelsAvailableError —
+    those suites only ever passed because of that leak. Resetting per test
+    makes every test start exactly as a lone run does.
+    """
+    import lucent.model_registry as model_registry
+
+    model_registry._db_models = None
+    model_registry._db_model_by_id = {}
+    model_registry._db_enabled_ids = set()
+    model_registry._MODEL_BY_ID = {m.id: m for m in model_registry.MODELS}
+    yield
+
+
+@pytest.fixture
+def daemon_tenant_scope():
+    """Bind the ambient tenant context the daemon loop runs under.
+
+    Repository layers fail closed on ``scoped_acquire`` when no tenant
+    context exists. Real callers always have one — API request handlers set a
+    request scope, and the daemon loop binds a scope with ``role="daemon"``
+    before touching repositories. Unit tests that exercise such repositories
+    directly (fake pools, no ``db_pool`` fixture) must reproduce that context:
+    request this fixture in the test (or a suite-local autouse wrapper) and
+    the fail-closed guard passes exactly as it does for the real daemon.
+
+    Deliberately opt-in, not autouse: tests that pin down the fail-closed
+    behavior itself (asserting the refusal) and tests that drive routes (where
+    the real scope comes from the request) would both be silently changed by
+    a global binding. Cross-org code under test should thread explicit
+    ``organization_id`` kwargs instead — the ambient scope here deliberately
+    resolves to none (mirrors ``stale_reaper``'s no-org daemon branch).
+    """
+    from lucent.db.pool import clear_tenant_scope, set_tenant_scope
+
+    set_tenant_scope(user_id=str(uuid4()), organization_id=None, role="daemon")
+    yield
+    clear_tenant_scope()
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def db_pool():
     """Create one database pool for the test session.
@@ -139,6 +223,12 @@ def cleanup_orphaned_test_data(request):
         )
         conn = await asyncpg.connect(database_url)
         try:
+            # Session-start cleanup runs before db_pool has applied any
+            # migrations to a fresh test container — clean nothing there.
+            if not await conn.fetchval(
+                "SELECT to_regclass('public.schema_migrations') IS NOT NULL"
+            ):
+                return
             async with conn.transaction():
                 await _delete_test_organizations(conn, ["test_%", "mcp_other_%"])
                 await conn.execute(

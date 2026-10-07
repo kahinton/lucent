@@ -154,7 +154,7 @@ class TestReconsolidationOnUpdate:
     """update_memory reactivates as a side effect of any real field change."""
 
     async def test_update_archived_memory_reactivates(
-        self, db_pool, test_memory
+        self, db_pool, test_memory, test_user
     ):
         await _set_stage(db_pool, test_memory["id"], "archived")
 
@@ -162,13 +162,14 @@ class TestReconsolidationOnUpdate:
         result = await mem_repo.update(
             memory_id=test_memory["id"],
             content="updated content for reactivation test",
+            organization_id=test_user["organization_id"],
         )
         assert result is not None
         assert result["lifecycle_stage"] == "active"
         assert await _read_stage(db_pool, test_memory["id"]) == "active"
 
     async def test_update_consolidating_memory_reactivates(
-        self, db_pool, test_memory
+        self, db_pool, test_memory, test_user
     ):
         await _set_stage(db_pool, test_memory["id"], "consolidating")
 
@@ -176,12 +177,13 @@ class TestReconsolidationOnUpdate:
         result = await mem_repo.update(
             memory_id=test_memory["id"],
             tags=["touched"],
+            organization_id=test_user["organization_id"],
         )
         assert result is not None
         assert result["lifecycle_stage"] == "active"
 
     async def test_update_forgotten_memory_does_not_reactivate(
-        self, db_pool, test_memory
+        self, db_pool, test_memory, test_user
     ):
         await _set_stage(db_pool, test_memory["id"], "forgotten")
 
@@ -189,20 +191,26 @@ class TestReconsolidationOnUpdate:
         result = await mem_repo.update(
             memory_id=test_memory["id"],
             content="touch a forgotten memory",
+            organization_id=test_user["organization_id"],
         )
         assert result is not None
         assert result["lifecycle_stage"] == "forgotten"
 
     async def test_update_noop_does_not_run_update(
-        self, db_pool, test_memory
+        self, db_pool, test_memory, test_user
     ):
         # No fields supplied — the repo short-circuits to get(), so
         # no reactivation logic should fire and version stays the same.
         await _set_stage(db_pool, test_memory["id"], "archived")
 
         mem_repo = MemoryRepository(db_pool)
-        before = await mem_repo.get(test_memory["id"])
-        result = await mem_repo.update(memory_id=test_memory["id"])
+        before = await mem_repo.get(
+            test_memory["id"], organization_id=test_user["organization_id"]
+        )
+        result = await mem_repo.update(
+            memory_id=test_memory["id"],
+            organization_id=test_user["organization_id"],
+        )
 
         assert result is not None
         assert result["version"] == before["version"]
@@ -236,6 +244,7 @@ class TestReconsolidationGoalSyncCoexistence:
         result = await mem_repo.update(
             memory_id=goal["id"],
             metadata={"status": "completed"},
+            organization_id=test_user["organization_id"],
         )
         assert result is not None
         assert await _read_stage(db_pool, goal["id"]) == "archived"
@@ -260,7 +269,9 @@ class TestReconsolidationGoalSyncCoexistence:
         )
 
         result = await mem_repo.update(
-            memory_id=goal["id"], metadata={"status": "completed"}
+            memory_id=goal["id"],
+            metadata={"status": "completed"},
+            organization_id=test_user["organization_id"],
         )
 
         assert result is not None

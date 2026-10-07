@@ -1,9 +1,9 @@
 """Temporary shadow auditing for database tenant scope.
 
-Set ``LUCENT_DB_SCOPE_AUDIT=1`` while running after RLS rollback to log
+Set ``LUCENT_DB_SCOPE_AUDIT=1`` while running the test suite to log
 database activity in a separate JSONL file. The wrapper does not alter
-queries or query results; it records the effective tenant scope and flags
-access that would not be valid under the scoped RLS contract.
+queries or query results; it records the effective tenant scope and
+flags access that runs without a tenant context.
 """
 
 from __future__ import annotations

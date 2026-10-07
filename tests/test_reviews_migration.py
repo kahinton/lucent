@@ -294,8 +294,8 @@ class TestFullWorkflow:
             title="Implement feature",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test-worker")
-        await req_repo.complete_task(str(task["id"]), "Feature implemented")
+        await req_repo.claim_task(str(task["id"]), "test-worker", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Feature implemented", org_id=org_id)
 
         # 3. Request should be in review
         req = await req_repo.get_request(str(req["id"]), org_id)
@@ -330,8 +330,8 @@ class TestFullWorkflow:
             title="Write code",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test-worker")
-        await req_repo.complete_task(str(task["id"]), "Code written")
+        await req_repo.claim_task(str(task["id"]), "test-worker", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Code written", org_id=org_id)
 
         # Reject
         reject_review = await review_repo.create_review(
@@ -374,10 +374,10 @@ class TestFullWorkflow:
             org_id=org_id,
         )
 
-        await req_repo.claim_task(str(t1["id"]), "worker")
-        await req_repo.complete_task(str(t1["id"]), "Done 1")
-        await req_repo.claim_task(str(t2["id"]), "worker")
-        await req_repo.complete_task(str(t2["id"]), "Done 2")
+        await req_repo.claim_task(str(t1["id"]), "worker", org_id=org_id)
+        await req_repo.complete_task(str(t1["id"]), "Done 1", org_id=org_id)
+        await req_repo.claim_task(str(t2["id"]), "worker", org_id=org_id)
+        await req_repo.complete_task(str(t2["id"]), "Done 2", org_id=org_id)
 
         # Request should be in review
         req = await req_repo.get_request(str(req["id"]), org_id)

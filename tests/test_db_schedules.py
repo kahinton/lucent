@@ -811,7 +811,12 @@ class TestGetDueSchedules:
         assert not any(d["id"] == s["id"] for d in due)
 
     @pytest.mark.asyncio
-    async def test_without_org_filter(self, repo, test_organization, db_pool):
+    async def test_without_org_filter(
+        self, repo, test_organization, db_pool, daemon_tenant_scope,
+    ):
+        # No-org get_due_schedules() is the daemon/system schedule loop's
+        # enumeration path; production binds an ambient scope (role daemon or
+        # system) before the call, so the test binds daemon_tenant_scope too.
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="Global Due",
@@ -858,7 +863,7 @@ class TestGetDueSchedules:
         org = str(test_organization["id"])
         s = await repo.create_schedule(title="Done", org_id=org, schedule_type="once")
         # Mark as run (once → completed) then backdate
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE schedules SET next_run_at = NOW() - interval '1 minute' WHERE id = $1",
@@ -880,7 +885,7 @@ class TestMarkScheduleRun:
             org_id=org,
             schedule_type="once",
         )
-        run = await repo.mark_schedule_run(str(s["id"]))
+        run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert run["status"] == "running"
         # Schedule should be completed
         updated = await repo.get_schedule(str(s["id"]), org)
@@ -898,7 +903,7 @@ class TestMarkScheduleRun:
             interval_seconds=3600,
         )
         await _make_due(db_pool, s["id"])
-        _run = await repo.mark_schedule_run(str(s["id"]))
+        _run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "active"
         assert updated["run_count"] == 1
@@ -916,7 +921,7 @@ class TestMarkScheduleRun:
             schedule_type="cron",
             cron_expression="0 9 * * *",
         )
-        _run = await repo.mark_schedule_run(str(s["id"]))
+        _run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "active"
         assert updated["next_run_at"] is not None
@@ -933,9 +938,9 @@ class TestMarkScheduleRun:
             max_runs=2,
         )
         await _make_due(db_pool, s["id"])
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         await _make_due(db_pool, s["id"])
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "completed"
         assert updated["run_count"] == 2
@@ -953,14 +958,17 @@ class TestMarkScheduleRun:
             expires_at=past,
         )
         await _make_due(db_pool, s["id"])
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "expired"
 
     @pytest.mark.asyncio
-    async def test_nonexistent_schedule(self, repo):
+    async def test_nonexistent_schedule(self, repo, test_organization):
         with pytest.raises(ValueError, match="not found"):
-            await repo.mark_schedule_run("00000000-0000-0000-0000-000000000000")
+            await repo.mark_schedule_run(
+                "00000000-0000-0000-0000-000000000000",
+                org_id=str(test_organization["id"]),
+            )
 
     @pytest.mark.asyncio
     async def test_with_request_id(self, repo, test_organization, db_pool):
@@ -975,7 +983,7 @@ class TestMarkScheduleRun:
         )
         req_repo = RequestRepository(db_pool)
         req = await req_repo.create_request(title="From schedule", org_id=org)
-        run = await repo.mark_schedule_run(str(s["id"]), request_id=str(req["id"]))
+        run = await repo.mark_schedule_run(str(s["id"]), request_id=str(req["id"]), org_id=org)
         assert run["request_id"] == req["id"]
         # Cleanup: delete schedule_runs (which ref requests) first, then request
         async with db_pool.acquire() as conn:
@@ -1001,7 +1009,7 @@ class TestMarkScheduleRun:
                 past,
                 s["id"],
             )
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["status"] == "expired"
 
@@ -1016,9 +1024,9 @@ class TestMarkScheduleRun:
             interval_seconds=60,
         )
         await _make_due(db_pool, s["id"])
-        run1 = await repo.mark_schedule_run(str(s["id"]))
+        run1 = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         await _make_due(db_pool, s["id"])
-        run2 = await repo.mark_schedule_run(str(s["id"]))
+        run2 = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert run1["id"] != run2["id"]
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["run_count"] == 2
@@ -1035,7 +1043,7 @@ class TestMarkScheduleRun:
             interval_seconds=3600,
         )
         # Don't backdate — next_run_at is 1 hour from now
-        result = await repo.mark_schedule_run(str(s["id"]))
+        result = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert result is None
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["run_count"] == 0
@@ -1045,10 +1053,10 @@ class TestMarkScheduleRun:
         """A once schedule that already fired cannot fire again (next_run_at is None)."""
         org = str(test_organization["id"])
         s = await repo.create_schedule(title="OnceGuard", org_id=org, schedule_type="once")
-        run1 = await repo.mark_schedule_run(str(s["id"]))
+        run1 = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert run1 is not None
         # Second attempt should return None — schedule is completed
-        run2 = await repo.mark_schedule_run(str(s["id"]))
+        run2 = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert run2 is None
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["run_count"] == 1
@@ -1064,7 +1072,7 @@ class TestMarkScheduleRun:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE schedules SET status = 'expired' WHERE id = $1", s["id"])
         await _make_due(db_pool, s["id"])
-        result = await repo.mark_schedule_run(str(s["id"]))
+        result = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert result is None
 
     @pytest.mark.asyncio
@@ -1078,10 +1086,10 @@ class TestMarkScheduleRun:
             interval_seconds=3600,
         )
         # next_run_at is 1 hour from now — without force this returns None
-        result = await repo.mark_schedule_run(str(s["id"]))
+        result = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert result is None
         # With force, it should proceed
-        result = await repo.mark_schedule_run(str(s["id"]), force=True)
+        result = await repo.mark_schedule_run(str(s["id"]), force=True, org_id=org)
         assert result is not None
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["run_count"] == 1
@@ -1091,10 +1099,10 @@ class TestMarkScheduleRun:
         """force=True still respects the status guard — cannot fire a completed schedule."""
         org = str(test_organization["id"])
         s = await repo.create_schedule(title="ForceBlock", org_id=org, schedule_type="once")
-        run = await repo.mark_schedule_run(str(s["id"]))
+        run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert run is not None
         # Schedule is now completed; force should still return None
-        result = await repo.mark_schedule_run(str(s["id"]), force=True)
+        result = await repo.mark_schedule_run(str(s["id"]), force=True, org_id=org)
         assert result is None
 
 
@@ -1107,15 +1115,18 @@ class TestCompleteRun:
             org_id=org,
             schedule_type="once",
         )
-        run = await repo.mark_schedule_run(str(s["id"]))
-        completed = await repo.complete_run(str(run["id"]), result="All good")
+        run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
+        completed = await repo.complete_run(str(run["id"]), result="All good", org_id=org)
         assert completed["status"] == "completed"
         assert completed["result"] == "All good"
         assert completed["completed_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_complete_nonexistent(self, repo):
-        result = await repo.complete_run("00000000-0000-0000-0000-000000000000")
+    async def test_complete_nonexistent(self, repo, test_organization):
+        result = await repo.complete_run(
+            "00000000-0000-0000-0000-000000000000",
+            org_id=str(test_organization["id"]),
+        )
         assert result is None
 
     @pytest.mark.asyncio
@@ -1123,8 +1134,8 @@ class TestCompleteRun:
         """complete_run with result=None."""
         org = str(test_organization["id"])
         s = await repo.create_schedule(title="CRN", org_id=org, schedule_type="once")
-        run = await repo.mark_schedule_run(str(s["id"]))
-        completed = await repo.complete_run(str(run["id"]))
+        run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
+        completed = await repo.complete_run(str(run["id"]), org_id=org)
         assert completed["status"] == "completed"
         assert completed["result"] is None
 
@@ -1138,15 +1149,18 @@ class TestFailRun:
             org_id=org,
             schedule_type="once",
         )
-        run = await repo.mark_schedule_run(str(s["id"]))
-        failed = await repo.fail_run(str(run["id"]), error="Boom")
+        run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
+        failed = await repo.fail_run(str(run["id"]), error="Boom", org_id=org)
         assert failed["status"] == "failed"
         assert failed["error"] == "Boom"
         assert failed["completed_at"] is not None
 
     @pytest.mark.asyncio
-    async def test_fail_nonexistent(self, repo):
-        result = await repo.fail_run("00000000-0000-0000-0000-000000000000")
+    async def test_fail_nonexistent(self, repo, test_organization):
+        result = await repo.fail_run(
+            "00000000-0000-0000-0000-000000000000",
+            org_id=str(test_organization["id"]),
+        )
         assert result is None
 
     @pytest.mark.asyncio
@@ -1154,8 +1168,8 @@ class TestFailRun:
         """fail_run with error=None."""
         org = str(test_organization["id"])
         s = await repo.create_schedule(title="FRN", org_id=org, schedule_type="once")
-        run = await repo.mark_schedule_run(str(s["id"]))
-        failed = await repo.fail_run(str(run["id"]))
+        run = await repo.mark_schedule_run(str(s["id"]), org_id=org)
+        failed = await repo.fail_run(str(run["id"]), org_id=org)
         assert failed["status"] == "failed"
         assert failed["error"] is None
 
@@ -1174,10 +1188,10 @@ class TestListRuns:
             interval_seconds=60,
         )
         await _make_due(db_pool, s["id"])
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         await _make_due(db_pool, s["id"])
-        await repo.mark_schedule_run(str(s["id"]))
-        result = await repo.list_runs(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
+        result = await repo.list_runs(str(s["id"]), org_id=org)
         assert len(result["items"]) == 2
 
     @pytest.mark.asyncio
@@ -1191,14 +1205,19 @@ class TestListRuns:
         )
         for _ in range(5):
             await _make_due(db_pool, s["id"])
-            await repo.mark_schedule_run(str(s["id"]))
-        result = await repo.list_runs(str(s["id"]), limit=3)
+            await repo.mark_schedule_run(str(s["id"]), org_id=org)
+        result = await repo.list_runs(str(s["id"]), limit=3, org_id=org)
         assert len(result["items"]) == 3
 
 
 class TestGetScheduleWithRuns:
     @pytest.mark.asyncio
-    async def test_with_runs(self, repo, test_organization, db_pool):
+    async def test_with_runs(
+        self, repo, test_organization, db_pool, daemon_tenant_scope,
+    ):
+        # get_schedule_with_runs loads runs via list_runs() without an
+        # organization kwarg — the ambient ContextVar fallback that real API
+        # request scopes provide. Bind it here so the fail-closed guard passes.
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="SWR",
@@ -1207,7 +1226,7 @@ class TestGetScheduleWithRuns:
             interval_seconds=60,
         )
         await _make_due(db_pool, s["id"])
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         result = await repo.get_schedule_with_runs(str(s["id"]), org)
         assert result is not None
         assert "runs" in result
@@ -1285,7 +1304,7 @@ class TestGetSummary:
         """Completed schedules appear in the completed count."""
         org = str(test_organization["id"])
         s = await repo.create_schedule(title="Done", org_id=org, schedule_type="once")
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
         summary = await repo.get_summary(org)
         assert summary["completed"] >= 1
 
@@ -1322,8 +1341,8 @@ class TestSchedulerDeduplication:
         await _make_due(db_pool, s["id"])
 
         results = await asyncio.gather(
-            repo.mark_schedule_run(str(s["id"])),
-            repo.mark_schedule_run(str(s["id"])),
+            repo.mark_schedule_run(str(s["id"]), org_id=org),
+            repo.mark_schedule_run(str(s["id"]), org_id=org),
         )
         successful = [r for r in results if r is not None]
         assert len(successful) == 1, f"Expected exactly 1 successful run, got {len(successful)}"
@@ -1342,10 +1361,10 @@ class TestSchedulerDeduplication:
         )
         await _make_due(db_pool, s["id"])
 
-        run1 = await repo.mark_schedule_run(str(s["id"]))
+        run1 = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert run1 is not None
         # Second call: next_run_at is now ~1 hour in the future
-        run2 = await repo.mark_schedule_run(str(s["id"]))
+        run2 = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert run2 is None
         updated = await repo.get_schedule(str(s["id"]), org)
         assert updated["run_count"] == 1
@@ -1362,7 +1381,7 @@ class TestSchedulerDeduplication:
         )
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE schedules SET next_run_at = NULL WHERE id = $1", s["id"])
-        result = await repo.mark_schedule_run(str(s["id"]))
+        result = await repo.mark_schedule_run(str(s["id"]), org_id=org)
         assert result is None
 
     @pytest.mark.asyncio
@@ -1378,8 +1397,8 @@ class TestSchedulerDeduplication:
         )
         # Both try to force-fire the once schedule
         results = await asyncio.gather(
-            repo.mark_schedule_run(str(s["id"]), force=True),
-            repo.mark_schedule_run(str(s["id"]), force=True),
+            repo.mark_schedule_run(str(s["id"]), force=True, org_id=org),
+            repo.mark_schedule_run(str(s["id"]), force=True, org_id=org),
         )
         successful = [r for r in results if r is not None]
         # Once schedule: first run completes it, second is blocked by status guard
@@ -1404,7 +1423,7 @@ class TestSchedulerDeduplication:
         due_ids = [str(d["id"]) for d in due_before]
         assert str(s["id"]) in due_ids
 
-        await repo.mark_schedule_run(str(s["id"]))
+        await repo.mark_schedule_run(str(s["id"]), org_id=org)
 
         due_after = await repo.get_due_schedules(org)
         due_ids_after = [str(d["id"]) for d in due_after]

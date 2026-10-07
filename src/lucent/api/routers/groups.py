@@ -51,11 +51,11 @@ def _to_member_response(member: dict[str, Any]) -> GroupMemberResponse:
 
 
 async def _require_group_admin_or_org_admin(
-    repo: GroupRepository, group_id: str, user: AuthenticatedUser
+    repo: GroupRepository, group_id: str, user: AuthenticatedUser, org_id: str
 ) -> None:
     if user.role >= Role.ADMIN:
         return
-    if not await repo.is_group_admin(str(user.id), group_id):
+    if not await repo.is_group_admin(str(user.id), group_id, organization_id=org_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Requires group admin or org admin role",
@@ -134,7 +134,7 @@ async def update_group(group_id: UUID, data: GroupUpdate, user: AuthenticatedUse
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    await _require_group_admin_or_org_admin(repo, str(group_id), user)
+    await _require_group_admin_or_org_admin(repo, str(group_id), user, org_id)
     try:
         updated = await repo.update_group(
             str(group_id), org_id, **data.model_dump(exclude_none=True)
@@ -182,14 +182,16 @@ async def add_group_member(
     group = await repo.get_group(str(group_id), org_id)
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    await _require_group_admin_or_org_admin(repo, str(group_id), user)
+    await _require_group_admin_or_org_admin(repo, str(group_id), user, org_id)
 
     target_user = await user_repo.get_by_id(data.user_id)
     if not target_user or str(target_user.get("organization_id")) != org_id:
         raise HTTPException(status_code=404, detail="User not found")
 
     try:
-        await repo.add_member(str(group_id), str(data.user_id), role=data.role)
+        await repo.add_member(
+            str(group_id), str(data.user_id), role=data.role, organization_id=org_id
+        )
     except Exception as exc:
         if exc.__class__.__name__ == "UniqueViolationError":
             raise HTTPException(status_code=409, detail="User is already a group member") from exc
@@ -210,9 +212,9 @@ async def remove_group_member(group_id: UUID, user_id: UUID, user: Authenticated
     group = await repo.get_group(str(group_id), org_id)
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    await _require_group_admin_or_org_admin(repo, str(group_id), user)
+    await _require_group_admin_or_org_admin(repo, str(group_id), user, org_id)
 
-    if not await repo.remove_member(str(group_id), str(user_id)):
+    if not await repo.remove_member(str(group_id), str(user_id), organization_id=org_id):
         raise HTTPException(status_code=404, detail="Group member not found")
     return {"success": True}
 

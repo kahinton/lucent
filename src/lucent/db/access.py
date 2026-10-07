@@ -9,6 +9,7 @@ from uuid import UUID
 
 import asyncpg
 from asyncpg import Pool
+
 from lucent.db.pool import scoped_acquire
 
 
@@ -208,6 +209,7 @@ class AccessRepository:
         user_id: UUID,
         limit: int = 100,
         since: datetime | None = None,
+        organization_id: UUID | None = None,
     ) -> list[dict[str, Any]]:
         """Get recent memory access activity for a user.
 
@@ -241,7 +243,9 @@ class AccessRepository:
 
         params.append(limit)
 
-        async with scoped_acquire(user_id=user_id) as conn:
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=user_id
+        ) as conn:
             rows = await conn.fetch(query, *params)
 
         return [self._row_to_dict(row) for row in rows]
@@ -472,7 +476,7 @@ class AccessRepository:
             GROUP BY memory_id
         """
 
-        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
+        async with self.pool.acquire() as conn:  # system-infra: intentionally scope-less, audited site
             rows = await conn.fetch(query, *[str(mid) for mid in memory_ids])
 
         counts: dict[UUID, int] = {}

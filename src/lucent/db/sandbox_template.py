@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import asyncpg
@@ -19,11 +19,49 @@ from lucent.db.admin_audit import (
     AdminAuditRepository,
     resolve_audit_actor,
 )
-from lucent.secrets.utils import validate_env_var_references
+from lucent.db.pool import (
+    AuthorizedDatabasePool,
+    AuthTablePolicy,
+    get_authorized_pool_for_user,
+    scoped_acquire_on,
+)
 from lucent.sandbox.models import validate_extra_hosts
-from lucent.db.pool import scoped_acquire
+from lucent.secrets.utils import validate_env_var_references
 
 logger = logging.getLogger(__name__)
+
+
+# ── Clearance-driven usage reads ────────────────────────────────────────
+#
+# Sandbox templates follow the definitions-family pattern: *use* (launching,
+# dispatch, task/schedule attachment) is clearance-driven and default-deny —
+# ownership (123), group and built-in org grants (127) and explicit grants all
+# live in auth_clearances. A plain pool is fail-closed. Management reads
+# (admin route listing, proposals queue, credential migration) stay on the
+# legacy org-scoped path with their existing gates.
+
+SANDBOX_TEMPLATE_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy(
+    "sandbox_templates", direct_columns=()
+)
+SANDBOX_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy("sandboxes", direct_columns=())
+
+
+async def get_authorized_templates_pool(
+    pool: asyncpg.Pool, user: dict[str, Any], required_clearance: str = "read"
+) -> AuthorizedDatabasePool:
+    """Authorized pool for sandbox-template usage reads as this principal."""
+    return await get_authorized_pool_for_user(
+        pool, user, SANDBOX_TEMPLATE_AUTH_POLICY, required_clearance
+    )
+
+
+async def get_authorized_sandboxes_pool(
+    pool: asyncpg.Pool, user: dict[str, Any], required_clearance: str = "read"
+) -> AuthorizedDatabasePool:
+    """Authorized pool covering the whole sandbox family (templates + instances)."""
+    return await get_authorized_pool_for_user(
+        pool, user, (SANDBOX_TEMPLATE_AUTH_POLICY, SANDBOX_AUTH_POLICY), required_clearance
+    )
 
 
 class SandboxTemplateRepository:
@@ -181,7 +219,9 @@ class SandboxTemplateRepository:
             and scope != "built-in"
         ):
             owner_user_id = created_by
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             row = await conn.fetchrow(
                 """INSERT INTO sandbox_templates
                    (name, organization_id, description, image, repo_url, branch,
@@ -232,19 +272,21 @@ class SandboxTemplateRepository:
                 )
             return self._parse_row(row)
 
-    async def get(self, template_id: str, organization_id: str | None = None) -> dict | None:
-        async with scoped_acquire(organization_id=organization_id) as conn:
-            if organization_id:
-                row = await conn.fetchrow(
-                    "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
-                    UUID(template_id),
-                    UUID(organization_id),
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT * FROM sandbox_templates WHERE id = $1",
-                    UUID(template_id),
-                )
+    async def get(self, template_id: str, organization_id: str) -> dict | None:
+        """By-ID fetch, org-predicated: another org's template is absent.
+
+        organization_id is required — there is no system branch here. The
+        unauthenticated/daemon paths use clearance probes
+        (get_usable_template) instead.
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
+                UUID(template_id),
+                UUID(organization_id),
+            )
             return self._parse_row(row) if row else None
 
     async def get_accessible(
@@ -254,9 +296,14 @@ class SandboxTemplateRepository:
         user_id: str,
         user_role: str | None = None,
     ) -> dict | None:
-        """Get template only if user can access it."""
+        """Get template only if user can access it (legacy management read).
+
+        The usage path uses clearance-driven ``get_usable_template`` below.
+        """
         role = user_role or "member"
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             row = await conn.fetchrow(
                 """
                 SELECT *
@@ -279,7 +326,9 @@ class SandboxTemplateRepository:
 
     async def list_for_credential_migration(self, organization_id: str) -> list[dict]:
         """List template env rows that may contain plaintext credentials."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             rows = await conn.fetch(
                 """
                 SELECT id, organization_id, owner_user_id, owner_group_id, env_vars
@@ -294,21 +343,25 @@ class SandboxTemplateRepository:
         self, template_id: str, organization_id: str, env_vars: dict
     ) -> bool:
         """Replace a template's environment variables after migration."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             result = await conn.execute(
                 """
                 UPDATE sandbox_templates
-                SET env_vars = $2::jsonb, updated_at = NOW()
+                SET env_vars = $3::jsonb, updated_at = NOW()
                 WHERE id = $1 AND organization_id = $2
                 """,
-                template_id,
-                organization_id,
+                UUID(str(template_id)),
+                UUID(str(organization_id)),
                 json.dumps(env_vars),
             )
         return result != "UPDATE 0"
 
     async def get_by_name(self, name: str, organization_id: str) -> dict | None:
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             row = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE name = $1 AND organization_id = $2",
                 name,
@@ -317,7 +370,9 @@ class SandboxTemplateRepository:
             return self._parse_row(row) if row else None
 
     async def list_all(self, organization_id: str, limit: int = 25, offset: int = 0) -> dict:
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             count_row = await conn.fetchrow(
                 "SELECT COUNT(*) AS total FROM sandbox_templates WHERE organization_id = $1",
                 UUID(organization_id),
@@ -396,7 +451,9 @@ class SandboxTemplateRepository:
         if len(sets) == 1:  # Only updated_at
             return await self.get(template_id, organization_id)
 
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             before = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
                 UUID(template_id),
@@ -428,7 +485,9 @@ class SandboxTemplateRepository:
 
     async def delete(self, template_id: str, organization_id: str, *,
                      audit: bool | None = None) -> bool:
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             before = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
                 UUID(template_id),
@@ -478,7 +537,11 @@ class SandboxTemplateRepository:
         offset: int = 0,
         user_role: str | None = None,
     ) -> dict:
-        """List sandbox templates accessible to a user: owned, group-owned, or built-in."""
+        """List sandbox templates visible to a user on the legacy predicate.
+
+        Management path only — the usage path (launch/dispatch/attachment)
+        uses clearance-driven ``list_templates_accessible_by`` below.
+        """
         role = user_role or "member"
         base = """
             FROM sandbox_templates
@@ -490,7 +553,9 @@ class SandboxTemplateRepository:
                 OR $3 IN ('admin', 'owner')
             )
         """
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
             count_row = await conn.fetchrow(
                 f"SELECT COUNT(*) AS total {base}",
                 UUID(organization_id), UUID(user_id), role,
@@ -512,7 +577,9 @@ class SandboxTemplateRepository:
         """Return all approved templates in the org — those a planner is
         allowed to reference when creating a task. Excludes proposed and
         rejected templates."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM sandbox_templates
                    WHERE organization_id = $1
@@ -522,9 +589,92 @@ class SandboxTemplateRepository:
             )
         return [self._parse_row(r) for r in rows]
 
+    # ── Clearance-driven usage reads ──────────────────────────────────────
+
+    async def _authorized_fetchrow(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, *params)
+
+    async def _authorized_fetch(self, query: str, *params: object):
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(query, *params)
+
+    async def list_templates_accessible_by(
+        self,
+        user_id: str,
+        organization_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict:
+        """List templates cleared for *use* by the pool's principal.
+
+        Clearance-driven and default-deny on an authorized pool — the
+        ownership (123), group and built-in org grants (127) plus explicit
+        grants all live in auth_clearances. A plain pool is fail-closed.
+        The org predicate stays in the caller's SQL (defense in depth) and
+        ``status`` stays the caller's lifecycle filter.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Sandbox template usage reads require an "
+                "AuthorizedDatabasePool built for the sandbox templates "
+                "policy (usage is clearance-driven and default-deny)"
+            )
+        params: list[Any] = [UUID(organization_id)]
+        status_clause = ""
+        if status:
+            status_clause = f" AND st.status = ${len(params) + 1}"
+            params.append(status)
+        count_query = (
+            f"SELECT COUNT(*) AS total FROM sandbox_templates st "
+            f"WHERE st.organization_id = $1{status_clause}"
+        )
+        query = (
+            f"SELECT st.* FROM sandbox_templates st "
+            f"WHERE st.organization_id = $1{status_clause} "
+            f"ORDER BY st.scope DESC, st.name LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        )
+        params_with_page = [*params, limit, offset]
+
+        count_row = await self._authorized_fetchrow(count_query, *params)
+        total_count = count_row["total"] if count_row else 0
+        rows = await self._authorized_fetch(query, *params_with_page)
+        return {
+            "items": [self._parse_row(r) for r in rows],
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(rows) < total_count,
+        }
+
+    async def get_usable_template(
+        self, template_id: str, *, status: str | None = None
+    ) -> dict | None:
+        """By-ID *usage* probe: the template must be cleared for this principal.
+
+        Pass ``status="approved"`` at dispatch-style call sites that must not
+        accept proposed/rejected templates.
+        """
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError("Sandbox template usage reads require an AuthorizedDatabasePool")
+        params: list[Any] = [UUID(template_id)]
+        status_clause = ""
+        if status:
+            status_clause = f" AND status = ${len(params) + 1}"
+            params.append(status)
+        row = await self._authorized_fetchrow(
+            f"SELECT * FROM sandbox_templates WHERE id = $1{status_clause}",
+            *params,
+        )
+        return self._parse_row(row) if row else None
+
     async def list_proposed(self, organization_id: str) -> list[dict]:
         """Return templates awaiting human approval."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             rows = await conn.fetch(
                 """SELECT * FROM sandbox_templates
                    WHERE organization_id = $1
@@ -536,7 +686,9 @@ class SandboxTemplateRepository:
 
     async def count_proposed(self, organization_id: str) -> int:
         """Return the number of templates awaiting human approval."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             return await conn.fetchval(
                 """SELECT COUNT(*) FROM sandbox_templates
                    WHERE organization_id = $1 AND status = 'proposed'""",
@@ -554,7 +706,9 @@ class SandboxTemplateRepository:
     ) -> dict | None:
         if status not in {"approved", "proposed", "rejected"}:
             raise ValueError(f"Invalid status: {status}")
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             before = await conn.fetchrow(
                 "SELECT * FROM sandbox_templates WHERE id = $1 AND organization_id = $2",
                 UUID(template_id),
@@ -588,13 +742,23 @@ class SandboxTemplateRepository:
                 )
             return self._parse_row(row) if row else None
 
-    async def mark_used(self, template_id: str, organization_id: str | None = None) -> None:
-        """Record that a template was just dispatched. Best-effort."""
+    async def mark_used(self, template_id: str, organization_id: str) -> None:
+        """Record that a template was just dispatched. Best-effort.
+
+        Required organization_id: the write is org-predicated so a
+        template ID from another organization is never touched.
+        """
         try:
-            async with scoped_acquire(organization_id=organization_id, role="system" if not organization_id else None) as conn:
+            async with scoped_acquire_on(
+                self.pool, organization_id=organization_id
+            ) as conn:
                 await conn.execute(
-                    "UPDATE sandbox_templates SET last_used_at = NOW() WHERE id = $1",
+                    """
+                    UPDATE sandbox_templates SET last_used_at = NOW()
+                    WHERE id = $1 AND organization_id = $2
+                    """,
                     UUID(template_id),
+                    UUID(organization_id),
                 )
         except Exception:
             pass
@@ -648,7 +812,9 @@ class SandboxTemplateRepository:
 
             if existing:
                 # Refresh fields and ensure built-in/approved status.
-                async with scoped_acquire(organization_id=organization_id) as conn:
+                async with scoped_acquire_on(
+                    self.pool, organization_id=organization_id
+                ) as conn:
                     await conn.execute(
                         """UPDATE sandbox_templates
                            SET description = $3, image = $4, repo_url = $5, branch = $6,

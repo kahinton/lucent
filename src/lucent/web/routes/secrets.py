@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from lucent.access_control import AccessControlService
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import GroupRepository, get_pool
-from lucent.db.secrets import SecretRepository
+from lucent.db.secrets import SecretRepository, get_authorized_secrets_pool
 from lucent.secrets import SecretRegistry, SecretScope
 
 from ._shared import _check_csrf, get_user_context, templates
@@ -29,22 +29,26 @@ async def secrets_page(
     """Render secrets list page (keys only, never values)."""
     user = await get_user_context(request)
     pool = await get_pool()
-    acl = AccessControlService(pool)
-    role_value = user.role if isinstance(user.role, str) else user.role.value
 
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
     offset = (page - 1) * per_page
 
-    group_ids = [UUID(gid) for gid in await acl.get_user_group_ids(str(user.id))]
     org_id = UUID(str(user.organization_id))
     user_id = UUID(str(user.id))
 
-    total_count, rows = await SecretRepository(pool).list_scoped(
+    # Listing is clearance-driven for every role: owners/admins see only what
+    # they own, their groups, or what was explicitly granted to them. There
+    # is no org-wide branch.
+    authorized_pool = await get_authorized_secrets_pool(
+        pool,
+        {
+            "id": str(user_id),
+            "organization_id": str(org_id),
+        },
+    )
+    total_count, rows = await SecretRepository(authorized_pool).list_scoped(
         organization_id=str(org_id),
-        user_id=str(user_id),
-        group_ids=[str(group_id) for group_id in group_ids],
-        role=role_value,
         limit=per_page,
         offset=offset,
     )

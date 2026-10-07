@@ -11,7 +11,7 @@ Tests /api/memories endpoints:
 - GET /api/memories/tags/suggest (suggest tags)
 """
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest_asyncio
@@ -748,24 +748,33 @@ class TestDeleteMemory:
 class TestShareMemory:
     """POST /api/memories/{memory_id}/share and /unshare"""
 
-    async def test_share_memory(self, mem_client, mem_prefix):
+    async def test_share_memory(self, mem_client, db_pool, mem_user, mem_prefix):
+        from lucent.db import MemoryRepository
+
         create_resp = await _create_memory(mem_client, mem_prefix)
-        memory_id = create_resp.json()["id"]
+        memory_id = UUID(create_resp.json()["id"])
 
         resp = await mem_client.post(f"/api/memories/{memory_id}/share")
         assert resp.status_code == 200
-        assert resp.json()["shared"] is True
+        # Shared state is the org read clearance (shared column retired in 132).
+        assert await MemoryRepository(db_pool).is_org_shared(
+            memory_id, mem_user["organization_id"]
+        )
 
-    async def test_unshare_memory(self, mem_client, mem_prefix):
+    async def test_unshare_memory(self, mem_client, db_pool, mem_user, mem_prefix):
+        from lucent.db import MemoryRepository
+
         create_resp = await _create_memory(mem_client, mem_prefix)
-        memory_id = create_resp.json()["id"]
+        memory_id = UUID(create_resp.json()["id"])
 
         # Share first
         await mem_client.post(f"/api/memories/{memory_id}/share")
         # Then unshare
         resp = await mem_client.post(f"/api/memories/{memory_id}/unshare")
         assert resp.status_code == 200
-        assert resp.json()["shared"] is False
+        assert not await MemoryRepository(db_pool).is_org_shared(
+            memory_id, mem_user["organization_id"]
+        )
 
     async def test_share_not_found(self, mem_client):
         fake_id = str(uuid4())

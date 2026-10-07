@@ -196,7 +196,7 @@ class TestListRequests:
 
     async def test_filter_by_status(self, repo, org_id):
         req = await _make_request(repo, org_id, title="To complete")
-        await repo.update_request_status(str(req["id"]), "completed")
+        await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
         pending = await repo.list_requests(org_id, status="pending")
         completed = await repo.list_requests(org_id, status="completed")
         assert all(r["status"] == "pending" for r in pending["items"])
@@ -220,7 +220,7 @@ class TestListRequests:
 
     async def test_combined_filters(self, repo, org_id):
         req = await _make_request(repo, org_id, title="Daemon done", source="daemon")
-        await repo.update_request_status(str(req["id"]), "completed")
+        await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
         results = await repo.list_requests(org_id, status="completed", source="daemon")
         assert any(r["title"] == "Daemon done" for r in results["items"])
 
@@ -270,29 +270,30 @@ class TestListRequests:
 class TestUpdateRequestStatus:
     async def test_update_to_in_progress(self, repo, org_id):
         req = await _make_request(repo, org_id)
-        updated = await repo.update_request_status(str(req["id"]), "in_progress")
+        updated = await repo.update_request_status(str(req["id"]), "in_progress", org_id=org_id)
         assert updated["status"] == "in_progress"
         assert updated["completed_at"] is None
 
     async def test_update_to_completed_sets_completed_at(self, repo, org_id):
         req = await _make_request(repo, org_id)
-        updated = await repo.update_request_status(str(req["id"]), "completed")
+        updated = await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
         assert updated["status"] == "completed"
         assert updated["completed_at"] is not None
 
     async def test_update_to_failed_sets_completed_at(self, repo, org_id):
         req = await _make_request(repo, org_id)
-        updated = await repo.update_request_status(str(req["id"]), "failed")
+        updated = await repo.update_request_status(str(req["id"]), "failed", org_id=org_id)
         assert updated["status"] == "failed"
         assert updated["completed_at"] is not None
 
     async def test_update_to_cancelled_sets_completed_at(self, repo, org_id):
         req = await _make_request(repo, org_id)
-        updated = await repo.update_request_status(str(req["id"]), "cancelled")
+        updated = await repo.update_request_status(str(req["id"]), "cancelled", org_id=org_id)
         assert updated["completed_at"] is not None
 
-    async def test_update_nonexistent_returns_none(self, repo):
-        assert await repo.update_request_status(str(uuid4()), "completed") is None
+    async def test_update_nonexistent_returns_none(self, repo, org_id):
+        # A missing request row returns None even with a valid tenant org.
+        assert await repo.update_request_status(str(uuid4()), "completed", org_id=org_id) is None
 
 
 # ── Task CRUD ────────────────────────────────────────────────────────────
@@ -341,7 +342,7 @@ class TestCreateTask:
     async def test_create_task_generates_created_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id, title="Evented")
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert len(events["items"]) >= 1
         assert events["items"][0]["event_type"] == "created"
 
@@ -370,7 +371,7 @@ class TestListTasks:
         rid = str(req["id"])
         await _make_task(repo, rid, org_id, title="T1")
         await _make_task(repo, rid, org_id, title="T2")
-        tasks = await repo.list_tasks(rid)
+        tasks = await repo.list_tasks(rid, org_id=org_id)
         assert len(tasks["items"]) == 2
 
     async def test_list_by_status(self, repo, org_id):
@@ -378,9 +379,9 @@ class TestListTasks:
         rid = str(req["id"])
         t1 = await _make_task(repo, rid, org_id, title="T1")
         await _make_task(repo, rid, org_id, title="T2")
-        await repo.claim_task(str(t1["id"]), "inst-1")
-        pending = await repo.list_tasks(rid, status="pending")
-        claimed = await repo.list_tasks(rid, status="claimed")
+        await repo.claim_task(str(t1["id"]), "inst-1", org_id=org_id)
+        pending = await repo.list_tasks(rid, status="pending", org_id=org_id)
+        claimed = await repo.list_tasks(rid, status="claimed", org_id=org_id)
         assert len(pending["items"]) == 1
         assert len(claimed["items"]) == 1
 
@@ -389,13 +390,13 @@ class TestListTasks:
         rid = str(req["id"])
         await _make_task(repo, rid, org_id, title="Later", sequence_order=2)
         await _make_task(repo, rid, org_id, title="First", sequence_order=0)
-        tasks = await repo.list_tasks(rid)
+        tasks = await repo.list_tasks(rid, org_id=org_id)
         assert tasks["items"][0]["title"] == "First"
         assert tasks["items"][1]["title"] == "Later"
 
     async def test_list_empty(self, repo, org_id):
         req = await _make_request(repo, org_id)
-        tasks = await repo.list_tasks(str(req["id"]))
+        tasks = await repo.list_tasks(str(req["id"]), org_id=org_id)
         assert tasks["items"] == []
 
 
@@ -406,7 +407,7 @@ class TestClaimTask:
     async def test_claim_pending(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        claimed = await repo.claim_task(str(task["id"]), "daemon-a")
+        claimed = await repo.claim_task(str(task["id"]), "daemon-a", org_id=org_id)
         assert claimed is not None
         assert claimed["status"] == "claimed"
         assert claimed["claimed_by"] == "daemon-a"
@@ -415,23 +416,23 @@ class TestClaimTask:
     async def test_claim_already_claimed_returns_none(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "daemon-a")
-        second = await repo.claim_task(str(task["id"]), "daemon-b")
+        await repo.claim_task(str(task["id"]), "daemon-a", org_id=org_id)
+        second = await repo.claim_task(str(task["id"]), "daemon-b", org_id=org_id)
         assert second is None
 
     async def test_claim_sets_request_in_progress(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         assert req["status"] == "pending"
-        await repo.claim_task(str(task["id"]), "inst-1")
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
         updated_req = await repo.get_request(str(req["id"]), org_id)
         assert updated_req["status"] == "in_progress"
 
     async def test_claim_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-x")
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-x", org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         claimed_events = [e for e in events["items"] if e["event_type"] == "claimed"]
         assert len(claimed_events) == 1
         assert "inst-x" in claimed_events[0]["detail"]
@@ -440,8 +441,8 @@ class TestClaimTask:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         claim_a, claim_b = await asyncio.gather(
-            repo.claim_task(str(task["id"]), "daemon-a"),
-            repo.claim_task(str(task["id"]), "daemon-b"),
+            repo.claim_task(str(task["id"]), "daemon-a", org_id=org_id),
+            repo.claim_task(str(task["id"]), "daemon-b", org_id=org_id),
         )
         winners = [c for c in (claim_a, claim_b) if c is not None]
         assert len(winners) == 1
@@ -453,22 +454,22 @@ class TestStartTask:
     async def test_start_claimed_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
-        started = await repo.start_task(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
+        started = await repo.start_task(str(task["id"]), org_id=org_id)
         assert started is not None
         assert started["status"] == "running"
 
     async def test_start_unclaimed_returns_none(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        assert await repo.start_task(str(task["id"])) is None
+        assert await repo.start_task(str(task["id"]), org_id=org_id) is None
 
     async def test_start_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
-        await repo.start_task(str(task["id"]))
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
+        await repo.start_task(str(task["id"]), org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert any(e["event_type"] == "running" for e in events["items"])
 
 
@@ -476,8 +477,8 @@ class TestCompleteTask:
     async def test_complete_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        completed = await repo.complete_task(str(task["id"]), "All done")
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        completed = await repo.complete_task(str(task["id"]), "All done", org_id=org_id)
         assert completed is not None
         assert completed["status"] == "completed"
         assert completed["result"] == "All done"
@@ -486,16 +487,16 @@ class TestCompleteTask:
     async def test_complete_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.complete_task(str(task["id"]), "Output text")
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(task["id"]), "Output text", org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert any(e["event_type"] == "completed" for e in events["items"])
 
     async def test_completing_last_task_moves_to_review(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.complete_task(str(task["id"]), "Done")
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(task["id"]), "Done", org_id=org_id)
         updated = await repo.get_request(str(req["id"]), org_id)
         assert updated["status"] == "review"
 
@@ -504,10 +505,10 @@ class TestCompleteTask:
         rid = str(req["id"])
         t1 = await _make_task(repo, rid, org_id, title="T1")
         t2 = await _make_task(repo, rid, org_id, title="T2")
-        await repo.claim_task(str(t1["id"]), "inst-test")
-        await repo.fail_task(str(t1["id"]), "Broke")
-        await repo.claim_task(str(t2["id"]), "inst-test")
-        await repo.complete_task(str(t2["id"]), "OK")
+        await repo.claim_task(str(t1["id"]), "inst-test", org_id=org_id)
+        await repo.fail_task(str(t1["id"]), "Broke", org_id=org_id)
+        await repo.claim_task(str(t2["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(t2["id"]), "OK", org_id=org_id)
         updated = await repo.get_request(rid, org_id)
         assert updated["status"] == "failed"
 
@@ -516,8 +517,8 @@ class TestFailTask:
     async def test_fail_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        failed = await repo.fail_task(str(task["id"]), "Something broke")
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        failed = await repo.fail_task(str(task["id"]), "Something broke", org_id=org_id)
         assert failed is not None
         assert failed["status"] == "failed"
         assert failed["error"] == "Something broke"
@@ -526,9 +527,9 @@ class TestFailTask:
     async def test_fail_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.fail_task(str(task["id"]), "err")
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.fail_task(str(task["id"]), "err", org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert any(e["event_type"] == "failed" for e in events["items"])
 
 
@@ -536,8 +537,8 @@ class TestReleaseTask:
     async def test_release_claimed_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
-        released = await repo.release_task(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
+        released = await repo.release_task(str(task["id"]), org_id=org_id)
         assert released is not None
         assert released["status"] == "pending"
         assert released["claimed_by"] is None
@@ -546,23 +547,23 @@ class TestReleaseTask:
     async def test_release_running_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
-        await repo.start_task(str(task["id"]))
-        released = await repo.release_task(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
+        await repo.start_task(str(task["id"]), org_id=org_id)
+        released = await repo.release_task(str(task["id"]), org_id=org_id)
         assert released is not None
         assert released["status"] == "pending"
 
     async def test_release_pending_returns_none(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        assert await repo.release_task(str(task["id"])) is None
+        assert await repo.release_task(str(task["id"]), org_id=org_id) is None
 
     async def test_release_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
-        await repo.release_task(str(task["id"]))
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
+        await repo.release_task(str(task["id"]), org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert any(e["event_type"] == "released" for e in events["items"])
 
 
@@ -570,9 +571,9 @@ class TestRetryTask:
     async def test_retry_failed_task(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.fail_task(str(task["id"]), "Oops")
-        retried = await repo.retry_task(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.fail_task(str(task["id"]), "Oops", org_id=org_id)
+        retried = await repo.retry_task(str(task["id"]), org_id=org_id)
         assert retried is not None
         assert retried["status"] == "pending"
         assert retried["claimed_by"] is None
@@ -583,30 +584,30 @@ class TestRetryTask:
     async def test_retry_non_failed_returns_none(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        assert await repo.retry_task(str(task["id"])) is None
+        assert await repo.retry_task(str(task["id"]), org_id=org_id) is None
 
     async def test_retry_resets_failed_request_to_in_progress(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.fail_task(str(task["id"]), "err")
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.fail_task(str(task["id"]), "err", org_id=org_id)
         # Mark request as failed manually (simulating _check_request_completion)
-        await repo.update_request_status(str(req["id"]), "failed")
-        await repo.retry_task(str(task["id"]))
+        await repo.update_request_status(str(req["id"]), "failed", org_id=org_id)
+        await repo.retry_task(str(task["id"]), org_id=org_id)
         _updated = await repo.get_request(str(req["id"]), org_id)
         # _ensure_request_in_progress checks for 'pending', 'planned', or 'failed'
         # so a failed request will auto-transition to in_progress on retry
         # Just verify the retry itself worked
-        retried_task = await repo.get_task(str(task["id"]))
+        retried_task = await repo.get_task(str(task["id"]), org_id=org_id)
         assert retried_task["status"] == "pending"
 
     async def test_retry_logs_event(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.fail_task(str(task["id"]), "err")
-        await repo.retry_task(str(task["id"]))
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.fail_task(str(task["id"]), "err", org_id=org_id)
+        await repo.retry_task(str(task["id"]), org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert any(e["event_type"] == "retried" for e in events["items"])
 
 
@@ -614,33 +615,44 @@ class TestReleaseStaleTasks:
     async def test_release_stale_tasks(self, repo, org_id, db_pool):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
         # Manually backdate claimed_at to make it stale
         async with db_pool.acquire() as conn:
+            # claim_task stamps last_heartbeat_at AND logs a 'claimed' event;
+            # both count as activity in the activity-based stale predicate, so
+            # a hung task must have both backdated/cleared to simulate zero
+            # activity within the threshold.
             await conn.execute(
-                """UPDATE tasks SET claimed_at = NOW() - INTERVAL '60 minutes'
+                """UPDATE tasks
+                   SET claimed_at = NOW() - INTERVAL '60 minutes',
+                       last_heartbeat_at = NULL
                    WHERE id = $1""",
+                task["id"],
+            )
+            await conn.execute(
+                """UPDATE task_events SET created_at = NOW() - INTERVAL '60 minutes'
+                   WHERE task_id = $1""",
                 task["id"],
             )
         count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert count >= 1
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id=org_id)
         assert refreshed["status"] == "pending"
         assert refreshed["claimed_by"] is None
 
     async def test_no_stale_tasks(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
         # freshly claimed — should NOT be released
         _count = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id=org_id)
         assert refreshed["status"] == "claimed"
 
     async def test_release_expired_lease_even_when_claim_recent(self, repo, org_id, db_pool):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-lease")
+        await repo.claim_task(str(task["id"]), "inst-lease", org_id=org_id)
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """UPDATE tasks
@@ -651,7 +663,7 @@ class TestReleaseStaleTasks:
             )
         released = await repo.release_stale_tasks(stale_minutes=120, org_id=org_id)
         assert released == 1
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id=org_id)
         assert refreshed["status"] == "pending"
         assert refreshed["claimed_by"] is None
 
@@ -666,7 +678,7 @@ class TestReleaseStaleTasks:
             pid=1234,
             roles=["dispatcher"],
         )
-        await repo.claim_task(str(task["id"]), instance_id)
+        await repo.claim_task(str(task["id"]), instance_id, org_id=org_id)
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """UPDATE daemon_instances
@@ -687,14 +699,14 @@ class TestReleaseStaleTasks:
             instance_stale_seconds=60,
         )
         assert released == 1
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id=org_id)
         assert refreshed["status"] == "pending"
         assert refreshed["claimed_by"] is None
 
     async def test_release_logs_reaper_event_with_claim_owner(self, repo, org_id, db_pool):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-reaper")
+        await repo.claim_task(str(task["id"]), "inst-reaper", org_id=org_id)
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """UPDATE tasks
@@ -706,7 +718,7 @@ class TestReleaseStaleTasks:
         released = await repo.release_stale_tasks(stale_minutes=30, org_id=org_id)
         assert released == 1
 
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         reaper_events = [e for e in events["items"] if e["event_type"] == "reaper"]
         assert len(reaper_events) == 1
         assert "Claim expired (was claimed by inst-reaper)" in (reaper_events[0]["detail"] or "")
@@ -760,7 +772,7 @@ class TestAddTaskEvent:
     async def test_add_event_basic(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        event = await repo.add_task_event(str(task["id"]), "progress", "50% done")
+        event = await repo.add_task_event(str(task["id"]), "progress", "50% done", org_id=org_id)
         assert isinstance(event["id"], UUID)
         assert event["event_type"] == "progress"
         assert event["detail"] == "50% done"
@@ -773,6 +785,7 @@ class TestAddTaskEvent:
             "agent_dispatched",
             "Dispatched code agent",
             metadata={"model": "claude-sonnet-4", "instance": "i-123"},
+            org_id=org_id,
         )
         assert event["event_type"] == "agent_dispatched"
 
@@ -780,9 +793,9 @@ class TestAddTaskEvent:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         # 'created' event is auto-added by create_task
-        await repo.add_task_event(str(task["id"]), "progress", "Step 1")
-        await repo.add_task_event(str(task["id"]), "progress", "Step 2")
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.add_task_event(str(task["id"]), "progress", "Step 1", org_id=org_id)
+        await repo.add_task_event(str(task["id"]), "progress", "Step 2", org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert len(events["items"]) >= 3  # created + 2 progress
         types = [e["event_type"] for e in events["items"]]
         assert "created" in types
@@ -792,8 +805,8 @@ class TestAddTaskEvent:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         for i in range(5):
-            await repo.add_task_event(str(task["id"]), "progress", f"Step {i}")
-        events = await repo.list_task_events(str(task["id"]), limit=3)
+            await repo.add_task_event(str(task["id"]), "progress", f"Step {i}", org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), limit=3, org_id=org_id)
         assert len(events["items"]) == 3
 
 
@@ -805,8 +818,8 @@ class TestLinkMemory:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         memory_id = str(test_memory["id"])
-        await repo.link_memory(str(task["id"]), memory_id, "created")
-        memories = await repo.list_task_memories(str(task["id"]))
+        await repo.link_memory(str(task["id"]), memory_id, "created", org_id=org_id)
+        memories = await repo.list_task_memories(str(task["id"]), org_id=org_id)
         assert len(memories["items"]) == 1
         assert str(memories["items"][0]["memory_id"]) == memory_id
         assert memories["items"][0]["relation"] == "created"
@@ -814,26 +827,26 @@ class TestLinkMemory:
     async def test_link_memory_logs_event(self, repo, org_id, test_memory):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.link_memory(str(task["id"]), str(test_memory["id"]), "read")
-        events = await repo.list_task_events(str(task["id"]))
+        await repo.link_memory(str(task["id"]), str(test_memory["id"]), "read", org_id=org_id)
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert any(e["event_type"] == "memory_read" for e in events["items"])
 
     async def test_link_memory_duplicate_ignored(self, repo, org_id, test_memory):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         mid = str(test_memory["id"])
-        await repo.link_memory(str(task["id"]), mid, "created")
-        await repo.link_memory(str(task["id"]), mid, "created")
-        memories = await repo.list_task_memories(str(task["id"]))
+        await repo.link_memory(str(task["id"]), mid, "created", org_id=org_id)
+        await repo.link_memory(str(task["id"]), mid, "created", org_id=org_id)
+        memories = await repo.list_task_memories(str(task["id"]), org_id=org_id)
         assert len(memories["items"]) == 1
 
     async def test_link_multiple_relations(self, repo, org_id, test_memory):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         mid = str(test_memory["id"])
-        await repo.link_memory(str(task["id"]), mid, "created")
-        await repo.link_memory(str(task["id"]), mid, "updated")
-        memories = await repo.list_task_memories(str(task["id"]))
+        await repo.link_memory(str(task["id"]), mid, "created", org_id=org_id)
+        await repo.link_memory(str(task["id"]), mid, "updated", org_id=org_id)
+        memories = await repo.list_task_memories(str(task["id"]), org_id=org_id)
         relations = {m["relation"] for m in memories["items"]}
         assert "created" in relations
         assert "updated" in relations
@@ -876,8 +889,8 @@ class TestGetRequestWithTasks:
         rid = str(req["id"])
         task = await _make_task(repo, rid, org_id, title="Linked")
         tid = str(task["id"])
-        await repo.add_task_event(tid, "progress", "Working")
-        await repo.link_memory(tid, str(test_memory["id"]), "read")
+        await repo.add_task_event(tid, "progress", "Working", org_id=org_id)
+        await repo.link_memory(tid, str(test_memory["id"]), "read", org_id=org_id)
         full = await repo.get_request_with_tasks(rid, org_id)
         t = full["tasks"][0]
         assert len(t["events"]) >= 2  # created + progress
@@ -892,10 +905,10 @@ class TestGetRequestWithTasks:
         t1 = await _make_task(repo, rid, org_id, title="T1")
         t2 = await _make_task(repo, rid, org_id, title="T2")
         _t3 = await _make_task(repo, rid, org_id, title="T3")
-        await repo.claim_task(str(t1["id"]), "inst-1")
-        await repo.start_task(str(t1["id"]))
-        await repo.claim_task(str(t2["id"]), "inst-test")
-        await repo.complete_task(str(t2["id"]), "Done")
+        await repo.claim_task(str(t1["id"]), "inst-1", org_id=org_id)
+        await repo.start_task(str(t1["id"]), org_id=org_id)
+        await repo.claim_task(str(t2["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(t2["id"]), "Done", org_id=org_id)
         full = await repo.get_request_with_tasks(rid, org_id)
         assert full["stats"]["running"] == 1  # t1 running
         assert full["stats"]["completed"] == 1  # t2
@@ -909,7 +922,7 @@ class TestListPendingRequests:
     async def test_returns_pending_only(self, repo, org_id):
         _r1 = await _make_request(repo, org_id, title="Pending one")
         r2 = await _make_request(repo, org_id, title="Done one")
-        await repo.update_request_status(str(r2["id"]), "completed")
+        await repo.update_request_status(str(r2["id"]), "completed", org_id=org_id)
         pending = await repo.list_pending_requests(org_id)
         titles = [r["title"] for r in pending["items"]]
         assert "Done one" not in titles
@@ -956,8 +969,8 @@ class TestListPendingTasks:
         rid = str(req["id"])
         t0 = await _make_task(repo, rid, org_id, title="First", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Second", sequence_order=1)
-        await repo.claim_task(str(t0["id"]), "inst-test")
-        await repo.complete_task(str(t0["id"]), "Done")
+        await repo.claim_task(str(t0["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(t0["id"]), "Done", org_id=org_id)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Second" in titles
@@ -979,8 +992,8 @@ class TestListPendingTasks:
         await _make_task(repo, rid, org_id, title="Par B", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Next stage", sequence_order=1)
 
-        await repo.claim_task(str(first["id"]), "inst-test")
-        await repo.complete_task(str(first["id"]), "Done")
+        await repo.claim_task(str(first["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(first["id"]), "Done", org_id=org_id)
 
         pending = await repo.list_pending_tasks(org_id)
         titles = [task["title"] for task in pending["items"]]
@@ -1003,9 +1016,9 @@ class TestListPendingTasks:
         t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
         # Fail step 0
-        await repo.claim_task(str(t0["id"]), "inst-test")
-        await repo.start_task(str(t0["id"]))
-        await repo.fail_task(str(t0["id"]), "boom")
+        await repo.claim_task(str(t0["id"]), "inst-test", org_id=org_id)
+        await repo.start_task(str(t0["id"]), org_id=org_id)
+        await repo.fail_task(str(t0["id"]), "boom", org_id=org_id)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Step 1" not in titles
@@ -1037,9 +1050,9 @@ class TestListPendingTasks:
         rid = str(req["id"])
         t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
-        await repo.claim_task(str(t0["id"]), "inst-test")
-        await repo.start_task(str(t0["id"]))
-        await repo.fail_task(str(t0["id"]), "boom")
+        await repo.claim_task(str(t0["id"]), "inst-test", org_id=org_id)
+        await repo.start_task(str(t0["id"]), org_id=org_id)
+        await repo.fail_task(str(t0["id"]), "boom", org_id=org_id)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Step 1" in titles
@@ -1065,8 +1078,8 @@ class TestListPendingTasks:
         rid = str(req["id"])
         t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
-        await repo.claim_task(str(t0["id"]), "inst-test")
-        await repo.start_task(str(t0["id"]))
+        await repo.claim_task(str(t0["id"]), "inst-test", org_id=org_id)
+        await repo.start_task(str(t0["id"]), org_id=org_id)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Step 1" not in titles
@@ -1087,17 +1100,17 @@ class TestListPendingTasks:
         t_a = await _make_task(repo, rid, org_id, title="Task A", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Task B", sequence_order=1)
         # Fail task A
-        await repo.claim_task(str(t_a["id"]), "inst-test")
-        await repo.start_task(str(t_a["id"]))
-        await repo.fail_task(str(t_a["id"]), "boom")
+        await repo.claim_task(str(t_a["id"]), "inst-test", org_id=org_id)
+        await repo.start_task(str(t_a["id"]), org_id=org_id)
+        await repo.fail_task(str(t_a["id"]), "boom", org_id=org_id)
         # Task B should be blocked (no completed task at seq 0)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Task B" not in titles
         # Create retry task A2 at seq 0 and complete it
         t_a2 = await _make_task(repo, rid, org_id, title="Task A2", sequence_order=0)
-        await repo.claim_task(str(t_a2["id"]), "inst-test")
-        await repo.complete_task(str(t_a2["id"]), "Retry succeeded")
+        await repo.claim_task(str(t_a2["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(t_a2["id"]), "Retry succeeded", org_id=org_id)
         # Now task B should be unblocked
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
@@ -1110,9 +1123,9 @@ class TestListPendingTasks:
         rid = str(req["id"])
         t0 = await _make_task(repo, rid, org_id, title="Step 0", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Step 1", sequence_order=1)
-        await repo.claim_task(str(t0["id"]), "inst-test")
-        await repo.start_task(str(t0["id"]))
-        await repo.fail_task(str(t0["id"]), "boom")
+        await repo.claim_task(str(t0["id"]), "inst-test", org_id=org_id)
+        await repo.start_task(str(t0["id"]), org_id=org_id)
+        await repo.fail_task(str(t0["id"]), "boom", org_id=org_id)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Step 1" not in titles
@@ -1123,17 +1136,17 @@ class TestListPendingTasks:
         rid = str(req["id"])
         t_a = await _make_task(repo, rid, org_id, title="Task A", sequence_order=0)
         await _make_task(repo, rid, org_id, title="Task B", sequence_order=1)
-        await repo.claim_task(str(t_a["id"]), "inst-test")
-        await repo.start_task(str(t_a["id"]))
-        await repo.fail_task(str(t_a["id"]), "boom")
+        await repo.claim_task(str(t_a["id"]), "inst-test", org_id=org_id)
+        await repo.start_task(str(t_a["id"]), org_id=org_id)
+        await repo.fail_task(str(t_a["id"]), "boom", org_id=org_id)
         # Under permissive, B is already unblocked by the failed task
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Task B" in titles
         # Adding a completed retry should also keep B unblocked
         t_a2 = await _make_task(repo, rid, org_id, title="Task A2", sequence_order=0)
-        await repo.claim_task(str(t_a2["id"]), "inst-test")
-        await repo.complete_task(str(t_a2["id"]), "Retry succeeded")
+        await repo.claim_task(str(t_a2["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(t_a2["id"]), "Retry succeeded", org_id=org_id)
         pending = await repo.list_pending_tasks(org_id)
         titles = [t["title"] for t in pending["items"]]
         assert "Task B" in titles
@@ -1152,7 +1165,7 @@ class TestGetActiveSummary:
         req = await _make_request(repo, org_id)
         rid = str(req["id"])
         task = await _make_task(repo, rid, org_id)
-        await repo.claim_task(str(task["id"]), "inst-1")
+        await repo.claim_task(str(task["id"]), "inst-1", org_id=org_id)
         summary = await repo.get_active_summary(org_id)
         assert summary["requests"]["active"] >= 1  # in_progress from claim
         assert summary["tasks"]["running"] >= 1
@@ -1163,8 +1176,8 @@ class TestReviewLifecycle:
         monkeypatch.delenv("LUCENT_SKIP_POST_REVIEW", raising=False)
         req = await _make_request(repo, org_id, title="Needs review")
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.complete_task(str(task["id"]), "Done")
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.complete_task(str(task["id"]), "Done", org_id=org_id)
         items = await repo.get_requests_in_review(org_id)
         ids = [str(r["id"]) for r in items["items"]]
         assert str(req["id"]) in ids
@@ -1172,8 +1185,8 @@ class TestReviewLifecycle:
     async def test_retry_task_with_feedback(self, repo, org_id):
         req = await _make_request(repo, org_id, title="Rework path")
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.fail_task(str(task["id"]), "oops")
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=org_id)
+        await repo.fail_task(str(task["id"]), "oops", org_id=org_id)
         retried = await repo.retry_task_with_feedback(
             str(task["id"]),
             "Please include tests and handle edge case",
@@ -1191,7 +1204,7 @@ class TestGetRecentEvents:
     async def test_recent_events(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id, title="Eventful")
-        await repo.add_task_event(str(task["id"]), "progress", "Doing stuff")
+        await repo.add_task_event(str(task["id"]), "progress", "Doing stuff", org_id=org_id)
         events = await repo.get_recent_events(org_id)
         assert len(events) >= 1
         assert any(e.get("task_title") == "Eventful" for e in events)
@@ -1201,15 +1214,15 @@ class TestGetRecentEvents:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         for i in range(5):
-            await repo.add_task_event(str(task["id"]), "progress", f"Step {i}")
+            await repo.add_task_event(str(task["id"]), "progress", f"Step {i}", org_id=org_id)
         events = await repo.get_recent_events(org_id, limit=3)
         assert len(events) == 3
 
     async def test_recent_events_ordered_desc(self, repo, org_id):
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.add_task_event(str(task["id"]), "progress", "First")
-        await repo.add_task_event(str(task["id"]), "progress", "Last")
+        await repo.add_task_event(str(task["id"]), "progress", "First", org_id=org_id)
+        await repo.add_task_event(str(task["id"]), "progress", "Last", org_id=org_id)
         events = await repo.get_recent_events(org_id)
         # Most recent first
         if len(events) >= 2:

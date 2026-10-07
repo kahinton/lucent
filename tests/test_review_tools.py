@@ -29,12 +29,17 @@ async def mcp(db_pool):
 
 @pytest_asyncio.fixture
 async def auth_user(test_user):
-    """Set auth context to the test user."""
+    """Set auth context to the test user.
+
+    Admin role: ``test_request`` is a system-owned request (created_by NULL),
+    and the request tool's visibility filter only surfaces system requests to
+    admins/owners — members would get 'Request not found' by design.
+    """
     set_current_user(
         {
             "id": test_user["id"],
             "organization_id": test_user["organization_id"],
-            "role": "member",
+            "role": "admin",
             "display_name": "Test User",
             "email": "test@test.com",
         }

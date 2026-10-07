@@ -58,15 +58,17 @@ async def _make_task(repo, request_id, org_id, **kwargs):
 async def _complete_task_flow(repo, task, result="Done"):
     """Claim then complete a task in one step."""
     tid = str(task["id"])
-    await repo.claim_task(tid, "test-inst")
-    return await repo.complete_task(tid, result)
+    org_id = str(task["organization_id"])
+    await repo.claim_task(tid, "test-inst", org_id=org_id)
+    return await repo.complete_task(tid, result, org_id=org_id)
 
 
 async def _fail_task_flow(repo, task, error="Something broke"):
     """Claim then fail a task in one step."""
     tid = str(task["id"])
-    await repo.claim_task(tid, "test-inst")
-    return await repo.fail_task(tid, error)
+    org_id = str(task["organization_id"])
+    await repo.claim_task(tid, "test-inst", org_id=org_id)
+    return await repo.fail_task(tid, error, org_id=org_id)
 
 
 def test_review_updatable_memories_excludes_goals():
@@ -223,7 +225,7 @@ class TestReviewStatusTransitions:
         await _complete_task_flow(repo, task)
 
         # Now in review; approve it
-        result = await repo.update_request_status(str(req["id"]), "completed")
+        result = await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
         assert result is not None
         assert result["status"] == REQUEST_STATUS_COMPLETED
         assert result["completed_at"] is not None
@@ -234,7 +236,7 @@ class TestReviewStatusTransitions:
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
 
-        result = await repo.update_request_status(str(req["id"]), "needs_rework")
+        result = await repo.update_request_status(str(req["id"]), "needs_rework", org_id=org_id)
         assert result is not None
         assert result["status"] == REQUEST_STATUS_NEEDS_REWORK
         assert result["reviewed_at"] is not None
@@ -246,18 +248,18 @@ class TestReviewStatusTransitions:
 
         # Complete → review → needs_rework
         await _complete_task_flow(repo, task)
-        await repo.update_request_status(str(req["id"]), "needs_rework")
+        await repo.update_request_status(str(req["id"]), "needs_rework", org_id=org_id)
 
         # Fail then retry the task to trigger _ensure_request_in_progress
         # We need a failed task to retry; create a new one
         t2 = await _make_task(repo, str(req["id"]), org_id, title="Retry target")
         await _fail_task_flow(repo, t2, "error")
 
-        retried = await repo.retry_task(str(t2["id"]))
+        retried = await repo.retry_task(str(t2["id"]), org_id=org_id)
         assert retried is not None
 
         # Claim triggers _ensure_request_in_progress
-        await repo.claim_task(str(t2["id"]), "test-inst-2")
+        await repo.claim_task(str(t2["id"]), "test-inst-2", org_id=org_id)
         updated = await repo.get_request(str(req["id"]), org_id)
         assert updated["status"] == REQUEST_STATUS_IN_PROGRESS
 
@@ -290,7 +292,7 @@ class TestReviewStatusTransitions:
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
 
-        result = await repo.update_request_status(str(req["id"]), "needs_rework")
+        result = await repo.update_request_status(str(req["id"]), "needs_rework", org_id=org_id)
         assert result["reviewed_at"] is not None
 
 
@@ -387,7 +389,7 @@ class TestInvalidTransitions:
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
         # review → completed
-        await repo.update_request_status(str(req["id"]), "completed")
+        await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
 
         result = await repo.get_request(str(req["id"]), org_id)
         assert result["status"] == REQUEST_STATUS_COMPLETED
@@ -424,7 +426,7 @@ class TestReviewCountTracking:
         await _fail_task_flow(repo, task)
 
         retried = await repo.retry_task_with_feedback(
-            str(task["id"]), "Fix the output formatting"
+            str(task["id"]), "Fix the output formatting", org_id=org_id
         )
         assert retried is not None
 
@@ -442,7 +444,7 @@ class TestReviewCountTracking:
             task = await _make_task(repo, rid, org_id, title=f"Task round {i}")
             await _fail_task_flow(repo, task, f"Error {i}")
             await repo.retry_task_with_feedback(
-                str(task["id"]), f"Feedback round {i}"
+                str(task["id"]), f"Feedback round {i}", org_id=org_id
             )
 
         updated = await repo.get_request(rid, org_id)
@@ -455,11 +457,11 @@ class TestReviewCountTracking:
 
         t1 = await _make_task(repo, rid, org_id, title="T1")
         await _fail_task_flow(repo, t1, "err")
-        await repo.retry_task_with_feedback(str(t1["id"]), "First feedback")
+        await repo.retry_task_with_feedback(str(t1["id"]), "First feedback", org_id=org_id)
 
         t2 = await _make_task(repo, rid, org_id, title="T2")
         await _fail_task_flow(repo, t2, "err2")
-        await repo.retry_task_with_feedback(str(t2["id"]), "Second feedback")
+        await repo.retry_task_with_feedback(str(t2["id"]), "Second feedback", org_id=org_id)
 
         updated = await repo.get_request(rid, org_id)
         assert updated["review_feedback"] == "Second feedback"
@@ -470,7 +472,7 @@ class TestReviewCountTracking:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         # Task is still pending — not failed
-        result = await repo.retry_task_with_feedback(str(task["id"]), "feedback")
+        result = await repo.retry_task_with_feedback(str(task["id"]), "feedback", org_id=org_id)
         assert result is None
 
     async def test_retry_with_feedback_logs_event(self, repo, org_id):
@@ -478,9 +480,9 @@ class TestReviewCountTracking:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await _fail_task_flow(repo, task, "err")
-        await repo.retry_task_with_feedback(str(task["id"]), "Fix it")
+        await repo.retry_task_with_feedback(str(task["id"]), "Fix it", org_id=org_id)
 
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         event_types = [e["event_type"] for e in events["items"]]
         assert "review_feedback" in event_types
 
@@ -490,7 +492,7 @@ class TestReviewCountTracking:
         task = await _make_task(repo, str(req["id"]), org_id)
         await _fail_task_flow(repo, task, "err")
 
-        await repo.retry_task_with_feedback(str(task["id"]), "Fix it")
+        await repo.retry_task_with_feedback(str(task["id"]), "Fix it", org_id=org_id)
         updated = await repo.get_request(str(req["id"]), org_id)
         assert updated["status"] == REQUEST_STATUS_IN_PROGRESS
 
@@ -518,7 +520,7 @@ class TestGetRequestsInReview:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
-        await repo.update_request_status(str(req["id"]), "needs_rework")
+        await repo.update_request_status(str(req["id"]), "needs_rework", org_id=org_id)
 
         result = await repo.get_requests_in_review(org_id)
         ids = [str(r["id"]) for r in result["items"]]
@@ -529,7 +531,7 @@ class TestGetRequestsInReview:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
-        await repo.update_request_status(str(req["id"]), "completed")
+        await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
 
         result = await repo.get_requests_in_review(org_id)
         ids = [str(r["id"]) for r in result["items"]]
@@ -552,7 +554,7 @@ class TestGetRequestsInReview:
         r2 = await _make_request(repo, org_id, title=f"Rework second {uuid4().hex[:6]}")
         t2 = await _make_task(repo, str(r2["id"]), org_id)
         await _complete_task_flow(repo, t2)
-        await repo.update_request_status(str(r2["id"]), "needs_rework")
+        await repo.update_request_status(str(r2["id"]), "needs_rework", org_id=org_id)
         # r2 is now 'needs_rework'
 
         result = await repo.get_requests_in_review(org_id)
@@ -606,11 +608,11 @@ class TestEnsureRequestInProgress:
         # Get to needs_rework state
         t1 = await _make_task(repo, rid, org_id, title="Original")
         await _complete_task_flow(repo, t1)
-        await repo.update_request_status(rid, "needs_rework")
+        await repo.update_request_status(rid, "needs_rework", org_id=org_id)
 
         # Create a new task and claim it
         t2 = await _make_task(repo, rid, org_id, title="Rework task")
-        await repo.claim_task(str(t2["id"]), "inst-rework")
+        await repo.claim_task(str(t2["id"]), "inst-rework", org_id=org_id)
 
         updated = await repo.get_request(rid, org_id)
         assert updated["status"] == REQUEST_STATUS_IN_PROGRESS
@@ -626,8 +628,8 @@ class TestEnsureRequestInProgress:
         assert updated["status"] == REQUEST_STATUS_FAILED
 
         # Retry
-        await repo.retry_task(str(task["id"]))
-        await repo.claim_task(str(task["id"]), "inst-retry")
+        await repo.retry_task(str(task["id"]), org_id=org_id)
+        await repo.claim_task(str(task["id"]), "inst-retry", org_id=org_id)
 
         updated2 = await repo.get_request(str(req["id"]), org_id)
         assert updated2["status"] == REQUEST_STATUS_IN_PROGRESS
@@ -727,7 +729,7 @@ class TestReviewAPIEndpoints:
         assert resp1.json()["review_count"] == 1
 
         # Move back to review for second rejection
-        await repo.update_request_status(str(req["id"]), "review")
+        await repo.update_request_status(str(req["id"]), "review", org_id=org_id)
 
         resp2 = await admin_client.post(
             f"/api/requests/{req['id']}/review/reject",
@@ -828,7 +830,7 @@ class TestStatusFiltering:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
-        await repo.update_request_status(str(req["id"]), "needs_rework")
+        await repo.update_request_status(str(req["id"]), "needs_rework", org_id=org_id)
 
         resp = await api_client.get("/api/requests", params={"status": "needs_rework"})
         assert resp.status_code == 200
@@ -910,7 +912,7 @@ class TestHappyPathFlow:
         assert req_after["status"] == REQUEST_STATUS_REVIEW
 
         # Approve the review
-        approved = await repo.update_request_status(rid, "completed")
+        approved = await repo.update_request_status(rid, "completed", org_id=org_id)
         assert approved["status"] == REQUEST_STATUS_COMPLETED
         assert approved["completed_at"] is not None
 
@@ -923,7 +925,7 @@ class TestHappyPathFlow:
         req_after = await repo.get_request(str(req["id"]), org_id)
         assert req_after["status"] == REQUEST_STATUS_REVIEW
 
-        approved = await repo.update_request_status(str(req["id"]), "completed")
+        approved = await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
         assert approved["status"] == REQUEST_STATUS_COMPLETED
 
 
@@ -940,7 +942,7 @@ class TestReworkFlow:
         # Request is in review
 
         # Reject: review → needs_rework
-        await repo.update_request_status(rid, "needs_rework")
+        await repo.update_request_status(rid, "needs_rework", org_id=org_id)
         req_rework = await repo.get_request(rid, org_id)
         assert req_rework["status"] == REQUEST_STATUS_NEEDS_REWORK
 
@@ -948,17 +950,17 @@ class TestReworkFlow:
         t2 = await _make_task(repo, rid, org_id, title="Rework: Task 1")
 
         # Claim the rework task (triggers _ensure_request_in_progress)
-        await repo.claim_task(str(t2["id"]), "inst-rework")
+        await repo.claim_task(str(t2["id"]), "inst-rework", org_id=org_id)
         req_ip = await repo.get_request(rid, org_id)
         assert req_ip["status"] == REQUEST_STATUS_IN_PROGRESS
 
         # Complete rework task → back to review
-        await repo.complete_task(str(t2["id"]), "Reworked output")
+        await repo.complete_task(str(t2["id"]), "Reworked output", org_id=org_id)
         req_review2 = await repo.get_request(rid, org_id)
         assert req_review2["status"] == REQUEST_STATUS_REVIEW
 
         # Approve second review
-        approved = await repo.update_request_status(rid, "completed")
+        approved = await repo.update_request_status(rid, "completed", org_id=org_id)
         assert approved["status"] == REQUEST_STATUS_COMPLETED
 
     async def test_rework_with_retry_task_with_feedback(self, repo, org_id):
@@ -971,7 +973,7 @@ class TestReworkFlow:
 
         # retry with feedback
         retried = await repo.retry_task_with_feedback(
-            str(task["id"]), "Use the correct API endpoint"
+            str(task["id"]), "Use the correct API endpoint", org_id=org_id
         )
         assert retried is not None
         assert retried["status"] == "pending"
@@ -983,8 +985,8 @@ class TestReworkFlow:
         assert req_updated["review_feedback"] == "Use the correct API endpoint"
 
         # Complete the retried task
-        await repo.claim_task(str(task["id"]), "inst-retry")
-        await repo.complete_task(str(task["id"]), "Fixed output")
+        await repo.claim_task(str(task["id"]), "inst-retry", org_id=org_id)
+        await repo.complete_task(str(task["id"]), "Fixed output", org_id=org_id)
 
         # Should go to review again
         req_final = await repo.get_request(rid, org_id)
@@ -1005,7 +1007,7 @@ class TestMaxReworkExceeded:
             )
             await _fail_task_flow(repo, task, f"Error cycle {cycle}")
             await repo.retry_task_with_feedback(
-                str(task["id"]), f"Feedback cycle {cycle}"
+                str(task["id"]), f"Feedback cycle {cycle}", org_id=org_id
             )
 
         req_final = await repo.get_request(rid, org_id)
@@ -1023,7 +1025,7 @@ class TestMaxReworkExceeded:
             )
             await _fail_task_flow(repo, task, f"Error {cycle}")
             await repo.retry_task_with_feedback(
-                str(task["id"]), f"Feedback {cycle}"
+                str(task["id"]), f"Feedback {cycle}", org_id=org_id
             )
 
         req_final = await repo.get_request(rid, org_id)
@@ -1057,7 +1059,7 @@ class TestReviewAgentFailure:
 
         # At DB level, request will be 'failed' because a task failed.
         # The daemon restores review so a human can make the final decision.
-        await repo.update_request_status(rid, "review")
+        await repo.update_request_status(rid, "review", org_id=org_id)
 
         req_after = await repo.get_request(rid, org_id)
         assert req_after["status"] == REQUEST_STATUS_REVIEW
@@ -1075,7 +1077,7 @@ class TestBackwardsCompatibility:
     async def test_manual_status_to_completed_still_works(self, repo, org_id):
         """Direct update_request_status to completed bypasses review (legacy behavior)."""
         req = await _make_request(repo, org_id)
-        result = await repo.update_request_status(str(req["id"]), "completed")
+        result = await repo.update_request_status(str(req["id"]), "completed", org_id=org_id)
         assert result["status"] == REQUEST_STATUS_COMPLETED
 
     async def test_request_default_review_fields_present(self, repo, org_id):
@@ -1099,7 +1101,7 @@ class TestBackwardsCompatibility:
     async def test_failed_request_not_in_review(self, repo, org_id):
         """Failed requests don't show up in review list."""
         req = await _make_request(repo, org_id)
-        await repo.update_request_status(str(req["id"]), "failed")
+        await repo.update_request_status(str(req["id"]), "failed", org_id=org_id)
 
         result = await repo.get_requests_in_review(org_id)
         ids = [str(r["id"]) for r in result["items"]]
@@ -1108,7 +1110,7 @@ class TestBackwardsCompatibility:
     async def test_cancelled_request_not_in_review(self, repo, org_id):
         """Cancelled requests don't show up in review list."""
         req = await _make_request(repo, org_id)
-        await repo.update_request_status(str(req["id"]), "cancelled")
+        await repo.update_request_status(str(req["id"]), "cancelled", org_id=org_id)
 
         result = await repo.get_requests_in_review(org_id)
         ids = [str(r["id"]) for r in result["items"]]
@@ -1367,7 +1369,7 @@ class TestDeduplication:
         await repo.link_request_memory(str(req1["id"]), mem_id, "goal", org_id=org_id)
         task = await _make_task(repo, str(req1["id"]), org_id)
         await _complete_task_flow(repo, task)
-        await repo.update_request_status(str(req1["id"]), "needs_rework")
+        await repo.update_request_status(str(req1["id"]), "needs_rework", org_id=org_id)
 
         req2 = await repo.create_request(title="Different title", org_id=org_id, memory_ids=mids)
         assert str(req2["id"]) == str(req1["id"])
@@ -1387,7 +1389,7 @@ class TestDeduplication:
         await repo.link_request_memory(str(req1["id"]), mem_id, "goal", org_id=org_id)
         task = await _make_task(repo, str(req1["id"]), org_id)
         await _complete_task_flow(repo, task)
-        await repo.update_request_status(str(req1["id"]), "completed")
+        await repo.update_request_status(str(req1["id"]), "completed", org_id=org_id)
 
         req2 = await repo.create_request(title="New attempt", org_id=org_id, memory_ids=mids)
         assert str(req2["id"]) != str(req1["id"])
@@ -1416,7 +1418,7 @@ class TestActiveSummary:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
-        await repo.update_request_status(str(req["id"]), "needs_rework")
+        await repo.update_request_status(str(req["id"]), "needs_rework", org_id=org_id)
 
         summary = await repo.get_active_summary(org_id)
         assert summary["requests"]["active"] >= 1

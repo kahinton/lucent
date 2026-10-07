@@ -16,32 +16,44 @@ Repositories:
 
 # Pool management
 from lucent.db.access import AccessRepository
+from lucent.db.access_control import (
+    AuthAccessRepository,
+    normalize_auth_resource_type,
+)
 from lucent.db.admin_audit import AdminAuditRepository
 from lucent.db.api_key import ApiKeyRepository
 from lucent.db.audit import AuditRepository
 from lucent.db.auth import AuthRepository
+from lucent.db.pool import (
+    AuthorizedDatabaseConnection,
+    AuthorizedDatabasePool,
+    AuthorizedQueryError,
+    AuthPrincipal,
+    AuthAccessRole,
+    AuthTablePolicy,
+    get_authorized_pool,
+)
 from lucent.db.bootstrap import BootstrapRepository
 from lucent.db.credentials import CredentialRepository
-
-# Repositories
+from lucent.db.dashboard import DashboardRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
-from lucent.db.dashboard import DashboardRepository
 from lucent.db.integrations import IntegrationRepository
 from lucent.db.llm_sessions import LLMSessionRepository
 from lucent.db.memory import (
     DuplicateTechnicalMemoryError,
     MemoryRepository,
     VersionConflictError,
+    get_first_memory_owner,
+    get_authorized_memories_pool,
 )
 from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.pool import close_db, get_pool, init_db
-from lucent.db.projects import ProjectRepository
+from lucent.db.projects import ProjectRepository, get_authorized_projects_pool
 from lucent.db.reviews import ReviewRepository
 from lucent.db.runtime_settings import RuntimeSettingsRepository
-from lucent.db.secrets import SecretRepository
-from lucent.db.secrets import SecretMigrationRepository
+from lucent.db.secrets import SecretMigrationRepository, SecretRepository
 from lucent.db.token_usage import TokenUsageRepository
 from lucent.db.tool_audit import ToolAuditRepository
 
@@ -87,6 +99,18 @@ __all__ = [
     "ApiKeyRepository",
     "OrganizationRepository",
     "AuthRepository",
+    "AuthorizedDatabaseConnection",
+    "AuthorizedDatabasePool",
+    "AuthorizedQueryError",
+    "AuthPrincipal",
+    "AuthTablePolicy",
+    "AuthAccessRole",
+    "AuthAccessRepository",
+    "normalize_auth_resource_type",
+    "get_authorized_pool",
+    "get_authorized_projects_pool",
+    "get_authorized_memories_pool",
+    "get_first_memory_owner",
     "AuditRepository",
     "AdminAuditRepository",
     "BootstrapRepository",

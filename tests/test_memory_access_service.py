@@ -41,6 +41,7 @@ async def test_get_accessible_filters_single_memory_by_repo_access() -> None:
     repo.get_accessible = AsyncMock(
         return_value={"id": memory_id, "metadata": {"repo": "org/repo"}}
     )
+    repo.is_org_shared = AsyncMock(return_value=False)
     github_access = AsyncMock()
     github_access.check_access = AsyncMock(return_value=False)
     service = MemoryAccessService(repo, github_access)
@@ -53,6 +54,30 @@ async def test_get_accessible_filters_single_memory_by_repo_access() -> None:
         "metadata": {"repo": "org/repo"},
     }
     github_access.check_access.assert_awaited_once_with(user_id, "org/repo")
+    repo.is_org_shared.assert_awaited_once_with(memory_id, org_id)
+
+
+@pytest.mark.asyncio
+async def test_get_accessible_bypasses_repo_filter_for_org_shared_memory() -> None:
+    """An org-shared memory (org read clearance) skips the GitHub repo filter."""
+    memory_id = uuid4()
+    user_id = uuid4()
+    org_id = uuid4()
+
+    repo = AsyncMock()
+    repo.get_accessible = AsyncMock(
+        return_value={"id": memory_id, "metadata": {"repo": "org/repo"}}
+    )
+    repo.is_org_shared = AsyncMock(return_value=True)
+    github_access = AsyncMock()
+    github_access.check_access = AsyncMock(return_value=False)
+    service = MemoryAccessService(repo, github_access)
+
+    result = await service.get_accessible(memory_id, user_id, org_id)
+
+    assert result == {"id": memory_id, "metadata": {"repo": "org/repo"}}
+    repo.is_org_shared.assert_awaited_once_with(memory_id, org_id)
+    github_access.check_access.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -81,6 +106,10 @@ async def test_search_updates_counts_after_filtering() -> None:
 
     repo = AsyncMock()
     repo.pool = pool
+    github_access = AsyncMock()
+    # _resolve_accessible_repos reads the pool off the github access service,
+    # so wire the fake pool there too.
+    github_access.pool = pool
     # repo.search must receive the resolved accessible_repos and (in real
     # life) filter at the SQL level. Here we just confirm it's invoked with
     # the right kwarg and pass through what it returns.
@@ -94,8 +123,7 @@ async def test_search_updates_counts_after_filtering() -> None:
         }
     )
 
-    github_access = AsyncMock()
-    service = MemoryAccessService(repo, github_access)
+    service = MemoryAccessService(repo, github_access, organization_id=uuid4())
 
     result = await service.search(user_id=user_id, query="x")
 
@@ -240,6 +268,8 @@ async def test_search_full_filters_repo_tagged_results() -> None:
 
     repo = AsyncMock()
     repo.pool = pool
+    github_access = AsyncMock()
+    github_access.pool = pool
     repo.search_full = AsyncMock(
         return_value={
             "memories": [
@@ -252,8 +282,7 @@ async def test_search_full_filters_repo_tagged_results() -> None:
             "has_more": False,
         }
     )
-    github_access = AsyncMock()
-    service = MemoryAccessService(repo, github_access)
+    service = MemoryAccessService(repo, github_access, organization_id=uuid4())
 
     result = await service.search_full(user_id=user_id, query="repo")
 

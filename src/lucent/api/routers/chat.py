@@ -38,7 +38,6 @@ from pydantic import BaseModel, Field
 
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import UserRepository, get_pool
-from lucent.db.user_interactions import UserInteractionRepository
 from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
 from lucent.prompts.memory_usage import render_active_user_context
@@ -78,11 +77,16 @@ SESSION_EXPERIENCE_TIMEOUT = session_experience_timeout_seconds()
 
 
 async def _can_user_access_model(user, pool, model_id: str) -> bool:
-    from lucent.access_control import AccessControlService
+    # Usage is clearance-driven and default-deny: the model must be explicitly
+    # granted to this principal (user/group/org clearance) AND enabled — a
+    # role grants nothing, and this check matches what the model picker lists.
+    from lucent.db.models import ModelRepository, get_authorized_models_pool
 
-    return await AccessControlService(pool).can_access(
-        str(user["id"]), "model", model_id, str(user["organization_id"])
+    model_pool = await get_authorized_models_pool(
+        pool, {"id": str(user["id"]), "organization_id": str(user["organization_id"])}
     )
+    model = await ModelRepository(model_pool).get_usable_model(model_id)
+    return bool(model) and bool(model.get("is_enabled", False))
 
 
 def _resolve_chat_model(override: str | None = None) -> str:
@@ -974,7 +978,9 @@ async def _render_active_user_context(user: dict, pool) -> str:
     """Load and render trusted context without making chat depend on memory I/O."""
     individual_memory = None
     try:
-        individual_memory = await UserRepository(pool).get_individual_memory_for_user(user["id"])
+        individual_memory = await UserRepository(pool).get_individual_memory_for_user(
+            user["id"], organization_id=user.get("organization_id")
+        )
     except Exception:
         logger.warning("Failed to load active user memory for chat", exc_info=True)
     return render_active_user_context(user, individual_memory)
@@ -1021,10 +1027,26 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         # Load deep context for detail pages
         try:
             if page_type == "memory_detail" and page_data.get("memory_id") and org_id:
-                from lucent.db import MemoryRepository
+                from lucent.db import MemoryRepository, get_authorized_memories_pool
 
                 repo = MemoryRepository(pool)
-                mem = await repo.get_memory(page_data["memory_id"], org_id)
+                if str(user.get("role") or "") in ("admin", "owner"):
+                    mem = await repo.get(
+                        page_data["memory_id"], organization_id=org_id
+                    )
+                else:
+                    # Members: clearance-driven probe (default-deny). This
+                    # grounding read used to call the nonexistent
+                    # `get_memory` — the context silently never loaded.
+                    authorized = await get_authorized_memories_pool(
+                        pool,
+                        {"id": str(user["id"]), "organization_id": org_id},
+                    )
+                    mem = await MemoryRepository(authorized).get_accessible(
+                        page_data["memory_id"],
+                        user_id=user["id"],
+                        organization_id=org_id,
+                    )
                 if mem:
                     parts.append("\n## Memory Being Viewed")
                     parts.append(f"- Type: {mem.get('type', '?')}")
@@ -1033,10 +1055,32 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                     parts.append(f"- Content:\n{str(mem.get('content', ''))[:2000]}")
 
             elif page_type == "schedule_detail" and page_data.get("schedule_id") and org_id:
-                from lucent.db.schedules import ScheduleRepository
+                from lucent.db.schedules import (
+                    ScheduleRepository,
+                    get_authorized_schedules_pool,
+                )
 
                 repo = ScheduleRepository(pool)
-                sched = await repo.get_schedule_with_runs(page_data["schedule_id"], org_id)
+                if str(user.get("role") or "") in ("admin", "owner"):
+                    sched = await repo.get_schedule_with_runs(
+                        page_data["schedule_id"], org_id
+                    )
+                else:
+                    # Members: clearance-driven probe (default-deny) since
+                    # the grounding read used to leak any org schedule.
+                    authorized = await get_authorized_schedules_pool(
+                        pool,
+                        {"id": str(user["id"]), "organization_id": org_id},
+                    )
+                    cleared = await ScheduleRepository(authorized).get_usable_schedule(
+                        page_data["schedule_id"]
+                    )
+                    if cleared:
+                        sched = {**cleared, "runs": await repo.list_runs(
+                            page_data["schedule_id"], org_id=org_id
+                        )}
+                    else:
+                        sched = None
                 if sched:
                     parts.append("\n## Schedule Being Viewed")
                     parts.append(f"- Title: {sched.get('title')}")
@@ -1117,19 +1161,34 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
         except Exception:
             logger.debug("Failed to load request context for chat", exc_info=True)
 
-    # Pull relevant memories for context
+    # Pull relevant memories for context. This block used to call the
+    # nonexistent `list_memories` and silently never loaded; it now reads
+    # through the same clearance-driven service the dashboard composer uses —
+    # every caller sees exactly their own view (own + granted + org-shared),
+    # so the model never sees more than the human driving the chat.
     try:
-        from lucent.db import MemoryRepository
-
-        memo_repo = MemoryRepository(pool)
-        if org_id:
-            recent = await memo_repo.list_memories(
-                org_id=org_id,
-                limit=10,
+        if org_id and user.get("id"):
+            from lucent.db import MemoryRepository
+            from lucent.integrations.github_repo_access_service import (
+                GitHubRepoAccessService,
             )
-            if recent:
+            from lucent.services.memory_access_service import MemoryAccessService
+
+            memory_access = MemoryAccessService(
+                MemoryRepository(pool),
+                GitHubRepoAccessService(pool),
+                organization_id=org_id,
+                is_admin=str(user.get("role") or "") in ("admin", "owner"),
+            )
+            recent = await memory_access.search(
+                user_id=user["id"],
+                limit=10,
+                requesting_user_id=user["id"],
+                requesting_org_id=org_id,
+            )
+            if recent["memories"]:
                 parts.append("\n## Recent Memories (for context)")
-                for m in recent[:10]:
+                for m in recent["memories"][:10]:
                     tags = ", ".join(m.get("tags", [])[:5])
                     content_preview = str(m.get("content", ""))[:200]
                     parts.append(f"- [{tags}] {content_preview}")
@@ -1617,16 +1676,16 @@ async def chat_stream(
 async def chat_models(request: Request):
     """List available models for the chat model picker."""
     user, pool = await _get_session_user(request)
-    from lucent.db.models import ModelRepository
+    from lucent.db.models import ModelRepository, get_authorized_models_pool
 
-    role = user.get("role", "member")
-    if hasattr(role, "value"):
-        role = role.value
+    model_pool = await get_authorized_models_pool(
+        pool,
+        {"id": str(user["id"]), "organization_id": str(user["organization_id"])},
+    )
     models = (
-        await ModelRepository(pool).list_models_accessible_by(
+        await ModelRepository(model_pool).list_models_accessible_by(
             str(user["id"]),
             str(user["organization_id"]),
-            requester_role=str(role),
         )
     )["items"]
     default_model = _resolve_chat_model()
@@ -1685,14 +1744,16 @@ async def chat_status(request: Request):
 async def chat_agents(request: Request):
     """List available agents for the chat agent picker (session-authenticated)."""
     user, pool = await _get_session_user(request)
-    from lucent.db.definitions import DefinitionRepository
+    from lucent.db.definitions import DefinitionRepository, get_authorized_definitions_pool
 
-    repo = DefinitionRepository(pool)
-    result = await repo.list_agents(
-        str(user["organization_id"]),
-        status="active",
-        requester_user_id=str(user["id"]),
-        requester_role=user.get("role", "member"),
+    # Usage is clearance-driven and default-deny: the picker lists exactly
+    # what a session may compose with — the same gate the stream enforces.
+    agent_pool = await get_authorized_definitions_pool(
+        pool, {"id": str(user["id"]), "organization_id": str(user["organization_id"])}
+    )
+    repo = DefinitionRepository(agent_pool)
+    result = await repo.list_agents_accessible_by(
+        str(user["id"]), str(user["organization_id"]), status="active"
     )
     return result.get("items", result) if isinstance(result, dict) else result
 
@@ -1770,9 +1831,20 @@ async def chat_stream_v2(
 
         repo = DefinitionRepository(pool)
         agent = None
+        from lucent.db.definitions import get_authorized_definitions_pool
+
+        agent_pool = await get_authorized_definitions_pool(
+            pool, {"id": str(user["id"]), "organization_id": str(user["organization_id"])}
+        )
         if agent_id:
-            agent = await repo.get_agent(agent_id, str(user["organization_id"]))
+            # Usage is clearance-driven and default-deny: the picked agent must
+            # be granted to this principal, exactly like the picker's listing.
+            agent = await DefinitionRepository(agent_pool).get_usable_agent(agent_id)
+            if not agent:
+                raise HTTPException(status_code=403, detail="Agent is not available to this user")
         else:
+            # Default persona: the built-in `lucent` identity resolves
+            # org-shared (runtime composition trusts the agent for now).
             agent = await _load_default_chat_agent(repo, str(user["organization_id"]))
         if agent:
             effective_agent_id = str(agent["id"])

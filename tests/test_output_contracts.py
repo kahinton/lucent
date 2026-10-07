@@ -673,7 +673,7 @@ class TestCompleteTaskWithStructuredOutput:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         completed = await oc_repo.complete_task(
             str(task["id"]),
@@ -681,7 +681,8 @@ class TestCompleteTaskWithStructuredOutput:
             result_structured={"summary": "Done", "score": 100},
             result_summary="Done",
             validation_status="valid",
-        )
+            org_id=str(oc_org["id"]),
+)
         assert completed is not None
         assert completed["status"] == "completed"
         assert completed["result"] == "Text result goes here"
@@ -704,9 +705,11 @@ class TestCompleteTaskWithStructuredOutput:
             title="Plain Complete",
             org_id=str(oc_org["id"]),
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
-        completed = await oc_repo.complete_task(str(task["id"]), "Just text")
+        completed = await oc_repo.complete_task(
+            str(task["id"]), "Just text", org_id=str(oc_org["id"])
+        )
         assert completed is not None
         assert completed["status"] == "completed"
         assert completed["result"] == "Just text"
@@ -721,14 +724,15 @@ class TestCompleteTaskWithStructuredOutput:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         completed = await oc_repo.complete_task(
             str(task["id"]),
             "Text-only fallback result",
             validation_status="fallback_used",
             validation_errors=["No <task_output> block found"],
-        )
+            org_id=str(oc_org["id"]),
+)
         assert completed["validation_status"] == "fallback_used"
         assert completed["result_structured"] is None
 
@@ -745,7 +749,7 @@ class TestCompleteTaskWithStructuredOutput:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         completed = await oc_repo.complete_task(
             str(task["id"]),
@@ -753,7 +757,8 @@ class TestCompleteTaskWithStructuredOutput:
             result_structured={"summary": "Fixed", "score": 80},
             result_summary="Fixed",
             validation_status="repair_succeeded",
-        )
+            org_id=str(oc_org["id"]),
+)
         assert completed["validation_status"] == "repair_succeeded"
 
         stored = completed["result_structured"]
@@ -770,14 +775,15 @@ class TestCompleteTaskWithStructuredOutput:
             title="Bad Status",
             org_id=str(oc_org["id"]),
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         with pytest.raises(ValueError, match="validation_status"):
             await oc_repo.complete_task(
                 str(task["id"]),
                 "result",
                 validation_status="totally_wrong",
-            )
+            org_id=str(oc_org["id"]),
+)
 
     @pytest.mark.asyncio
     async def test_complete_stores_all_validation_statuses(
@@ -798,12 +804,13 @@ class TestCompleteTaskWithStructuredOutput:
                 title=f"Status {status}",
                 org_id=str(oc_org["id"]),
             )
-            await oc_repo.claim_task(str(task["id"]), "test-daemon")
+            await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
             completed = await oc_repo.complete_task(
                 str(task["id"]),
                 f"result for {status}",
                 validation_status=status,
-            )
+            org_id=str(oc_org["id"]),
+)
             assert completed is not None, f"Status '{status}' should be accepted"
             assert completed["validation_status"] == status
 
@@ -821,16 +828,17 @@ class TestGetTaskReturnsStructuredFields:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "d1")
+        await oc_repo.claim_task(str(task["id"]), "d1", org_id=str(oc_org["id"]))
         await oc_repo.complete_task(
             str(task["id"]),
             "text",
             result_structured={"summary": "ok", "score": 1},
             result_summary="ok",
             validation_status="valid",
-        )
+            org_id=str(oc_org["id"]),
+)
 
-        fetched = await oc_repo.get_task(str(task["id"]))
+        fetched = await oc_repo.get_task(str(task["id"]), org_id=str(oc_org["id"]))
         assert fetched is not None
         assert fetched["output_contract"] is not None
         assert fetched["validation_status"] == "valid"
@@ -852,13 +860,14 @@ class TestGetTaskReturnsStructuredFields:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "d1")
+        await oc_repo.claim_task(str(task["id"]), "d1", org_id=str(oc_org["id"]))
         await oc_repo.complete_task(
             str(task["id"]),
             "text result",
             result_structured={"summary": "tree", "score": 42},
             validation_status="valid",
-        )
+            org_id=str(oc_org["id"]),
+)
 
         detail = await oc_repo.get_request_with_tasks(
             str(oc_request["id"]), str(oc_org["id"])
@@ -903,7 +912,7 @@ class TestApiCreateTaskWithContract:
         assert data["title"] == "API Contracted Task"
 
         # Verify contract was stored
-        task = await oc_repo.get_task(str(data["id"]))
+        task = await oc_repo.get_task(str(data["id"]), org_id=str(oc_org["id"]))
         assert task["output_contract"] is not None
 
     @pytest.mark.asyncio
@@ -923,7 +932,7 @@ class TestApiCreateTaskWithContract:
         )
         assert resp.status_code == 200, resp.text
 
-        task = await oc_repo.get_task(str(resp.json()["id"]))
+        task = await oc_repo.get_task(str(resp.json()["id"]), org_id=str(oc_org["id"]))
         contract = task["output_contract"]
         if isinstance(contract, str):
             contract = json.loads(contract)
@@ -997,7 +1006,7 @@ class TestApiCompleteTaskWithStructuredOutput:
             output_contract=_SIMPLE_CONTRACT,
             agent_type="code",
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         resp = await oc_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -1024,7 +1033,7 @@ class TestApiCompleteTaskWithStructuredOutput:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         resp = await oc_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -1048,7 +1057,7 @@ class TestApiCompleteTaskWithStructuredOutput:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         resp = await oc_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -1072,7 +1081,7 @@ class TestApiCompleteTaskWithStructuredOutput:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         resp = await oc_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -1095,7 +1104,7 @@ class TestApiCompleteTaskWithStructuredOutput:
             title="Legacy Complete",
             org_id=str(oc_org["id"]),
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         resp = await oc_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -1114,7 +1123,7 @@ class TestApiCompleteTaskWithStructuredOutput:
             title="Bad Status",
             org_id=str(oc_org["id"]),
         )
-        await oc_repo.claim_task(str(task["id"]), "test-daemon")
+        await oc_repo.claim_task(str(task["id"]), "test-daemon", org_id=str(oc_org["id"]))
 
         resp = await oc_client.post(
             f"/api/requests/tasks/{task['id']}/complete",
@@ -1139,7 +1148,7 @@ class TestApiRetrieveStructuredResults:
             org_id=str(oc_org["id"]),
             output_contract=_SIMPLE_CONTRACT,
         )
-        await oc_repo.claim_task(str(task["id"]), "d1")
+        await oc_repo.claim_task(str(task["id"]), "d1", org_id=str(oc_org["id"]))
         await oc_repo.complete_task(
             str(task["id"]),
             "text",
@@ -1218,7 +1227,7 @@ class TestEndToEndLifecycle:
         task_id = str(resp.json()["id"])
 
         # Step 2: Claim the task (via repo since that's what daemon does)
-        claimed = await oc_repo.claim_task(task_id, "test-daemon-e2e")
+        claimed = await oc_repo.claim_task(task_id, "test-daemon-e2e", org_id=str(oc_org["id"]))
         assert claimed is not None
 
         # Step 3: Complete with structured output via API
@@ -1259,7 +1268,7 @@ class TestEndToEndLifecycle:
         assert len(structured["findings"]) == 3
 
         # Step 5: Verify via direct DB retrieval
-        db_task = await oc_repo.get_task(task_id)
+        db_task = await oc_repo.get_task(task_id, org_id=str(oc_org["id"]))
         assert db_task["validation_status"] == "valid"
         stored = db_task["result_structured"]
         if isinstance(stored, str):
@@ -1283,8 +1292,8 @@ class TestEndToEndLifecycle:
             org_id=org_id,
             sequence_order=0,
         )
-        await oc_repo.claim_task(str(t1["id"]), "d1")
-        await oc_repo.complete_task(str(t1["id"]), "Plain text result")
+        await oc_repo.claim_task(str(t1["id"]), "d1", org_id=str(oc_org["id"]))
+        await oc_repo.complete_task(str(t1["id"]), "Plain text result", org_id=str(oc_org["id"]))
 
         # Task 2: With contract
         t2 = await oc_repo.create_task(
@@ -1294,14 +1303,15 @@ class TestEndToEndLifecycle:
             output_contract=_SIMPLE_CONTRACT,
             sequence_order=1,
         )
-        await oc_repo.claim_task(str(t2["id"]), "d2")
+        await oc_repo.claim_task(str(t2["id"]), "d2", org_id=str(oc_org["id"]))
         await oc_repo.complete_task(
             str(t2["id"]),
             "Text plus structured",
             result_structured={"summary": "Mixed", "score": 50},
             result_summary="Mixed",
             validation_status="valid",
-        )
+            org_id=str(oc_org["id"]),
+)
 
         # Retrieve the full request
         detail = await oc_repo.get_request_with_tasks(req_id, org_id)
@@ -1349,13 +1359,14 @@ class TestEndToEndLifecycle:
         assert child["output_contract"] is not None
 
         # Complete the child with structured output
-        await oc_repo.claim_task(str(child["id"]), "d1")
+        await oc_repo.claim_task(str(child["id"]), "d1", org_id=str(oc_org["id"]))
         completed = await oc_repo.complete_task(
             str(child["id"]),
             "child result",
             result_structured={"summary": "child done", "score": 10},
             validation_status="valid",
-        )
+            org_id=str(oc_org["id"]),
+)
         assert completed["validation_status"] == "valid"
 
     @pytest.mark.asyncio
@@ -1388,13 +1399,14 @@ class TestEndToEndLifecycle:
         assert str(t1["id"]) not in pending_ids
 
         # Complete t0
-        await oc_repo.claim_task(str(t0["id"]), "d1")
+        await oc_repo.claim_task(str(t0["id"]), "d1", org_id=str(oc_org["id"]))
         await oc_repo.complete_task(
             str(t0["id"]),
             "done",
             result_structured={"summary": "done", "score": 1},
             validation_status="valid",
-        )
+            org_id=str(oc_org["id"]),
+)
 
         # Now t1 should be pending
         pending = await oc_repo.list_pending_tasks(org_id)

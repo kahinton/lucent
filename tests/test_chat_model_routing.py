@@ -111,7 +111,7 @@ async def test_active_user_context_contains_authenticated_users_memory(monkeypat
         def __init__(self, _pool):
             pass
 
-        async def get_individual_memory_for_user(self, user_id):
+        async def get_individual_memory_for_user(self, user_id, organization_id=None):
             assert user_id == "authenticated-user"
             return {"content": "Prefers the unique Glasswing workflow."}
 

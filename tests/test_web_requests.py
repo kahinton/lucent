@@ -149,12 +149,13 @@ async def request_with_task(db_pool, web_user, sample_request):
 
 
 @pytest_asyncio.fixture
-async def failed_task(db_pool, request_with_task):
+async def failed_task(db_pool, request_with_task, web_user):
     """Create a request with a failed task."""
     req, task = request_with_task
+    _user, org, _token = web_user
     repo = RequestRepository(db_pool)
-    await repo.claim_task(str(task["id"]), "inst-test")
-    await repo.fail_task(str(task["id"]), "Simulated failure for testing")
+    await repo.claim_task(str(task["id"]), "inst-test", org_id=str(org["id"]))
+    await repo.fail_task(str(task["id"]), "Simulated failure for testing", org_id=str(org["id"]))
     return req, task
 
 
@@ -295,7 +296,13 @@ class TestActivityList:
         resp = await client.get("/activity", params={"status": "active"})
 
         assert resp.status_code == 200
-        assert 'href="/activity?status=active&amp;per_page=25&amp;source=user,cognitive,daemon,schedule"' in resp.text
+        # Summary card's "active" link (requests_list.html): literal template
+        # text — Jinja autoescape only escapes variable output, so query
+        # separators render as raw "&".
+        assert (
+            'href="/activity?status=active&per_page=25'
+            '&source=user,cognitive,daemon,schedule"' in resp.text
+        )
         for status in active_statuses:
             assert f"Active {status}" in resp.text
         assert "Completed control request" not in resp.text
@@ -454,12 +461,15 @@ class TestRequestDetail:
         assert "Web Test Task" in resp.text
 
     async def test_live_refresh_preserves_completed_task_output_state(
-        self, client, db_pool, request_with_task
+        self, client, db_pool, request_with_task, web_user
     ):
         req, task = request_with_task
+        _user, org, _token = web_user
         repo = RequestRepository(db_pool)
-        await repo.claim_task(str(task["id"]), "inst-test")
-        await repo.complete_task(str(task["id"]), "# Result\n\n" + "Output " * 400)
+        await repo.claim_task(str(task["id"]), "inst-test", org_id=str(org["id"]))
+        await repo.complete_task(
+            str(task["id"]), "# Result\n\n" + "Output " * 400, org_id=str(org["id"])
+        )
 
         resp = await client.get(
             f"/requests/{req['id']}",
@@ -754,8 +764,9 @@ class TestRetryTask:
         assert resp.status_code == 303
         assert f"/requests/{req['id']}" in resp.headers.get("location", "")
 
-    async def test_retry_resets_task_to_pending(self, client, failed_task, db_pool):
+    async def test_retry_resets_task_to_pending(self, client, failed_task, db_pool, web_user):
         _req, task = failed_task
+        _user, org, _token = web_user
         repo = RequestRepository(db_pool)
 
         await client.post(
@@ -764,7 +775,7 @@ class TestRetryTask:
             follow_redirects=False,
         )
 
-        updated = await repo.get_task(str(task["id"]))
+        updated = await repo.get_task(str(task["id"]), org_id=str(org["id"]))
         assert updated is not None
         assert updated["status"] == "pending"
 

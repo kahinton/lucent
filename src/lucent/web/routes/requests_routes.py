@@ -1,17 +1,19 @@
 """Request tracking and activity routes."""
 
+import logging
 from hashlib import sha256
 from math import ceil
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from lucent.db.pool import scoped_acquire, scoped_acquire_on
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.rbac import Role
 
 from ._shared import _check_csrf, get_user_context, templates
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -119,6 +121,7 @@ async def _record_rejection_lesson(pool, *, user, req: dict, request_id: str, co
             "source": req.get("source", "unknown"),
         },
         user_id=user.id,
+        organization_id=user.organization_id,
        )
 
 
@@ -382,7 +385,9 @@ async def request_detail(request: Request, request_id: str):
         if origin_session_id:
             session_relations[str(origin_session_id)] = "origin"
 
-        linked_rows = await session_repo.list_request_relations(str(req["id"]))
+        linked_rows = await session_repo.list_request_relations(
+            str(req["id"]), str(user.organization_id)
+        )
         for row in linked_rows:
             sid = str(row["session_id"])
             session_relations.setdefault(sid, row["relation"] or "linked")
@@ -426,6 +431,10 @@ async def request_detail(request: Request, request_id: str):
             origin_sessions.append(session_summary)
         origin_session = origin_sessions[0] if origin_sessions else None
     except Exception:
+        logger.exception(
+            "Linked-session block failed on request %s — showing none",
+            req.get("id"),
+        )
         origin_sessions = []
         origin_session = None
 
@@ -457,13 +466,16 @@ async def request_detail(request: Request, request_id: str):
     )
     if has_editable_task:
         from lucent.db.definitions import DefinitionRepository
-        from lucent.db.models import ModelRepository
+        from lucent.db.models import ModelRepository, get_authorized_models_pool
 
+        model_pool = await get_authorized_models_pool(
+            pool,
+            {"id": str(user.id), "organization_id": str(user.organization_id)},
+        )
         model_rows = (
-            await ModelRepository(pool).list_models_accessible_by(
+            await ModelRepository(model_pool).list_models_accessible_by(
                 str(user.id),
                 str(user.organization_id),
-                requester_role=role_value,
             )
         )["items"]
         available_models = [
@@ -477,13 +489,17 @@ async def request_detail(request: Request, request_id: str):
         ]
         available_models.sort(key=lambda m: m["id"])
 
-        def_repo = DefinitionRepository(pool)
-        agents_page = await def_repo.list_agents(
+        # Usage picks are clearance-driven and default-deny.
+        from lucent.db.definitions import get_authorized_definitions_pool
+
+        agent_pool = await get_authorized_definitions_pool(
+            pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+        )
+        agents_page = await DefinitionRepository(agent_pool).list_agents_accessible_by(
+            str(user.id),
             str(user.organization_id),
             status="active",
             limit=200,
-            requester_user_id=str(user.id),
-            requester_role=role_value,
         )
         available_agents = sorted(
             [{"name": a["name"], "description": a.get("description", "")}
@@ -668,15 +684,17 @@ async def edit_task(request: Request, task_id: str):
         raise HTTPException(422, "reasoning_effort requires model")
 
     if agent_type:
-        from lucent.db.definitions import DefinitionRepository
+        from lucent.db.definitions import DefinitionRepository, get_authorized_definitions_pool
 
-        def_repo = DefinitionRepository(pool)
-        agents_page = await def_repo.list_agents(
+        # Usage is clearance-driven and default-deny.
+        agent_pool = await get_authorized_definitions_pool(
+            pool, {"id": str(user.id), "organization_id": org_id}
+        )
+        agents_page = await DefinitionRepository(agent_pool).list_agents_accessible_by(
+            str(user.id),
             org_id,
             status="active",
             limit=200,
-            requester_user_id=str(user.id),
-            requester_role=user.role.value,
         )
         if not any(a["name"] == agent_type for a in agents_page.get("items", [])):
             raise HTTPException(422, f"Unknown or unapproved agent_type '{agent_type}'.")

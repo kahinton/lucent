@@ -142,8 +142,10 @@ async def memories_list(
     # Attach access counts for list display
     memory_ids = [m["id"] for m in result["memories"]]
     access_counts = await access_repo.get_access_counts(memory_ids)
+    org_shared = await memory_access.repo.org_shared_ids(memory_ids, user.organization_id)
     for memory in result["memories"]:
         memory["access_count"] = access_counts.get(memory["id"], 0)
+        memory["shared"] = memory["id"] in org_shared
 
     # Get tags for filter — go through MemoryAccessService so tag counts
     # respect the same GitHub repo ACL as the memories listing.
@@ -397,7 +399,8 @@ async def memory_detail(request: Request, memory_id: UUID):
         memory_id=memory_id,
         access_type="view",
         user_id=user.id,
-       )
+        organization_id=user.organization_id,
+    )
 
     # Keep the detail page readable. Dedicated audit/version APIs can expose
     # deeper history when needed; the page should show a compact recent trail.
@@ -409,6 +412,11 @@ async def memory_detail(request: Request, memory_id: UUID):
     # Access count (includes this view)
     counts = await access_repo.get_access_counts([memory_id])
     memory["access_count"] = counts.get(memory_id, 0)
+    # Shared badge/button state derives from the org read clearance
+    # (the shared column was retired in migration 132).
+    memory["shared"] = memory_id in await repo.org_shared_ids(
+        [memory_id], user.organization_id
+    )
 
     is_owner = memory.get("user_id") == user.id
     can_edit = await _can_edit_memory(repo, memory, user)
@@ -638,6 +646,8 @@ async def memory_edit_submit(
         tags=tag_list if tag_list else None,
         importance=importance,
         metadata=metadata if metadata else None,
+        organization_id=user.organization_id,
+        user_id=user.id,
     )
 
     # Log the update with version snapshot
@@ -666,7 +676,6 @@ async def memory_edit_submit(
             "importance": result["importance"],
             "metadata": result["metadata"],
             "related_memory_ids": [str(uid) for uid in result.get("related_memory_ids", [])],
-            "shared": result.get("shared", False),
         }
         if result
         else None,
@@ -790,7 +799,8 @@ async def memory_share(request: Request, memory_id: UUID):
     if memory.get("user_id") != user.id:
         raise HTTPException(status_code=403, detail="You can only share your own memories")
 
-    new_shared = not memory.get("shared", False)
+    # Share state is the org read clearance (shared column retired in 132).
+    new_shared = not await repo.is_org_shared(memory_id, user.organization_id)
     if new_shared:
         duplicate = await repo.find_duplicate_technical_file_memory(
             metadata=memory.get("metadata"),
@@ -808,7 +818,7 @@ async def memory_share(request: Request, memory_id: UUID):
                         filename=scope["filename"],
                     )
                 )
-    await repo.set_shared(memory_id, user.id, new_shared)
+    await repo.set_shared(memory_id, user.id, new_shared, organization_id=user.organization_id)
 
     await audit_repo.log(
         memory_id=memory_id,
@@ -886,7 +896,6 @@ async def memory_delete(request: Request, memory_id: UUID):
             "importance": memory["importance"],
             "metadata": memory["metadata"],
             "related_memory_ids": [str(uid) for uid in memory.get("related_memory_ids", [])],
-            "shared": memory.get("shared", False),
         },
     )
 
@@ -938,7 +947,6 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
         "importance": memory["importance"],
         "metadata": memory["metadata"],
         "related_memory_ids": [str(uid) for uid in memory.get("related_memory_ids", [])],
-        "shared": memory.get("shared", False),
     }
 
     # Apply the restore
@@ -949,6 +957,8 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
         importance=snapshot.get("importance"),
         metadata=snapshot.get("metadata"),
         related_memory_ids=[UUID(uid) for uid in snapshot.get("related_memory_ids", [])],
+        organization_id=user.organization_id,
+        user_id=user.id,
     )
 
     if result is None:
@@ -970,7 +980,6 @@ async def memory_restore(request: Request, memory_id: UUID, version: int):
             "importance": result["importance"],
             "metadata": result["metadata"],
             "related_memory_ids": [str(uid) for uid in result.get("related_memory_ids", [])],
-            "shared": result.get("shared", False),
         },
     )
 
@@ -984,9 +993,8 @@ async def knowledge_tree(request: Request):
     pool = await get_pool()
 
     rows = await MemoryRepository(pool).list_knowledge_tree(
-        org_id=str(user.organization_id),
+        organization_id=str(user.organization_id),
         user_id=str(user.id),
-        user_clause=MemoryRepository.user_memory_access_condition("$2", "$1"),
     )
 
     # Validate repo existence — batch check unique repos in parallel

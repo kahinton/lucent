@@ -134,6 +134,8 @@ async def audit_entries(db_pool, web_user, web_prefix):
     updated = await mem_repo.update(
         memory_id=memory["id"],
         content="Updated audit test memory",
+        organization_id=org["id"],
+        user_id=user["id"],
     )
 
     await audit_repo.log(

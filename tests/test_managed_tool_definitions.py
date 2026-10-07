@@ -264,8 +264,13 @@ async def test_repository_managed_tool_proposal_and_grant(repo, auth_user):
     proposals = await repo.get_pending_proposals(org_id)
     assert any(item["name"] == "echo-value" for item in proposals["managed_tools"])
 
+    # Two-step approval: owner sign-off lands as 'owner_approved'; the
+    # admin's second approval activates the tool.
     approved = await repo.approve_managed_tool(str(tool["id"]), org_id, user_id)
-    assert approved["status"] == "active"
+    assert approved["status"] == "owner_approved"
+
+    activated = await repo.approve_managed_tool(str(tool["id"]), org_id, user_id)
+    assert activated["status"] == "active"
 
     agent = await repo.create_agent(
         name="tool-agent",

@@ -110,9 +110,16 @@ class FileListResponse(BaseModel):
 
 
 async def _get_sandbox_for_user(sandbox_id: str, user: AuthenticatedUser) -> dict:
-    """Fetch a sandbox and verify the caller owns it. Raises 404/403."""
+    """Fetch a sandbox and verify the caller may use it. Raises 404/403.
+
+    "Only yours" (2026-10-01): members may touch only the sandboxes created
+    for them; admins/owners manage every org sandbox.
+
+    Note: sandboxes created before owner persistence/backfill may have no
+    owner — a member gets 404 on those and can ask an admin/owner.
+    """
     manager = get_sandbox_manager()
-    info = await manager.get(sandbox_id)
+    info = await manager.get(sandbox_id, str(user.organization_id))
     if not info:
         raise HTTPException(status_code=404, detail="Sandbox not found")
     # Verify organization ownership
@@ -122,6 +129,11 @@ async def _get_sandbox_for_user(sandbox_id: str, user: AuthenticatedUser) -> dic
         else getattr(info, "organization_id", None)
     )
     if org_id and str(org_id) != str(user.organization_id):
+        raise HTTPException(status_code=404, detail="Sandbox not found")
+    created_by = info.get("created_by") if isinstance(info, dict) else None
+    if user.role.value not in ("admin", "owner") and (
+        not created_by or str(created_by) != str(user.id)
+    ):
         raise HTTPException(status_code=404, detail="Sandbox not found")
     return info
 
@@ -209,6 +221,7 @@ async def create_sandbox(
         reuse_within_request=body.reuse_within_request,
         reuse_key=body.reuse_key,
         organization_id=str(user.organization_id),
+        requesting_user_id=str(user.id),
     )
     manager = get_sandbox_manager()
     info = await manager.create(config)
@@ -224,9 +237,29 @@ async def create_sandbox(
 
 @router.get("")
 async def list_sandboxes(user: AuthenticatedUser):
-    """List all sandboxes for the caller's organization."""
+    """List sandboxes for the caller's organization.
+
+    Admins/owners get every org sandbox; members get only the ones cleared
+    for their use — their own, plus any granted to their group ("only
+    yours", 2026-10-01).
+    """
     manager = get_sandbox_manager()
-    result = await manager.list_all(str(user.organization_id))
+    if user.role.value in ("admin", "owner"):
+        result = await manager.list_all(str(user.organization_id))
+    else:
+        from lucent.db.sandbox import (
+            SandboxRepository,
+            get_authorized_sandboxes_pool,
+        )
+
+        pool = await get_pool()
+        user_pool = await get_authorized_sandboxes_pool(
+            pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+        )
+        repo = SandboxRepository(user_pool)
+        result = await repo.list_sandboxes_accessible_by(
+            str(user.id), str(user.organization_id)
+        )
     result["items"] = [_to_response(s) for s in result["items"]]
     result["sandboxes_enabled"] = sandboxes_enabled(organization_id=user.organization_id)
     result["custom_tooling_enabled"] = custom_tooling_enabled(
@@ -420,15 +453,17 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
 
 @router.get("/templates")
 async def list_templates(user: AuthenticatedUser):
-    """List all sandbox templates for the organization."""
-    from lucent.db.sandbox_template import SandboxTemplateRepository
+    """List sandbox templates cleared for this principal's use."""
+    from lucent.db.sandbox_template import SandboxTemplateRepository, get_authorized_templates_pool
 
     pool = await get_pool()
-    repo = SandboxTemplateRepository(pool)
-    result = await repo.list_accessible_by(
+    tpl_pool = await get_authorized_templates_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
+    )
+    repo = SandboxTemplateRepository(tpl_pool)
+    result = await repo.list_templates_accessible_by(
         str(user.id),
         str(user.organization_id),
-        user_role=user.role.value,
     )
     result["sandboxes_enabled"] = sandboxes_enabled(organization_id=user.organization_id)
     result["custom_tooling_enabled"] = custom_tooling_enabled(
@@ -439,17 +474,15 @@ async def list_templates(user: AuthenticatedUser):
 
 @router.get("/templates/{template_id}")
 async def get_template(template_id: str, user: AuthenticatedUser):
-    """Get a sandbox template by ID."""
-    from lucent.db.sandbox_template import SandboxTemplateRepository
+    """Get a sandbox template by ID — clearance-driven and default-deny."""
+    from lucent.db.sandbox_template import SandboxTemplateRepository, get_authorized_templates_pool
 
     pool = await get_pool()
-    repo = SandboxTemplateRepository(pool)
-    tpl = await repo.get_accessible(
-        template_id,
-        str(user.organization_id),
-        str(user.id),
-        user_role=user.role.value,
+    tpl_pool = await get_authorized_templates_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
     )
+    repo = SandboxTemplateRepository(tpl_pool)
+    tpl = await repo.get_usable_template(template_id)
     if not tpl:
         raise HTTPException(404, "Template not found")
     return tpl
@@ -467,7 +500,7 @@ async def update_template(template_id: str, body: TemplateUpdateRequest, user: A
         raise HTTPException(403, "Only administrators can configure Docker host mappings")
     pool = await get_pool()
     acl = AccessControlService(pool)
-    if not await acl.can_modify(
+    if user.role.value not in ("admin", "owner") and not await acl.can_modify(
         str(user.id), "sandbox_template", template_id, str(user.organization_id)
     ):
         raise HTTPException(404, "Template not found")
@@ -489,7 +522,7 @@ async def delete_template(template_id: str, user: AuthenticatedUser):
 
     pool = await get_pool()
     acl = AccessControlService(pool)
-    if not await acl.can_modify(
+    if user.role.value not in ("admin", "owner") and not await acl.can_modify(
         str(user.id), "sandbox_template", template_id, str(user.organization_id)
     ):
         raise HTTPException(404, "Template not found")
@@ -557,17 +590,20 @@ async def launch_from_template(
     name: str | None = None,
 ) -> SandboxResponse:
     """Launch a sandbox instance from a template."""
-    from lucent.db.sandbox_template import SandboxTemplateRepository
+    from lucent.db.sandbox_template import (
+        SandboxTemplateRepository,
+        get_authorized_templates_pool,
+    )
 
     _require_sandboxes_enabled(user)
     pool = await get_pool()
-    tpl_repo = SandboxTemplateRepository(pool)
-    tpl = await tpl_repo.get_accessible(
-        template_id,
-        str(user.organization_id),
-        str(user.id),
-        user_role=user.role.value,
+    # Usage is clearance-driven and default-deny: launching needs a grant
+    # (built-in org read, ownership, group, or explicit) for this principal.
+    tpl_pool = await get_authorized_templates_pool(
+        pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
     )
+    tpl_repo = SandboxTemplateRepository(tpl_pool)
+    tpl = await tpl_repo.get_usable_template(template_id)
     if not tpl:
         raise HTTPException(404, "Template not found")
     if tpl.get("status") != "approved":
@@ -592,6 +628,7 @@ async def launch_from_template(
         allowed_hosts=tpl.get("allowed_hosts") or [],
         timeout_seconds=tpl.get("timeout_seconds", 1800),
         organization_id=str(user.organization_id),
+        requesting_user_id=str(user.id),
     )
     manager = get_sandbox_manager()
     info = await manager.create(config)

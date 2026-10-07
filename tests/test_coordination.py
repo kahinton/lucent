@@ -80,10 +80,12 @@ async def pending_task(db_pool, coord_user, coord_prefix):
 class TestClaimTask:
     """Tests for atomic task claiming."""
 
-    async def test_claim_pending_task(self, db_pool, pending_task):
+    async def test_claim_pending_task(self, db_pool, coord_user, pending_task):
         """Successfully claim a pending task."""
         repo = MemoryRepository(db_pool)
-        result = await repo.claim_task(pending_task["id"], "instance-a")
+        result = await repo.claim_task(
+            pending_task["id"], "instance-a", org_id=coord_user["organization_id"]
+        )
 
         assert result is not None
         assert "pending" not in result["tags"]
@@ -91,18 +93,19 @@ class TestClaimTask:
         assert "daemon-task" in result["tags"]
         assert result["version"] == pending_task["version"] + 1
 
-    async def test_claim_already_claimed_task(self, db_pool, pending_task):
+    async def test_claim_already_claimed_task(self, db_pool, coord_user, pending_task):
         """Cannot claim a task that's already claimed."""
         repo = MemoryRepository(db_pool)
+        org_id = coord_user["organization_id"]
         # First claim succeeds
-        result = await repo.claim_task(pending_task["id"], "instance-a")
+        result = await repo.claim_task(pending_task["id"], "instance-a", org_id=org_id)
         assert result is not None
 
         # Second claim fails
-        result2 = await repo.claim_task(pending_task["id"], "instance-b")
+        result2 = await repo.claim_task(pending_task["id"], "instance-b", org_id=org_id)
         assert result2 is None
 
-    async def test_claim_nonexistent_task(self, db_pool):
+    async def test_claim_nonexistent_task(self, db_pool, daemon_tenant_scope):
         """Cannot claim a task that doesn't exist."""
         repo = MemoryRepository(db_pool)
         result = await repo.claim_task(uuid4(), "instance-a")
@@ -124,12 +127,13 @@ class TestClaimTask:
         )
 
         # Launch 5 concurrent claims
+        org_id = coord_user["organization_id"]
         results = await asyncio.gather(
-            repo.claim_task(task["id"], "instance-1"),
-            repo.claim_task(task["id"], "instance-2"),
-            repo.claim_task(task["id"], "instance-3"),
-            repo.claim_task(task["id"], "instance-4"),
-            repo.claim_task(task["id"], "instance-5"),
+            repo.claim_task(task["id"], "instance-1", org_id=org_id),
+            repo.claim_task(task["id"], "instance-2", org_id=org_id),
+            repo.claim_task(task["id"], "instance-3", org_id=org_id),
+            repo.claim_task(task["id"], "instance-4", org_id=org_id),
+            repo.claim_task(task["id"], "instance-5", org_id=org_id),
         )
 
         # Exactly one should succeed
@@ -148,37 +152,42 @@ class TestClaimTask:
 class TestReleaseClaim:
     """Tests for releasing claimed tasks."""
 
-    async def test_release_own_claim(self, db_pool, pending_task):
+    async def test_release_own_claim(self, db_pool, coord_user, pending_task):
         """Release a task claimed by this instance."""
         repo = MemoryRepository(db_pool)
-        await repo.claim_task(pending_task["id"], "instance-a")
+        org_id = coord_user["organization_id"]
+        await repo.claim_task(pending_task["id"], "instance-a", org_id=org_id)
 
-        result = await repo.release_claim(pending_task["id"], "instance-a")
+        result = await repo.release_claim(pending_task["id"], "instance-a", org_id=org_id)
         assert result is not None
         assert "pending" in result["tags"]
         assert "claimed-by-instance-a" not in result["tags"]
 
-    async def test_cannot_release_other_instance_claim(self, db_pool, pending_task):
+    async def test_cannot_release_other_instance_claim(self, db_pool, coord_user, pending_task):
         """Cannot release a task claimed by another instance when specifying instance_id."""
         repo = MemoryRepository(db_pool)
-        await repo.claim_task(pending_task["id"], "instance-a")
+        org_id = coord_user["organization_id"]
+        await repo.claim_task(pending_task["id"], "instance-a", org_id=org_id)
 
-        result = await repo.release_claim(pending_task["id"], "instance-b")
+        result = await repo.release_claim(pending_task["id"], "instance-b", org_id=org_id)
         assert result is None
 
-    async def test_release_any_claim(self, db_pool, pending_task):
+    async def test_release_any_claim(self, db_pool, coord_user, pending_task):
         """Release any claim without specifying instance_id (for stale detection)."""
         repo = MemoryRepository(db_pool)
-        await repo.claim_task(pending_task["id"], "instance-a")
+        org_id = coord_user["organization_id"]
+        await repo.claim_task(pending_task["id"], "instance-a", org_id=org_id)
 
-        result = await repo.release_claim(pending_task["id"], instance_id=None)
+        result = await repo.release_claim(pending_task["id"], instance_id=None, org_id=org_id)
         assert result is not None
         assert "pending" in result["tags"]
 
-    async def test_release_unclaimed_task(self, db_pool, pending_task):
+    async def test_release_unclaimed_task(self, db_pool, coord_user, pending_task):
         """Cannot release a task that isn't claimed."""
         repo = MemoryRepository(db_pool)
-        result = await repo.release_claim(pending_task["id"], "instance-a")
+        result = await repo.release_claim(
+            pending_task["id"], "instance-a", org_id=coord_user["organization_id"]
+        )
         assert result is None
 
 
@@ -190,27 +199,30 @@ class TestReleaseClaim:
 class TestOptimisticLocking:
     """Tests for version-based optimistic locking."""
 
-    async def test_update_with_correct_version(self, db_pool, pending_task):
+    async def test_update_with_correct_version(self, db_pool, coord_user, pending_task):
         """Update succeeds when expected_version matches."""
         repo = MemoryRepository(db_pool)
         result = await repo.update(
             memory_id=pending_task["id"],
             content="Updated content",
             expected_version=pending_task["version"],
+            organization_id=coord_user["organization_id"],
         )
         assert result is not None
         assert result["content"] == "Updated content"
         assert result["version"] == pending_task["version"] + 1
 
-    async def test_update_with_wrong_version(self, db_pool, pending_task):
+    async def test_update_with_wrong_version(self, db_pool, coord_user, pending_task):
         """Update raises VersionConflictError when expected_version is stale."""
         repo = MemoryRepository(db_pool)
+        organization_id = coord_user["organization_id"]
 
         # First update succeeds
         await repo.update(
             memory_id=pending_task["id"],
             content="First update",
             expected_version=pending_task["version"],
+            organization_id=organization_id,
         )
 
         # Second update with stale version fails
@@ -219,17 +231,19 @@ class TestOptimisticLocking:
                 memory_id=pending_task["id"],
                 content="Stale update",
                 expected_version=pending_task["version"],
+                organization_id=organization_id,
             )
 
         assert exc_info.value.expected_version == pending_task["version"]
         assert exc_info.value.actual_version == pending_task["version"] + 1
 
-    async def test_update_without_version_always_succeeds(self, db_pool, pending_task):
+    async def test_update_without_version_always_succeeds(self, db_pool, coord_user, pending_task):
         """Update without expected_version always succeeds (backward compatible)."""
         repo = MemoryRepository(db_pool)
         result = await repo.update(
             memory_id=pending_task["id"],
             content="No version check",
+            organization_id=coord_user["organization_id"],
         )
         assert result is not None
         assert result["content"] == "No version check"

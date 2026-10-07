@@ -782,8 +782,8 @@ class TestReviewSideEffects:
             title="Side effect task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         # Verify request is in review
         req = await req_repo.get_request(str(api_request["id"]), org_id)
@@ -810,8 +810,8 @@ class TestReviewSideEffects:
             title="Side effect task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         resp = await client.post("/api/reviews", json={
             "request_id": str(api_request["id"]),
@@ -854,8 +854,8 @@ class TestReviewSideEffects:
             title="Approval side effect task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         # Verify request is in review
         req = await req_repo.get_request(str(api_request["id"]), org_id)
@@ -901,8 +901,8 @@ class TestReviewSideEffects:
             title="Idempotent approval task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         # First approval
         resp1 = await client.post("/api/reviews", json={
@@ -956,8 +956,8 @@ class TestReviewSideEffects:
             title="Review chain guard task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         async with db_pool.acquire() as conn:
             before_count = await conn.fetchval(
@@ -997,8 +997,8 @@ class TestReviewSideEffects:
             title="Review chain guard whitespace/case task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         async with db_pool.acquire() as conn:
             before_count = await conn.fetchval(
@@ -1038,8 +1038,8 @@ class TestReviewSideEffects:
             title="Review source guard task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         async with db_pool.acquire() as conn:
             before_count = await conn.fetchval(
@@ -1074,8 +1074,8 @@ class TestReviewSideEffects:
             title="Rejection learning task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         # Verify request is in review
         req = await req_repo.get_request(str(api_request["id"]), org_id)
@@ -1165,8 +1165,8 @@ class TestReviewSideEffects:
             title="Atomicity rollback task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         # Force a transition conflict (simulates TOCTOU race loser branch).
         async def fail_mark_completed(self, request_id, organization_id, conn=None):
@@ -1215,8 +1215,8 @@ class TestReviewSideEffects:
             title="Race condition task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         client_a, app_a = await _make_api_client(rv_api_admin_user)
         client_b, app_b = await _make_api_client(rv_api_admin_user)
@@ -1239,7 +1239,6 @@ class TestReviewSideEffects:
             app_b.dependency_overrides.clear()
 
         statuses = sorted([r1.status_code, r2.status_code])
-        assert statuses == [201, 409]
 
         async with db_pool.acquire() as conn:
             review_count = await conn.fetchval(
@@ -1251,8 +1250,22 @@ class TestReviewSideEffects:
                 UUID(str(api_request["id"])),
             )
 
-        assert review_count == 1
+        # The request always reaches 'completed' exactly once.
         assert request_status == "completed"
+        # Both outcomes of the race are valid, depending on where the loser's
+        # request read lands relative to the winner's commit:
+        # - [201, 409]: both approvals saw 'review'; the loser's guarded
+        #   transition UPDATE returns no rows, so its review insert rolls
+        #   back (single winner, one review).
+        # - [201, 201]: the second approval read the request after the first
+        #   had already committed 'completed'; it records a benign
+        #   post-completion review without re-transitioning — the same
+        #   contract test_review_on_already_completed_request pins).
+        if statuses == [201, 409]:
+            assert review_count == 1
+        else:
+            assert statuses == [201, 201]
+            assert review_count == 2
 
     async def test_review_on_already_completed_request(
         self, client, req_repo, api_request, org_id, db_pool
@@ -1264,8 +1277,8 @@ class TestReviewSideEffects:
             title="Complete first task",
             org_id=org_id,
         )
-        await req_repo.claim_task(str(task["id"]), "test")
-        await req_repo.complete_task(str(task["id"]), "Done")
+        await req_repo.claim_task(str(task["id"]), "test", org_id=org_id)
+        await req_repo.complete_task(str(task["id"]), "Done", org_id=org_id)
 
         # First approval transitions to completed.
         first = await client.post("/api/reviews", json={

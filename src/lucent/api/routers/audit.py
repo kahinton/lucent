@@ -156,7 +156,6 @@ async def get_organization_audit_log(
         since=since,
         offset=offset,
         limit=limit,
-        user_id=user.id,
     )
 
     return AuditLogResponse(

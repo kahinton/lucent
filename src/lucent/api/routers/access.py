@@ -11,9 +11,13 @@ from lucent.api.models import (
     AccessFrequencyItem,
     AccessLogEntry,
     AccessLogResponse,
+    AuthAccessGrantListResponse,
+    AuthAccessGrantResponse,
+    AuthAccessGrantRevoke,
+    AuthAccessGrantUpsert,
     MostAccessedItem,
 )
-from lucent.db import AccessRepository, get_pool
+from lucent.db import AccessRepository, AuthAccessRepository, get_pool
 from lucent.rbac import Permission
 
 router = APIRouter()
@@ -30,6 +34,116 @@ def _entry_to_response(entry: dict[str, Any]) -> AccessLogEntry:
         accessed_at=entry["accessed_at"],
         context=entry.get("context", {}),
     )
+
+
+def _grant_response(grant: dict[str, Any]) -> AuthAccessGrantResponse:
+    """Map the database principal type back to the public grant type."""
+    return AuthAccessGrantResponse(
+        id=grant["id"],
+        resource_type=grant["resource_type"],
+        resource_id=grant["resource_id"],
+        organization_id=grant["organization_id"],
+        grantee_type=(
+            "organization"
+            if grant["principal_type"] == "org"
+            else grant["principal_type"]
+        ),
+        grantee_id=grant["principal_id"],
+        role=grant["role"],
+        granted_by=grant["granted_by"],
+        created_at=grant["created_at"],
+        user_display_name=grant.get("user_display_name"),
+        user_email=grant.get("user_email"),
+        group_name=grant.get("group_name"),
+        organization_name=grant.get("organization_name"),
+    )
+
+
+@router.get("/resources/{resource_type}/{resource_id}/grants")
+async def list_resource_grants(
+    resource_type: str,
+    resource_id: UUID,
+    user: AuthenticatedUser,
+) -> AuthAccessGrantListResponse:
+    """List roles granted to principals for one auth-ID-backed resource."""
+    user.require_permission(Permission.ACCESS_GRANT)
+    pool = await get_pool()
+    try:
+        grants = await AuthAccessRepository(pool).list_grants(
+            resource_type,
+            resource_id,
+            organization_id=user.organization_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return AuthAccessGrantListResponse(grants=[_grant_response(grant) for grant in grants])
+
+
+@router.put("/resources/{resource_type}/{resource_id}/grants")
+async def update_resource_grant(
+    resource_type: str,
+    resource_id: UUID,
+    grant: AuthAccessGrantUpsert,
+    user: AuthenticatedUser,
+) -> AuthAccessGrantResponse:
+    """Set one principal's role for one auth-ID-backed resource."""
+    user.require_permission(Permission.ACCESS_GRANT)
+    pool = await get_pool()
+    try:
+        result = await AuthAccessRepository(pool).upsert_grant(
+            resource_type,
+            resource_id,
+            grantee_type=grant.grantee_type,
+            grantee_id=grant.grantee_id,
+            role=grant.role,
+            granted_by=user.id,
+            organization_id=user.organization_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        http_status = (
+            status.HTTP_404_NOT_FOUND
+            if "not found" in detail.lower()
+            else status.HTTP_403_FORBIDDEN
+            if "owner" in detail.lower()
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(http_status, detail) from exc
+    return _grant_response(result)
+
+
+@router.delete("/resources/{resource_type}/{resource_id}/grants")
+async def delete_resource_grant(
+    resource_type: str,
+    resource_id: UUID,
+    grant: AuthAccessGrantRevoke,
+    user: AuthenticatedUser,
+) -> dict[str, bool]:
+    """Remove one principal's role for one auth-ID-backed resource."""
+    user.require_permission(Permission.ACCESS_GRANT)
+    pool = await get_pool()
+    try:
+        revoked = await AuthAccessRepository(pool).revoke_grant(
+            resource_type,
+            resource_id,
+            grantee_type=grant.grantee_type,
+            grantee_id=grant.grantee_id,
+            granted_by=user.id,
+            organization_id=user.organization_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        http_status = (
+            status.HTTP_404_NOT_FOUND
+            if "not found" in detail.lower()
+            else status.HTTP_403_FORBIDDEN
+            if "owner" in detail.lower()
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(http_status, detail) from exc
+    if not revoked:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Access grant not found")
+    return {"revoked": True}
 
 
 @router.get(
@@ -138,6 +252,7 @@ async def get_user_access_activity(
         user_id=user_id,
         since=since,
         limit=limit,
+        organization_id=user.organization_id,
     )
 
     return [_entry_to_response(e) for e in entries]
@@ -177,6 +292,7 @@ async def get_most_accessed_memories(
     else:
         result = await access_repo.get_most_accessed(
             user_id=user.id,
+            organization_id=user.organization_id,
             since=since,
             limit=limit,
         )
@@ -221,6 +337,7 @@ async def get_least_accessed_memories(
     else:
         result = await access_repo.get_least_accessed(
             user_id=user.id,
+            organization_id=user.organization_id,
             since=since,
             limit=limit,
         )
@@ -268,6 +385,7 @@ async def get_access_frequency(
         result = await access_repo.get_access_frequency(
             bucket=bucket,
             user_id=user.id,
+            organization_id=user.organization_id,
             since=since,
             limit=limit,
         )

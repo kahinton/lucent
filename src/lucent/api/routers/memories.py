@@ -29,6 +29,7 @@ from lucent.db import (
     MemoryRepository,
     UserRepository,
     VersionConflictError,
+    get_first_memory_owner,
     get_pool,
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
@@ -87,7 +88,6 @@ def _memory_to_response(memory: dict[str, Any]) -> MemoryResponse:
         deleted_at=memory.get("deleted_at"),
         user_id=memory.get("user_id"),
         organization_id=memory.get("organization_id"),
-        shared=memory.get("shared", False),
         last_accessed_at=memory.get("last_accessed_at"),
         access_count=memory.get("access_count", 0),
     )
@@ -165,14 +165,20 @@ async def create_memory(
     effective_user_id = _effective_memory_user_id(user)
     username = await _effective_memory_username(user, pool)
 
-    # Detect daemon caller for auto-sharing and auto-tagging
+    # Detect daemon caller for auto-tagging
     is_daemon = user.is_daemon_service and not user.is_memory_scoped
 
-    # Daemon memories remain shared for organization-level administration,
-    # while repository access limits them to admins and owners.
-    effective_shared = data.shared
     if is_daemon:
-        effective_shared = True
+        # Memories going forward are owned by a real user: an unscoped daemon
+        # key attributes its writes to the org's first owner (the daemon works
+        # for the owner). There is no org-wide force-share — sharing is the
+        # owner's explicit choice.
+        first_owner = await get_first_memory_owner(pool, user.organization_id)
+        if first_owner is not None:
+            effective_user_id = UUID(first_owner["id"])
+            username = first_owner["display_name"]
+
+    effective_shared = data.shared
 
     # Normalize tags: replace prohibited tags, auto-tag daemon content
     effective_tags = normalize_tags(data.tags, is_daemon=is_daemon)
@@ -213,6 +219,7 @@ async def create_memory(
             user_id=effective_user_id,
             organization_id=user.organization_id,
             shared=effective_shared,
+            daemon_reader_id=user.id if is_daemon else None,
         )
     except DuplicateTechnicalMemoryError as e:
         _raise_duplicate_technical_memory(e)
@@ -502,6 +509,8 @@ async def update_memory(
         importance=data.importance,
         related_memory_ids=data.related_memory_ids,
         metadata=validated_metadata,
+        organization_id=user.organization_id,
+        user_id=effective_user_id,
     )
 
     if result is None:
@@ -632,7 +641,6 @@ async def update_goal_milestone(
             "related_memory_ids": [
                 str(uid) for uid in result.get("related_memory_ids", [])
             ],
-            "shared": result.get("shared", False),
         },
     )
     return _memory_to_response(result)
@@ -897,6 +905,7 @@ async def share_memory(
         memory_id=memory_id,
         user_id=effective_user_id,
         shared=True,
+        organization_id=user.organization_id,
     )
 
     if result is None:
@@ -937,6 +946,7 @@ async def unshare_memory(
         memory_id=memory_id,
         user_id=_effective_memory_user_id(user),
         shared=False,
+        organization_id=user.organization_id,
     )
 
     if result is None:

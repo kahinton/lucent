@@ -138,6 +138,42 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         elif reasoning_effort:
             return json.dumps({"error": "reasoning_effort requires model"})
 
+        # Usage is clearance-driven and default-deny: the schedule's sandbox
+        # template must be cleared for the schedule creator.
+        if sandbox_template_id:
+            from lucent.db.sandbox_template import (
+                SandboxTemplateRepository,
+                get_authorized_templates_pool,
+            )
+
+            pool = await _get_pool()
+            tpl_pool = await get_authorized_templates_pool(
+                pool, {"id": str(user_id), "organization_id": str(org_id)}
+            )
+            tpl = await SandboxTemplateRepository(tpl_pool).get_usable_template(
+                sandbox_template_id
+            )
+            if not tpl:
+                return json.dumps(
+                    {
+                        "error": (
+                            f"Sandbox template {sandbox_template_id} not found "
+                            f"or not cleared for this user."
+                        ),
+                        "hint": "Call list_sandbox_templates to discover IDs.",
+                    }
+                )
+            if tpl.get("status") != "approved":
+                return json.dumps(
+                    {
+                        "error": (
+                            f"Sandbox template '{tpl.get('name')}' has status "
+                            f"{tpl.get('status')!r} — only 'approved' templates "
+                            "may be scheduled."
+                        )
+                    }
+                )
+
         repo = await _get_schedule_repository()
         sched = await repo.create_schedule(
             title=title,
@@ -158,6 +194,20 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
             {k: str(v) if hasattr(v, "hex") else str(v) for k, v in sched.items()}, default=str
         )
 
+    async def _authorized_schedule_repository(
+        user_id: str, org_id: str, required_clearance: str = "read"
+    ):
+        """Repo on an authorized pool (clearance-driven, default-deny)."""
+        from lucent.db.schedules import get_authorized_schedules_pool
+
+        pool = await _get_pool()
+        authorized = await get_authorized_schedules_pool(
+            pool,
+            {"id": str(user_id), "organization_id": str(org_id)},
+            required_clearance=required_clearance,
+        )
+        return ScheduleRepository(authorized)
+
     @mcp.tool(
         description="""List scheduled tasks, optionally filtered by status or enabled state.
 
@@ -174,15 +224,27 @@ Returns: JSON array of schedules."""
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
 
-        repo = await _get_schedule_repository()
-        result = await repo.list_schedules(
-            str(org_id),
-            status=status,
-            enabled=True if enabled_only else None,
-            created_by=str(user_id) if user_id else None,
-            include_daemon_created=_include_daemon_workflows(user_role),
-        )
+        if _include_daemon_workflows(user_role):
+            repo = await _get_schedule_repository()
+            result = await repo.list_schedules(
+                str(org_id),
+                status=status,
+                enabled=True if enabled_only else None,
+                created_by=str(user_id),
+                include_daemon_created=True,
+            )
+        else:
+            # Usage is clearance-driven and default-deny (own + explicit grants).
+            repo = await _authorized_schedule_repository(str(user_id), str(org_id))
+            result = await repo.list_schedules_accessible_by(
+                str(user_id),
+                str(org_id),
+                status=status,
+                enabled=True if enabled_only else None,
+            )
         serialized_items = [
             {k: str(v) if hasattr(v, "hex") else str(v) for k, v in s.items()}
             for s in result["items"]
@@ -206,14 +268,22 @@ Returns: JSON with the updated schedule."""
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
 
         repo = await _get_schedule_repository()
-        schedule = await repo.get_schedule(
-            schedule_id,
-            str(org_id),
-            created_by=str(user_id) if user_id else None,
-            include_daemon_created=_include_daemon_workflows(user_role),
-        )
+        if _include_daemon_workflows(user_role):
+            schedule = await repo.get_schedule(
+                schedule_id,
+                str(org_id),
+                created_by=str(user_id),
+                include_daemon_created=True,
+            )
+        else:
+            # Mutating requires a write-level clearance (default-deny).
+            schedule = await (
+                await _authorized_schedule_repository(user_id, str(org_id), "write")
+            ).get_usable_schedule(schedule_id)
         if not schedule:
             return json.dumps({"error": "Schedule not found"})
         try:
@@ -244,12 +314,25 @@ Returns: JSON with the schedule details and its run history."""
             return json.dumps({"error": "No user context"})
 
         repo = await _get_schedule_repository()
-        result = await repo.get_schedule_with_runs(
-            schedule_id,
-            str(org_id),
-            created_by=str(user_id),
-            include_daemon_created=_include_daemon_workflows(user_role),
-        )
+        if _include_daemon_workflows(user_role):
+            result = await repo.get_schedule_with_runs(
+                schedule_id,
+                str(org_id),
+                created_by=str(user_id),
+                include_daemon_created=True,
+            )
+        else:
+            # Usage is clearance-driven and default-deny; runs are read
+            # through the parent schedule.
+            cleared = await (
+                await _authorized_schedule_repository(user_id, str(org_id))
+            ).get_usable_schedule(schedule_id)
+            if cleared:
+                result = {**cleared, "runs": await repo.list_runs(
+                    schedule_id, org_id=str(org_id)
+                )}
+            else:
+                result = None
         if not result:
             return json.dumps({"error": "Schedule not found"})
         return json.dumps(
@@ -351,15 +434,22 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
                 normalized_actions.append(action)
             actions = normalized_actions
             try:
-                from lucent.db.definitions import DefinitionRepository
+                from lucent.db.definitions import (
+                    DefinitionRepository,
+                    get_authorized_definitions_pool,
+                )
 
-                def_repo = DefinitionRepository(repo.pool)
-                active = await def_repo.list_agents(
+                # Usage is clearance-driven and default-deny: only agents the
+                # acting principal is granted may fill workflow actions.
+                agent_pool = await get_authorized_definitions_pool(
+                    repo.pool, {"id": str(user_id), "organization_id": str(org_id)}
+                )
+                def_repo = DefinitionRepository(agent_pool)
+                active = await def_repo.list_agents_accessible_by(
+                    str(user_id),
                     str(org_id),
                     status="active",
                     limit=1000,
-                    requester_user_id=str(user_id) if user_id else None,
-                    requester_role=user_role,
                 )
                 active_names = {str(agent.get("name")) for agent in active.get("items", [])}
             except Exception as exc:
@@ -388,6 +478,50 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
                             "active_agent_types": sorted(active_names),
                         }
                     )
+            # Usage is clearance-driven and default-deny: every task action's
+            # sandbox template must be cleared for the actor (approved only).
+            from lucent.db.sandbox_template import (
+                SandboxTemplateRepository,
+                get_authorized_templates_pool,
+            )
+
+            template_ids = sorted(
+                {
+                    str(action["sandbox_template_id"])
+                    for action in actions
+                    if action.get("action_type", "task") == "task"
+                    and action.get("sandbox_template_id")
+                }
+            )
+            if template_ids:
+                tpl_pool = await get_authorized_templates_pool(
+                    repo.pool, {"id": str(user_id), "organization_id": str(org_id)}
+                )
+                tpl_repo = SandboxTemplateRepository(tpl_pool)
+                for template_id in template_ids:
+                    tpl = await tpl_repo.get_usable_template(template_id)
+                    if not tpl:
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"Sandbox template {template_id} not found "
+                                    "or not cleared for this user."
+                                ),
+                                "hint": (
+                                    "Call list_sandbox_templates to discover IDs."
+                                ),
+                            }
+                        )
+                    if tpl.get("status") != "approved":
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"Sandbox template '{tpl.get('name')}' has "
+                                    f"status {tpl.get('status')!r} — only "
+                                    "'approved' templates may be scheduled."
+                                )
+                            }
+                        )
         workflow = await repo.create_schedule(
             title=title,
             org_id=str(org_id),
@@ -422,14 +556,26 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
-        repo = await _get_schedule_repository()
-        result = await repo.list_schedules(
-            str(org_id),
-            status=status,
-            enabled=True if enabled_only else None,
-            created_by=str(user_id) if user_id else None,
-            include_daemon_created=_include_daemon_workflows(user_role),
-        )
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+        if _include_daemon_workflows(user_role):
+            repo = await _get_schedule_repository()
+            result = await repo.list_schedules(
+                str(org_id),
+                status=status,
+                enabled=True if enabled_only else None,
+                created_by=str(user_id),
+                include_daemon_created=True,
+            )
+        else:
+            # Usage is clearance-driven and default-deny (own + explicit grants).
+            repo = await _authorized_schedule_repository(str(user_id), str(org_id))
+            result = await repo.list_schedules_accessible_by(
+                str(user_id),
+                str(org_id),
+                status=status,
+                enabled=True if enabled_only else None,
+            )
         items = result["items"]
         if trigger_type:
             items = [i for i in items if (i.get("trigger_type") or "schedule") == trigger_type]

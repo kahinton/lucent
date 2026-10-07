@@ -102,6 +102,9 @@ class Permission(str, Enum):
     MEMORY_DELETE_ANY = "memory.delete.any"  # Owner only
     MEMORY_SHARE = "memory.share"
 
+    # Access-management permissions (the auth_clearances table)
+    ACCESS_GRANT = "access.grant"  # Manage who can see a resource (any family)
+
     # Audit & analytics permissions
     AUDIT_VIEW_OWN = "audit.view.own"
     AUDIT_VIEW_ORG = "audit.view.org"
@@ -176,6 +179,8 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.AUDIT_VIEW_ORG,
         Permission.ACCESS_VIEW_OWN,
         Permission.ACCESS_VIEW_ORG,
+        # Access grant management (auth_clearances — any resource family)
+        Permission.ACCESS_GRANT,
         # Users (can manage)
         Permission.USERS_VIEW,
         Permission.USERS_INVITE,
@@ -200,6 +205,8 @@ ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
         Permission.AUDIT_VIEW_ORG,
         Permission.ACCESS_VIEW_OWN,
         Permission.ACCESS_VIEW_ORG,
+        # Access grant management (auth_clearances — any resource family)
+        Permission.ACCESS_GRANT,
         # Users
         Permission.USERS_VIEW,
         Permission.USERS_INVITE,

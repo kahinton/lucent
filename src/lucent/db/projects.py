@@ -1,12 +1,11 @@
 """Persistence for Projects — user-owned workspaces grouping chats, files, and
 standing instructions.
 
-Tenant isolation is enforced by construction at this layer (Kyle's standing
-data-layer directive, 2026-09-10): every public method REQUIRES an explicit
-``org_id`` + ``user_id`` pair, validates them non-empty via ``_require_scope``
-before any SQL runs, and every statement references them structurally — a
-missing scope is impossible to express, not merely discouraged. There is
-deliberately no org-wide or unscoped query variant anywhere in this module.
+Legacy project methods enforce tenant isolation by construction (Kyle's
+standing data-layer directive, 2026-09-10): they require an explicit
+``org_id`` + ``user_id`` pair, validate it via ``_require_scope``, and
+reference it structurally in SQL. Authorized project methods use an
+``AuthorizedDatabasePool`` so auth-ID clearances are applied automatically.
 
 Membership model (migration 111): ``llm_sessions.project_id`` is the
 authoritative membership anchor; ``llm_messages.project_id`` is a
@@ -27,11 +26,17 @@ prompt. No hook mediates injection anymore.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 from asyncpg import Pool
-from lucent.db.pool import scoped_acquire
+
+from lucent.db.pool import (
+    AuthorizedDatabasePool,
+    AuthTablePolicy,
+    get_authorized_pool_for_user,
+    scoped_acquire,
+)
 
 
 class ProjectNotFoundError(LookupError):
@@ -61,16 +66,44 @@ def _uuid(value: Any) -> UUID | None:
     return UUID(str(value))
 
 
-class ProjectRepository:
-    """All Projects SQL lives here, mandatory (org_id, user_id)-scoped.
+PROJECT_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy(
+    "projects",
+    direct_columns=(),
+)
 
-    The pair is non-optional on every method, referenced in every statement's
-    WHERE or INSERT, and validated up front — tenant scoping holds even for
-    the write path's verification reads.
+
+async def get_authorized_projects_pool(
+    pool: Pool,
+    user: dict[str, Any],
+    required_clearance: str = "read",
+) -> AuthorizedDatabasePool:
+    """Return a pool whose project reads use auth-ID clearances."""
+    return await get_authorized_pool_for_user(
+        pool,
+        user,
+        PROJECT_AUTH_POLICY,
+        required_clearance,
+    )
+
+
+class ProjectRepository:
+    """Project SQL with explicit scope for writes and auth reads for reads.
+
+    Project reads accept either the normal pool (with explicit ``(org_id,
+    user_id)`` scoping) or an ``AuthorizedDatabasePool`` carrying the
+    request's auth context. The latter applies auth-ID clearances through
+    the pool's policy without duplicating project-specific SQL paths.
     """
 
-    def __init__(self, pool: Pool):
+    def __init__(self, pool: Pool | AuthorizedDatabasePool):
         self.pool = pool
+
+    def _authorized_pool(self) -> AuthorizedDatabasePool:
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError("Authorized project reads require an authorized pool")
+        if PROJECT_AUTH_POLICY not in self.pool.table_policies:
+            raise ValueError("Authorized project reads require a projects policy")
+        return self.pool
 
     # ------------------------------------------------------------------
     # Project CRUD
@@ -94,40 +127,76 @@ class ProjectRepository:
         return dict(row)
 
     async def get_owned(
-        self, project_id: str | UUID, *, org_id: str | UUID, user_id: str | UUID
+        self,
+        project_id: str | UUID,
+        *,
+        org_id: str | UUID | None = None,
+        user_id: str | UUID | None = None,
     ) -> dict[str, Any] | None:
-        org, user = _require_scope(org_id, user_id)
-        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-            row = await conn.fetchrow(
-                """SELECT * FROM projects
-                   WHERE id = $1 AND organization_id = $2 AND user_id = $3""",
-                _uuid(project_id),
-                org,
-                user,
-            )
+        if isinstance(self.pool, AuthorizedDatabasePool):
+            pool = self._authorized_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT * FROM projects
+                       WHERE id = $1
+                         AND organization_id = current_setting('app.org_id', true)::uuid""",
+                    _uuid(project_id),
+                )
+        else:
+            org, user = _require_scope(org_id, user_id)
+            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+                row = await conn.fetchrow(
+                    """SELECT * FROM projects
+                       WHERE id = $1 AND organization_id = $2 AND user_id = $3""",
+                    _uuid(project_id),
+                    org,
+                    user,
+                )
         return dict(row) if row else None
 
     async def get_owned_with_counts(
-        self, project_id: str | UUID, *, org_id: str | UUID, user_id: str | UUID
+        self,
+        project_id: str | UUID,
+        *,
+        org_id: str | UUID | None = None,
+        user_id: str | UUID | None = None,
     ) -> dict[str, Any] | None:
-        """One owned project plus its member counts (single query)."""
-        org, user = _require_scope(org_id, user_id)
-        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-            row = await conn.fetchrow(
-                """SELECT p.*,
-                          (SELECT COUNT(*) FROM llm_sessions s
-                             WHERE s.project_id = p.id
-                               AND s.status NOT IN ('archived', 'deleted'))
-                              AS session_count,
-                          (SELECT COUNT(*) FROM user_files f
-                             WHERE f.project_id = p.id AND f.deleted_at IS NULL)
-                              AS file_count
-                   FROM projects p
-                   WHERE p.id = $1 AND p.organization_id = $2 AND p.user_id = $3""",
-                _uuid(project_id),
-                org,
-                user,
-            )
+        """One project plus its member counts (single query)."""
+        if isinstance(self.pool, AuthorizedDatabasePool):
+            pool = self._authorized_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT p.*,
+                              (SELECT COUNT(*) FROM llm_sessions s
+                                 WHERE s.project_id = p.id
+                                   AND s.status NOT IN ('archived', 'deleted'))
+                                  AS session_count,
+                              (SELECT COUNT(*) FROM user_files f
+                                 WHERE f.project_id = p.id AND f.deleted_at IS NULL)
+                                  AS file_count
+                       FROM projects p
+                       WHERE p.id = $1
+                         AND p.organization_id = current_setting('app.org_id', true)::uuid""",
+                    _uuid(project_id),
+                )
+        else:
+            org, user = _require_scope(org_id, user_id)
+            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+                row = await conn.fetchrow(
+                    """SELECT p.*,
+                              (SELECT COUNT(*) FROM llm_sessions s
+                                 WHERE s.project_id = p.id
+                                   AND s.status NOT IN ('archived', 'deleted'))
+                                  AS session_count,
+                              (SELECT COUNT(*) FROM user_files f
+                                 WHERE f.project_id = p.id AND f.deleted_at IS NULL)
+                                  AS file_count
+                       FROM projects p
+                       WHERE p.id = $1 AND p.organization_id = $2 AND p.user_id = $3""",
+                    _uuid(project_id),
+                    org,
+                    user,
+                )
         return dict(row) if row else None
 
     async def rename(
@@ -183,35 +252,62 @@ class ProjectRepository:
         return row is not None
 
     async def list_owned(
-        self, *, org_id: str | UUID, user_id: str | UUID,
+        self,
+        *,
+        org_id: str | UUID | None = None,
+        user_id: str | UUID | None = None,
         limit: int = 100, offset: int = 0,
     ) -> dict[str, Any]:
-        org, user = _require_scope(org_id, user_id)
-        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
-            total = await conn.fetchval(
-                """SELECT COUNT(*) FROM projects
-                   WHERE organization_id = $1 AND user_id = $2""",
-                org,
-                user,
-            )
-            rows = await conn.fetch(
-                """SELECT p.*,
-                          (SELECT COUNT(*) FROM llm_sessions s
-                             WHERE s.project_id = p.id
-                               AND s.status NOT IN ('archived', 'deleted'))
-                              AS session_count,
-                          (SELECT COUNT(*) FROM user_files f
-                             WHERE f.project_id = p.id AND f.deleted_at IS NULL)
-                              AS file_count
-                   FROM projects p
-                   WHERE p.organization_id = $1 AND p.user_id = $2
-                   ORDER BY p.updated_at DESC
-                   LIMIT $3 OFFSET $4""",
-                org,
-                user,
-                limit,
-                offset,
-            )
+        if isinstance(self.pool, AuthorizedDatabasePool):
+            pool = self._authorized_pool()
+            async with pool.acquire() as conn:
+                total = await conn.fetchval(
+                    "SELECT COUNT(*) FROM projects "
+                    "WHERE organization_id = current_setting('app.org_id', true)::uuid"
+                )
+                rows = await conn.fetch(
+                    """SELECT p.*,
+                              (SELECT COUNT(*) FROM llm_sessions s
+                                 WHERE s.project_id = p.id
+                                   AND s.status NOT IN ('archived', 'deleted'))
+                                  AS session_count,
+                              (SELECT COUNT(*) FROM user_files f
+                                 WHERE f.project_id = p.id AND f.deleted_at IS NULL)
+                                  AS file_count
+                       FROM projects p
+                       WHERE p.organization_id = current_setting('app.org_id', true)::uuid
+                       ORDER BY p.updated_at DESC
+                       LIMIT $1 OFFSET $2""",
+                    limit,
+                    offset,
+                )
+        else:
+            org, user = _require_scope(org_id, user_id)
+            async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+                total = await conn.fetchval(
+                    """SELECT COUNT(*) FROM projects
+                       WHERE organization_id = $1 AND user_id = $2""",
+                    org,
+                    user,
+                )
+                rows = await conn.fetch(
+                    """SELECT p.*,
+                              (SELECT COUNT(*) FROM llm_sessions s
+                                 WHERE s.project_id = p.id
+                                   AND s.status NOT IN ('archived', 'deleted'))
+                                  AS session_count,
+                              (SELECT COUNT(*) FROM user_files f
+                                 WHERE f.project_id = p.id AND f.deleted_at IS NULL)
+                                  AS file_count
+                       FROM projects p
+                       WHERE p.organization_id = $1 AND p.user_id = $2
+                       ORDER BY p.updated_at DESC
+                       LIMIT $3 OFFSET $4""",
+                    org,
+                    user,
+                    limit,
+                    offset,
+                )
         total_count = int(total or 0)
         return {
             "items": [dict(row) for row in rows],

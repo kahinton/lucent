@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from asyncpg import Pool
-from lucent.db.pool import scoped_acquire
+
+from lucent.db.pool import scoped_acquire_on
 
 if TYPE_CHECKING:
     from lucent.api.deps import CurrentUser
@@ -196,7 +197,9 @@ class AdminAuditRepository:
                       changed_fields, old_values, new_values,
                       context, notes, outcome, created_at
         """
-        async with scoped_acquire(organization_id=organization_id, user_id=actor_user_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=actor_user_id
+        ) as conn:
             row = await conn.fetchrow(
                 query,
                 str(organization_id),
@@ -372,7 +375,9 @@ class AdminAuditRepository:
         """
         count_q = f"SELECT COUNT(*) AS total FROM admin_audit_log a WHERE {where_sql}"
 
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             total_row = await conn.fetchrow(count_q, *params)
             rows = await conn.fetch(list_q, *params, limit, offset)
 
@@ -385,7 +390,9 @@ class AdminAuditRepository:
 
     async def list_actions(self, organization_id: UUID) -> list[str]:
         """Distinct action types currently present in the org's audit log."""
-        async with scoped_acquire(organization_id=organization_id) as conn:
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id
+        ) as conn:
             rows = await conn.fetch(
                 "SELECT DISTINCT action FROM admin_audit_log "
                 "WHERE organization_id = $1 ORDER BY action",

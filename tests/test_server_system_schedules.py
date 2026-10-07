@@ -12,6 +12,7 @@ Validates that the stale-task reaper operates independently of the daemon proces
 import json
 from unittest.mock import AsyncMock, patch
 
+import pytest
 import pytest_asyncio
 
 from lucent.api.system_schedules import (
@@ -25,6 +26,24 @@ from lucent.db.requests import RequestRepository
 from lucent.db.schedules import ScheduleRepository
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _system_tenant_scope():
+    """Bind the ambient scope the real server-schedule loop runs under.
+
+    Production drives these entry points from two system-infra contexts
+    (api/app.py boot tasks and ``_server_system_schedule_loop``), each of which
+    binds ``set_tenant_scope(role="system")``; the repository layer fails
+    closed without it. The direct ``run_*``/``ensure_*`` calls here reproduce
+    that context. Suite-local autouse for this module only, never global (see
+    conftest's ``daemon_tenant_scope`` docstring).
+    """
+    from lucent.db.pool import clear_tenant_scope, set_tenant_scope
+
+    set_tenant_scope(user_id=None, organization_id=None, role="system")
+    yield
+    clear_tenant_scope()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -214,10 +233,10 @@ class TestScheduleSeeding:
         async with db_pool.acquire() as conn:
             memory_id = await conn.fetchval(
                 """INSERT INTO memories
-                   (username, type, content, tags, importance, organization_id, shared)
+                   (username, type, content, tags, importance, organization_id)
                    VALUES ('server-vitality-test', 'technical',
                            'server vitality test memory', ARRAY['test'], 5,
-                           $1::uuid, true)
+                           $1::uuid)
                    RETURNING id""",
                 org_id,
             )
@@ -355,10 +374,10 @@ class TestExpiredClaimRelease:
 
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-server-reaper")
+        await repo.claim_task(str(task["id"]), "inst-server-reaper", org_id=org_id)
 
         # Verify it's claimed
-        claimed = await repo.get_task(str(task["id"]))
+        claimed = await repo.get_task(str(task["id"]), org_id)
         assert claimed["status"] == "claimed"
 
         # Expire the claim
@@ -376,7 +395,7 @@ class TestExpiredClaimRelease:
         assert fired >= 1
 
         # Task should be back to pending
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id)
         assert refreshed["status"] == "pending"
         assert refreshed["claimed_by"] is None
         assert refreshed["claimed_at"] is None
@@ -393,7 +412,7 @@ class TestExpiredClaimRelease:
 
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-run-check")
+        await repo.claim_task(str(task["id"]), "inst-run-check", org_id=org_id)
 
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -439,7 +458,7 @@ class TestReaperEventLogging:
 
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-event-check")
+        await repo.claim_task(str(task["id"]), "inst-event-check", org_id=org_id)
 
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -452,7 +471,7 @@ class TestReaperEventLogging:
 
         await run_server_system_schedules_once()
 
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         reaper_events = [
             e for e in events["items"] if e["event_type"] == "reaper"
         ]
@@ -470,7 +489,7 @@ class TestReaperEventLogging:
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         instance_name = "inst-detail-check-abc123"
-        await repo.claim_task(str(task["id"]), instance_name)
+        await repo.claim_task(str(task["id"]), instance_name, org_id=org_id)
 
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -483,7 +502,7 @@ class TestReaperEventLogging:
 
         await run_server_system_schedules_once()
 
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         reaper_events = [
             e for e in events["items"] if e["event_type"] == "reaper"
         ]
@@ -508,7 +527,7 @@ class TestReaperEventLogging:
         await _force_schedule_due(db_pool, test_organization["id"])
         await run_server_system_schedules_once()
 
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert not any(e["event_type"] == "reaper" for e in events["items"])
 
 
@@ -527,7 +546,7 @@ class TestActiveClaimProtection:
 
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-active-claim")
+        await repo.claim_task(str(task["id"]), "inst-active-claim", org_id=org_id)
 
         # Set a future expiry and recent claimed_at
         async with db_pool.acquire() as conn:
@@ -543,11 +562,11 @@ class TestActiveClaimProtection:
         fired = await run_server_system_schedules_once()
         assert fired >= 1
 
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id)
         assert refreshed["status"] == "claimed"
         assert refreshed["claimed_by"] == "inst-active-claim"
 
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert not any(e["event_type"] == "reaper" for e in events["items"])
 
     async def test_mixed_expired_and_active_tasks(
@@ -563,7 +582,7 @@ class TestActiveClaimProtection:
 
         # Task A: expired claim
         task_a = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task_a["id"]), "inst-expired")
+        await repo.claim_task(str(task_a["id"]), "inst-expired", org_id=org_id)
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """UPDATE tasks
@@ -574,7 +593,7 @@ class TestActiveClaimProtection:
 
         # Task B: active claim
         task_b = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task_b["id"]), "inst-active")
+        await repo.claim_task(str(task_b["id"]), "inst-active", org_id=org_id)
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """UPDATE tasks
@@ -588,20 +607,20 @@ class TestActiveClaimProtection:
         await run_server_system_schedules_once()
 
         # A should be released
-        refreshed_a = await repo.get_task(str(task_a["id"]))
+        refreshed_a = await repo.get_task(str(task_a["id"]), org_id)
         assert refreshed_a["status"] == "pending"
         assert refreshed_a["claimed_by"] is None
 
         # B should remain claimed
-        refreshed_b = await repo.get_task(str(task_b["id"]))
+        refreshed_b = await repo.get_task(str(task_b["id"]), org_id)
         assert refreshed_b["status"] == "claimed"
         assert refreshed_b["claimed_by"] == "inst-active"
 
         # Only A should have a reaper event
-        events_a = await repo.list_task_events(str(task_a["id"]))
+        events_a = await repo.list_task_events(str(task_a["id"]), org_id=org_id)
         assert any(e["event_type"] == "reaper" for e in events_a["items"])
 
-        events_b = await repo.list_task_events(str(task_b["id"]))
+        events_b = await repo.list_task_events(str(task_b["id"]), org_id=org_id)
         assert not any(e["event_type"] == "reaper" for e in events_b["items"])
 
 
@@ -620,7 +639,7 @@ class TestDaemonIndependence:
 
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-daemon-down")
+        await repo.claim_task(str(task["id"]), "inst-daemon-down", org_id=org_id)
 
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -638,11 +657,11 @@ class TestDaemonIndependence:
         fired = await run_server_system_schedules_once()
         assert fired >= 1
 
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id)
         assert refreshed["status"] == "pending"
         assert refreshed["claimed_by"] is None
 
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         assert any(e["event_type"] == "reaper" for e in events["items"])
 
     async def test_reaper_idempotent_double_run(
@@ -656,7 +675,7 @@ class TestDaemonIndependence:
 
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
-        await repo.claim_task(str(task["id"]), "inst-idempotent")
+        await repo.claim_task(str(task["id"]), "inst-idempotent", org_id=org_id)
 
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -669,7 +688,7 @@ class TestDaemonIndependence:
 
         # First run releases the task
         await run_server_system_schedules_once()
-        refreshed = await repo.get_task(str(task["id"]))
+        refreshed = await repo.get_task(str(task["id"]), org_id)
         assert refreshed["status"] == "pending"
 
         # Force schedule due again for second run
@@ -677,11 +696,11 @@ class TestDaemonIndependence:
 
         # Second run: task is already pending, nothing to release
         await run_server_system_schedules_once()
-        refreshed2 = await repo.get_task(str(task["id"]))
+        refreshed2 = await repo.get_task(str(task["id"]), org_id)
         assert refreshed2["status"] == "pending"
 
         # Should still only have one reaper event
-        events = await repo.list_task_events(str(task["id"]))
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
         reaper_events = [
             e for e in events["items"] if e["event_type"] == "reaper"
         ]

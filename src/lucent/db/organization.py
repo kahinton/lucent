@@ -62,7 +62,7 @@ class OrganizationRepository:
             RETURNING id, name, status, suspended_at, created_at, updated_at
         """
 
-        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
+        async with self.pool.acquire() as conn:  # system-infra: intentionally scope-less, audited site
             async with conn.transaction():
                 row = await conn.fetchrow(query, name)
                 org = self._row_to_dict(row)
@@ -124,7 +124,7 @@ class OrganizationRepository:
             WHERE name = $1
         """
 
-        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
+        async with self.pool.acquire() as conn:  # system-infra: intentionally scope-less, audited site
             row = await conn.fetchrow(query, name)
 
         if row is None:
@@ -275,7 +275,7 @@ class OrganizationRepository:
             LIMIT $1 OFFSET $2
         """
 
-        async with self.pool.acquire() as conn:  # rls: system-infra — audited no-scope site
+        async with self.pool.acquire() as conn:  # system-infra: intentionally scope-less, audited site
             count_row = await conn.fetchrow(count_query)
             total_count = count_row["total"] if count_row else 0
             rows = await conn.fetch(query, limit, offset)

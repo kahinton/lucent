@@ -1395,9 +1395,14 @@ class TestGrantManagement:
         assert str(mcp_def["id"]) not in server_ids
 
     async def test_grant_hook_to_agent(self, client, agent_def, hook_def, db_pool, web_user):
-        # Approve the hook first — get_agent_hooks filters by status='active'
+        # Approve the hook to 'active' first — get_agent_hooks filters by
+        # status='active'. Hook approval is two-step under the clearance
+        # migration: proposed -> owner_approved (owner sign-off) -> active,
+        # so it takes two approve_hook calls (same contract test_agent_hooks
+        # pins).
         _user, org, _token = web_user
         repo = DefinitionRepository(db_pool)
+        await repo.approve_hook(str(hook_def["id"]), str(org["id"]), str(_user["id"]))
         await repo.approve_hook(str(hook_def["id"]), str(org["id"]), str(_user["id"]))
 
         resp = await client.post(
@@ -1685,12 +1690,45 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 303
 
-    async def test_member_cannot_reject_hook(self, member_client, member_hook_def):
+    async def test_member_rejects_own_proposal_but_not_others(
+        self, member_client, member_hook_def, db_pool, member_user, web_user
+    ):
+        # Approve/reject are the owner sign-off surface: a member who OWNS a
+        # proposed hook signs off on it himself (proposed -> owner_approved is
+        # "owner approved", rejected == owner withdrawing the proposal), per
+        # `_require_definition_approval_access` (admin/owner role OR resource
+        # owner via can_modify). Members without ownership stay blocked.
         resp = await member_client.post(
             f"/definitions/hooks/{member_hook_def['id']}/reject",
             data=_csrf_data(member_client),
+            follow_redirects=False,
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
+        repo = DefinitionRepository(db_pool)
+        rejected = await repo.get_hook(
+            str(member_hook_def["id"]), str(member_user[1]["id"])
+        )
+        assert rejected["status"] == "rejected"
+
+        # A hook the member does not own (org-shared, owner-less) cannot be
+        # rejected by a plain member.
+        shared = await repo.create_hook(
+            name="Member Org Shared Hook",
+            description="Org-shared hook",
+            trigger_event="tool_call",
+            action_type="static_context",
+            content="Shared context",
+            config={"tool_names": ["read_file"]},
+            org_id=str(member_user[1]["id"]),
+            created_by=str(member_user[0]["id"]),
+            shared_with_org=True,
+        )
+        resp2 = await member_client.post(
+            f"/definitions/hooks/{shared['id']}/reject",
+            data=_csrf_data(member_client),
+            follow_redirects=False,
+        )
+        assert resp2.status_code in (403, 404)
 
     # --- MCP Server CRUD ---
 

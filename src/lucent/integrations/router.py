@@ -199,11 +199,10 @@ async def receive_webhook(
         """Background task: parse event, resolve integration, dispatch."""
         try:
             # Find all active integrations of this type.
-            # rls: integrations is RLS-bound (shape b, org-keyed). Webhook
-            # fan-out is cross-org by design (no org is known until a match
-            # is found), so this enumeration runs under the system session
-            # branch — the same class as the other system-infra paths — and
-            # scrubs on release. Every downstream per-org operation is
+            # Webhook fan-out is cross-org by design (no org is known until a
+            # match is found), so this enumeration runs under the system
+            # session branch — the same class as other system-infra paths —
+            # and scrubs on release. Every downstream per-org operation is
             # org-scoped from the matched integration row.
             rows = await IntegrationRepo(pool).list_active_by_type(provider)
 

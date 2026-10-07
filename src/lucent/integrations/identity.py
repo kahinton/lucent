@@ -143,8 +143,8 @@ class PairingChallengeService:
         Increments ``attempt_count`` on every candidate checked. Returns a
         ``VerifyResult`` indicating success or the reason for failure.
 
-        organization_id binds the RLS tenant GUCs for the pairing_challenges
-        scan (fail-closed empty when omitted).
+        organization_id binds the tenant GUCs for the pairing_challenges scan
+        (fail-closed empty when omitted).
         """
         # Fetch all pending, non-expired challenges for this integration
         # We need to scan because the code is bcrypt-hashed (no direct lookup).
@@ -200,10 +200,10 @@ class PairingChallengeService:
     ) -> list[dict[str, Any]]:
         """Return all pending, non-expired challenges for an integration.
 
-        Uses a direct pool query — PairingChallengeRepo doesn't expose
-        an integration-scoped pending query, so we go to the DB directly.
+        Uses a direct pool query — PairingChallengeRepo exposes it as
+        ``list_pending_for_integration``.
         """
-        return await self._challenge_repo.list_pending_for_integration(
+        return await self._repo.list_pending_for_integration(
             integration_id,
             organization_id=organization_id,
             user_id=user_id,
@@ -237,6 +237,7 @@ class IdentityResolver:
         provider: str,
         external_user_id: str,
         external_workspace_id: str | None = None,
+        organization_id: str | None = None,
     ) -> IdentityResult:
         """Look up the Lucent user linked to an external identity.
 
@@ -244,10 +245,11 @@ class IdentityResolver:
         exists, or ``IdentityResult(resolved=False)`` when the external user
         is unknown or their link is inactive.
         """
-        link = await self._links.resolve_identity(
-            provider=provider,
-            external_user_id=external_user_id,
+        link = await self._links.resolve_by_external_identity(
+            provider,
+            external_user_id,
             external_workspace_id=external_workspace_id,
+            organization_id=organization_id,
         )
 
         if link and link.get("status") == UserLinkStatus.ACTIVE.value:
@@ -325,10 +327,11 @@ class IdentityResolver:
             return IdentityResult(resolved=False)
 
         # Check for an existing link to supersede
-        existing = await self._links.resolve_identity(
-            provider=provider,
-            external_user_id=external_user_id,
+        existing = await self._links.resolve_by_external_identity(
+            provider,
+            external_user_id,
             external_workspace_id=external_workspace_id,
+            organization_id=organization_id,
         )
 
         # Create the new user link

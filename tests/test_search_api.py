@@ -346,7 +346,6 @@ class TestSearchPost:
             assert "updated_at" in m
             assert "user_id" in m
             assert "organization_id" in m
-            assert "shared" in m
 
     async def test_search_no_results(self, srch_client, srch_prefix):
         """Search for nonexistent content returns empty results."""
@@ -674,9 +673,15 @@ class TestSearchAccessControl:
         )
         assert resp.status_code == 200
         data = resp.json()
-        # User B should not see User A's unshared memories
-        for m in data["memories"]:
-            assert m["user_id"] != str(srch_user["id"]) or m["shared"] is True
+        # User B should not see User A's memories unless those memories are
+        # org-shared (org-shared state is the ('read','org') clearance since
+        # migration 132).
+        user_a_rows = [m for m in data["memories"] if m["user_id"] == str(srch_user["id"])]
+        shared_ids = await MemoryRepository(db_pool).org_shared_ids(
+            [m["id"] for m in user_a_rows], srch_user["organization_id"]
+        )
+        for m in user_a_rows:
+            assert m["id"] in shared_ids
 
     async def test_user_sees_shared_memories(self, srch_client_b, db_pool, srch_user, srch_prefix):
         """User B can find User A's shared memories."""
@@ -688,6 +693,7 @@ class TestSearchAccessControl:
             memory_id=memories[0]["id"],
             user_id=srch_user["id"],
             shared=True,
+            organization_id=srch_user["organization_id"],
         )
 
         resp = await srch_client_b.post(
@@ -698,8 +704,10 @@ class TestSearchAccessControl:
         )
         assert resp.status_code == 200
         data = resp.json()
-        shared_ids = [m["id"] for m in data["memories"] if m["shared"]]
-        assert str(memories[0]["id"]) in shared_ids
+        shared_ids = await repo.org_shared_ids(
+            [m["id"] for m in data["memories"]], srch_user["organization_id"]
+        )
+        assert memories[0]["id"] in shared_ids
 
 
 # ============================================================================
@@ -733,6 +741,7 @@ class TestSearchAccessLogging:
             access_log = await access_repo.get_access_history(
                 memory_id=memory_id,
                 limit=10,
+                organization_id=srch_user["organization_id"],
             )
             # Should have at least one search_result entry
             search_entries = [
@@ -761,6 +770,7 @@ class TestSearchAccessLogging:
             access_log = await access_repo.get_access_history(
                 memory_id=memory_id,
                 limit=10,
+                organization_id=srch_user["organization_id"],
             )
             search_entries = [
                 e for e in access_log["entries"] if e.get("access_type") == "search_result"

@@ -122,9 +122,9 @@ class ApiKeyRepository:
             WHERE user_id = $1 AND name = $2 AND organization_id = $3 AND revoked_at IS NULL
         """
 
-        # rls: api_keys is RLS-bound (shape a). verify() runs pre-auth (no
-        # tenant context exists yet), so it reverts to raw; these lookup
-        # helpers run post-auth with the caller's org threaded in.
+        # verify() runs pre-auth (no tenant context exists yet), so it uses a
+        # raw acquire; these lookup helpers run post-auth with the
+        # caller's org threaded in.
         async with scoped_acquire_on(
             self.pool, organization_id=organization_id, user_id=user_id
         ) as conn:

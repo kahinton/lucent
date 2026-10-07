@@ -640,7 +640,11 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert "id=\"agent-select\"" in detail_resp.text
     assert "id=\"model-select\"" in detail_resp.text
     assert "id=\"reasoning-select\"" in detail_resp.text
-    assert "lucent-orb lucent-orb-sm" in detail_resp.text
+    # The Sep 2026 restyle (a584eab) aligned the handoff detail view with the
+    # main-chat styling: the small assistant orb ("lucent-orb lucent-orb-sm")
+    # and its ✦ glyph were replaced by the inline-chat conversation shell.
+    assert "data-inline-chat-loading" in detail_resp.text
+    assert "lucent-orb" not in detail_resp.text
     assert "✦" not in detail_resp.text
     assert "Reply here, ask a follow-up question" in detail_resp.text
     assert "Question from Lucent" in detail_resp.text

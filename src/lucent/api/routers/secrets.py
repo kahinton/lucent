@@ -21,6 +21,7 @@ from lucent.db.definitions import DefinitionRepository
 from lucent.db.integrations_repositories import IntegrationRepo
 from lucent.db.sandbox import SandboxRepository
 from lucent.db.sandbox_template import SandboxTemplateRepository
+from lucent.db.secrets import SecretRepository, get_authorized_secrets_pool
 from lucent.integrations.encryption import BackendCredentialEncryptor, EncryptionError
 from lucent.rbac import Role
 from lucent.secrets import SecretRegistry, SecretScope
@@ -160,9 +161,13 @@ async def _check_group_secret_scope(
     if user.role >= Role.ADMIN:
         return
     if require_modify:
-        allowed = await repo.is_group_admin(str(user.id), owner_group_id)
+        allowed = await repo.is_group_admin(
+            str(user.id), owner_group_id, organization_id=str(user.organization_id)
+        )
     else:
-        allowed = await repo.is_member(str(user.id), owner_group_id)
+        allowed = await repo.is_member(
+            str(user.id), owner_group_id, organization_id=str(user.organization_id)
+        )
     if not allowed:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -195,10 +200,40 @@ async def create_secret(body: SecretCreate, user: AuthenticatedUser):
 
 @router.get("", response_model=SecretListResponse)
 async def list_secrets(user: AuthenticatedUser, owner_group_id: str | None = None):
-    """List secret key names (no values) for the current user or group."""
+    """List secret key names (no values) for the current user or group.
+
+    Without an explicit group scope, the built-in provider lists through
+    the clearance-driven path — the same rules the web listing enforces
+    (owned via 123, group shares via 124, explicit grants), so a granted
+    secret is listed here too. External providers and explicit group
+    scoping keep the legacy scope-predicated listing.
+    """
     await _check_group_secret_scope(user, owner_group_id, require_modify=False)
     provider = SecretRegistry.get()
     scope = _user_scope(user, owner_group_id)
+    if not owner_group_id and hasattr(provider, "get_secret_row"):
+        pool = await get_pool()
+        authorized_pool = await get_authorized_secrets_pool(
+            pool,
+            {"id": str(user.id), "organization_id": str(user.organization_id)},
+        )
+        rows = await SecretRepository(authorized_pool).list_keys_cleared(
+            str(user.organization_id)
+        )
+        return SecretListResponse(
+            keys=[
+                SecretKeyResponse(
+                    key=str(row["key"]),
+                    owner_user_id=(
+                        str(row["owner_user_id"]) if row["owner_user_id"] else None
+                    ),
+                    owner_group_id=(
+                        str(row["owner_group_id"]) if row["owner_group_id"] else None
+                    ),
+                )
+                for row in rows
+            ]
+        )
     keys = await provider.list_keys(scope)
     return SecretListResponse(
         keys=[
@@ -214,15 +249,37 @@ async def list_secrets(user: AuthenticatedUser, owner_group_id: str | None = Non
 
 @router.get("/{key}", response_model=SecretValueResponse)
 async def get_secret(key: str, user: AuthenticatedUser, owner_group_id: str | None = None):
-    """Get a secret value. Requires explicit authorization via web session only."""
+    """Get a secret value. Requires explicit authorization via web session only.
+
+    For the built-in provider without an explicit group scope the read is
+    clearance-driven: the same rules the listings enforce, so a granted
+    user can fetch the value (previously the scope-predicated lookup hid
+    the row entirely and every grant stopped at the list). Explicit group
+    scopes and external providers keep the legacy scope-predicated path.
+    """
     if user.auth_method == "api_key":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Secret values cannot be accessed via API key. Use a web session.",
         )
+    provider = SecretRegistry.get()
+    if not owner_group_id and hasattr(provider, "get_secret_row"):
+        pool = await get_pool()
+        authorized_pool = await get_authorized_secrets_pool(
+            pool,
+            {"id": str(user.id), "organization_id": str(user.organization_id)},
+        )
+        row = await SecretRepository(authorized_pool).get_usable_encrypted_value(
+            key, str(user.organization_id)
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Secret not found")
+        value = provider.decrypt_value(row["encrypted_value"])
+        await _audit_secret(user, SECRET_READ, key)
+        return SecretValueResponse(key=key, value=value)
+
     scope = _user_scope(user, owner_group_id)
     await _check_secret_access(user, key, scope)
-    provider = SecretRegistry.get()
     value = await provider.get(key, scope)
     if value is None:
         raise HTTPException(status_code=404, detail="Secret not found")

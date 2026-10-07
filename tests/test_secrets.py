@@ -12,7 +12,7 @@ Covers:
 
 import json
 import os
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -451,6 +451,7 @@ class TestSecretsAPI:
             str(group["id"]),
             str(org_and_users["user_a"]["id"]),
             role="admin",
+            organization_id=str(org_and_users["org"]["id"]),
         )
         scope = SecretScope(
             organization_id=str(org_and_users["org"]["id"]),
@@ -478,6 +479,7 @@ class TestSecretsAPI:
             str(group["id"]),
             str(org_and_users["user_b"]["id"]),
             role="member",
+            organization_id=str(org_and_users["org"]["id"]),
         )
 
         app = create_app()
@@ -657,3 +659,150 @@ class TestSecretsAPI:
             if sandbox_id:
                 async with db_pool.acquire() as conn:
                     await conn.execute("DELETE FROM sandboxes WHERE id = $1", sandbox_id)
+
+
+class TestGrantedValueAccess:
+    """Grants must reach the value path, not stop at the listing.
+
+    Before the clearance value path, a user granted read on someone
+    else's secret could see the key in a listing but both the API value
+    fetch (scope-predicated get_secret_id lookup) and the env-reference
+    resolver (candidate-scope probe) came up empty.
+    """
+
+    @pytest.mark.asyncio
+    async def test_granted_user_fetches_secret_value(
+        self, registered_provider, org_and_users, secret_prefix, db_pool
+    ):
+        from lucent.db.access_control import AuthAccessRepository
+
+        org_id = str(org_and_users["org"]["id"])
+        scope = SecretScope(
+            organization_id=org_id, owner_user_id=str(org_and_users["user_a"]["id"])
+        )
+        key = f"{secret_prefix}granted"
+        await registered_provider.set(key, "grantee-sees-this", scope)
+
+        secret_id = await registered_provider.get_secret_id(key, scope)
+        await AuthAccessRepository(db_pool).upsert_grant(
+            "secret",
+            UUID(secret_id),
+            grantee_type="user",
+            grantee_id=UUID(str(org_and_users["user_b"]["id"])),
+            role="read",
+            granted_by=UUID(str(org_and_users["user_a"]["id"])),
+            organization_id=UUID(org_id),
+        )
+
+        app = create_app()
+        async with _make_client(app, org_and_users["user_b"]) as client:
+            resp = await client.get(f"/api/secrets/{key}")
+        assert resp.status_code == 200
+        assert resp.json()["value"] == "grantee-sees-this"
+
+    @pytest.mark.asyncio
+    async def test_granted_user_lists_granted_secret(
+        self, registered_provider, org_and_users, secret_prefix, db_pool
+    ):
+        from lucent.db.access_control import AuthAccessRepository
+
+        org_id = str(org_and_users["org"]["id"])
+        scope = SecretScope(
+            organization_id=org_id, owner_user_id=str(org_and_users["user_a"]["id"])
+        )
+        key = f"{secret_prefix}granted_list"
+        await registered_provider.set(key, "value", scope)
+        secret_id = await registered_provider.get_secret_id(key, scope)
+        await AuthAccessRepository(db_pool).upsert_grant(
+            "secret",
+            UUID(secret_id),
+            grantee_type="user",
+            grantee_id=UUID(str(org_and_users["user_b"]["id"])),
+            role="read",
+            granted_by=UUID(str(org_and_users["user_a"]["id"])),
+            organization_id=UUID(org_id),
+        )
+
+        app = create_app()
+        async with _make_client(app, org_and_users["user_b"]) as client:
+            resp = await client.get("/api/secrets")
+        assert resp.status_code == 200
+        keys = [k["key"] for k in resp.json()["keys"]]
+        assert key in keys
+
+    @pytest.mark.asyncio
+    async def test_ungranted_user_cannot_fetch_or_resolve(
+        self, registered_provider, org_and_users, secret_prefix, db_pool
+    ):
+        from lucent.api.deps import CurrentUser, get_current_user
+        from lucent.auth import set_current_user
+        from lucent.secrets.utils import resolve_secret_reference
+
+        org_id = str(org_and_users["org"]["id"])
+        scope = SecretScope(
+            organization_id=org_id, owner_user_id=str(org_and_users["user_a"]["id"])
+        )
+        key = f"{secret_prefix}private_val"
+        await registered_provider.set(key, "a-only", scope)
+
+        # User B (same org, member, NO grant): API fetch is 404 —
+        app = create_app()
+        async with _make_client(app, org_and_users["user_b"]) as client:
+            resp = await client.get(f"/api/secrets/{key}")
+        assert resp.status_code == 404
+
+        # — and the env_reference resolution is a clear KeyError.
+        fake_user = CurrentUser(
+            id=org_and_users["user_b"]["id"],
+            organization_id=org_id,
+            role="member",
+            email=org_and_users["user_b"].get("email"),
+            display_name=org_and_users["user_b"].get("display_name"),
+        )
+        app.dependency_overrides[get_current_user] = lambda: fake_user
+        set_current_user(
+            {"id": str(org_and_users["user_b"]["id"]), "organization_id": org_id}
+        )
+        try:
+            with pytest.raises(KeyError):
+                await resolve_secret_reference(
+                    f"secret://{key}", registered_provider
+                )
+        finally:
+            set_current_user(None)
+
+    @pytest.mark.asyncio
+    async def test_granted_user_resolves_env_reference(
+        self, registered_provider, org_and_users, secret_prefix, db_pool
+    ):
+        from lucent.auth import set_current_user
+        from lucent.db.access_control import AuthAccessRepository
+        from lucent.secrets.utils import resolve_secret_reference
+
+        org_id = str(org_and_users["org"]["id"])
+        scope = SecretScope(
+            organization_id=org_id, owner_user_id=str(org_and_users["user_a"]["id"])
+        )
+        key = f"{secret_prefix}envref"
+        await registered_provider.set(key, "resolved!", scope)
+        secret_id = await registered_provider.get_secret_id(key, scope)
+        await AuthAccessRepository(db_pool).upsert_grant(
+            "secret",
+            UUID(secret_id),
+            grantee_type="user",
+            grantee_id=UUID(str(org_and_users["user_b"]["id"])),
+            role="read",
+            granted_by=UUID(str(org_and_users["user_a"]["id"])),
+            organization_id=UUID(org_id),
+        )
+
+        set_current_user(
+            {"id": str(org_and_users["user_b"]["id"]), "organization_id": org_id}
+        )
+        try:
+            value = await resolve_secret_reference(
+                f"secret://{key}", registered_provider
+            )
+            assert value == "resolved!"
+        finally:
+            set_current_user(None)

@@ -43,7 +43,6 @@ class TestMemoryRecord:
             "deleted_at": None,
             "user_id": uuid4(),
             "organization_id": None,
-            "shared": False,
             "last_accessed_at": None,
         }
         assert record["username"] == "testuser"
@@ -67,7 +66,6 @@ class TestMemoryRecord:
             "deleted_at",
             "user_id",
             "organization_id",
-            "shared",
             "last_accessed_at",
         }
         assert set(hints.keys()) == expected
@@ -99,7 +97,6 @@ class TestMemorySearchRecord:
             "similarity_score": 0.95,
             "user_id": None,
             "organization_id": None,
-            "shared": False,
             "last_accessed_at": None,
         }
         assert record["similarity_score"] == 0.95

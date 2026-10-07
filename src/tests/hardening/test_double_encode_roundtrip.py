@@ -56,6 +56,13 @@ class RecordingConn:
         # task-existence probe when org_id is passed
         return 1
 
+    async def execute(self, query: str, *params: Any) -> str:
+        # Tenant-scope set_config preamble/scrub issued by scoped_acquire_on.
+        self._pool.recorded.append(
+            {"kind": "execute", "query": query, "params": list(params)}
+        )
+        return "INSERT 0 0"
+
     async def fetchrow(self, query: str, *params: Any) -> dict:
         self._pool.recorded.append(
             {"kind": "fetchrow", "query": query, "params": list(params)}
