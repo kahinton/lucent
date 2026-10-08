@@ -140,7 +140,16 @@ async def _runtime_setting_option_sets(pool, organization_id) -> dict[str, list[
         }
         for model in result["items"]
     ]
-    return {"models": model_options}
+    decision_model_options = [
+        {
+            "value": model["id"],
+            "label": f"{model['name']} — {model['provider']}",
+            "description": "decision model",
+        }
+        for model in result["items"]
+        if (model.get("model_class") or "language") == "decision"
+    ]
+    return {"models": model_options, "decision_models": decision_model_options}
 
 
 def _runtime_settings_error_response(

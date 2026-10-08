@@ -36,7 +36,15 @@ class ModelInfo:
     # Selectable provider reasoning/thinking levels reported by provider metadata.
     reasoning_efforts: list[str] = field(default_factory=list)
     engine: str | None = None  # engine override: None=auto, "copilot", "langchain"
+    # Explicit classification separating standard chat LLMs from System One
+    # decision models (Jev-style choice/noul/score served by Ollama 0.35+).
+    # Decision models never participate in chat-model selection or the
+    # chat engines; they are consumed through lucent.llm.decision.
+    model_class: str = "language"  # "language" | "decision"
     enabled: bool = True  # whether the model is available for use
+
+
+MODEL_CLASSES = ("language", "decision")
 
 
 @dataclass(frozen=True)
@@ -295,12 +303,17 @@ def _sync_runtime_model_registry(models: list[ModelInfo]) -> None:
     models. Keep LangChain/Copilot routing state aligned whenever this cache is
     loaded or refreshed so chat, API, and daemon processes can resolve
     Ollama/custom models without a restart.
+
+    Decision models are skipped: they are not chat models and must never be
+    registered with the chat engines.
     """
     try:
         from lucent.llm.langchain_engine import clear_runtime_model_registry, register_model
 
         clear_runtime_model_registry()
         for model in models:
+            if model.model_class == "decision":
+                continue
             if (
                 model.provider == "ollama"
                 or model.engine is not None
@@ -350,6 +363,7 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
                 tags=list(r.get("tags") or []),
                 reasoning_efforts=list(r.get("reasoning_efforts") or []),
                 engine=r.get("engine"),
+                model_class=r.get("model_class") or "language",
             )
             loaded.append(m)
             by_id[m.id] = m
@@ -405,10 +419,33 @@ def list_models(
     return models
 
 
+def is_decision_model(model_id: str) -> bool:
+    """Return True when the model is classified as a decision model."""
+    model = get_model(model_id)
+    return bool(model and model.model_class == "decision")
+
+
+def list_decision_models(
+    provider: str | None = None,
+    include_disabled: bool = False,
+) -> list[ModelInfo]:
+    """List decision-class models (e.g. local System One models via Ollama).
+
+    Decision models must be consumed through ``lucent.llm.decision``; they are
+    never returned by the chat-model selection helpers.
+    """
+    models = list_models(provider=provider, include_disabled=include_disabled)
+    return [m for m in models if m.model_class == "decision"]
+
+
 def _available_models(models: list[ModelInfo] | None = None) -> list[ModelInfo]:
-    """Return models that are available for selection."""
+    """Return models that are available for selection.
+
+    Decision-class models are excluded from every chat-selection path: they
+    answer System One questions, not chat turns.
+    """
     if models is not None:
-        return list(models)
+        return [m for m in models if m.model_class != "decision"]
     return list_models()
 
 
@@ -576,6 +613,29 @@ def select_model_for_task(
             alternatives=[m.id for m in available if m.id != explicit_model][:5],
         )
 
+    # A decision-class model named as the explicit request is never selected
+    # for chat work: it cannot produce chat turns, so fall back to the default
+    # model and say why instead of silently routing elsewhere.
+    if explicit_model:
+        raw_source = models if models is not None else list_models(include_disabled=True)
+        explicit_raw = next((m for m in raw_source if m.id == explicit_model), None)
+        if explicit_raw and explicit_raw.model_class == "decision":
+            default_id = get_default_model_id(
+                available if available else None,
+                preferred_model=preferred_default,
+                require_tools=require_tools,
+            )
+            return ModelSelection(
+                model_id=default_id,
+                reason=(
+                    f"Explicit model '{explicit_model}' is a decision model; "
+                    "decision models cannot serve chat tasks. Using default model."
+                ),
+                source="fallback",
+                default_model_id=default_id,
+                alternatives=[m.id for m in available if m.id != default_id][:5],
+            )
+
     default_id = get_default_model_id(
         available if available else None,
         preferred_model=preferred_default,
@@ -665,6 +725,13 @@ def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
         if model_id in _db_model_by_id:
             if model_id not in _db_enabled_ids:
                 return f"Model '{model_id}' is disabled by admin. Choose an enabled model."
+            if _db_model_by_id[model_id].model_class == "decision":
+                return (
+                    f"Model '{model_id}' is a decision model, not a chat model. "
+                    "Decision models answer System One questions "
+                    "(choice/noul/score) through the decision API and cannot "
+                    "serve chat turns or agent tasks."
+                )
             if require_tools and not _db_model_by_id[model_id].supports_tools:
                 return (
                     f"Model '{model_id}' does not support tool/function calling. "
@@ -685,6 +752,13 @@ def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
     if model_id in _MODEL_BY_ID:
         if not _MODEL_BY_ID[model_id].enabled:
             return f"Model '{model_id}' is disabled. Choose an enabled model."
+        if _MODEL_BY_ID[model_id].model_class == "decision":
+            return (
+                f"Model '{model_id}' is a decision model, not a chat model. "
+                "Decision models answer System One questions "
+                "(choice/noul/score) through the decision API and cannot "
+                "serve chat turns or agent tasks."
+            )
         if require_tools and not _MODEL_BY_ID[model_id].supports_tools:
             return (
                 f"Model '{model_id}' does not support tool/function calling. "

@@ -515,7 +515,9 @@ async def reactivate_user(request: Request, user_id: UUID):
 
 MODEL_CATEGORIES = [
     "general", "fast", "reasoning", "agentic", "frontier", "research", "visual",
+    "decision",
 ]
+MODEL_CLASSES = ["language", "decision"]
 MODEL_TAGS = [
     "coding", "frontier", "reasoning", "reasoning-effort", "agentic", "fast",
     "research", "tools", "reflection", "general", "writing", "lightweight",
@@ -554,6 +556,11 @@ def _validate_engine_form(provider: str, engine: str | None) -> tuple[str | None
         return normalized, warnings, None
     except ValueError as e:
         return None, [], str(e)
+
+
+def _validate_model_class_form(raw: str | None, default: str = "language") -> str | None:
+    value = (raw or default).strip().lower()
+    return value if value in MODEL_CLASSES else None
 
 
 def _models_redirect(success: str | None = None, error: str | None = None, warning: str | None = None):
@@ -655,6 +662,7 @@ async def models_list(request: Request):
             "enabled_count": enabled_count,
             "total_count": len(models),
             "all_categories": MODEL_CATEGORIES,
+            "all_model_classes": MODEL_CLASSES,
             "all_tags": MODEL_TAGS,
             "all_providers": MODEL_PROVIDERS,
             "provider_statuses": provider_statuses,
@@ -843,11 +851,15 @@ async def edit_model(request: Request, model_id: str):
     owner_user_id: str | None = None
     owner_group_id: str | None = None
 
+    model_class = _validate_model_class_form(form.get("model_class"), default=str(model.get("model_class", "language")))
+    if model_class is None:
+        return _models_redirect(error="Unsupported model class")
     await repo.update_model(
         model_id,
         name=form.get("name", model["name"]),
         provider=provider,
         category=form.get("category", model["category"]),
+        model_class=model_class,
         api_model_id=form.get("api_model_id", model["api_model_id"]),
         context_window=int(form.get("context_window") or 0),
         notes=form.get("notes", model["notes"]),
@@ -894,6 +906,9 @@ async def add_model(request: Request):
     engine, warnings, error = _validate_engine_form(provider, form.get("engine"))
     if error:
         return _models_redirect(error=error)
+    model_class = _validate_model_class_form(form.get("model_class"))
+    if model_class is None:
+        return _models_redirect(error="Unsupported model class")
     # Models belong to the organization; a new model starts closed with no
     # owner — access comes only from explicit grants.
     owner_user_id, owner_group_id = None, None
@@ -903,6 +918,7 @@ async def add_model(request: Request):
         provider=provider,
         name=form.get("name", model_id),
         category=form.get("category", "general"),
+        model_class=model_class,
         api_model_id=form.get("api_model_id", "") or model_id,
         context_window=int(form.get("context_window") or 0),
         notes=form.get("notes", ""),

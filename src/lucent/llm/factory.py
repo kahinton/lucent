@@ -80,6 +80,18 @@ def get_engine_for_model(model_id: str) -> LLMEngine:
         from lucent.model_registry import get_model
 
         model_info = get_model(model_id)
+
+        # Decision models (System One: choice/noul/score via /v1/systemone)
+        # are not chat models. Fail loudly rather than handing them to a chat
+        # engine — discovery marks their engine "langchain" for the runtime
+        # registry, but that must never route them into a chat turn, where
+        # Ollama would reject the request with an opaque 400.
+        if model_info and model_info.model_class == "decision":
+            raise ValueError(
+                f"Model '{model_id}' is a decision model, not a chat model. "
+                "Use lucent.llm.decision.decide() for decision-model work."
+            )
+
         if model_info and model_info.engine == "copilot":
             return _get_copilot_engine()
         if model_info and model_info.engine == "langchain":

@@ -121,6 +121,62 @@ Runtime mappings:
 Leave `reasoning_effort` unset to use the provider default. Choose higher
 levels only for complex analysis where extra latency/cost is justified.
 
+### Model Classification (decision models)
+
+Every model carries an explicit classification, `model_class`, kept separate
+from the task-flavored `category`:
+
+| `model_class` | Meaning |
+|---------------|---------|
+| `language` | Standard chat LLM. Default for every model. |
+| `decision` | System One decision model (Jev-style `choice`/`noul`/`score`, served locally by Ollama 0.35+ via `POST {OLLAMA_HOST}/v1/systemone`). |
+
+Decision models never participate in chat-model selection, daemon task
+dispatch, or the LangChain/Copilot chat engines — `select_model_for_task`
+excludes them and chat validation rejects them with a clear message. Admins
+set (or override) the classification in **Settings → Models**; provider sync
+detects local decision models via a `decision`/`systemone` capability marker
+or the known model families (`nimble`, `tev1`, `clef`) and classifies them
+automatically.
+
+Lucent exposes decision models through `lucent.llm.decision`:
+
+```python
+from lucent.llm import DecisionQuestion, DecisionRequest, decide
+
+response = await decide(
+    DecisionRequest(
+        model_id="nimble",
+        state={"ticket": "I was charged twice. Please refund the extra payment."},
+        questions={
+            "team": DecisionQuestion(
+                name="team", type="choice",
+                instructions="Which team should handle this ticket?",
+                criteria={"billing": "Payments and refunds",
+                          "technical": "Bugs and integrations",
+                          "other": "None of the above"},
+            ),
+            "urgency": DecisionQuestion(
+                name="urgency", type="score",
+                instructions="How urgent is this ticket?",
+                criteria=["Routine", "Soon", "Urgent"],
+            ),
+        },
+    )
+)
+response.answers["team"].choice         # "billing"
+response.answers["team"].probabilities  # {"billing": 0.985, ...}
+```
+
+`decide()` sends one HTTP request to `/v1/systemone` and answers every
+question at once; answers are typed (`choice` → option plus per-option
+probabilities, `noul` → true-probability, `score` → weighted rubric position
+with its legend). Request limits mirror the server (1–64 questions, 2–255
+choice options, 2–26 score levels, 64 KiB body) and are validated client-side
+first. For local testing, start Ollama 0.35+, `ollama pull nimble`, and keep
+`OLLAMA_HOST` pointed at it — provider discovery picks the decision model up
+on the next sync.
+
 ### Proactive Memory Injection
 
 The message hook can look up relevant accessible memories before the first
@@ -184,6 +240,23 @@ final injection filter.
 | `LUCENT_REQUEST_REVIEW_MODEL` | *(daemon default)* | Model for request-level post-completion review |
 | `LUCENT_REQUEST_REVIEW_AGENT_TYPE` | `request-review` | Agent type for post-completion review |
 | `LUCENT_REQUEST_REVIEW_FALLBACK_AGENT_TYPE` | `code` | Fallback agent type if review agent not found |
+| `LUCENT_DECISION_GATE_ENABLED` | `false` | Env fallback for **Settings → Runtime Settings → Decision-model pre-review gate**. Runs a cheap decision-model screening of the completed work before spawning the LLM review task. |
+| `LUCENT_DECISION_GATE_MODEL` | *(first enabled decision model)* | Decision-class model for the pre-screen. Leave blank to use the first enabled decision-class model (ordered by provider, name). |
+| `LUCENT_DECISION_GATE_THRESHOLD` | `0.7` | Minimum probability per pre-screen question to count as passing. |
+| `LUCENT_DECISION_GATE_STATE_CHAR_BUDGET` | `16000` | Character budget for the state sent to the decision endpoint (roughly 4 chars/token; the state is re-sent per question). |
+| `LUCENT_DECISION_GATE_TASK_RESULT_CHAR_BUDGET` | `2000` | Per-task result excerpt budget inside the pre-screen state. |
+
+#### Decision-model pre-review gate
+
+When **Settings → Runtime Settings → Decision-model pre-review gate** is enabled, the request review lifecycle asks a decision model (Ollama 0.35+ System One: `model_class="decision"`, e.g. `nimble`) one cheap `noul` question per concern in a single `/v1/systemone` call:
+
+- `request_fulfilled` / `not_blocked` — did the completed outputs accomplish the request, free of unresolved blockers?
+- `contracts_satisfied` — when any task carries an `output_contract`: does every structured payload satisfy the contract *in intent and meaning*, not merely schema-valid it? One additional question per contracted task verifies each payload individually.
+- `deliverables_durable` — when a `target_repo` or recorded outputs exist: are the deliverables durably captured?
+
+If every asked question scores at or above the threshold, the request is **auto-completed without an LLM review session**. If any question scores below it, the ordinary (deeper, LLM-based) review task is created with a `DECISION PRE-SCREEN FINDINGS` block listing the failed items — the reviewer verifies them and directs rework explicitly.
+
+The gate is fail-open: disabled flag, no available decision model, or an endpoint error falls back to the standard review. Requests with failed/`needs_review` tasks, linked memories requiring review-agent updates, or a `target_repo` never auto-approve — the pre-screen findings still surface, but the full review runs.
 
 #### Approval Flow
 

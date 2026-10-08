@@ -68,6 +68,7 @@ class ModelRepository:
         self,
         provider: str | None = None,
         category: str | None = None,
+        model_class: str | None = None,
         enabled_only: bool = False,
         org_id: str | None = None,
         limit: int = 25,
@@ -84,6 +85,10 @@ class ModelRepository:
         if category:
             base += f" AND category = ${idx}"
             params.append(category)
+            idx += 1
+        if model_class:
+            base += f" AND model_class = ${idx}"
+            params.append(model_class)
             idx += 1
         if enabled_only:
             base += " AND is_enabled = true"
@@ -243,6 +248,7 @@ class ModelRepository:
         provider: str,
         name: str,
         category: str = "general",
+        model_class: str = "language",
         api_model_id: str = "",
         context_window: int = 0,
         supports_tools: bool = True,
@@ -262,18 +268,19 @@ class ModelRepository:
         now = datetime.now(timezone.utc)
         async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
-                """INSERT INTO models (id, provider, name, category, api_model_id,
-                   context_window, supports_tools, supports_vision, notes, tags,
-                   reasoning_efforts, is_enabled, organization_id, engine,
-                   discovery_source, is_custom, discovery_metadata, created_at,
-                   updated_at, owner_user_id, owner_group_id)
+                """INSERT INTO models (id, provider, name, category, model_class,
+                   api_model_id, context_window, supports_tools, supports_vision,
+                   notes, tags, reasoning_efforts, is_enabled, organization_id,
+                   engine, discovery_source, is_custom, discovery_metadata,
+                   created_at, updated_at, owner_user_id, owner_group_id)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                       $16,$17::jsonb,$18,$18,$19,$20)
+                       $16,$17,$18::jsonb,$19,$19,$20,$21)
                    RETURNING *""",
                 model_id,
                 provider,
                 name,
                 category,
+                model_class,
                 api_model_id,
                 context_window,
                 supports_tools,
@@ -303,7 +310,8 @@ class ModelRepository:
         (provider sync housekeeping owns the global namespace).
         """
         allowed = {
-            "provider", "name", "category", "api_model_id", "context_window",
+            "provider", "name", "category", "model_class", "api_model_id",
+            "context_window",
             "supports_tools", "supports_vision", "notes", "tags", "is_enabled",
             "reasoning_efforts", "engine", "discovery_source", "is_custom",
             "last_discovered_at", "discovery_metadata",
@@ -373,20 +381,21 @@ class ModelRepository:
                             SELECT 1 FROM models WHERE id = $1
                         )
                         INSERT INTO models (
-                            id, provider, name, category, api_model_id,
+                            id, provider, name, category, model_class, api_model_id,
                             context_window, supports_tools, supports_vision,
                             notes, tags, is_enabled, organization_id, engine,
                             reasoning_efforts, discovery_source, is_custom, last_discovered_at,
                             discovery_metadata, created_at, updated_at
                         ) SELECT
-                            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,$11,$12,
-                            $13,'provider',false,$14,$15::jsonb,$14,$14
+                            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false,$12,$13,
+                            $14,'provider',false,$15,$16::jsonb,$15,$15
                         WHERE NOT EXISTS (SELECT 1 FROM existing)
                         """,
                         m["model_id"],
                         m["provider"],
                         m["name"],
                         m.get("category", "general"),
+                        m.get("model_class", "language"),
                         m.get("api_model_id") or m["model_id"],
                         int(m.get("context_window") or 0),
                         bool(m.get("supports_tools", True)),
@@ -417,45 +426,50 @@ class ModelRepository:
                                     THEN models.category
                                 ELSE $4
                             END,
+                            model_class = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.model_class
+                                ELSE $5
+                            END,
                             api_model_id = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.api_model_id
-                                ELSE $5
+                                ELSE $6
                             END,
                             context_window = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.context_window
-                                ELSE $6
+                                ELSE $7
                             END,
                             supports_tools = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.supports_tools
-                                ELSE $7
+                                ELSE $8
                             END,
                             supports_vision = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.supports_vision
-                                ELSE $8
+                                ELSE $9
                             END,
                             notes = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.notes
-                                ELSE $9
+                                ELSE $10
                             END,
                             tags = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.tags
-                                ELSE $10
+                                ELSE $11
                             END,
                             engine = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.engine
-                                ELSE $11
+                                ELSE $12
                             END,
                             reasoning_efforts = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.reasoning_efforts
-                                ELSE $12
+                                ELSE $13
                             END,
                             discovery_source = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
@@ -467,15 +481,16 @@ class ModelRepository:
                                     THEN models.is_custom
                                 ELSE false
                             END,
-                            last_discovered_at = $13,
-                            discovery_metadata = $14::jsonb,
-                            updated_at = $13
+                            last_discovered_at = $14,
+                            discovery_metadata = $15::jsonb,
+                            updated_at = $14
                         WHERE id = $1
                         """,
                         m["model_id"],
                         m["provider"],
                         m["name"],
                         m.get("category", "general"),
+                        m.get("model_class", "language"),
                         m.get("api_model_id") or m["model_id"],
                         int(m.get("context_window") or 0),
                         bool(m.get("supports_tools", True)),

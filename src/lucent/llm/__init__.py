@@ -16,6 +16,13 @@ Usage:
 
 from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, SessionEventType
 from lucent.llm.factory import get_engine, get_engine_for_model, get_engine_name
+from lucent.llm.decision import (
+    DecisionError,
+    DecisionRequest,
+    DecisionQuestion,
+    DecisionResponse,
+    decide,
+)
 
 __all__ = [
     "LLMEngine",
@@ -25,4 +32,9 @@ __all__ = [
     "get_engine",
     "get_engine_for_model",
     "get_engine_name",
+    "DecisionError",
+    "DecisionRequest",
+    "DecisionQuestion",
+    "DecisionResponse",
+    "decide",
 ]

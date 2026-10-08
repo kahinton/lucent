@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 RuntimeSettingType = Literal["boolean", "integer", "float", "string", "json"]
 RuntimeSettingSource = Literal["database", "environment", "default"]
 RuntimeSettingControl = Literal["auto", "toggle", "select", "model", "url", "text"]
-RuntimeSettingOptionSource = Literal["models"]
+RuntimeSettingOptionSource = Literal["models", "decision_models"]
 
 
 @dataclass(frozen=True)
@@ -330,6 +330,53 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         title="Request review fallback agent type",
         section="Requests",
         description="Fallback agent type when the dedicated review agent is unavailable.",
+    ),
+    RuntimeSettingDefinition(
+        key="requests.decision_gate_enabled",
+        env_var="LUCENT_DECISION_GATE_ENABLED",
+        value_type="boolean",
+        default=False,
+        title="Decision-model pre-review gate",
+        section="Requests",
+        description=(
+            "Run a cheap decision-model screening of completed work before "
+            "spawning the LLM review task."
+        ),
+        help_text=(
+            "When the pre-screen passes, the request is auto-completed without "
+            "an LLM review session. When it fails, findings are attached to "
+            "the review task. Requests with failed tasks, linked memories to "
+            "update, or a target repo always go through the full review. "
+            "Requires an Ollama 0.35+ host with a decision-class model "
+            "available."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="requests.decision_gate_model",
+        env_var="LUCENT_DECISION_GATE_MODEL",
+        value_type="string",
+        default="",
+        title="Decision pre-review model",
+        section="Requests",
+        description="Decision-class model used for the pre-review screening.",
+        control="model",
+        option_source="decision_models",
+        allow_empty=True,
+        help_text=(
+            "Leave blank to use the first enabled decision-class model "
+            "(models ordered by provider, name)."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="requests.decision_gate_threshold",
+        env_var="LUCENT_DECISION_GATE_THRESHOLD",
+        value_type="float",
+        default=0.7,
+        title="Decision pre-review pass threshold",
+        section="Requests",
+        description="Minimum probability per pre-screen question to count as passing.",
+        min_value=0.0,
+        max_value=1.0,
     ),
     RuntimeSettingDefinition(
         key="models.default_model",
@@ -1627,6 +1674,23 @@ def request_review_agent_type(*, organization_id: Any | None = None) -> str:
 
 def request_review_fallback_agent_type(*, organization_id: Any | None = None) -> str:
     return _setting_string("requests.review_fallback_agent_type", organization_id=organization_id)
+
+
+def decision_gate_enabled(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("requests.decision_gate_enabled", organization_id=organization_id)
+
+
+def decision_gate_model_id(*, organization_id: Any | None = None) -> str | None:
+    return _setting_string("requests.decision_gate_model", organization_id=organization_id) or None
+
+
+def decision_gate_threshold(*, organization_id: Any | None = None) -> float:
+    return float(
+        get_runtime_setting(
+            "requests.decision_gate_threshold",
+            organization_id=organization_id,
+        )
+    )
 
 
 def shadow_forget_enabled(*, organization_id: Any | None = None) -> bool:

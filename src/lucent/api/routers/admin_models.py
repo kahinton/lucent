@@ -20,6 +20,9 @@ class ModelUpsertRequest(BaseModel):
     provider: str
     name: str
     category: str = "general"
+    # Explicit classification: "language" (chat LLM) or "decision"
+    # (System One decision model served via Ollama /v1/systemone).
+    model_class: Literal["language", "decision"] = "language"
     api_model_id: str = ""
     context_window: int = 0
     supports_tools: bool = True
@@ -48,6 +51,7 @@ class ModelPatchRequest(BaseModel):
     provider: str | None = None
     name: str | None = None
     category: str | None = None
+    model_class: Literal["language", "decision"] | None = None
     api_model_id: str | None = None
     context_window: int | None = None
     supports_tools: bool | None = None
@@ -157,6 +161,7 @@ async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
         provider=body.provider,
         name=body.name,
         category=body.category,
+        model_class=body.model_class,
         api_model_id=body.api_model_id or body.model_id,
         context_window=body.context_window,
         supports_tools=body.supports_tools,

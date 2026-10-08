@@ -2198,7 +2198,8 @@ use the provider default unless the task clearly benefits from lower latency or
 deeper reasoning.
 
 Args:
-    category: Optional filter — one of: general, fast, reasoning, agentic, visual
+    category: Optional filter — one of: general, fast, reasoning, agentic, visual,
+        decision
     agent_type: Optional agent type to also return the recommended model for
         (code, research, memory, reflection, documentation, planning, review, fast, agentic)
 
@@ -2245,8 +2246,11 @@ provided, the recommended model plus a selection reason."""
             "guidance": (
                 "Use the default_model unless the task has a clear need for a "
                 "specialized category such as fast, reasoning, agentic, or visual. "
-                "Daemon-dispatched tasks require tool-capable models, because "
-                "agents receive MCP tools for memory/request operations. Only "
+                "daemon-dispatched tasks require tool-capable models, because "
+                "agents receive MCP tools for memory/request operations. Never "
+                "assign a decision-class model to a task: decision models "
+                "(model_class 'decision', e.g. local System One models) answer "
+                "choice/noul/score questions outside chat workflows. Only "
                 "choose from enabled models in this list. If a model includes "
                 "reasoning_efforts, omit reasoning_effort for provider default, "
                 "choose low/minimal for cheap simple work, and high/xhigh/max only "
@@ -2257,6 +2261,7 @@ provided, the recommended model plus a selection reason."""
                     "id": m.id,
                     "name": m.name,
                     "provider": m.provider,
+                    "model_class": m.model_class,
                     "category": m.category,
                     "supports_tools": m.supports_tools,
                     "supports_vision": m.supports_vision,

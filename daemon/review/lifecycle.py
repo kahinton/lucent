@@ -7,6 +7,13 @@ runtime module, avoiding stale configuration snapshots and circular imports.
 from __future__ import annotations
 
 from lucent.db.daemon import DaemonRepository
+from daemon.review.decision_gate import (
+    DecisionGateOutcome,
+    _auto_resolve_review_task,
+    maybe_decision_gate,
+    pass_note,
+    pre_screen_text,
+)
 from daemon.runtime.module_proxy import runtime
 
 
@@ -31,6 +38,16 @@ class RequestReviewMixin:
 
     async def _create_request_review_task(self, request_id: str, request_data: dict):
         return await _create_request_review_task(self, request_id, request_data)
+
+    async def _maybe_decision_gate(
+        self, request_id: str, request_data: dict
+    ) -> DecisionGateOutcome:
+        return await maybe_decision_gate(self, request_id, request_data)
+
+    async def _auto_resolve_review_task(
+        self, review_task: dict, request_id: str, outcome: DecisionGateOutcome
+    ) -> bool:
+        return await _auto_resolve_review_task(self, review_task, request_id, outcome)
 
     async def _ensure_request_review_tasks(self):
         return await _ensure_request_review_tasks(self)
@@ -202,6 +219,43 @@ async def _create_request_review_task(daemon, request_id: str, request_data: dic
     if not agent_type:
         runtime.log(f'Request {request_id[:8]} has no accessible review agent; manual review required', 'WARN')
         return None
+    outcome = await daemon._maybe_decision_gate(request_id, request_data)
+    if outcome.auto_approve:
+        review_task = await runtime.RequestAPI.create_task(
+            request_id=request_id,
+            title=runtime.REQUEST_REVIEW_TASK_TITLE,
+            agent_type=agent_type,
+            description=(
+                'Post-completion review resolved by decision-model pre-screen. '
+                'No LLM review session was required.\n\n'
+                f'{pass_note(outcome)}\n\n'
+                'If this record is dispatched anyway (e.g. the auto-resolution '
+                'claim was lost), perform the ordinary post-completion review '
+                'and treat the pre-screen above as advisory.'
+            ),
+            priority=request_data.get('priority', 'medium'),
+            sequence_order=10000000,
+            requesting_user_id=requesting_user_id,
+        )
+        if not review_task:
+            runtime.log(f'Failed to create review task for request {request_id[:8]}; falling back to standard review', 'WARN')
+        else:
+            resolved = await _auto_resolve_review_task(daemon, review_task, request_id, outcome)
+            if resolved:
+                review_task['_decision_gate_auto_resolved'] = True
+                await runtime.RequestAPI.add_event(
+                    str(review_task.get('id')),
+                    'decision_gate_pre_screen',
+                    'Decision pre-screen passed; request auto-completed without an LLM review.',
+                    outcome.metadata(),
+                )
+            else:
+                runtime.log(
+                    f'Request {request_id[:8]} pre-screen auto-resolution lost the claim race; '
+                    'review task left for the ordinary LLM review path',
+                    'WARN',
+                )
+            return review_task
     non_review_tasks = [t for t in tasks if not daemon._is_request_review_task(t)]
     done_tasks = [t for t in non_review_tasks if t.get('status') in ('completed', 'failed', 'cancelled')]
     task_summaries = []
@@ -252,6 +306,9 @@ Memories and review prose do not satisfy this requirement. If the research outco
         target_section += f"\n\nTarget persistence scope:\n- target_repo: {target_repo or 'unspecified'}\n- target_paths: {target_paths or []}\nIf this request produced docs/files/reports intended for the target repository, do not approve unless the task outputs show actual durable repo changes (paths plus commit/URL or equivalent recorded artifact)."
     linked_memories = await runtime.RequestAPI.get_request_memories(request_id)
     updatable_memories = _review_updatable_memories(linked_memories)
+    prescreen_block = pre_screen_text(outcome)
+    if prescreen_block:
+        prescreen_block = '\n\n' + prescreen_block
     goal_memories = [
         memory for memory in linked_memories if memory.get("memory_type") == "goal"
     ]
@@ -269,7 +326,7 @@ Memories and review prose do not satisfy this requirement. If the research outco
             mem_id_list.append(str(mem['memory_id']))
             mem_lines.append(f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, type: {mem.get('memory_type', 'unknown')}\n  Content: {mem.get('content', '')[:200]}\n  Status: {mem.get('status', 'unknown')}")
         memory_section += '\n\nLinked Memories (MANDATORY UPDATE TARGETS):\n' + '\n'.join(mem_lines) + "\n\n=== MANDATORY MEMORY UPDATE STEP — DO NOT SKIP ===\nBefore you emit REQUEST_REVIEW_DECISION below, you MUST call `update_memory` on EVERY memory listed above. This is a hard precondition for emitting any decision — not a suggestion, not a best practice, not 'if relevant'. The memory update IS part of the review work. A review that skips it is incomplete and will be rejected by the daemon.\n\nRequired calls (one per linked memory):\n" + '\n'.join((f'  - update_memory(memory_id="{mid}", ...)' for mid in mem_id_list)) + '\n\nFor other memory types: update with any relevant new information from the task results, or call update_memory with a no-op note explaining why no substantive change was needed.\n\nAfter calling update_memory for each linked memory, also call `link_task_memory` to attach any NEW memories created by tasks back to this request.\n\nIn the FEEDBACK section of your decision block below, you MUST include a line of the form:\n  MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on>\nIf this line is missing or doesn\'t list every required memory ID, the daemon will treat the review as incomplete and re-queue it.\n=== END MANDATORY STEP ===\n'
-    review_description = f"""Perform post-completion request review.\n\nYou are validating whether the request outcomes satisfy the original request goals AND propagating those outcomes into linked memories.\n\nOriginal request title: {request_data.get('title', '')}\nOriginal request description:\n{request_data.get('description', '')}\n\n{target_section}\n\nTask outcomes:\n{chr(10).join(task_summaries)}{incomplete_note}{memory_section}\n\n=== OUTPUT ARTIFACT REVIEW ===\nEach task may include a 'recorded outputs' list. These are the user-visible deliverables shown in the Activity UI: GitHub PRs/issues, emails, docs, files, deployments, memories, or generic artifacts.\nDurable persistence is mandatory for external artifacts: if the request asked for repository documentation/files or named a target_repo, narrative markdown in the task result is insufficient. Require concrete changed file paths and a commit/URL (or an explicit BLOCKED result explaining missing write capability).\nBefore approving, verify that every deliverable mentioned in task output has a corresponding recorded output. Plain URLs in task results are auto-extracted by Lucent, but non-URL deliverables such as sent emails, created documents identified only by provider ID, or files stored in an external system may require an explicit `record_task_output` call.\nIf a deliverable is missing and you have enough task_id/title/url or external_id/provider information, call `record_task_output` before approving. If you cannot identify the missing deliverable precisely, return NEEDS_REWORK and ask the task agent to record the output.\n=== END OUTPUT ARTIFACT REVIEW ===\n\n=== SETUP/CONFIGURATION BLOCKER HANDOFFS ===\nBefore deciding APPROVED or NEEDS_REWORK, check whether task output reports a legitimate environment, setup, credential, permission, dependency, or configuration blocker that prevented useful completion. Examples include missing API keys, inaccessible services, invalid local configuration, unavailable MCP servers, sandbox provisioning failures, missing repo permissions, or dependency installation failures that the task agent could not reasonably fix.\nWhen a task was blocked by a user- or environment-actionable issue and reported what was attempted clearly, call `send_handoff` before emitting REQUEST_REVIEW_DECISION. The handoff must explain what was attempted, what blocked progress, why Lucent could not resolve it autonomously, and exactly what the user may need to configure or verify next. Include request/task references when IDs are available, set `requires_response=true` only if Lucent needs an answer before continuing, and use a stable `dedupe_key` like `review-blocker:<request-id>:<task-id-or-topic>`. A narrative-only handoff section in your final output is not enough; you must call `send_handoff` so the user sees a Handoffs item.\nApprove with a blocker handoff only when the blocker is external and the task's report is clear enough for the user to act on. Return NEEDS_REWORK when the task merely blames setup/configuration without evidence, attempted actions, or actionable remediation detail.\n=== END SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n\nReturn your decision in this exact machine-readable shape (emit it ONLY after completing all mandatory memory updates above):\nREQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\nTASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\nFEEDBACK: <actionable rationale and correction guidance>\nMEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; use "none" only when no Linked Memories section was provided>\nHANDOFF_SENT: <handoff URL/id if you called send_handoff, or "none">"""
+    review_description = f"""Perform post-completion request review.\n\nYou are validating whether the request outcomes satisfy the original request goals AND propagating those outcomes into linked memories.\n\nOriginal request title: {request_data.get('title', '')}\nOriginal request description:\n{request_data.get('description', '')}\n\n{target_section}\n\nTask outcomes:\n{chr(10).join(task_summaries)}{incomplete_note}{memory_section}{prescreen_block}\n\n=== OUTPUT ARTIFACT REVIEW ===\nEach task may include a 'recorded outputs' list. These are the user-visible deliverables shown in the Activity UI: GitHub PRs/issues, emails, docs, files, deployments, memories, or generic artifacts.\nDurable persistence is mandatory for external artifacts: if the request asked for repository documentation/files or named a target_repo, narrative markdown in the task result is insufficient. Require concrete changed file paths and a commit/URL (or an explicit BLOCKED result explaining missing write capability).\nBefore approving, verify that every deliverable mentioned in task output has a corresponding recorded output. Plain URLs in task results are auto-extracted by Lucent, but non-URL deliverables such as sent emails, created documents identified only by provider ID, or files stored in an external system may require an explicit `record_task_output` call.\nIf a deliverable is missing and you have enough task_id/title/url or external_id/provider information, call `record_task_output` before approving. If you cannot identify the missing deliverable precisely, return NEEDS_REWORK and ask the task agent to record the output.\n=== END OUTPUT ARTIFACT REVIEW ===\n\n=== SETUP/CONFIGURATION BLOCKER HANDOFFS ===\nBefore deciding APPROVED or NEEDS_REWORK, check whether task output reports a legitimate environment, setup, credential, permission, dependency, or configuration blocker that prevented useful completion. Examples include missing API keys, inaccessible services, invalid local configuration, unavailable MCP servers, sandbox provisioning failures, missing repo permissions, or dependency installation failures that the task agent could not reasonably fix.\nWhen a task was blocked by a user- or environment-actionable issue and reported what was attempted clearly, call `send_handoff` before emitting REQUEST_REVIEW_DECISION. The handoff must explain what was attempted, what blocked progress, why Lucent could not resolve it autonomously, and exactly what the user may need to configure or verify next. Include request/task references when IDs are available, set `requires_response=true` only if Lucent needs an answer before continuing, and use a stable `dedupe_key` like `review-blocker:<request-id>:<task-id-or-topic>`. A narrative-only handoff section in your final output is not enough; you must call `send_handoff` so the user sees a Handoffs item.\nApprove with a blocker handoff only when the blocker is external and the task's report is clear enough for the user to act on. Return NEEDS_REWORK when the task merely blames setup/configuration without evidence, attempted actions, or actionable remediation detail.\n=== END SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n\nReturn your decision in this exact machine-readable shape (emit it ONLY after completing all mandatory memory updates above):\nREQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\nTASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\nFEEDBACK: <actionable rationale and correction guidance>\nMEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; use "none" only when no Linked Memories section was provided>\nHANDOFF_SENT: <handoff URL/id if you called send_handoff, or "none">"""
     try:
         review_model, review_model_reason = await runtime._select_model_for_user(
             user_id=requesting_user_id,
@@ -287,6 +344,13 @@ Memories and review prose do not satisfy this requirement. If the research outco
         return None
     review_task = await runtime.RequestAPI.create_task(request_id=request_id, title=runtime.REQUEST_REVIEW_TASK_TITLE, agent_type=agent_type, description=review_description, priority=request_data.get('priority', 'medium'), sequence_order=10000000, model=review_model, requesting_user_id=requesting_user_id)
     if review_task:
+        if outcome.verdict != 'skipped' and prescreen_block:
+            await runtime.RequestAPI.add_event(
+                str(review_task.get('id')),
+                'decision_gate_findings',
+                f'Decision pre-screen flagged {len(outcome.failed)} item(s) before review.',
+                outcome.metadata(),
+            )
         runtime.log(f"Request {request_id[:8]} moved to review; created review task {str(review_task.get('id', ''))[:8]} agent={agent_type} mode={mode} model={review_model} ({review_model_reason})")
     else:
         runtime.log(f'Failed to create review task for request {request_id[:8]}; manual review required', 'WARN')
@@ -308,7 +372,13 @@ async def _ensure_request_review_tasks(self) -> None:
             continue
         created = await self._create_request_review_task(req_id, full)
         if created:
-            await runtime.RequestAPI.add_event(str(created.get('id')), 'request_review_started', f'Auto-created review task for request {req_id[:8]}')
+            auto_resolved = created.pop('_decision_gate_auto_resolved', None)
+            detail = (
+                'Auto-created review task, auto-resolved by decision-model pre-screen'
+                if auto_resolved
+                else f'Auto-created review task for request {req_id[:8]}'
+            )
+            await runtime.RequestAPI.add_event(str(created.get('id')), 'request_review_started', detail)
 
 
 async def _process_request_review_task(daemon, task: dict, review_result: str) -> None:

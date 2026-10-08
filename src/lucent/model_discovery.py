@@ -99,6 +99,7 @@ class DiscoveredModel:
     tags: list[str] = field(default_factory=list)
     reasoning_efforts: list[str] = field(default_factory=list)
     engine: str | None = None
+    model_class: str = "language"
     discovery_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_repo_kwargs(self) -> dict[str, Any]:
@@ -199,6 +200,22 @@ _REASONING_EFFORT_METADATA_KEYS = {
 # /api/show. Its chat API accepts these standardized values for models with that
 # capability, but does not return a per-model enum in discovery responses.
 _OLLAMA_REASONING_EFFORTS = ("low", "medium", "high")
+
+# Decision-capable (System One) markers. Ollama 0.35+ does not yet document
+# which capability string marks a decision model in /api/tags//api/show
+# entries, so classify via two signals: any decision/systemone capability the
+# server reports, plus the known System One model families. Capability
+# detection wins over the family list so newly-published decision models are
+# classified without a Lucent update.
+_DECISION_CAPABILITY_MARKERS = {"decision", "systemone"}
+_DECISION_MODEL_FAMILIES = ("nimble", "tev1", "clef")
+
+# Version of Lucent's derivation logic for discovered fields (classification,
+# category, capabilities mapping). When it changes, rows whose catalog digest
+# is unchanged must still be refreshed once, because their stored derived
+# fields were computed by an older version of this module. Bump on any change
+# to discovery-derived field semantics.
+_DERIVED_FIELDS_VERSION = "1"
 
 
 def _metadata_key_name(key: str) -> str:
@@ -785,13 +802,20 @@ class ModelDiscoveryService:
             model_id = str(row.get("model") or row.get("name") or "")
             if not model_id:
                 return None
-            category = _infer_category(model_id)
             details = row.get("details") or {}
             digest = str(row.get("digest") or "")
             previous = discovery_state.get(model_id) or {}
             metadata: dict[str, Any] = {}
             show: dict[str, Any] = {}
             unchanged = bool(digest) and previous.get("digest") == digest
+            if unchanged and previous.get("derived_fields_version") != _DERIVED_FIELDS_VERSION:
+                # Same catalog digest, but the stored derived fields
+                # (classification, category, capability mapping) were computed
+                # by an older derivation version — re-derive them once.
+                logger.info(
+                    "Model discovery derivation changed for %s; refreshing", model_id
+                )
+                unchanged = False
             if unchanged:
                 # Digest match: /api/show would return identical data. Reuse the
                 # persisted summary and only refresh the timestamp downstream.
@@ -813,6 +837,7 @@ class ModelDiscoveryService:
                     show = previous.get("show_summary") or {}
                 metadata = {
                     "digest": digest,
+                    "derived_fields_version": _DERIVED_FIELDS_VERSION,
                     "modified_at": row.get("modified_at"),
                     "tags_row": {
                         key: row[key]
@@ -828,26 +853,48 @@ class ModelDiscoveryService:
                     *(show.get("capabilities") or []),
                 ]
             }
+            base_name = model_id.partition(":")[0].lower()
+            is_decision = bool(
+                capabilities & _DECISION_CAPABILITY_MARKERS
+                or base_name.startswith(_DECISION_MODEL_FAMILIES)
+            )
             supports_vision = "vision" in capabilities or "llava" in model_id.lower()
-            supports_tools = "tools" in capabilities
             reasoning_efforts = (
                 list(_OLLAMA_REASONING_EFFORTS)
-                if "thinking" in capabilities
+                if "thinking" in capabilities and not is_decision
                 else []
             )
+            if is_decision:
+                # Decision models answer System One questions, not chat turns:
+                # no chat-tool support, and their category reflects the
+                # classification so admin/UI grouping separates them too.
+                category = "decision"
+                supports_tools = False
+                tags = {"decision", "local"}
+                if details.get("parameter_size"):
+                    tags.add(str(details["parameter_size"]).lower())
+                notes = (
+                    "Decision model (System One: choice/noul/score via "
+                    "/v1/systemone). Discovered from local Ollama server."
+                )
+                model_class = "decision"
+            else:
+                supports_tools = "tools" in capabilities
+                category = _infer_category(model_id)
+                tags = _infer_tags(model_id, category, local=True)
+                if details.get("parameter_size"):
+                    tags.append(str(details["parameter_size"]).lower())
+                if supports_tools:
+                    tags.append("tools")
+                if reasoning_efforts:
+                    tags.append("reasoning-effort")
+                notes = "Discovered from local Ollama server."
+                if reasoning_efforts:
+                    notes += " Supports low, medium, and high thinking effort."
+                if not supports_tools:
+                    notes += " Ollama reports no structured tool-call support."
+                model_class = "language"
             context_window = _trained_context_length(show, row)
-            tags = _infer_tags(model_id, category, local=True)
-            if details.get("parameter_size"):
-                tags.append(str(details["parameter_size"]).lower())
-            if supports_tools:
-                tags.append("tools")
-            if reasoning_efforts:
-                tags.append("reasoning-effort")
-            notes = "Discovered from local Ollama server."
-            if reasoning_efforts:
-                notes += " Supports low, medium, and high thinking effort."
-            if not supports_tools:
-                notes += " Ollama reports no structured tool-call support."
             return DiscoveredModel(
                 id=model_id,
                 provider="ollama",
@@ -861,6 +908,7 @@ class ModelDiscoveryService:
                 tags=sorted(set(tags)),
                 reasoning_efforts=reasoning_efforts,
                 engine="langchain",
+                model_class=model_class,
                 discovery_metadata=metadata,
             )
 

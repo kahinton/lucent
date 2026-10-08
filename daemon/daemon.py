@@ -303,6 +303,15 @@ REQUEST_REVIEW_TASK_RESULT_CHAR_BUDGET = _env_int(
     180_000,
 )
 
+# Decision pre-review gate budgets. The /v1/systemone state is re-sent per
+# question, so the state budget doubles as an input-cost lever; 16k chars is
+# far under the client-enforced 64 KiB body cap for ~21 questions.
+DECISION_GATE_STATE_CHAR_BUDGET = _env_int("LUCENT_DECISION_GATE_STATE_CHAR_BUDGET", 16_000)
+DECISION_GATE_TASK_RESULT_CHAR_BUDGET = _env_int(
+    "LUCENT_DECISION_GATE_TASK_RESULT_CHAR_BUDGET",
+    2_000,
+)
+
 
 def _truncate_for_context(text: str, limit: int, *, label: str = "content") -> str:
     """Trim text only when it exceeds a large context budget."""

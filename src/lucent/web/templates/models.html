@@ -110,14 +110,20 @@
                         <div class="text-xs text-gray-500 font-mono">{{ model.id }}</div>
                     </td>
                     <td class="px-4 py-3">
-                        <span class="px-2 py-0.5 rounded text-xs
-                            {% if model.category == 'reasoning' %}bg-purple-100 text-purple-700
-                            {% elif model.category == 'agentic' %}bg-blue-100 text-blue-700
-                            {% elif model.category == 'fast' %}bg-green-100 text-green-700
-                            {% elif model.category == 'visual' %}bg-amber-100 text-amber-700
-                            {% elif model.category == 'frontier' %}bg-rose-100 text-rose-700
-                            {% elif model.category == 'research' %}bg-teal-100 text-teal-700
-                            {% else %}bg-gray-100 text-gray-600{% endif %}">{{ model.category }}</span>
+                        <div class="flex flex-wrap items-center gap-1">
+                            <span class="px-2 py-0.5 rounded text-xs
+                                {% if model.category == 'reasoning' %}bg-purple-100 text-purple-700
+                                {% elif model.category == 'agentic' %}bg-blue-100 text-blue-700
+                                {% elif model.category == 'fast' %}bg-green-100 text-green-700
+                                {% elif model.category == 'visual' %}bg-amber-100 text-amber-700
+                                {% elif model.category == 'frontier' %}bg-rose-100 text-rose-700
+                                {% elif model.category == 'research' %}bg-teal-100 text-teal-700
+                                {% elif model.category == 'decision' %}bg-indigo-100 text-indigo-700
+                                {% else %}bg-gray-100 text-gray-600{% endif %}">{{ model.category }}</span>
+                            {% if model.model_class == 'decision' %}
+                            <span class="px-2 py-0.5 rounded text-xs bg-gray-900 text-white">decision</span>
+                            {% endif %}
+                        </div>
                     </td>
                     <td class="px-4 py-3 hidden sm:table-cell">
                         {% if model.context_window > 0 %}
@@ -238,6 +244,7 @@
                                 data-name="{{ model.name }}"
                                 data-provider="{{ model.provider }}"
                                 data-category="{{ model.category }}"
+                                data-model-class="{{ model.model_class or 'language' }}"
                                 data-api-model-id="{{ model.api_model_id or '' }}"
                                 data-context-window="{{ model.context_window or 0 }}"
                                 data-notes="{{ model.notes or '' }}"
@@ -283,12 +290,19 @@
                     <input name="name" required placeholder="e.g. GPT-6 Turbo" class="w-full px-3 py-2 border rounded-lg text-sm">
                 </div>
             </div>
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-4 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
                     <select name="provider" class="w-full px-3 py-2 border rounded-lg text-sm">
                         {% for p in all_providers %}<option value="{{ p }}">{{ p|capitalize }}</option>{% endfor %}
                     </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Classification</label>
+                    <select name="model_class" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for c in all_model_classes %}<option value="{{ c }}" {% if c == 'language' %}selected{% endif %}>{{ c|capitalize }}</option>{% endfor %}
+                    </select>
+                    <p class="mt-1 text-xs text-gray-500">Decision models answer choice/noul/score questions via Ollama's /v1/systemone and are never used for chat.</p>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Category</label>
@@ -360,11 +374,17 @@
                     <input name="name" id="edit-name" required class="w-full px-3 py-2 border rounded-lg text-sm">
                 </div>
             </div>
-            <div class="grid grid-cols-3 gap-4">
+            <div class="grid grid-cols-4 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
                     <select name="provider" id="edit-provider" class="w-full px-3 py-2 border rounded-lg text-sm">
                         {% for p in all_providers %}<option value="{{ p }}">{{ p|capitalize }}</option>{% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Classification</label>
+                    <select name="model_class" id="edit-model-class" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        {% for c in all_model_classes %}<option value="{{ c }}">{{ c|capitalize }}</option>{% endfor %}
                     </select>
                 </div>
                 <div>
@@ -426,6 +446,7 @@ function openEditModal(btn) {
     document.getElementById('edit-name').value = d.name;
     document.getElementById('edit-provider').value = d.provider;
     document.getElementById('edit-category').value = d.category;
+    document.getElementById('edit-model-class').value = d.modelClass || 'language';
     document.getElementById('edit-api-model-id').value = d.apiModelId || '';
     document.getElementById('edit-context-window').value = d.contextWindow || '';
     document.getElementById('edit-notes').value = d.notes || '';
