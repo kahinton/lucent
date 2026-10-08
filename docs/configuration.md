@@ -194,6 +194,26 @@ final injection filter.
 | `LUCENT_INJECT_MAX_QUERIES` | `5` | Maximum bounded searches for one message. Each extra search adds memory-server work. |
 | `LUCENT_INJECT_FOLLOWUP_QUERY_TERMS` | `4` | Terms in each follow-up window after the initial eight-term lookup. |
 | `LUCENT_INJECT_MAX_MEMORIES` | `3` | Maximum memories inserted into the model context per user message. |
+| `LUCENT_INJECT_DECISION_GATE_ENABLED` | `false` | Env fallback for **Settings → Runtime Settings → Message injection decision gate**. Screens surviving injected memories with a decision-class model and keeps only those judged relevant to the conversation. |
+| `LUCENT_INJECT_DECISION_GATE_MODEL` | *(first enabled decision model)* | Decision-class model for the injection screen. Leave blank to use the first enabled decision-class model (ordered by provider, name). |
+| `LUCENT_INJECT_DECISION_GATE_THRESHOLD` | `0.7` | Minimum relevance probability for an injected memory to survive the decision-model screen. |
+
+When the decision gate is enabled, the injection hook makes ONE extra
+`/v1/systemone` call per user message after the similarity filters and
+before the injection cap: the state carries the current message, the last
+few turns of conversation, the chat project name, and one field per
+surviving candidate memory (its ~1000-char search preview); the decision
+model answers one `noul` relevance question per candidate, and only
+memories scoring at or above the threshold are injected. The injection cap
+still applies to the survivors.
+
+The gate is fail-open — any gate error (model unavailable, endpoint
+failure, timeout) leaves the pre-gate candidate set untouched, and a
+rejected memory is never marked injected, so it may still be picked on a
+later turn. This adds at most ~15s of bounded pre-model latency (warm
+inference is tens of milliseconds; the budget covers one cold model load)
+for a locally hosted decision model; the independent `LUCENT_DECISION_GATE_*`
+settings above control the request pre-review gate, not this one.
 
 ## Daemon Configuration
 

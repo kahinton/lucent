@@ -82,59 +82,19 @@ def _warn(message: str) -> None:
 async def resolve_decision_model(daemon, org_id: str | None) -> str | None:
     """Pick the decision-class model for the gate.
 
-    Explicit ``requests.decision_gate_model`` wins. An id the in-memory
-    registry knows but classifies non-decision is rejected; an unknown id is
-    trusted (admin-configured, and the daemon process never loads the DB
-    registry). Otherwise the first enabled decision-class model is taken
-    from the DB (models ordered by provider, name → stable selection), with
-    the in-memory registry as fallback.
+    Explicit ``requests.decision_gate_model`` wins. Resolution is shared
+    with the memory injection gate; the review gate is a background path so
+    it keeps the DB-first pick (DB ordering by provider, name → stable
+    selection), with the in-memory registry as fallback.
     """
+    from lucent.llm.decision import resolve_decision_model_id
     from lucent.settings import decision_gate_model_id
 
-    explicit = decision_gate_model_id(organization_id=org_id or None)
-    if explicit:
-        try:
-            from lucent.model_registry import get_model, is_decision_model
-
-            if get_model(explicit) is not None and not is_decision_model(explicit):
-                _warn(
-                    f"Decision pre-review model '{explicit}' is not a "
-                    "decision-class model; skipping gate"
-                )
-                return None
-        except Exception as exc:  # registry lookups must never break the gate
-            _warn(f"Decision pre-review model check failed: {exc}")
-        return explicit
-
-    try:
-        from daemon.db_scope import connect_scoped
-        from lucent.db.models import ModelRepository
-
-        conn = await connect_scoped(runtime.DATABASE_URL, organization_id=org_id or None)
-        try:
-            result = await ModelRepository(conn).list_models(
-                model_class="decision",
-                enabled_only=True,
-                org_id=org_id or None,
-                limit=1,
-            )
-        finally:
-            await conn.close()
-        items = (result or {}).get("items") or []
-        if items:
-            return str(items[0]["id"])
-    except Exception as exc:
-        _warn(f"Decision pre-review model lookup failed: {exc}; trying in-memory registry")
-
-    try:
-        from lucent.model_registry import list_decision_models
-
-        candidates = list_decision_models()
-        if candidates:
-            return str(candidates[0].id)
-    except Exception:
-        pass
-    return None
+    return await resolve_decision_model_id(
+        explicit_model_id=decision_gate_model_id(organization_id=org_id or None),
+        organization_id=org_id or None,
+        prefer_db=True,
+    )
 
 
 def _terminal_tasks(daemon, request_data: dict) -> list[dict]:

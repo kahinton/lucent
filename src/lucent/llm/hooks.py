@@ -19,6 +19,12 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from lucent import settings as runtime_settings
+from lucent.llm.decision import resolve_decision_model_id
+from lucent.llm.memory_injection_gate import (
+    MEMORY_INJECT_DECISION_MAX_QUESTIONS,
+    build_gate_state,
+    run_injection_gate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -567,6 +573,55 @@ def _message_lookup_followup_query_terms() -> int:
         return 4
 
 
+def _message_inject_decision_gate_enabled() -> bool:
+    """Whether injected memories are screened by a decision-class model."""
+    try:
+        return runtime_settings.message_inject_decision_gate_enabled(
+            organization_id=_message_lookup_organization_id(),
+        )
+    except Exception:
+        return False
+
+
+def _message_inject_decision_gate_model_id() -> str | None:
+    """Explicit decision-model id for the injection gate (None = auto)."""
+    try:
+        return runtime_settings.message_inject_decision_gate_model_id(
+            organization_id=_message_lookup_organization_id(),
+        )
+    except Exception:
+        return None
+
+
+def _message_inject_decision_gate_threshold() -> float:
+    """Relevance probability an injected memory must reach to survive."""
+    try:
+        return float(
+            runtime_settings.message_inject_decision_gate_threshold(
+                organization_id=_message_lookup_organization_id(),
+            )
+        )
+    except Exception:
+        return 0.7
+
+
+async def _message_inject_decision_model_id() -> str | None:
+    """Resolve the decision-class model for the injection gate (None = skip).
+
+    Uses the shared resolver (in-memory registry first, DB fallback) — this
+    is the hot per-message path, so the lookup usually never touches the DB.
+    """
+    try:
+        return await resolve_decision_model_id(
+            explicit_model_id=_message_inject_decision_gate_model_id(),
+            organization_id=_message_lookup_organization_id(),
+            prefer_db=False,
+        )
+    except Exception as exc:
+        logger.warning("Message injection decision model lookup failed: %s", exc)
+        return None
+
+
 def build_message_lookup_queries(terms: list[str]) -> list[str]:
     """Build bounded, coverage-oriented queries for proactive retrieval.
 
@@ -974,6 +1029,24 @@ async def _run_message_memory_lookup_hook(
             )
         ]
     min_similarity = _message_lookup_min_similarity()
+
+    # Decision-model relevance gate (memory.inject_decision_gate_*): set up
+    # BEFORE any behavior changes, so an unresolved model cleanly disables
+    # the gate and the flag-off path stays byte-for-byte. When the gate is
+    # on, the filter loop must collect ALL survivors instead of breaking at
+    # the cap — gating the already-capped set could only confirm what the
+    # similarity threshold picked and could never sharpen anything.
+    decision_gate: tuple[str, float] | None = None
+    if _message_inject_decision_gate_enabled():
+        gate_model = await _message_inject_decision_model_id()
+        if gate_model is None:
+            logger.warning(
+                "Message memory injection gate enabled but no decision-class "
+                "model resolved; gate skipped"
+            )
+        else:
+            decision_gate = (gate_model, _message_inject_decision_gate_threshold())
+
     if not candidates:
         # Search ran and returned nothing injectable: emit the explicit
         # silence line (hook-UX) so this turn is distinguishable from a
@@ -1010,6 +1083,7 @@ async def _run_message_memory_lookup_hook(
     deduped = 0
     injected: list[tuple[dict[str, Any], float]] = []
     max_score_drop = max(0.0, min(_message_lookup_max_score_drop(), 1.0))
+    collect_all = decision_gate is not None
     for memory in candidates:
         try:
             score = float(memory.get("similarity_score") or 0.0)
@@ -1030,28 +1104,105 @@ async def _run_message_memory_lookup_hook(
             deduped += 1
             continue
         injected.append((memory, score))
-        if len(injected) >= max_memories:
+        if not collect_all and len(injected) >= max_memories:
             break
+
+    # Decision-model relevance screen: one System One call per message, one
+    # ``noul`` question per surviving candidate. The gate NEVER raises out
+    # of the hook (HookManager renders escaping hook exceptions as a visible
+    # "hook error:" chip) and fail-open means the gate can only ever REMOVE
+    # candidates — a failed screen leaves the pre-gate survivor set intact.
+    gate_ran = decision_gate is not None
+    decision_gated = 0
+    decision_overflow = 0
+    decision_scores: dict[str, float] = {}
+    decision_model_id: str | None = None
+    decision_gate_failure: str | None = None
+    if decision_gate is not None:
+        decision_model_id, gate_threshold = decision_gate
+        try:
+            gated_window = injected[:MEMORY_INJECT_DECISION_MAX_QUESTIONS]
+            decision_overflow = len(injected) - len(gated_window)
+            state_fields, gated = build_gate_state(
+                user_text=source_text,
+                messages=messages,
+                session_state=session_state,
+                candidates=gated_window,
+            )
+            outcome = await run_injection_gate(
+                decision_model_id,
+                state_fields,
+                gated,
+                threshold=gate_threshold,
+            )
+            decision_scores = {
+                str(memory.get("id") or "")[:8]: round(
+                    outcome.scores.get(field, 0.0), 4
+                )
+                for field, memory in gated
+            }
+            if outcome.verdict == "skipped":
+                # Whole screen unusable: fail open; nothing was screened away.
+                decision_gate_failure = outcome.error
+                decision_overflow = 0
+            else:
+                kept = [
+                    (memory, score)
+                    for (memory, score), (field, _memory) in zip(gated_window, gated)
+                    if field in outcome.kept_fields
+                ]
+                decision_gated = len(gated_window) - len(kept)
+                injected = kept
+        except Exception as exc:
+            logger.warning(
+                "Message memory injection gate failed; proceeding unfiltered",
+                exc_info=True,
+            )
+            decision_gate_failure = str(exc)
+            decision_overflow = 0
+    injected = injected[:max_memories]
     if not injected:
-        return HookExecution(
-            hook_name=str(hook.get("name") or "message_memory_lookup"),
-            text=(
+        if gate_ran and decision_gated > 0 and not decision_gate_failure:
+            silence_text = (
+                "memory-lookup: 0 injected "
+                f"({decision_gated} gated, {decision_overflow} overflow, "
+                f"{deduped} deduped, {below_threshold} below threshold)"
+            )
+        else:
+            silence_text = (
                 "memory-lookup: 0 injected "
                 f"({deduped} deduped, {below_threshold} below threshold)"
+            )
+        metadata = {
+            "terms": terms,
+            "query": queries[0],
+            "queries": queries,
+            "query_plan": query_plan,
+            "min_similarity": min_similarity,
+            "memory_count": 0,
+            "deduped": deduped,
+            "below_threshold": below_threshold,
+            "below_score_spread": below_score_spread,
+            "max_score_drop": max_score_drop,
+            "skipped": (
+                deduped + below_threshold + below_score_spread
+                + decision_gated + decision_overflow
             ),
-            metadata={
-                "terms": terms,
-                "query": queries[0],
-                "queries": queries,
-                "query_plan": query_plan,
-                "min_similarity": min_similarity,
-                "memory_count": 0,
-                "deduped": deduped,
-                "below_threshold": below_threshold,
-                "below_score_spread": below_score_spread,
-                "max_score_drop": max_score_drop,
-                "skipped": deduped + below_threshold + below_score_spread,
-            },
+        }
+        if gate_ran:
+            metadata.update({
+                "decision_gate": True,
+                "decision_model": decision_model_id,
+                "decision_gated": decision_gated,
+                "decision_overflow": decision_overflow,
+                "decision_scores": decision_scores,
+            })
+            if decision_gate_failure:
+                metadata["decision_skipped"] = decision_gate_failure
+        return HookExecution(
+            hook_name=str(hook.get("name") or "message_memory_lookup"),
+            text=silence_text,
+            metadata=metadata,
         )
     injected_memory_ids.update(str(memory.get("id") or "") for memory, _ in injected)
 
@@ -1089,35 +1240,49 @@ async def _run_message_memory_lookup_hook(
         content = _single_line(str(memory.get("content") or ""))[:500]
         lines.append(f"{prefix}: {content}")
 
+    metadata = {
+        "terms": terms,
+        "query": queries[0],
+        "queries": queries,
+        "query_plan": query_plan,
+        "min_similarity": min_similarity,
+        "memory_count": len(injected),
+        "deduped": deduped,
+        "below_threshold": below_threshold,
+        "below_score_spread": below_score_spread,
+        "max_score_drop": max_score_drop,
+        "skipped": (
+            deduped + below_threshold + below_score_spread
+            + decision_gated + decision_overflow
+        ),
+        "full_content_count": len(full_ids),
+        "full_content_bytes": used_bytes,
+        "memory_ids": [str(memory.get("id", ""))[:8] for memory, _ in injected],
+        "scores": [round(score, 3) for _, score in injected],
+        "memories": [
+            {
+                "id": str(memory.get("id", ""))[:8],
+                "tags": list((memory.get("tags") or [])[:5]),
+                "content": _single_line(str(memory.get("content") or ""))[:500],
+                "full": str(memory.get("id") or "") in full_ids,
+            }
+            for memory, _ in injected
+        ],
+    }
+    if gate_ran:
+        metadata.update({
+            "decision_gate": True,
+            "decision_model": decision_model_id,
+            "decision_gated": decision_gated,
+            "decision_overflow": decision_overflow,
+            "decision_scores": decision_scores,
+        })
+        if decision_gate_failure:
+            metadata["decision_skipped"] = decision_gate_failure
     return HookExecution(
         hook_name=str(hook.get("name") or "message_memory_lookup"),
         text="\n".join(lines),
-        metadata={
-            "terms": terms,
-            "query": queries[0],
-            "queries": queries,
-            "query_plan": query_plan,
-            "min_similarity": min_similarity,
-            "memory_count": len(injected),
-            "deduped": deduped,
-            "below_threshold": below_threshold,
-            "below_score_spread": below_score_spread,
-            "max_score_drop": max_score_drop,
-            "skipped": deduped + below_threshold + below_score_spread,
-            "full_content_count": len(full_ids),
-            "full_content_bytes": used_bytes,
-            "memory_ids": [str(memory.get("id", ""))[:8] for memory, _ in injected],
-            "scores": [round(score, 3) for _, score in injected],
-            "memories": [
-                {
-                    "id": str(memory.get("id", ""))[:8],
-                    "tags": list((memory.get("tags") or [])[:5]),
-                    "content": _single_line(str(memory.get("content") or ""))[:500],
-                    "full": str(memory.get("id") or "") in full_ids,
-                }
-                for memory, _ in injected
-            ],
-        },
+        metadata=metadata,
     )
 
 

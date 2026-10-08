@@ -234,6 +234,58 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         max_value=10,
     ),
     RuntimeSettingDefinition(
+        key="memory.inject_decision_gate_enabled",
+        env_var="LUCENT_INJECT_DECISION_GATE_ENABLED",
+        value_type="boolean",
+        default=False,
+        title="Message injection decision gate",
+        section="Memory lifecycle",
+        description=(
+            "Screen surviving injected memories with a decision-class model "
+            "and keep only those judged relevant to the current conversation."
+        ),
+        help_text=(
+            "Runs after the similarity filters and before the injection cap, "
+            "so the decision model decides among candidates that already "
+            "passed scoring. Requires an Ollama 0.35+ host with a "
+            "decision-class model. Fail-open: gate errors leave injection "
+            "unchanged."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="memory.inject_decision_gate_model",
+        env_var="LUCENT_INJECT_DECISION_GATE_MODEL",
+        value_type="string",
+        default="",
+        title="Message injection decision model",
+        section="Memory lifecycle",
+        description=(
+            "Decision-class model used to screen injected memories for "
+            "conversation relevance."
+        ),
+        control="model",
+        option_source="decision_models",
+        allow_empty=True,
+        help_text=(
+            "Leave blank to use the first enabled decision-class model "
+            "(models ordered by provider, name)."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="memory.inject_decision_gate_threshold",
+        env_var="LUCENT_INJECT_DECISION_GATE_THRESHOLD",
+        value_type="float",
+        default=0.7,
+        title="Message injection decision threshold",
+        section="Memory lifecycle",
+        description=(
+            "Minimum relevance probability for an injected memory to "
+            "survive the decision-model gate."
+        ),
+        min_value=0.0,
+        max_value=1.0,
+    ),
+    RuntimeSettingDefinition(
         key="projects.context_enabled",
         env_var="LUCENT_PROJECT_CONTEXT_ENABLED",
         value_type="boolean",
@@ -1831,6 +1883,39 @@ def message_inject_max_memories(*, organization_id: Any | None = None) -> int:
     return int(
         get_runtime_setting(
             "memory.inject_max_memories",
+            organization_id=organization_id,
+        )
+    )
+
+
+def message_inject_decision_gate_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether injected memories are screened by a decision-class model.
+
+    Runs after the similarity filters and before the injection cap so the
+    decision model judges only candidates that already passed scoring.
+    """
+    return _setting_bool(
+        "memory.inject_decision_gate_enabled",
+        organization_id=organization_id,
+    )
+
+
+def message_inject_decision_gate_model_id(*, organization_id: Any | None = None) -> str | None:
+    """Decision-class model used by the message injection gate (None = auto)."""
+    return (
+        _setting_string(
+            "memory.inject_decision_gate_model",
+            organization_id=organization_id,
+        )
+        or None
+    )
+
+
+def message_inject_decision_gate_threshold(*, organization_id: Any | None = None) -> float:
+    """Minimum relevance probability for an injected memory to survive."""
+    return float(
+        get_runtime_setting(
+            "memory.inject_decision_gate_threshold",
             organization_id=organization_id,
         )
     )

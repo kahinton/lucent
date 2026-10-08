@@ -22,6 +22,7 @@ actionable messages: 1-64 questions per request, 2-255 choice options,
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Literal, Union
@@ -41,6 +42,8 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 QUESTION_TYPES = {"choice", "noul", "score"}
 
 QuestionType = Literal["choice", "noul", "score"]
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionError(RuntimeError):
@@ -312,3 +315,80 @@ def _parse_response(data: Any) -> DecisionResponse:
             output_tokens=int(usage_row.get("output_tokens") or 0),
         ),
     )
+
+
+async def resolve_decision_model_id(
+    *,
+    explicit_model_id: str | None = None,
+    organization_id: str | None = None,
+    prefer_db: bool = False,
+) -> str | None:
+    """Resolve the decision-class model id to use, or None.
+
+    Shared by the decision-model gates (request pre-review, memory
+    injection) since both run in processes where the DB model registry may
+    or may not be loaded:
+
+    - An explicit ``explicit_model_id`` wins. An id the in-memory registry
+      knows but classifies non-decision is rejected; an unknown id is
+      trusted (admin-configured, and the daemon never loads the DB
+      registry).
+    - Otherwise the first enabled decision-class model is taken:
+      DB-first when ``prefer_db`` (background gates — DB ordering by
+      provider/name gives a stable pick), in-memory registry first for the
+      hot message path (both processes load DB models at startup, so the
+      lookup usually never touches the DB).
+
+    All lookup failures degrade to ``None`` with a logged warning —
+    callers treat None as "gate skipped".
+    """
+    org = organization_id or None
+
+    if explicit_model_id:
+        try:
+            from lucent.model_registry import get_model, is_decision_model
+
+            if get_model(explicit_model_id) is not None and not is_decision_model(
+                explicit_model_id
+            ):
+                logger.warning(
+                    "Decision model '%s' is not a decision-class model;", explicit_model_id
+                )
+                return None
+        except Exception as exc:  # registry lookups must never break the gate
+            logger.warning("Decision model registry check failed: %s", exc)
+        return explicit_model_id
+
+    def _first_registry_model() -> str | None:
+        try:
+            from lucent.model_registry import list_decision_models
+
+            candidates = list_decision_models()
+            if candidates:
+                return str(candidates[0].id)
+        except Exception as exc:
+            logger.warning("In-memory decision model lookup failed: %s", exc)
+        return None
+
+    async def _first_db_model() -> str | None:
+        try:
+            from lucent.db.models import ModelRepository
+            from lucent.db.pool import scoped_acquire
+
+            async with scoped_acquire(organization_id=org, role="system") as conn:
+                result = await ModelRepository(conn).list_models(
+                    model_class="decision",
+                    enabled_only=True,
+                    org_id=org,
+                    limit=1,
+                )
+            items = (result or {}).get("items") or []
+            if items:
+                return str(items[0]["id"])
+        except Exception as exc:
+            logger.warning("Decision model DB lookup failed: %s", exc)
+        return None
+
+    if prefer_db:
+        return await _first_db_model() or _first_registry_model()
+    return _first_registry_model() or await _first_db_model()

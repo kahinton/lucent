@@ -7,6 +7,7 @@ The full request-review lifecycle exercises (gate pass auto-completing the
 request, gate fail escalating with findings) live in test_review_lifecycle.py.
 """
 
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 import pytest
@@ -351,9 +352,10 @@ async def test_resolve_decision_model_rejects_registry_known_non_decision(monkey
         ),
     )
 
-    def _unused_connect(*args, **kwargs):  # DB must not be consulted
+    def _unused_scoped_acquire(*args, **kwargs):  # DB must not be consulted
         raise AssertionError("DB lookup should not run for an explicit setting")
 
+    monkeypatch.setattr("lucent.db.pool.scoped_acquire", _unused_scoped_acquire)
     monkeypatch.setattr(decision_gate, "_warn", lambda *a, **k: None)
     model = await decision_gate.resolve_decision_model(daemon, "org")
     assert model is None
@@ -363,8 +365,7 @@ async def test_resolve_decision_model_db_first_pick(monkeypatch):
     daemon = _fake_daemon()
 
     class _FakeConn:
-        async def close(self):
-            pass
+        pass
 
     class _FakeRepo:
         def __init__(self, conn):
@@ -378,13 +379,14 @@ async def test_resolve_decision_model_db_first_pick(monkeypatch):
                 "items": [{"id": "nimble", "name": "Nimble", "provider": "ollama"}]
             }
 
-    async def fake_connect_scoped(dsn, *, organization_id=None, **kwargs):
-        return _FakeConn()
+    @asynccontextmanager
+    async def fake_scoped_acquire(*args, **kwargs):
+        yield _FakeConn()
 
     monkeypatch.setattr(
         "lucent.settings.decision_gate_model_id", lambda *, organization_id=None: None
     )
-    monkeypatch.setattr("daemon.db_scope.connect_scoped", fake_connect_scoped)
+    monkeypatch.setattr("lucent.db.pool.scoped_acquire", fake_scoped_acquire)
     monkeypatch.setattr("lucent.db.models.ModelRepository", _FakeRepo)
 
     model = await decision_gate.resolve_decision_model(daemon, "org")
@@ -394,13 +396,15 @@ async def test_resolve_decision_model_db_first_pick(monkeypatch):
 async def test_resolve_decision_model_falls_back_to_memory_registry(monkeypatch):
     daemon = _fake_daemon()
 
-    async def failing_connect(*args, **kwargs):
+    @asynccontextmanager
+    async def failing_scoped_acquire(*args, **kwargs):
         raise RuntimeError("db down")
+        yield None
 
     monkeypatch.setattr(
         "lucent.settings.decision_gate_model_id", lambda *, organization_id=None: None
     )
-    monkeypatch.setattr("daemon.db_scope.connect_scoped", failing_connect)
+    monkeypatch.setattr("lucent.db.pool.scoped_acquire", failing_scoped_acquire)
     monkeypatch.setattr(
         "lucent.model_registry.list_decision_models",
         lambda: [
@@ -422,8 +426,7 @@ async def test_resolve_decision_model_none_when_no_models(monkeypatch):
     daemon = _fake_daemon()
 
     class _FakeConn:
-        async def close(self):
-            pass
+        pass
 
     class _FakeRepo:
         def __init__(self, conn):
@@ -432,18 +435,18 @@ async def test_resolve_decision_model_none_when_no_models(monkeypatch):
         async def list_models(self, **kwargs):
             return {"items": []}
 
-    async def fake_connect_scoped(dsn, *, organization_id=None, **kwargs):
-        return _FakeConn()
+    @asynccontextmanager
+    async def fake_scoped_acquire(*args, **kwargs):
+        yield _FakeConn()
 
     monkeypatch.setattr(
         "lucent.settings.decision_gate_model_id", lambda *, organization_id=None: None
     )
-    monkeypatch.setattr("daemon.db_scope.connect_scoped", fake_connect_scoped)
+    monkeypatch.setattr("lucent.db.pool.scoped_acquire", fake_scoped_acquire)
     monkeypatch.setattr("lucent.db.models.ModelRepository", _FakeRepo)
     monkeypatch.setattr(
         "lucent.model_registry.list_decision_models", lambda: []
     )
-    monkeypatch.setattr(decision_gate, "_warn", lambda *a, **k: None)
 
     assert await decision_gate.resolve_decision_model(daemon, "org") is None
 
