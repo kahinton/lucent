@@ -50,6 +50,7 @@ from daemon.db_scope import connect_scoped
 from daemon.decomposition.capability import DecompositionHelpersMixin
 from daemon.dispatch import policy as task_policy
 from daemon.dispatch import decision_step
+from daemon.dispatch import fusion
 from daemon.observability.tools import (
     _MEMORY_CAPTURE_TOOLS,
     _MEMORY_SEARCH_TOOLS,
@@ -1707,6 +1708,10 @@ class LucentDaemon(
         # MCP memory-tool usage tracking per session (for observability)
         self._session_mcp_trackers: dict[str, list[dict]] = {}
         self._session_tool_trackers: dict[str, list[dict]] = {}
+        # Per-session token-usage accumulator (input/output), incremented in
+        # record_stream_usage; fusion dispatch pops its candidate/session
+        # keys to build the fusion_completed telemetry totals.
+        self._session_usage_totals: dict[str, dict[str, int]] = {}
 
         # OTEL instrumentation — create tracer and metrics (no-ops when unavailable)
         self._init_telemetry_instruments()
@@ -3619,6 +3624,16 @@ class LucentDaemon(
                 if not organization_id or not user_id or not event.usage:
                     return
                 try:
+                    # Session-level token totals (fusion dispatch aggregates
+                    # candidates from here); bookkeeping never breaks the stream.
+                    totals = self._session_usage_totals.setdefault(
+                        name, {"input_tokens": 0, "output_tokens": 0}
+                    )
+                    totals["input_tokens"] += int(event.usage.get("input_tokens") or 0)
+                    totals["output_tokens"] += int(event.usage.get("output_tokens") or 0)
+                except Exception:
+                    log("Failed to track session usage totals", "DEBUG")
+                try:
                     from lucent.db import init_db
                     from lucent.db.token_usage import TokenUsageRepository
 
@@ -3960,6 +3975,136 @@ class LucentDaemon(
                 return await RequestAPI.release_task(task_id, instance_id=self.instance_id)
             except TypeError:
                 return await RequestAPI.release_task(task_id)
+
+        async def _finalize_tracked_task_result(
+            *,
+            task: dict,
+            task_id: str,
+            agent_type: str,
+            result: str | None,
+            validation_tool_counts: dict | None = None,
+            selected_model: str | None = None,
+            org_id: str | None = None,
+            requesting_user_id: str | None = None,
+            provided_result_structured: dict | None = None,
+            result_summary_prefix: str | None = None,
+        ):
+            """Validate → contract-process → complete/fail for a finished session.
+
+            Shared by the normal single-model path and the fusion branch (a
+            fusion dispatch finalizes its winner through this same tail —
+            the WINNER's tool counts feed required-tool validation, and its
+            comparison prefix is prepended to the stored summary). Behavior
+            is identical to the inline span it replaced.
+            """
+            # Validate
+            success, reason = self._validate_task_result(
+                result,
+                task=task,
+                tool_counts=validation_tool_counts or {},
+            )
+
+            if success:
+                output_contract = task.get("output_contract")
+                output_result = process_task_output(result, output_contract)
+
+                if output_result["validation_status"] in ("invalid", "extraction_failed"):
+                    on_failure = (output_contract or {}).get("on_failure", "fallback")
+                    max_retries = int((output_contract or {}).get("max_retries", 1) or 0)
+
+                    if on_failure == "retry_then_fallback" and max_retries > 0:
+                        repair_text = await self._repair_structured_output(
+                            task_id,
+                            result,
+                            output_contract,
+                            selected_model,
+                            org_id,
+                            requesting_user_id,
+                        )
+                        if repair_text:
+                            repair_result = process_task_output(repair_text, output_contract)
+                            if repair_result["validation_status"] == "valid":
+                                output_result = repair_result
+                                output_result["validation_status"] = "repair_succeeded"
+                                result = repair_text
+
+                    # If validation still failed after policy actions, either fail or fallback.
+                    if output_result["validation_status"] not in ("valid", "repair_succeeded"):
+                        if on_failure == "fail":
+                            await _fail_owned(
+                                task_id,
+                                "Output validation failed: "
+                                f"{output_result.get('validation_errors')}",
+                            )
+                            return
+                        output_result["validation_status"] = "fallback_used"
+                        output_result["result_structured"] = None
+                        log(f"Task {task_id[:8]}: validation failed, using text fallback", "WARN")
+
+                # A contract-derived structured payload wins; when there was
+                # none (and only fusion passes one in), keep the executor's
+                # typed payload so downstream steps can read it.
+                stored_structured = output_result.get("result_structured")
+                if stored_structured is None and provided_result_structured is not None:
+                    stored_structured = provided_result_structured
+                stored_summary = output_result.get("result_summary")
+                if result_summary_prefix:
+                    stored_summary = (
+                        f"{result_summary_prefix}\n{stored_summary}"
+                        if stored_summary
+                        else result_summary_prefix
+                    )
+
+                await _complete_owned(
+                    task_id,
+                    result,
+                    result_structured=stored_structured,
+                    result_summary=stored_summary,
+                    validation_status=output_result.get("validation_status", "not_applicable"),
+                    validation_errors=output_result.get("validation_errors"),
+                )
+
+                if self._is_request_review_task(task):
+                    try:
+                        await self._process_request_review_task(task, result or "")
+                    except Exception as review_err:
+                        log(
+                            f"Review processing failed for task {task_id[:8]}: {review_err}; "
+                            "marking request for manual review",
+                            "WARN",
+                        )
+                        review_request_id = str(task.get("request_id", ""))
+                        if review_request_id:
+                            await RequestAPI.update_request_status(review_request_id, "review")
+                        await RequestAPI.add_event(
+                            task_id,
+                            "request_review_processing_failed",
+                            f"Automatic review processing failed: {review_err}",
+                        )
+
+                log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
+                if self._tracer:
+                    self._tasks_completed_total.add(1, attributes={"status": "success", "agent_type": agent_type})
+            else:
+                if self._is_request_review_task(task):
+                    await self._handle_review_task_failure(task, reason, result)
+                    if self._tracer:
+                        self._tasks_completed_total.add(
+                            1, attributes={"status": "manual_review", "agent_type": agent_type}
+                        )
+                else:
+                    await RequestAPI.add_event(
+                        task_id,
+                        "validation_failed",
+                        reason,
+                        {"result_excerpt": (result or "")[:2000]},
+                    )
+                    await _fail_owned(task_id, reason, result=result)
+                    log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
+                    if self._tracer:
+                        self._tasks_completed_total.add(
+                            1, attributes={"status": "failed", "agent_type": agent_type}
+                        )
 
         # Ensure requests that reached review status have a review task queued.
         await self._ensure_request_review_tasks()
@@ -4563,6 +4708,143 @@ class LucentDaemon(
                 dispatched += 1
                 continue
 
+            # Fusion: N candidate chat sessions + decision-model arbiter,
+            # executed inside this one dispatch (flag-gated, default off).
+            # A disabled or unsupported fusion task falls through to the
+            # normal single-model path below so an admin flipping a flag
+            # mid-flight never strands a queued task.
+            fusion_config = task.get("fusion_config")
+            if isinstance(fusion_config, str) and fusion_config.strip():
+                try:
+                    fusion_config = json.loads(fusion_config)
+                except (TypeError, ValueError):
+                    fusion_config = None
+            if fusion_config:
+                fusion_mode = str(fusion_config.get("mode") or "")
+                if fusion_mode not in ("best_of_n", "synthesize"):
+                    # Malformed hand-edit (authoring validates this): fail
+                    # loud rather than silently run a different executor
+                    # than authored.
+                    _fusion_reason = (
+                        f"Fusion config has an invalid mode "
+                        f"{fusion_config.get('mode')!r} — a fusion task must "
+                        "carry a mode the executor supports"
+                    )
+                    await _fail_owned(task_id, _fusion_reason)
+                    await RequestAPI.add_event(task_id, "fusion_failed", _fusion_reason)
+                    dispatched += 1
+                    continue
+                try:
+                    _fusion_mode_enabled = (
+                        runtime_settings.fusion_synthesis_enabled(organization_id=org_id)
+                        if fusion_mode == "synthesize"
+                        else runtime_settings.fusion_best_of_n_enabled(organization_id=org_id)
+                    )
+                except Exception as flag_error:
+                    log(f"Task {task_id[:8]} fusion flag read failed: {flag_error}", "WARN")
+                    _fusion_mode_enabled = False
+                _fusion_unsupported: list[str] = []
+                if sandbox_config:
+                    _fusion_unsupported.append("sandboxed task")
+                if agent_type == "decision-step":
+                    _fusion_unsupported.append("decision-step agent")
+                if task_policy.required_task_tool_names(agent_type, title, description):
+                    _fusion_unsupported.append("agent requires specific tool calls")
+                if not _fusion_mode_enabled:
+                    await RequestAPI.add_event(
+                        task_id,
+                        "fusion_disabled",
+                        f"Fusion mode '{fusion_mode}' is disabled — running the "
+                        "normal single-model path",
+                        {"mode": fusion_mode},
+                    )
+                elif _fusion_unsupported:
+                    await RequestAPI.add_event(
+                        task_id,
+                        "fusion_unsupported",
+                        f"Fusion cannot run this task ({', '.join(_fusion_unsupported)}) "
+                        "— running the normal single-model path",
+                        {"mode": fusion_mode, "reasons": _fusion_unsupported},
+                    )
+                else:
+                    await RequestAPI.add_event(
+                        task_id,
+                        "fusion_dispatched",
+                        f"Fusion dispatched ({fusion_mode})",
+                        {"mode": fusion_mode},
+                    )
+                    try:
+                        _fusion_accessible = [
+                            model.id
+                            for model in await _accessible_models_for_user(
+                                requesting_user_id or "", org_id
+                            )
+                        ]
+                    except Exception as accessible_error:
+                        log(
+                            f"Task {task_id[:8]} fusion accessible-model read failed: "
+                            f"{accessible_error}",
+                            "WARN",
+                        )
+                        _fusion_accessible = []
+
+                    async def _fusion_complete(
+                        result_text,
+                        *,
+                        result_structured=None,
+                        result_summary=None,
+                        validation_tool_counts=None,
+                    ):
+                        await _finalize_tracked_task_result(
+                            task=task,
+                            task_id=task_id,
+                            agent_type=agent_type,
+                            result=result_text,
+                            validation_tool_counts=validation_tool_counts or {},
+                            selected_model=selected_model,
+                            org_id=org_id,
+                            requesting_user_id=requesting_user_id,
+                            provided_result_structured=result_structured,
+                            result_summary_prefix=result_summary,
+                        )
+
+                    try:
+                        await fusion.run_fusion_dispatch(
+                            daemon=self,
+                            task=dict(task),
+                            fusion_config=fusion_config,
+                            agent_type=agent_type,
+                            description=description,
+                            system_message=system_message,
+                            task_mcp_config=task_mcp_config,
+                            task_enable_config_discovery=task_enable_config_discovery,
+                            hooks=hooks,
+                            expected_surface=_expected_surface,
+                            selected_model=selected_model,
+                            task_reasoning_effort=task_reasoning_effort,
+                            org_id=org_id,
+                            requesting_user_id=requesting_user_id,
+                            accessible_models=_fusion_accessible,
+                            audit_base={
+                                "organization_id": org_id,
+                                "user_id": requesting_user_id,
+                                "request_id": request_id,
+                                "task_id": task_id,
+                                "agent_definition_id": str(agent_data["id"]),
+                                "agent_type": agent_type,
+                                "skill_names": [s.get("name") for s in skills if s.get("name")],
+                                "model": selected_model,
+                                "reasoning_effort": task_reasoning_effort,
+                            },
+                            on_complete=_fusion_complete,
+                            on_fail=_fail_owned,
+                            on_needs_review=_needs_review_owned,
+                        )
+                    except Exception as exc:
+                        await _fail_owned(task_id, f"Fusion dispatch failed: {exc}")
+                    dispatched += 1
+                    continue
+
             # Create sandbox if configured.
             # sandbox-orchestrator manages its own sandbox lifecycle — skip daemon-side
             # creation and instead inject the config so the orchestrator knows what to build.
@@ -5014,100 +5296,18 @@ class LucentDaemon(
                 )
                 continue
 
-            # Validate
-            success, reason = self._validate_task_result(
-                result,
+            # Validate → contract-process → complete/fail (shared tail; the
+            # fusion branch finalizes its winner through the same helper).
+            await _finalize_tracked_task_result(
                 task=task,
-                tool_counts=validation_tool_counts,
+                task_id=task_id,
+                agent_type=agent_type,
+                result=result,
+                validation_tool_counts=validation_tool_counts,
+                selected_model=selected_model,
+                org_id=org_id,
+                requesting_user_id=requesting_user_id,
             )
-
-            if success:
-                output_contract = task.get("output_contract")
-                output_result = process_task_output(result, output_contract)
-
-                if output_result["validation_status"] in ("invalid", "extraction_failed"):
-                    on_failure = (output_contract or {}).get("on_failure", "fallback")
-                    max_retries = int((output_contract or {}).get("max_retries", 1) or 0)
-
-                    if on_failure == "retry_then_fallback" and max_retries > 0:
-                        repair_text = await self._repair_structured_output(
-                            task_id,
-                            result,
-                            output_contract,
-                            selected_model,
-                            org_id,
-                            requesting_user_id,
-                        )
-                        if repair_text:
-                            repair_result = process_task_output(repair_text, output_contract)
-                            if repair_result["validation_status"] == "valid":
-                                output_result = repair_result
-                                output_result["validation_status"] = "repair_succeeded"
-                                result = repair_text
-
-                    # If validation still failed after policy actions, either fail or fallback.
-                    if output_result["validation_status"] not in ("valid", "repair_succeeded"):
-                        if on_failure == "fail":
-                            await _fail_owned(
-                                task_id,
-                                "Output validation failed: "
-                                f"{output_result.get('validation_errors')}",
-                            )
-                            continue
-                        output_result["validation_status"] = "fallback_used"
-                        output_result["result_structured"] = None
-                        log(f"Task {task_id[:8]}: validation failed, using text fallback", "WARN")
-
-                await _complete_owned(
-                    task_id,
-                    result,
-                    result_structured=output_result.get("result_structured"),
-                    result_summary=output_result.get("result_summary"),
-                    validation_status=output_result.get("validation_status", "not_applicable"),
-                    validation_errors=output_result.get("validation_errors"),
-                )
-
-                if self._is_request_review_task(task):
-                    try:
-                        await self._process_request_review_task(task, result or "")
-                    except Exception as review_err:
-                        log(
-                            f"Review processing failed for task {task_id[:8]}: {review_err}; "
-                            "marking request for manual review",
-                            "WARN",
-                        )
-                        request_id = str(task.get("request_id", ""))
-                        if request_id:
-                            await RequestAPI.update_request_status(request_id, "review")
-                        await RequestAPI.add_event(
-                            task_id,
-                            "request_review_processing_failed",
-                            f"Automatic review processing failed: {review_err}",
-                        )
-
-                log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
-                if self._tracer:
-                    self._tasks_completed_total.add(1, attributes={"status": "success", "agent_type": agent_type})
-            else:
-                if self._is_request_review_task(task):
-                    await self._handle_review_task_failure(task, reason, result)
-                    if self._tracer:
-                        self._tasks_completed_total.add(
-                            1, attributes={"status": "manual_review", "agent_type": agent_type}
-                        )
-                else:
-                    await RequestAPI.add_event(
-                        task_id,
-                        "validation_failed",
-                        reason,
-                        {"result_excerpt": (result or "")[:2000]},
-                    )
-                    await _fail_owned(task_id, reason, result=result)
-                    log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
-                    if self._tracer:
-                        self._tasks_completed_total.add(
-                            1, attributes={"status": "failed", "agent_type": agent_type}
-                        )
 
     # Maximum time to wait for in-flight sessions during graceful drain (seconds)
     DRAIN_TIMEOUT = SESSION_TOTAL_TIMEOUT + 60  # session timeout + buffer

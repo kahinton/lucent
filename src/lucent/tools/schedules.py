@@ -480,6 +480,60 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
                                 )
                             }
                         )
+                if action.get("action_type", "task") == "task" and action.get(
+                    "fusion_config"
+                ):
+                    from lucent.db.requests import validate_fusion_config
+                    from lucent.settings import (
+                        fusion_best_of_n_enabled,
+                        fusion_max_candidates,
+                        fusion_synthesis_enabled,
+                    )
+
+                    if action.get("agent_type") == "decision-step":
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"actions_json[{idx}] '{action.get('title')}' "
+                                    "sets fusion_config but uses agent_type "
+                                    "'decision-step' — fusion runs chat "
+                                    "candidates, a decision step is answered "
+                                    "directly by the decision model"
+                                )
+                            }
+                        )
+                    if action.get("decision_config"):
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"actions_json[{idx}] '{action.get('title')}' "
+                                    "combines fusion_config with decision_config — "
+                                    "they configure different executor kinds"
+                                )
+                            }
+                        )
+                    try:
+                        validate_fusion_config(
+                            action.get("fusion_config"),
+                            max_candidates=fusion_max_candidates(
+                                organization_id=str(org_id)
+                            ),
+                            best_of_n_enabled=fusion_best_of_n_enabled(
+                                organization_id=str(org_id)
+                            ),
+                            synthesis_enabled=fusion_synthesis_enabled(
+                                organization_id=str(org_id)
+                            ),
+                        )
+                    except ValueError as exc:
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"actions_json[{idx}] '{action.get('title')}' "
+                                    f"has an invalid fusion_config: {exc}"
+                                )
+                            }
+                        )
                 normalized_actions.append(action)
             actions = normalized_actions
             try:

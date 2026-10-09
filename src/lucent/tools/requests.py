@@ -654,6 +654,15 @@ Args:
         criteria?}], state?: {...}, model?: <decision model id>,
         threshold_policy?: {questions: {name: {min}}, on_fail: fail_task|needs_review}}.
         Dispatched to a System One decision model without an agent session.
+    fusion_config: Optional fusion payload — requires a chat agent_type (never
+        decision-step): {mode: best_of_n|synthesize, candidates: {models: [ids]} |
+        {count: n}, arbiter: {model?, questions: [<decision questions>],
+        threshold_policy?}, synthesis?: {model}, refine?: {model,
+        max_refine_passes}}. Runs several candidate chat models for this task,
+        scores every candidate with one decision-model call, and settles on the
+        best candidate (best_of_n) or synthesizes a merged answer (synthesize),
+        with an optional bounded refine pass. Gated by the fusion.* runtime
+        settings (off by default); model access applies to every named model.
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved or the sandbox template is invalid."""
@@ -672,6 +681,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         sandbox_overrides: dict | None = None,
         output_contract: dict | None = None,
         decision_config: dict | None = None,
+        fusion_config: dict | None = None,
     ) -> str:
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
@@ -768,6 +778,106 @@ if the agent type is not approved or the sandbox template is invalid."""
                                 "before creating decision steps."
                             )
                         }
+                    )
+
+        # Fusion pairing, flag gating, and payload validation. Mirrors the
+        # REST surface: candidate / synthesis / refine models are
+        # chat-class and the arbiter is decision-class; the fusion.* mode
+        # flags gate each mode at authoring time.
+        if fusion_config:
+            from lucent.db.requests import validate_fusion_config
+            from lucent.model_registry import (
+                validate_decision_model,
+                validate_model,
+            )
+            from lucent.settings import (
+                fusion_best_of_n_enabled,
+                fusion_max_candidates,
+                fusion_synthesis_enabled,
+            )
+
+            if decision_config:
+                return json.dumps(
+                    {
+                        "error": (
+                            "Provide either fusion_config or decision_config, "
+                            "not both"
+                        )
+                    }
+                )
+            try:
+                validate_fusion_config(
+                    fusion_config,
+                    max_candidates=fusion_max_candidates(organization_id=org_id),
+                    best_of_n_enabled=fusion_best_of_n_enabled(organization_id=org_id),
+                    synthesis_enabled=fusion_synthesis_enabled(organization_id=org_id),
+                )
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+            if agent_type == "decision-step":
+                return json.dumps(
+                    {
+                        "error": (
+                            "fusion_config requires a chat agent — decision-step "
+                            "tasks are executed by the decision model directly"
+                        )
+                    }
+                )
+
+            fusion_chat_model_specs: list[tuple[str, str]] = []
+            candidates = fusion_config.get("candidates") or {}
+            for candidate_model in candidates.get("models") or []:
+                fusion_chat_model_specs.append(
+                    (f"fusion candidate '{candidate_model}'", candidate_model)
+                )
+            synthesis_section = fusion_config.get("synthesis") or {}
+            synthesis_model = (
+                synthesis_section.get("model")
+                if isinstance(synthesis_section, dict)
+                else None
+            )
+            if synthesis_model:
+                fusion_chat_model_specs.append(("fusion synthesis", synthesis_model))
+            refine_section = fusion_config.get("refine")
+            refine_model = (
+                refine_section.get("model") if isinstance(refine_section, dict) else None
+            )
+            if refine_model:
+                fusion_chat_model_specs.append(("fusion refine", refine_model))
+
+            from lucent.db.models import (
+                ModelRepository,
+                get_authorized_models_pool,
+            )
+
+            fusion_model_pool = await get_authorized_models_pool(
+                await _get_pool(), {"id": str(user_id), "organization_id": str(org_id)}
+            )
+            for label, fusion_chat_model in fusion_chat_model_specs:
+                error = validate_model(fusion_chat_model, require_tools=True)
+                if error:
+                    return json.dumps({"error": f"{label}: {error}"})
+                if not await ModelRepository(fusion_model_pool).get_usable_model(
+                    fusion_chat_model
+                ):
+                    return json.dumps(
+                        {"error": f"{label} model is not available to this user"}
+                    )
+            arbiter_section = fusion_config.get("arbiter")
+            arbiter_model = (
+                arbiter_section.get("model")
+                if isinstance(arbiter_section, dict)
+                else None
+            ) or None
+            if arbiter_model:
+                arbiter_error = validate_decision_model(arbiter_model)
+                if arbiter_error:
+                    return json.dumps({"error": f"fusion arbiter: {arbiter_error}"})
+                if not await ModelRepository(fusion_model_pool).get_usable_model(
+                    arbiter_model
+                ):
+                    return json.dumps(
+                        {"error": "fusion arbiter model is not available to this user"}
                     )
 
         # Validate model against registry (chat tasks only — decision tasks
@@ -957,6 +1067,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
                 output_contract=output_contract,
                 decision_config=decision_config,
+                fusion_config=fusion_config,
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)})

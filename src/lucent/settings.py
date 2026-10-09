@@ -431,6 +431,102 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         max_value=1.0,
     ),
     RuntimeSettingDefinition(
+        key="fusion.best_of_n_enabled",
+        env_var="LUCENT_FUSION_BEST_OF_N_ENABLED",
+        value_type="boolean",
+        default=False,
+        title="Fusion best-of-N",
+        section="Fusion",
+        description=(
+            "Let tasks configured with fusion mode 'best_of_n' run against "
+            "several candidate chat models, with a decision-model arbiter "
+            "scoring the candidates and the best aggregate winning."
+        ),
+        help_text=(
+            "Off by default. While off, new best-of-n fusion configs are "
+            "rejected at authoring time and any queued fusion task "
+            "dispatches as a normal single-model task. Candidates run "
+            "sequentially inside one dispatch, so enabled tasks use several "
+            "times the tokens of a single-model run — measure via the "
+            "fusion_completed task event before keeping it on."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="fusion.synthesis_enabled",
+        env_var="LUCENT_FUSION_SYNTHESIS_ENABLED",
+        value_type="boolean",
+        default=False,
+        title="Fusion synthesis",
+        section="Fusion",
+        description=(
+            "Let tasks configured with fusion mode 'synthesize' merge N "
+            "candidate chat responses into one answer, steered by the "
+            "decision-model scores of each candidate."
+        ),
+        help_text=(
+            "Off by default. Synthesis adds an extra chat session on top of "
+            "the candidate fan-out, so it spends more tokens up front than "
+            "best-of-N — compare fusion_completed event totals against a "
+            "flags-off baseline before enabling widely."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="fusion.refine_loop_enabled",
+        env_var="LUCENT_FUSION_REFINE_LOOP_ENABLED",
+        value_type="boolean",
+        default=False,
+        title="Fusion refine loop",
+        section="Fusion",
+        description=(
+            "Allow best-of-n fusion dispatches one bounded refine pass: "
+            "re-run with the best candidate plus the failing arbiter "
+            "questions as structured critique, then re-score."
+        ),
+        help_text=(
+            "Off by default. The refined result is kept only when it scores "
+            "strictly better than the winner; passes are bounded by the "
+            "config's max_refine_passes (1-2)."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="fusion.max_candidates",
+        env_var="LUCENT_FUSION_MAX_CANDIDATES",
+        value_type="integer",
+        default=4,
+        title="Fusion candidate cap",
+        section="Fusion",
+        description=(
+            "Maximum number of chat-model candidates allowed in a "
+            "fusion_config (per-config values are clamped to this)."
+        ),
+        min_value=2,
+        max_value=8,
+        help_text=(
+            "Every additional candidate is another full chat session per "
+            "fusion dispatch; keep this low until you have measured fusion "
+            "token spend against a single-model baseline."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="fusion.arbiter_model",
+        env_var="LUCENT_FUSION_ARBITER_MODEL",
+        value_type="string",
+        default="",
+        title="Fusion arbiter model",
+        section="Fusion",
+        description=(
+            "Decision-class model used to score fusion candidates when the "
+            "task's fusion_config does not name one."
+        ),
+        control="model",
+        option_source="decision_models",
+        allow_empty=True,
+        help_text=(
+            "Leave blank to use the first enabled decision-class model "
+            "(models ordered by provider, name)."
+        ),
+    ),
+    RuntimeSettingDefinition(
         key="models.default_model",
         env_var="LUCENT_DEFAULT_MODEL",
         value_type="string",
@@ -1743,6 +1839,28 @@ def decision_gate_threshold(*, organization_id: Any | None = None) -> float:
             organization_id=organization_id,
         )
     )
+
+
+def fusion_best_of_n_enabled(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("fusion.best_of_n_enabled", organization_id=organization_id)
+
+
+def fusion_synthesis_enabled(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("fusion.synthesis_enabled", organization_id=organization_id)
+
+
+def fusion_refine_loop_enabled(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("fusion.refine_loop_enabled", organization_id=organization_id)
+
+
+def fusion_max_candidates(*, organization_id: Any | None = None) -> int:
+    """Candidate cap for fusion configs; clamped to the definition's bounds."""
+    value = _setting_int("fusion.max_candidates", organization_id=organization_id)
+    return max(2, min(8, value))
+
+
+def fusion_arbiter_model_id(*, organization_id: Any | None = None) -> str | None:
+    return _setting_string("fusion.arbiter_model", organization_id=organization_id) or None
 
 
 def shadow_forget_enabled(*, organization_id: Any | None = None) -> bool:

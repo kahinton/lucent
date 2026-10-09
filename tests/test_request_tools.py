@@ -1180,3 +1180,151 @@ class TestCreateTaskDecision:
             },
         )
         assert "No enabled decision-class model" in result["error"]
+
+
+class TestCreateTaskFusion:
+    """Fusion payloads on create_task (chat candidates + decision arbiter)."""
+
+    def _fusion_config(self, **overrides):
+        config = {
+            "mode": "best_of_n",
+            "candidates": {"count": 2},
+            "arbiter": {
+                "questions": [
+                    {"name": "fulfilled", "type": "noul", "instructions": "done?"}
+                ]
+            },
+        }
+        config.update(overrides)
+        return config
+
+    async def _seed_chat_agent(self, db_pool, org_id, user_id, name: str = "code"):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_definitions "
+                "(name, organization_id, content, status, owner_user_id) "
+                "VALUES ($1, $2, 'test chat agent definition', 'active', $3) "
+                "ON CONFLICT (name, organization_id) DO UPDATE SET "
+                "status = 'active', owner_user_id = EXCLUDED.owner_user_id",
+                name,
+                org_id,
+                user_id,
+            )
+
+    async def _enable_best_of_n(self, db_pool, org_id, user_id):
+        from lucent.db.runtime_settings import RuntimeSettingsRepository
+        from lucent.settings import set_runtime_setting_cache
+
+        await RuntimeSettingsRepository(db_pool).upsert_setting(
+            organization_id=str(org_id),
+            key="fusion.best_of_n_enabled",
+            value=True,
+            value_type="boolean",
+            user_id=str(user_id),
+        )
+        set_runtime_setting_cache(org_id, "fusion.best_of_n_enabled", True)
+
+    async def _disable_best_of_n(self, db_pool, org_id):
+        from lucent.db.runtime_settings import RuntimeSettingsRepository
+        from lucent.settings import clear_runtime_setting_cache
+
+        await RuntimeSettingsRepository(db_pool).delete_setting(
+            str(org_id), "fusion.best_of_n_enabled"
+        )
+        clear_runtime_setting_cache(org_id, "fusion.best_of_n_enabled")
+
+    @pytest.mark.asyncio
+    async def test_create_fusion_task_when_enabled(
+        self, mcp, auth_user, db_pool
+    ):
+        request = await _call(mcp, "create_request", {"title": "Fusion parent"})
+        await self._seed_chat_agent(db_pool, auth_user["organization_id"], auth_user["id"])
+        await self._enable_best_of_n(
+            db_pool, auth_user["organization_id"], auth_user["id"]
+        )
+        try:
+            result = await _call(
+                mcp,
+                "create_task",
+                {
+                    "request_id": request["id"],
+                    "title": "Fusion fan-out",
+                    "fusion_config": self._fusion_config(),
+                },
+            )
+        finally:
+            await self._disable_best_of_n(db_pool, auth_user["organization_id"])
+        assert "id" in result, result
+
+    @pytest.mark.asyncio
+    async def test_create_fusion_task_flag_off(self, mcp, auth_user):
+        request = await _call(mcp, "create_request", {"title": "Fusion gate"})
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request["id"],
+                "title": "Fusion fan-out",
+                "fusion_config": self._fusion_config(),
+            },
+        )
+        assert "not enabled" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_fusion_task_pairing_errors(self, mcp, auth_user, db_pool):
+        request = await _call(mcp, "create_request", {"title": "Fusion pairing"})
+        await self._seed_chat_agent(db_pool, auth_user["organization_id"], auth_user["id"])
+        await self._enable_best_of_n(
+            db_pool, auth_user["organization_id"], auth_user["id"]
+        )
+        try:
+            fused_together = await _call(
+                mcp,
+                "create_task",
+                {
+                    "request_id": request["id"],
+                    "title": "Both kinds",
+                    "agent_type": "code",
+                    "decision_config": {
+                        "questions": [
+                            {
+                                "name": "q",
+                                "type": "noul",
+                                "instructions": "check",
+                            }
+                        ]
+                    },
+                    "fusion_config": self._fusion_config(),
+                },
+            )
+            decision_agent = await _call(
+                mcp,
+                "create_task",
+                {
+                    "request_id": request["id"],
+                    "title": "Decision agent",
+                    "agent_type": "decision-step",
+                    "fusion_config": self._fusion_config(),
+                },
+            )
+            malformed = await _call(
+                mcp,
+                "create_task",
+                {
+                    "request_id": request["id"],
+                    "title": "No arbiter",
+                    "fusion_config": {"mode": "best_of_n"},
+                },
+            )
+        finally:
+            await self._disable_best_of_n(db_pool, auth_user["organization_id"])
+        # The decision block fires before the fusion block when a payload
+        # carries decision_config or names a decision-step agent.
+        assert "not both" in fused_together["error"] or "decision-step" in fused_together["error"]
+        assert (
+            "chat agent" in decision_agent["error"]
+            or "requires decision_config" in decision_agent["error"]
+        )
+        assert (
+            "arbiter" in malformed["error"] or "candidates" in malformed["error"]
+        )

@@ -640,37 +640,24 @@ def _validate_decision_threshold_policy(
     return on_fail, thresholds
 
 
-def validate_decision_config(config: dict | None) -> None:
-    """Validate a decision_config payload for a decision-step task.
+def validate_decision_questions(
+    raw_questions: Any, *, label: str = "decision_config"
+) -> dict[str, str]:
+    """Validate the shared decision-question schema.
 
-    Config format:
-      {
-        "questions": [ {"name", "type": "noul|choice|score",
-                        "instructions", "criteria"} ],   # 1..64, ordered
-        "state": {"<key>": "<literal>"}                  # optional
-        "model": "<decision model id>",                  # optional
-        "threshold_policy": {"questions": {name: {"min": f}},
-                             "on_fail": "fail_task|needs_review"},
-      }
+    Used by decision-step tasks (``label="decision_config"``) and fusion
+    arbiter configs (``label="fusion arbiter"``). Returns the ordered
+    name → type map so callers can validate thresholds against it.
 
     Raises ValueError with an author-facing message on any malformed shape.
     """
-    if config is None:
-        return
-    if not isinstance(config, dict):
-        raise ValueError("decision_config must be an object")
-
-    raw_questions = config.get("questions")
-    if raw_questions is None:
-        raise ValueError("decision_config requires a 'questions' list")
     if not isinstance(raw_questions, list) or not raw_questions:
         raise ValueError(
-            "decision_config.questions must be a non-empty list of question "
-            "objects"
+            f"{label}.questions must be a non-empty list of question objects"
         )
     if len(raw_questions) > MAX_QUESTIONS:
         raise ValueError(
-            f"Too many decision questions: {len(raw_questions)} "
+            f"Too many {label} questions: {len(raw_questions)} "
             f"(server allows at most {MAX_QUESTIONS})."
         )
 
@@ -678,22 +665,18 @@ def validate_decision_config(config: dict | None) -> None:
     questions: dict[str, str] = {}
     for index, raw in enumerate(raw_questions):
         if not isinstance(raw, dict):
-            raise ValueError(
-                f"decision_config.questions[{index}] must be an object"
-            )
+            raise ValueError(f"{label}.questions[{index}] must be an object")
         name = raw.get("name")
         qtype = raw.get("type")
         instructions = raw.get("instructions")
         if not name or not isinstance(name, str):
-            raise ValueError(f"decision_config.questions[{index}] requires a 'name'")
+            raise ValueError(f"{label}.questions[{index}] requires a 'name'")
         if len(name) > 128:
             raise ValueError(
                 f"decision question name '{name}' is too long (max 128 characters)"
             )
         if name in questions:
-            raise ValueError(
-                f"decision_config has duplicate question name '{name}'"
-            )
+            raise ValueError(f"{label} has duplicate question name '{name}'")
         if qtype not in QUESTION_TYPES:
             raise ValueError(
                 f"Question '{name}' has unknown type {qtype!r}. "
@@ -709,9 +692,10 @@ def validate_decision_config(config: dict | None) -> None:
                 criteria=raw.get("criteria"),
             )
         except ValueError as exc:
-            message = str(exc).replace("Decision request", "decision_config")
+            message = str(exc).replace("Decision request", label)
             raise ValueError(message) from None
         questions[name] = qtype
+
     # _validate_request's criteria checks run through DecisionQuestion above;
     # construction itself does not validate criteria ranges, so enforce them
     # here against the same client-side limits the client applies at send.
@@ -743,6 +727,33 @@ def validate_decision_config(config: dict | None) -> None:
                     f"Score question '{name}' needs between {MIN_SCORE_LEVELS} "
                     f"and {MAX_SCORE_LEVELS} levels; got {len(levels)}."
                 )
+    return questions
+
+
+def validate_decision_config(config: dict | None) -> None:
+    """Validate a decision_config payload for a decision-step task.
+
+    Config format:
+      {
+        "questions": [ {"name", "type": "noul|choice|score",
+                        "instructions", "criteria"} ],   # 1..64, ordered
+        "state": {"<key>": "<literal>"}                  # optional
+        "model": "<decision model id>",                  # optional
+        "threshold_policy": {"questions": {name: {"min": f}},
+                             "on_fail": "fail_task|needs_review"},
+      }
+
+    Raises ValueError with an author-facing message on any malformed shape.
+    """
+    if config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError("decision_config must be an object")
+
+    raw_questions = config.get("questions")
+    if raw_questions is None:
+        raise ValueError("decision_config requires a 'questions' list")
+    questions = validate_decision_questions(raw_questions, label="decision_config")
 
     state = config.get("state")
     if state is not None:
@@ -775,6 +786,203 @@ def validate_decision_config(config: dict | None) -> None:
     if unknown:
         raise ValueError(
             "decision_config has unknown key(s): "
+            + ", ".join(sorted(unknown))
+        )
+
+    return None
+
+
+_FUSION_MODES = ("best_of_n", "synthesize")
+
+
+def validate_fusion_config(
+    config: dict | None,
+    *,
+    max_candidates: int = 4,
+    best_of_n_enabled: bool = True,
+    synthesis_enabled: bool = True,
+) -> None:
+    """Validate a fusion_config payload for a chat task.
+
+    Config format:
+      {
+        "mode": "best_of_n" | "synthesize",
+        "candidates": {"models": ["<chat model id>", ...]}   # 2..max_candidates
+                    | {"count": 2..max_candidates},          # exactly one of the two
+        "arbiter": {                                          # required for best_of_n,
+                    "model": "<decision model id>",           # optional for synthesize
+                    "questions": [<decision questions>],      # required when arbiter present
+                    "threshold_policy": {...}},               # optional
+        "synthesis": {"model": "<chat model id or null>"},    # required iff synthesize
+        "refine": {"model": "<chat model id or null>",        # optional, best_of_n only
+                   "max_refine_passes": 1|2},
+      }
+
+    The flag parameters are the fusion.* runtime settings: authoring
+    surfaces pass the real values so a disabled mode raises instead of
+    persisting a config the dispatcher would silently ignore. Structural
+    validation (no flags) happens again at the repo layer on every create.
+
+    Raises ValueError with an author-facing message on any malformed shape.
+    """
+    if config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError("fusion_config must be an object")
+
+    mode = config.get("mode")
+    if mode not in _FUSION_MODES:
+        raise ValueError(
+            "fusion_config.mode must be 'best_of_n' or 'synthesize'; "
+            f"got {mode!r}"
+        )
+    if mode == "best_of_n" and not best_of_n_enabled:
+        raise ValueError(
+            "Fusion best-of-n is not enabled — turn on the "
+            "'fusion.best_of_n_enabled' runtime setting to use it"
+        )
+    if mode == "synthesize" and not synthesis_enabled:
+        raise ValueError(
+            "Fusion synthesis is not enabled — turn on the "
+            "'fusion.synthesis_enabled' runtime setting to use it"
+        )
+
+    candidates = config.get("candidates")
+    if not isinstance(candidates, dict):
+        raise ValueError("fusion_config.candidates must be an object")
+    unknown_candidate_keys = set(candidates) - {"models", "count"}
+    if unknown_candidate_keys:
+        raise ValueError(
+            "fusion_config.candidates has unknown key(s): "
+            + ", ".join(sorted(unknown_candidate_keys))
+        )
+    models = candidates.get("models")
+    count = candidates.get("count")
+    if (models is None) == (count is None):
+        raise ValueError(
+            "fusion_config.candidates must specify exactly one of 'models' "
+            "(chat model ids) or 'count'"
+        )
+    if models is not None:
+        if not isinstance(models, list) or len(models) < 2:
+            raise ValueError(
+                "fusion_config.candidates.models must be a list of at least "
+                "2 chat model ids"
+            )
+        if len(models) > max_candidates:
+            raise ValueError(
+                f"fusion_config.candidates.models lists {len(models)} models; "
+                f"at most {max_candidates} are allowed (the "
+                f"'fusion.max_candidates' setting)"
+            )
+        for candidate_model in models:
+            if not isinstance(candidate_model, str) or not candidate_model.strip():
+                raise ValueError(
+                    "fusion_config.candidates.models entries must be "
+                    "non-empty model ids"
+                )
+        if len(set(models)) != len(models):
+            raise ValueError(
+                "fusion_config.candidates.models must not repeat a model"
+            )
+    else:
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or not 2 <= count <= max_candidates
+        ):
+            raise ValueError(
+                f"fusion_config.candidates.count must be an integer between "
+                f"2 and {max_candidates} (the 'fusion.max_candidates' setting)"
+            )
+
+    arbiter = config.get("arbiter")
+    if mode == "best_of_n" and not isinstance(arbiter, dict):
+        raise ValueError(
+            "fusion mode 'best_of_n' requires an 'arbiter' object carrying "
+            "the decision questions used to score the candidates"
+        )
+    if arbiter is not None:
+        if not isinstance(arbiter, dict):
+            raise ValueError("fusion_config.arbiter must be an object")
+        arbiter_model = arbiter.get("model")
+        if arbiter_model is not None and (
+            not isinstance(arbiter_model, str) or not arbiter_model.strip()
+        ):
+            raise ValueError(
+                "fusion_config.arbiter.model must be a non-empty decision "
+                "model id"
+            )
+        arbiter_questions = arbiter.get("questions")
+        if arbiter_questions is None:
+            raise ValueError(
+                "fusion_config.arbiter requires a 'questions' list — the "
+                "questions the decision model answers to score each "
+                "candidate"
+            )
+        question_types = validate_decision_questions(
+            arbiter_questions, label="fusion arbiter"
+        )
+        if "threshold_policy" in arbiter:
+            _validate_decision_threshold_policy(
+                arbiter["threshold_policy"], question_types
+            )
+
+    synthesis = config.get("synthesis")
+    if mode == "synthesize":
+        if not isinstance(synthesis, dict):
+            raise ValueError(
+                "fusion mode 'synthesize' requires a 'synthesis' object"
+            )
+        synthesis_model = synthesis.get("model")
+        if synthesis_model is not None and (
+            not isinstance(synthesis_model, str) or not synthesis_model.strip()
+        ):
+            raise ValueError(
+                "fusion_config.synthesis.model must be a non-empty model id"
+            )
+    elif "synthesis" in config and synthesis is not None:
+        raise ValueError(
+            "fusion_config.synthesis is only allowed with mode 'synthesize'"
+        )
+
+    refine = config.get("refine")
+    if "refine" in config:
+        if mode != "best_of_n":
+            raise ValueError(
+                "fusion_config.refine is only allowed with mode 'best_of_n'"
+            )
+        if refine is not None and not isinstance(refine, dict):
+            raise ValueError("fusion_config.refine must be an object")
+        passes = refine.get("max_refine_passes") if isinstance(refine, dict) else None
+        if passes is None:
+            passes = 1
+        if (
+            not isinstance(passes, int)
+            or isinstance(passes, bool)
+            or passes not in (1, 2)
+        ):
+            raise ValueError(
+                "fusion_config.refine.max_refine_passes must be 1 or 2"
+            )
+        refine_model = refine.get("model") if isinstance(refine, dict) else None
+        if refine_model is not None and (
+            not isinstance(refine_model, str) or not refine_model.strip()
+        ):
+            raise ValueError(
+                "fusion_config.refine.model must be a non-empty model id"
+            )
+
+    unknown = set(config) - {
+        "mode",
+        "candidates",
+        "arbiter",
+        "synthesis",
+        "refine",
+    }
+    if unknown:
+        raise ValueError(
+            "fusion_config has unknown key(s): "
             + ", ".join(sorted(unknown))
         )
 
@@ -2179,9 +2387,13 @@ class RequestRepository:
         requesting_user_id: str | None = None,
         output_contract: dict | None = None,
         decision_config: dict | None = None,
+        fusion_config: dict | None = None,
     ) -> dict:
         _validate_output_contract(output_contract)
         validate_decision_config(decision_config)
+        # Structural validation only — authoring surfaces enforce the
+        # fusion.* mode flags before this call.
+        validate_fusion_config(fusion_config)
         if output_contract and decision_config:
             raise ValueError(
                 "A decision-step task carries its own question schema — "
@@ -2196,6 +2408,19 @@ class RequestRepository:
                 "agent_type 'decision-step' requires decision_config "
                 "carrying the questions to answer"
             )
+        # Unlike decision_config, output_contract IS allowed with
+        # fusion_config: the winner / synthesis result still goes through
+        # the normal output-contract validation and repair tail.
+        if fusion_config and decision_config:
+            raise ValueError(
+                "A task cannot carry both fusion_config and decision_config "
+                "— they configure different executor kinds"
+            )
+        if fusion_config and agent_type == "decision-step":
+            raise ValueError(
+                "fusion_config requires a chat agent — decision-step tasks "
+                "are executed by the decision model directly"
+            )
         from lucent.secrets.utils import validate_sandbox_config_references
 
         validate_sandbox_config_references(sandbox_config)
@@ -2208,11 +2433,12 @@ class RequestRepository:
                    (request_id, parent_task_id, title, description, agent_type,
                     agent_definition_id, priority, sequence_order, organization_id,
                     model, reasoning_effort, sandbox_template_id, sandbox_config,
-                    requesting_user_id, output_contract, decision_config)
+                    requesting_user_id, output_contract, decision_config,
+                    fusion_config)
                    VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                     COALESCE($14, (SELECT created_by FROM requests WHERE id = $1)),
-                    $15, $16
+                    $15, $16, $17
                    )
                    RETURNING *""",
                 UUID(request_id),
@@ -2233,6 +2459,7 @@ class RequestRepository:
                 UUID(requesting_user_id) if requesting_user_id else None,
                 json.dumps(output_contract) if output_contract else None,
                 json.dumps(decision_config) if decision_config else None,
+                json.dumps(fusion_config) if fusion_config else None,
             )
         task = dict(row)
         # Log creation event

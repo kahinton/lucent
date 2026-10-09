@@ -216,6 +216,7 @@ class WorkflowAction(BaseModel):
     output_contract: dict | None = None
     output_schema: dict | None = None
     decision_config: dict | None = None
+    fusion_config: dict | None = None
     interaction_type: str | None = Field(
         default=None,
         pattern=r"^(message|clarification|review|decision|workflow_output|handoff)$",
@@ -694,6 +695,46 @@ async def _trigger_schedule_execution(
                         # dispatch-resolve and fail the task.
                         action["model"] = None if model_error else action_model
                         action["reasoning_effort"] = None
+                fusion_config = action.get("fusion_config")
+                if fusion_config:
+                    from lucent.db.requests import validate_fusion_config
+                    from lucent.settings import (
+                        fusion_best_of_n_enabled,
+                        fusion_max_candidates,
+                        fusion_synthesis_enabled,
+                    )
+
+                    if agent_type == "decision-step":
+                        raise RuntimeError(
+                            f"Workflow action '{action.get('title')}' sets "
+                            "fusion_config on a decision-step task — fusion "
+                            "runs chat candidates, a decision step is answered "
+                            "directly by the decision model."
+                        )
+                    try:
+                        # Re-validate at trigger time: flags and the
+                        # candidate cap are runtime settings and can change
+                        # between authoring and run. Flag-off here fails the
+                        # run loud (same shape as decision_config) rather
+                        # than silently downgrading the workflow.
+                        validate_fusion_config(
+                            fusion_config,
+                            max_candidates=fusion_max_candidates(organization_id=org_id),
+                            best_of_n_enabled=fusion_best_of_n_enabled(
+                                organization_id=org_id
+                            ),
+                            synthesis_enabled=fusion_synthesis_enabled(
+                                organization_id=org_id
+                            ),
+                        )
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            f"Workflow action '{action.get('title')}' has an "
+                            f"invalid fusion_config: {exc}"
+                        ) from exc
+                    # Keep the action's chat model override — it becomes the
+                    # first candidate / fallback for count-based configs, so
+                    # it must NOT be pinned off like a decision step's is.
                 if agent_type and agent_type not in active_names:
                     raise RuntimeError(
                         f"Workflow action references agent_type '{action.get('agent_type')}', "
@@ -787,6 +828,7 @@ async def _trigger_schedule_execution(
                     requesting_user_id=owner_user_id,
                     output_contract=output_contract,
                     decision_config=action.get("decision_config"),
+                    fusion_config=fusion_config,
                 )
                 created_tasks.append(task)
 
@@ -880,6 +922,46 @@ def _validate_workflow_decision_actions(actions: list[dict]) -> None:
             )
 
 
+def _validate_workflow_fusion_actions(actions: list[dict], *, org_id: str) -> None:
+    """Authoring-time fusion validation for workflow actions.
+
+    Enforces the fusion.* mode flags and the fusion_config schema when the
+    workflow is saved, not only when it triggers. Model availability is
+    re-checked at trigger time and again at dispatch.
+    """
+    from lucent.db.requests import validate_fusion_config
+    from lucent.settings import (
+        fusion_best_of_n_enabled,
+        fusion_max_candidates,
+        fusion_synthesis_enabled,
+    )
+
+    for index, action in enumerate(actions):
+        fusion_config = action.get("fusion_config")
+        if not fusion_config:
+            continue
+        title = action.get("title") or f"#{index + 1}"
+        if action.get("agent_type") == "decision-step":
+            raise HTTPException(
+                422,
+                f"Workflow action '{title}' sets fusion_config but uses "
+                "agent_type 'decision-step' — fusion runs chat candidates, "
+                "a decision step is answered directly by the decision model",
+            )
+        try:
+            validate_fusion_config(
+                fusion_config,
+                max_candidates=fusion_max_candidates(organization_id=org_id),
+                best_of_n_enabled=fusion_best_of_n_enabled(organization_id=org_id),
+                synthesis_enabled=fusion_synthesis_enabled(organization_id=org_id),
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                422,
+                f"Workflow action '{title}' has an invalid fusion_config: {exc}",
+            )
+
+
 @router.post("")
 async def create_schedule(
     body: ScheduleCreate, user: AuthenticatedUser, pool=Depends(get_pool)
@@ -915,6 +997,9 @@ async def create_schedule(
         raise HTTPException(422, "reasoning_effort requires model")
 
     _validate_workflow_decision_actions(body.actions or [])
+    _validate_workflow_fusion_actions(
+        body.actions or [], org_id=str(user.organization_id)
+    )
 
     # Usage is clearance-driven and default-deny: every referenced sandbox
     # template must be cleared for the schedule creator.
@@ -1108,6 +1193,9 @@ async def update_schedule(
         raise HTTPException(422, "reasoning_effort requires model")
     if "actions" in fields:
         _validate_workflow_decision_actions(fields["actions"])
+        _validate_workflow_fusion_actions(
+            fields["actions"], org_id=str(user.organization_id)
+        )
     try:
         result = await repo.update_schedule(
             schedule_id, str(user.organization_id),

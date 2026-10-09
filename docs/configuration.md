@@ -312,6 +312,47 @@ Requests go through a two-stage gate:
 
 2. **Post-completion review** (`LUCENT_REQUIRE_APPROVAL`): Controls whether finished requests need human sign-off. When enabled (`true`), requests that complete successfully go to `review` status and appear in the Review Queue's "Completed Work Review" section.
 
+### Daemon Fusion Dispatch
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LUCENT_FUSION_BEST_OF_N_ENABLED` | `false` | Env fallback for **Settings → Runtime Settings → Fusion best-of-N**. Lets tasks configured with fusion mode `best_of_n` run against several candidate chat models scored by a decision-model arbiter. |
+| `LUCENT_FUSION_SYNTHESIS_ENABLED` | `false` | Env fallback for **Settings → Runtime Settings → Fusion synthesis**. Lets tasks configured with fusion mode `synthesize` merge the candidate responses into one answer in an extra chat session. |
+| `LUCENT_FUSION_REFINE_LOOP_ENABLED` | `false` | Env fallback for **Settings → Runtime Settings → Fusion refine loop**. Allows best-of-N dispatches one bounded refine pass (re-run with critique, re-score; kept only if strictly better). |
+| `LUCENT_FUSION_MAX_CANDIDATES` | `4` | Maximum candidate models allowed in a `fusion_config` (per-config values clamp to this, 2–8). |
+| `LUCENT_FUSION_ARBITER_MODEL` | *(blank / first enabled decision model)* | Decision-class model used as the arbiter when the task's `fusion_config` does not name one. Leave blank to use the first enabled decision-class model (ordered by provider, name). |
+| `LUCENT_FUSION_ARBITER_TIMEOUT_SECONDS` | `60` | Timeout for each arbiter `/v1/systemone` call. One retry is attempted on error before scoring degrades. |
+
+#### Fusion dispatch (best-of-N, synthesis, refine)
+
+Fusion runs **inside a single task's dispatch cycle**: instead of one chat session, the daemon fans out N candidate chat sessions (named `…-cand-1`, `…-cand-2`, …), asks a decision-class model (Ollama 0.35+ System One, e.g. `nimble`) to score every candidate against the task's authored questions, and ships the winner through the ordinary completion path. It is entirely opt-in per task — a task carries a `fusion_config` JSON document (authored via REST `POST /api/requests/{id}/tasks`, MCP `create_task`, or workflow actions, each rejecting configs while the mode's flag is off) and the daemon checks the flag again at dispatch:
+
+- **Flag off**: the task dispatches as a normal single-model task with a `fusion_disabled` event — flipping a flag mid-flight never strands a queued task.
+- **Unsupported shape** (sandboxed task, `decision-step` agent, agent-required tools present): `fusion_unsupported` event → normal single-model path.
+- **Enabled + supported**: each candidate runs sequentially in its own session; `fusion_candidate_done` fires per candidate and a final `fusion_completed` event carries the full comparison metadata.
+
+The `fusion_config` shape (validated at every authoring surface; `arbiter.questions` uses the same question schema as decision steps — see [*Decision steps as tasks*](#decision-steps-as-tasks)):
+
+```json
+{
+  "mode": "best_of_n",
+  "candidates": {"models": ["m1", "m2"]} | {"count": 3},
+  "arbiter": {
+    "model": "nimble",
+    "questions": [{"name": "fulfilled", "type": "noul", "instructions": "Is the request fulfilled?"}],
+    "threshold_policy": {"questions": {"fulfilled": {"min": 0.7}}, "on_fail": "needs_review"}
+  },
+  "refine": {"model": "m1", "max_refine_passes": 1}
+}
+```
+
+- `mode` — `best_of_n` (pick the top-scoring candidate) or `synthesize` (merge the candidates in one extra chat session, then re-score the merged answer); `candidates.models` (2+ unique chat-class models) and `candidates.count` (filled from the task's model first, then accessible models round-robin) are mutually exclusive.
+- `arbiter` — required questions (1–64, `noul`/`score`/`choice`), optional explicit `model` (falls back to `LUCENT_FUSION_ARBITER_MODEL`, then the first enabled decision model), optional `threshold_policy` on the winner's aggregate.
+- `refine` — best-of-N only: the best candidate text plus the failing arbiter questions feed a bounded critique-and-rescore loop (1–2 passes); the refined result ships only when it scores **strictly** better, and a refine failure never fails the task (`fusion.refine_loop_enabled` gates it).
+- `synthesis` (with `mode: "synthesize"`) — names the chat model that merges the candidates, each excerpted to 3k characters, steered by the per-candidate score table.
+
+Scoring: the arbiter is asked the authored questions **once per candidate** (prefixed `cand0_fulfilled`, `cand1_fulfilled`, …) in one `/v1/systemone` call per batch, so aggregates are directly comparable; ties and threshold failures break deterministically (highest normalized aggregate, then fewer failing thresholds, then earlier candidate). Candidates run sequentially inside one dispatch, so an enabled fusion task spends several full chat sessions' worth of tokens up front — the `fusion_completed` event's `totals` object (candidate/arbiter/synthesis/refine input- and output-token sums) plus `engine="decision"` arbiter ledger rows exist so admins can compare against a single-model baseline before keeping the flags on. Fusion tasks cannot use sandboxes, required tools, or `decision_config`; their `output_contract` still applies to the shipped result. Full candidate texts are not persisted — only the winner's result plus per-candidate excerpts in the event metadata.
+
 ### Daemon Git Operations
 
 | Variable | Default | Description |

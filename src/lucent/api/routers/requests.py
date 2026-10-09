@@ -12,7 +12,13 @@ from lucent.api.deps import AuthenticatedUser, get_pool
 from lucent.constants import REQUEST_SOURCE_PATTERN
 from lucent.db.pool import scoped_acquire
 from lucent.rbac import Role
-from lucent.settings import custom_tooling_enabled, sandboxes_enabled
+from lucent.settings import (
+    custom_tooling_enabled,
+    fusion_best_of_n_enabled,
+    fusion_max_candidates,
+    fusion_synthesis_enabled,
+    sandboxes_enabled,
+)
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -180,6 +186,7 @@ class TaskCreate(BaseModel):
     output_contract: dict | None = None  # Optional structured output contract (JSON Schema)
     output_schema: dict | None = None  # Backwards-compatible alias for output_contract.json_schema
     decision_config: dict | None = None  # Decision-step payload (System One questions)
+    fusion_config: dict | None = None  # Fusion payload (chat candidates + decision arbiter)
 
 
 class TaskEventCreate(BaseModel):
@@ -715,6 +722,58 @@ async def create_task(
             "agent_type 'decision-step' requires decision_config carrying "
             "the questions to answer",
         )
+    if body.fusion_config:
+        from lucent.db.requests import validate_fusion_config
+        from lucent.model_registry import (
+            validate_decision_model,
+            validate_model,
+        )
+
+        try:
+            validate_fusion_config(
+                body.fusion_config,
+                max_candidates=fusion_max_candidates(organization_id=org_id),
+                best_of_n_enabled=fusion_best_of_n_enabled(organization_id=org_id),
+                synthesis_enabled=fusion_synthesis_enabled(organization_id=org_id),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if body.agent_type == "decision-step":
+            raise HTTPException(
+                422,
+                "fusion_config requires a chat agent — decision-step tasks "
+                "are executed by the decision model directly",
+            )
+        if body.decision_config:
+            raise HTTPException(
+                422,
+                "Provide either fusion_config or decision_config, not both",
+            )
+
+        async def _require_chat_model(model_id: str) -> None:
+            error = validate_model(model_id, require_tools=True)
+            if error:
+                raise HTTPException(422, error)
+            await _require_model_access(pool, model_id, user)
+
+        candidates = body.fusion_config.get("candidates") or {}
+        for candidate_model in candidates.get("models") or []:
+            await _require_chat_model(candidate_model)
+        synthesis = body.fusion_config.get("synthesis") or {}
+        if synthesis.get("model"):
+            await _require_chat_model(synthesis["model"])
+        refine = body.fusion_config.get("refine")
+        if isinstance(refine, dict) and refine.get("model"):
+            await _require_chat_model(refine["model"])
+        arbiter = body.fusion_config.get("arbiter")
+        arbiter_model = (
+            arbiter.get("model") if isinstance(arbiter, dict) else None
+        ) or None
+        if arbiter_model:
+            arbiter_error = validate_decision_model(arbiter_model)
+            if arbiter_error:
+                raise HTTPException(422, arbiter_error)
+            await _require_model_access(pool, arbiter_model, user)
     if body.model:
         from lucent.model_registry import validate_model, validate_reasoning_effort
 
@@ -792,6 +851,7 @@ async def create_task(
             requesting_user_id=requesting_user_id,
             output_contract=output_contract,
             decision_config=body.decision_config,
+            fusion_config=body.fusion_config,
         )
         task["sandboxes_enabled"] = org_sandboxes_enabled
         task["custom_tooling_enabled"] = custom_tooling_enabled(organization_id=org_id)
