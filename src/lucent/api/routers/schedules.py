@@ -215,6 +215,7 @@ class WorkflowAction(BaseModel):
     sandbox_config: dict | None = None
     output_contract: dict | None = None
     output_schema: dict | None = None
+    decision_config: dict | None = None
     interaction_type: str | None = Field(
         default=None,
         pattern=r"^(message|clarification|review|decision|workflow_output|handoff)$",
@@ -648,6 +649,51 @@ async def _trigger_schedule_execution(
 
             for idx, action in enumerate(task_actions):
                 agent_type = action.get("agent_type") or sched.get("agent_type") or "code"
+                decision_config = action.get("decision_config")
+                if decision_config or agent_type == "decision-step":
+                    from lucent.db.requests import validate_decision_config
+
+                    if agent_type and agent_type != "decision-step":
+                        raise RuntimeError(
+                            f"Workflow action '{action.get('title')}' sets "
+                            f"decision_config but names agent_type "
+                            f"'{agent_type}' — a decision step must use "
+                            "agent_type 'decision-step'."
+                        )
+                    try:
+                        validate_decision_config(decision_config)
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            f"Workflow action '{action.get('title')}' has an "
+                            f"invalid decision_config: {exc}"
+                        ) from exc
+                    agent_type = "decision-step"
+                    if action.get("output_contract") or action.get("output_schema"):
+                        raise RuntimeError(
+                            f"Workflow action '{action.get('title')}' combines "
+                            "decision_config with an output contract — a "
+                            "decision step carries its own question schema"
+                        )
+                    action_model = action.get("model") if "model" in action else None
+                    if action_model:
+                        from lucent.model_registry import validate_decision_model
+
+                        model_error = validate_decision_model(action_model)
+                        if model_error:
+                            # Clear rather than fail the run: dispatch
+                            # resolves an accessible decision model, and
+                            # a chat-default would be plain unusable here.
+                            logger.warning(
+                                "Workflow %s decision step has invalid decision "
+                                "model '%s': %s — clearing override",
+                                schedule_id, action_model, model_error,
+                            )
+                        # Pin the key so the schedule-level chat model default
+                        # below (`sched.get("model")`) can never leak into a
+                        # decision step; a chat model there would only fail
+                        # dispatch-resolve and fail the task.
+                        action["model"] = None if model_error else action_model
+                        action["reasoning_effort"] = None
                 if agent_type and agent_type not in active_names:
                     raise RuntimeError(
                         f"Workflow action references agent_type '{action.get('agent_type')}', "
@@ -740,6 +786,7 @@ async def _trigger_schedule_execution(
                     org_id=org_id,
                     requesting_user_id=owner_user_id,
                     output_contract=output_contract,
+                    decision_config=action.get("decision_config"),
                 )
                 created_tasks.append(task)
 
@@ -787,6 +834,52 @@ async def _trigger_schedule_execution(
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
 
+def _validate_workflow_decision_actions(actions: list[dict]) -> None:
+    """Authoring-time decision-step validation for workflow actions.
+
+    Malformed decision_config or a broken agent_type pairing fails loud when
+    the workflow is saved, not only when it triggers. (Model availability is
+    re-checked at trigger time — grants can change between authoring and run.)
+    """
+    from lucent.db.requests import validate_decision_config
+
+    for index, action in enumerate(actions):
+        decision_config = action.get("decision_config")
+        if not decision_config and action.get("agent_type") != "decision-step":
+            continue
+        title = action.get("title") or f"#{index + 1}"
+        try:
+            validate_decision_config(decision_config)
+        except ValueError as exc:
+            raise HTTPException(
+                422,
+                f"Workflow action '{title}' has an invalid decision_config: {exc}",
+            )
+        action_agent = action.get("agent_type")
+        if action_agent and action_agent != "decision-step":
+            raise HTTPException(
+                422,
+                f"Workflow action '{title}' sets decision_config but names "
+                f"agent_type '{action_agent}' — a decision step must use "
+                "agent_type 'decision-step'",
+            )
+        if action.get("agent_type") == "decision-step" and not decision_config:
+            raise HTTPException(
+                422,
+                f"Workflow action '{title}' uses agent_type 'decision-step' "
+                "without decision_config",
+            )
+        if (
+            action.get("output_contract") or action.get("output_schema")
+        ) and decision_config:
+            raise HTTPException(
+                422,
+                f"Workflow action '{title}' combines decision_config with an "
+                "output contract — a decision step carries its own question "
+                "schema",
+            )
+
+
 @router.post("")
 async def create_schedule(
     body: ScheduleCreate, user: AuthenticatedUser, pool=Depends(get_pool)
@@ -820,6 +913,8 @@ async def create_schedule(
             raise HTTPException(422, effort_error)
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
+
+    _validate_workflow_decision_actions(body.actions or [])
 
     # Usage is clearance-driven and default-deny: every referenced sandbox
     # template must be cleared for the schedule creator.
@@ -1011,6 +1106,8 @@ async def update_schedule(
             raise HTTPException(422, effort_error)
     elif effective_effort:
         raise HTTPException(422, "reasoning_effort requires model")
+    if "actions" in fields:
+        _validate_workflow_decision_actions(fields["actions"])
     try:
         result = await repo.update_schedule(
             schedule_id, str(user.organization_id),

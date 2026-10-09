@@ -49,6 +49,7 @@ from daemon.api.tasks import TaskAPI
 from daemon.db_scope import connect_scoped
 from daemon.decomposition.capability import DecompositionHelpersMixin
 from daemon.dispatch import policy as task_policy
+from daemon.dispatch import decision_step
 from daemon.observability.tools import (
     _MEMORY_CAPTURE_TOOLS,
     _MEMORY_SEARCH_TOOLS,
@@ -3995,6 +3996,76 @@ class LucentDaemon(
                 await RequestAPI.add_event(task_id, "dispatch_denied", reason)
                 continue
             requesting_user_id = str(requesting_user_id)
+
+            # Decision-step branch: a task carrying decision_config is
+            # executed by a System One decision model without a chat session.
+            # Sits before chat model selection deliberately — decision models
+            # are never routed through _select_model_for_user / the engine
+            # factory, and this branch must never fall through to the
+            # generic path.
+            decision_cfg = task.get("decision_config") or {}
+            if isinstance(decision_cfg, str):
+                try:
+                    decision_cfg = json.loads(decision_cfg) or {}
+                except (TypeError, ValueError):
+                    decision_cfg = {}
+            if decision_cfg:
+                if self.draining:
+                    log("Dispatch is draining for source reload; leaving remaining tasks pending")
+                    break
+                try:
+                    decision_model = await decision_step.resolve_user_decision_model(
+                        user_id=requesting_user_id,
+                        org_id=org_id,
+                        explicit_model=task_model or decision_cfg.get("model"),
+                    )
+                except decision_step.ModelAccessDeniedError as exc:
+                    reason = f"Decision dispatch denied: {exc}"
+                    log(f"Task {task_id[:8]} {reason}", "WARN")
+                    await _fail_owned(task_id, reason)
+                    await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                    continue
+                self._claim_operations += 1
+                try:
+                    claimed = await RequestAPI.claim_task(task_id, self.instance_id)
+                finally:
+                    self._claim_operations -= 1
+                if not claimed:
+                    continue
+                try:
+                    await RequestAPI.update_task_model_settings(
+                        task_id, model=decision_model
+                    )
+                    started = await _start_owned(task_id)
+                    if not started:
+                        await _release_owned(task_id)
+                        continue
+                    await RequestAPI.add_event(
+                        task_id,
+                        "decision_dispatched",
+                        f"Decision step dispatched to {decision_model}",
+                    )
+                    if self._tracer:
+                        self._tasks_dispatched_total.add(
+                            1, attributes={"agent_type": "decision-step"}
+                        )
+                    dispatched += 1
+                    await decision_step.run_decision_step(
+                        task=dict(task),
+                        decision_config=decision_cfg,
+                        model_id=decision_model,
+                        org_id=org_id,
+                        requesting_user_id=requesting_user_id,
+                        on_complete=lambda result, **kw: _complete_owned(
+                            task_id, result, **kw
+                        ),
+                        on_fail=_fail_owned,
+                        on_needs_review=_needs_review_owned,
+                    )
+                except Exception as exc:
+                    await _fail_owned(task_id, f"Decision step failed: {exc}")
+                continue
+
             try:
                 selected_model, model_reason = await _select_model_for_user(
                     user_id=requesting_user_id,

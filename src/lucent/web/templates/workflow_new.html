@@ -1,5 +1,7 @@
 {% extends "base.html" %}
 
+{% from "partials/decision_config_editor.html" import decision_editor, decision_kind_toggle, decision_question_template %}
+
 {% block title %}New Workflow - Lucent{% endblock %}
 
 {% block content %}
@@ -258,12 +260,13 @@
                         <button type="button" class="remove-action rounded-md p-1.5 text-red-500 hover:bg-red-50 hover:text-red-700" title="Remove step" aria-label="Remove step"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg></button>
                     </div>
                 </div>
+                {{ decision_kind_toggle() }}
                 <div class="grid gap-4 lg:grid-cols-3">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">Task title</label>
                         <input name="action_title" placeholder="e.g. Check dependencies" class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
                     </div>
-                    <div>
+                    <div class="step-agent-only">
                         <label class="block text-sm font-medium text-gray-700 mb-1">Agent</label>
                         <select name="action_agent_type" class="action-agent w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
                             {% for agent in active_agents %}
@@ -279,7 +282,7 @@
                         <p class="mt-1 text-xs text-gray-400">Tasks with the same stage run in parallel.</p>
                     </div>
                 </div>
-                <div>
+                <div class="step-agent-only">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Instructions</label>
                     <textarea name="action_prompt" rows="5" placeholder="Tell the task agent exactly what to do and what output to record." class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none"></textarea>
                 </div>
@@ -289,11 +292,11 @@
                         <select name="action_priority" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select>
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Model override</label>
+                        <label class="block text-sm font-medium text-gray-700 mb-1 step-model-label">Model override</label>
                         <select name="action_model" class="action-model w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
                             <option value="" data-reasoning-efforts="">daemon default</option>
                             {% for model in available_models %}
-                            <option value="{{ model.id }}" data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}">{{ model.name }} ({{ model.id }})</option>
+                            <option value="{{ model.id }}" data-model-class="{{ model.model_class or 'language' }}" data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}">{{ model.name }} ({{ model.id }})</option>
                             {% endfor %}
                         </select>
                     </div>
@@ -304,7 +307,7 @@
                         </select>
                     </div>
                 </div>
-                <details class="rounded-lg border border-gray-200 bg-gray-50">
+                <details class="rounded-lg border border-gray-200 bg-gray-50 step-agent-only">
                     <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Sandbox and runtime</summary>
                     <div class="space-y-4 border-t border-gray-200 p-4">
                         <div class="grid gap-4 md:grid-cols-2">
@@ -346,7 +349,8 @@
                         </div>
                     </div>
                 </details>
-                <details class="rounded-lg border border-gray-200 bg-gray-50">
+                {{ decision_editor() }}
+                <details class="rounded-lg border border-gray-200 bg-gray-50 step-agent-only">
                     <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Structured output</summary>
                     <div class="space-y-4 border-t border-gray-200 p-4">
                                                 <div>
@@ -395,7 +399,11 @@
             <button type="submit" class="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-primary-200 hover:bg-primary-700"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>Create workflow</button>
         </div>
     </div>
+
+    {{ decision_question_template() }}
 </form>
+
+<script src="/static/workflow_decision_ui.js"></script>
 
 <script nonce="{{ request.state.csp_nonce }}">
 (function() {
@@ -673,6 +681,17 @@
     const scheduleType = document.getElementById('schedule_type');
     const actions = document.getElementById('actions');
     const addAction = document.getElementById('add-action');
+    const seedModelOptions = (() => {
+        const firstModel = actions.querySelector('.action-row .action-model');
+        return firstModel ? Array.from(firstModel.options).map(o => o.cloneNode(true)) : null;
+    })();
+    const decisionOpts = {
+        templateId: 'decision-question-template',
+        agentSelector: '.action-agent',
+        modelSelector: '.action-model',
+        modelOptionsSeed: seedModelOptions,
+        onModelSwap: root => refreshReasoning(root),
+    };
 
     function selectedTrigger() {
         const checked = document.querySelector('input[name="trigger_type"]:checked');
@@ -741,6 +760,7 @@
         const agentDefinition = row.querySelector('input[name="action_agent_definition_id"]');
         const syncAgentDefinition = () => {
             if (agentDefinition) agentDefinition.value = agent?.selectedOptions[0]?.dataset.definitionId || '';
+            if (window.lucentDecisionUI) window.lucentDecisionUI.syncDecision(row, decisionOpts);
         };
         if (remove) remove.addEventListener('click', () => {
             if (actions.querySelectorAll('.action-row').length === 1) return;
@@ -759,6 +779,8 @@
         });
         if (model) model.addEventListener('change', () => refreshReasoning(row));
         if (agent) agent.addEventListener('change', syncAgentDefinition);
+        const rowDecisionOpts = Object.assign({}, decisionOpts, { onAgentChange: syncAgentDefinition });
+        if (window.lucentDecisionUI) window.lucentDecisionUI.wireStep(row, rowDecisionOpts);
         syncAgentDefinition();
         refreshReasoning(row);
     }
@@ -783,6 +805,7 @@
         });
         clone.querySelector('input[name="action_stage"]').value = Math.max(...stages) + 1;
         clone.querySelector('input[name="action_output_retries"]').value = '1';
+        if (window.lucentDecisionUI) window.lucentDecisionUI.resetDecision(clone, decisionOpts);
         actions.appendChild(clone);
         wireAction(clone);
         refreshActionLabels();

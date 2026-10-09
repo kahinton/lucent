@@ -649,6 +649,11 @@ Args:
         tasks increasing ``sequence_order`` values.
     output_contract: Optional structured output contract dict:
         {json_schema: {...}, on_failure: fail|fallback|retry_then_fallback, max_retries: int}
+    decision_config: Optional decision-step payload — requires agent_type
+        'decision-step': {questions: [{name, type: noul|choice|score, instructions,
+        criteria?}], state?: {...}, model?: <decision model id>,
+        threshold_policy?: {questions: {name: {min}}, on_fail: fail_task|needs_review}}.
+        Dispatched to a System One decision model without an agent session.
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved or the sandbox template is invalid."""
@@ -666,6 +671,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         sandbox_template_id: str | None = None,
         sandbox_overrides: dict | None = None,
         output_contract: dict | None = None,
+        decision_config: dict | None = None,
     ) -> str:
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
@@ -692,8 +698,81 @@ if the agent type is not approved or the sandbox template is invalid."""
         if sequence_order < 0:
             return json.dumps({"error": "sequence_order must be >= 0"})
 
-        # Validate model against registry
-        if model:
+        # Decision-step pairing and payload validation. availability checks
+        # mirror the REST surface: a decision task needs an accessible
+        # decision-class model, and normal tool-capable model validation
+        # does not apply to it.
+        if decision_config or agent_type == "decision-step":
+            from lucent.db.models import (
+                ModelRepository,
+                decision_models_available_for_user,
+                get_authorized_models_pool,
+            )
+            from lucent.db.requests import validate_decision_config
+            from lucent.model_registry import validate_decision_model
+
+            try:
+                validate_decision_config(decision_config)
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+            if not decision_config:
+                return json.dumps(
+                    {"error": "agent_type 'decision-step' requires decision_config"}
+                )
+            if agent_type != "decision-step":
+                return json.dumps(
+                    {"error": "decision_config requires agent_type 'decision-step'"}
+                )
+            if output_contract:
+                return json.dumps(
+                    {
+                        "error": (
+                            "A decision-step task carries its own question "
+                            "schema — output_contract cannot be combined with "
+                            "decision_config"
+                        )
+                    }
+                )
+            if decision_config.get("model") and model:
+                return json.dumps(
+                    {
+                        "error": (
+                            "Set the decision model either via "
+                            "decision_config.model or the task's model field, "
+                            "not both"
+                        )
+                    }
+                )
+            decision_model = model or decision_config.get("model") or ""
+            model_pool_probe = await get_authorized_models_pool(
+                await _get_pool(), {"id": str(user_id), "organization_id": str(org_id)}
+            )
+            if decision_model:
+                error = validate_decision_model(decision_model)
+                if error:
+                    return json.dumps({"error": error})
+                if not await ModelRepository(model_pool_probe).get_usable_model(
+                    decision_model
+                ):
+                    return json.dumps({"error": "Model is not available to this user"})
+            else:
+                available = await decision_models_available_for_user(
+                    await _get_pool(), user_id=str(user_id), org_id=str(org_id)
+                )
+                if not available:
+                    return json.dumps(
+                        {
+                            "error": (
+                                "No enabled decision-class model is available "
+                                "to this user. Add and grant a decision model "
+                                "before creating decision steps."
+                            )
+                        }
+                    )
+
+        # Validate model against registry (chat tasks only — decision tasks
+        # validated above with the decision-class rules)
+        if model and not decision_config:
             from lucent.model_registry import validate_model, validate_reasoning_effort
 
             error = validate_model(model, require_tools=True)
@@ -877,6 +956,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 sandbox_config=sandbox_config,
                 requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
                 output_contract=output_contract,
+                decision_config=decision_config,
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
@@ -2248,13 +2328,16 @@ provided, the recommended model plus a selection reason."""
                 "specialized category such as fast, reasoning, agentic, or visual. "
                 "daemon-dispatched tasks require tool-capable models, because "
                 "agents receive MCP tools for memory/request operations. Never "
-                "assign a decision-class model to a task: decision models "
-                "(model_class 'decision', e.g. local System One models) answer "
-                "choice/noul/score questions outside chat workflows. Only "
-                "choose from enabled models in this list. If a model includes "
-                "reasoning_efforts, omit reasoning_effort for provider default, "
-                "choose low/minimal for cheap simple work, and high/xhigh/max only "
-                "for hard analysis where extra latency and cost are justified."
+                "set a decision-class model (model_class 'decision') as a normal "
+                "task's model — it would be swapped for the default chat model at "
+                "dispatch. To run System One checks (choice/noul/score) as part of "
+                "a request, create a decision step instead: agent_type "
+                "'decision-step' with decision_config carrying named questions "
+                "and an optional threshold_policy. Only choose from enabled "
+                "models in this list. If a model includes reasoning_efforts, "
+                "omit reasoning_effort for provider default, choose low/minimal "
+                "for cheap simple work, and high/xhigh/max only for hard "
+                "analysis where extra latency and cost are justified."
             ),
             "models": [
                 {

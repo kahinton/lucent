@@ -971,3 +971,212 @@ class TestListQueuedTasks:
 
         titles = {task["title"] for task in result["items"]}
         assert {"Ready stage", "Blocked stage"} <= titles
+
+
+# ============================================================================
+# create_task decision steps
+# ============================================================================
+
+
+class TestCreateTaskDecision:
+    """Decision-step payloads on create_task (agent_type 'decision-step')."""
+
+    def _decision_model_registry(self, monkeypatch, model_id: str):
+        """Expose a decision-class ModelInfo like a DB-loaded registry would."""
+        from lucent import model_registry
+        from lucent.model_registry import ModelInfo
+
+        model = ModelInfo(
+            id=model_id,
+            provider="ollama",
+            name="Nimble",
+            category="decision",
+            model_class="decision",
+            supports_tools=False,
+            engine="langchain",
+            enabled=True,
+        )
+        monkeypatch.setattr(model_registry, "_db_models", None)
+        monkeypatch.setattr(
+            model_registry, "_MODEL_BY_ID", {model.id: model}
+        )
+        return model
+
+    async def _seed_decision_model(self, db_pool, org_id, model_id):
+        """Org-shared decision row (owner NULL → accessible members probe)."""
+        from lucent.db.models import ModelRepository
+
+        return await ModelRepository(db_pool).create_model(
+            model_id=model_id,
+            provider="ollama",
+            name="Test decision model",
+            category="decision",
+            model_class="decision",
+            engine="langchain",
+            org_id=str(org_id),
+        )
+
+    async def _grant_org_read(self, db_pool, org_id, model_id, user_id):
+        """File the org-read clearance that drives the authorized pool."""
+        from uuid import UUID
+
+        await db_pool.execute(
+            """
+            INSERT INTO auth_clearances
+                (auth_id, role, principal_type, principal_id, granted_by)
+            SELECT m.auth_id, 'read', 'org', m.organization_id, $3
+            FROM models m WHERE m.id = $1 AND m.organization_id = $2
+            ON CONFLICT DO NOTHING
+            """,
+            model_id,
+            UUID(str(org_id)),
+            UUID(str(user_id)),
+        )
+
+    def _upsert_decision_agent_sql(self):
+        return (
+            "INSERT INTO agent_definitions "
+            "(name, organization_id, content, status, owner_user_id) "
+            "VALUES ('decision-step', $1, 'test decision definition', "
+            "'active', $2) "
+            "ON CONFLICT (name, organization_id) DO UPDATE SET "
+            "status = 'active', owner_user_id = EXCLUDED.owner_user_id"
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_decision_task(self, mcp, auth_user, db_pool, monkeypatch):
+        request = await _call(mcp, "create_request", {"title": "Decision parent"})
+        model_id = f"decision-{uuid4()}"
+        self._decision_model_registry(monkeypatch, model_id)
+        await self._seed_decision_model(db_pool, auth_user["organization_id"], model_id)
+        await self._grant_org_read(
+            db_pool, auth_user["organization_id"], model_id, auth_user["id"]
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                self._upsert_decision_agent_sql(),
+                auth_user["organization_id"],
+                auth_user["id"],
+            )
+        try:
+            result = await _call(
+                mcp,
+                "create_task",
+                {
+                    "request_id": request["id"],
+                    "title": "Decision step",
+                    "agent_type": "decision-step",
+                    "decision_config": {
+                        "questions": [
+                            {
+                                "name": "fulfilled",
+                                "type": "noul",
+                                "instructions": "Was it fulfilled?",
+                            }
+                        ],
+                        "model": model_id,
+                    },
+                },
+            )
+        finally:
+            from lucent.db.models import ModelRepository
+
+            await ModelRepository(db_pool).delete_model(model_id)
+        assert "id" in result, result
+        assert result["agent_type"] == "decision-step"
+
+    @pytest.mark.asyncio
+    async def test_decision_config_pairing_errors(self, mcp, auth_user):
+        request = await _call(mcp, "create_request", {"title": "Decision pairing"})
+        config = {
+            "questions": [
+                {"name": "q", "type": "noul", "instructions": "check"}
+            ]
+        }
+
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request["id"],
+                "title": "Wrong pairing",
+                "agent_type": "code",
+                "decision_config": config,
+            },
+        )
+        assert "decision-step" in result["error"]
+
+        result = await _call(
+            mcp,
+            "create_task",
+            {"request_id": request["id"], "title": "No config",
+             "agent_type": "decision-step"},
+        )
+        assert "requires decision_config" in result["error"]
+
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request["id"],
+                "title": "Both contracts",
+                "agent_type": "decision-step",
+                "decision_config": config,
+                "output_contract": {"json_schema": {"type": "object"}},
+            },
+        )
+        assert "cannot be combined" in result["error"]
+
+        choice_config = {
+            "questions": [
+                {
+                    "name": "route",
+                    "type": "choice",
+                    "instructions": "pick",
+                    "criteria": {"a": "", "b": ""},
+                }
+            ],
+            "threshold_policy": {"questions": {"route": 0.5}},
+        }
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request["id"],
+                "title": "Choice threshold",
+                "agent_type": "decision-step",
+                "decision_config": choice_config,
+            },
+        )
+        assert "cannot carry a threshold" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_decision_step_needs_available_model(
+        self, mcp, auth_user, db_pool, monkeypatch
+    ):
+        request = await _call(mcp, "create_request", {"title": "Decision probe"})
+        config = {
+            "questions": [
+                {"name": "q", "type": "noul", "instructions": "check"}
+            ]
+        }
+
+        import lucent.db.models as db_models
+
+        async def _empty_probe(*_args, **_kwargs):
+            return []
+
+        monkeypatch.setattr(
+            db_models, "decision_models_available_for_user", _empty_probe
+        )
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request["id"],
+                "title": "No decision model",
+                "agent_type": "decision-step",
+                "decision_config": config,
+            },
+        )
+        assert "No enabled decision-class model" in result["error"]

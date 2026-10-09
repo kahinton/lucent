@@ -179,6 +179,7 @@ class TaskCreate(BaseModel):
     requesting_user_id: str | None = None
     output_contract: dict | None = None  # Optional structured output contract (JSON Schema)
     output_schema: dict | None = None  # Backwards-compatible alias for output_contract.json_schema
+    decision_config: dict | None = None  # Decision-step payload (System One questions)
 
 
 class TaskEventCreate(BaseModel):
@@ -663,16 +664,69 @@ async def create_task(
         requesting_user_id = body.requesting_user_id
 
     # Validate model against registry (matches MCP create_task behavior)
+    if body.decision_config:
+        from lucent.db.models import decision_models_available_for_user
+        from lucent.db.requests import validate_decision_config
+        from lucent.model_registry import validate_decision_model
+
+        try:
+            validate_decision_config(body.decision_config)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        if body.output_contract or body.output_schema:
+            raise HTTPException(
+                422,
+                "A decision-step task carries its own question schema — "
+                "output_contract cannot be combined with decision_config",
+            )
+        if body.agent_type != "decision-step":
+            raise HTTPException(
+                422,
+                "decision_config requires agent_type 'decision-step'",
+            )
+        if body.decision_config.get("model") and body.model:
+            raise HTTPException(
+                422,
+                "Set the decision model either via decision_config.model or "
+                "the task's model field, not both",
+            )
+        decision_model = (
+            body.model or body.decision_config.get("model") or ""
+        )
+        if decision_model:
+            error = validate_decision_model(decision_model)
+            if error:
+                raise HTTPException(422, error)
+            await _require_model_access(pool, decision_model, user)
+        else:
+            available = await decision_models_available_for_user(
+                pool, user_id=str(user.id), org_id=org_id, requester_role=user.role
+            )
+            if not available:
+                raise HTTPException(
+                    422,
+                    "No enabled decision-class model is available to this "
+                    "user. Add and grant a decision model (Settings → Models) "
+                    "before creating decision steps.",
+                )
+    elif body.agent_type == "decision-step":
+        raise HTTPException(
+            422,
+            "agent_type 'decision-step' requires decision_config carrying "
+            "the questions to answer",
+        )
     if body.model:
         from lucent.model_registry import validate_model, validate_reasoning_effort
 
-        error = validate_model(body.model, require_tools=True)
-        if error:
-            raise HTTPException(422, error)
+        if not body.decision_config:
+            error = validate_model(body.model, require_tools=True)
+            if error:
+                raise HTTPException(422, error)
         await _require_model_access(pool, body.model, user)
-        effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
-        if effort_error:
-            raise HTTPException(422, effort_error)
+        if body.reasoning_effort and not body.decision_config:
+            effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
+            if effort_error:
+                raise HTTPException(422, effort_error)
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 
@@ -737,6 +791,7 @@ async def create_task(
             sandbox_config=body.sandbox_config,
             requesting_user_id=requesting_user_id,
             output_contract=output_contract,
+            decision_config=body.decision_config,
         )
         task["sandboxes_enabled"] = org_sandboxes_enabled
         task["custom_tooling_enabled"] = custom_tooling_enabled(organization_id=org_id)

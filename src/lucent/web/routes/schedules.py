@@ -12,7 +12,7 @@ from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.rbac import Role
 
-from ._shared import _check_csrf, get_user_context, templates
+from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
 router = APIRouter()
 
@@ -224,6 +224,7 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
             "id": model["id"],
             "name": model["name"] or model["id"],
             "reasoning_efforts": list(model.get("reasoning_efforts") or []),
+            "model_class": model.get("model_class") or "language",
         }
         for model in model_rows
     ]
@@ -302,6 +303,236 @@ async def _validate_action_template(repo, template_id: str | None) -> str | None
     return template_id
 
 
+def _parse_step_decision_config(
+    raw_json: str, *, step_number: int, agent_type: str
+) -> dict | None:
+    """Parse + validate the wizard's per-step decision-questions JSON.
+
+    Required whenever the step's agent is ``decision-step``; rejected for
+    any other agent type (the payload only pairs with decision steps).
+    """
+    from lucent.db.requests import validate_decision_config
+    from lucent.model_registry import validate_decision_model
+
+    if not raw_json:
+        if agent_type == "decision-step":
+            raise HTTPException(
+                422,
+                f"Step {step_number} uses the decision-step agent — add at "
+                "least one question in the Decision editor",
+            )
+        return None
+    if agent_type != "decision-step":
+        raise HTTPException(
+            422,
+            f"Step {step_number} has decision questions JSON but its agent "
+            f"is '{agent_type}' — decision questions require the "
+            "decision-step agent",
+        )
+    try:
+        config = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            422,
+            f"Invalid decision questions JSON for step {step_number}: {exc.msg}",
+        ) from exc
+    try:
+        validate_decision_config(config)
+    except ValueError as exc:
+        raise HTTPException(
+            422, f"Step {step_number} decision questions: {exc}"
+        ) from exc
+    if config.get("model"):
+        model_error = validate_decision_model(config["model"])
+        if model_error:
+            raise HTTPException(422, f"Step {step_number} decision model: {model_error}")
+    return config
+
+
+def _decision_line_items(text: str) -> list[str]:
+    """Non-empty stripped lines (score legend levels)."""
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _row_slice(slices: list[list[dict]], idx: int) -> list[dict]:
+    return slices[idx] if idx < len(slices) else []
+
+
+def _slice_decision_questions(form, counts: list[str]) -> list[list[dict]]:
+    """Slice the global per-question getlists into per-step row groups.
+
+    The step cards carry one hidden ``action_decision_q_count`` each; the
+    global ``decision_q_*`` lists are consumed sequentially so steps can be
+    added/reordered as whole cards without reindexing fields.
+    """
+    names = _form_list(form, "decision_q_name")
+    qtypes = _form_list(form, "decision_q_type")
+    instructions = _form_list(form, "decision_q_instructions")
+    criteria = _form_list(form, "decision_q_criteria")
+    mins = _form_list(form, "decision_q_min")
+    cursor = 0
+    slices: list[list[dict]] = []
+    for raw_count in counts:
+        try:
+            count = max(0, int(raw_count))
+        except ValueError:
+            count = 0
+        rows: list[dict] = []
+        for position in range(count):
+            index = cursor + position
+            rows.append(
+                {
+                    "name": _form_value(names, index),
+                    "type": _form_value(qtypes, index, "noul"),
+                    "instructions": _form_value(instructions, index),
+                    "criteria": _form_value(criteria, index),
+                    "min": _form_value(mins, index),
+                }
+            )
+        cursor += count
+        slices.append(rows)
+    return slices
+
+
+def _row_has_decision_content(*, raw_json: str, rows: list[dict]) -> bool:
+    if raw_json.strip():
+        return True
+    return any(
+        row["name"] or row["instructions"] or row["criteria"] or row["min"]
+        for row in rows
+    )
+
+
+def _build_decision_config_from_rows(
+    rows: list[dict], *, on_fail: str, state_text: str, step_number: int
+) -> dict:
+    """Assemble a decision_config from the wizard's question-editor rows."""
+    from lucent.db.requests import validate_decision_config
+
+    questions: list[dict[str, Any]] = []
+    thresholds: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        name = row["name"].strip()
+        qtype = row["type"] or "noul"
+        if qtype == "choice" and row["min"].strip():
+            raise HTTPException(
+                422,
+                f"Step {step_number}: '{name or 'question'}' is a choice "
+                "question — choice answers are classifications and cannot "
+                "carry a threshold. Leave the minimum blank.",
+            )
+        question: dict[str, Any] = {
+            "name": name,
+            "type": qtype,
+            "instructions": row["instructions"].strip(),
+        }
+        if qtype == "score":
+            levels = _decision_line_items(row["criteria"])
+            if levels:
+                question["criteria"] = levels
+        elif qtype == "choice":
+            options = _parse_env_vars(row["criteria"])
+            if options:
+                question["criteria"] = options
+        questions.append(question)
+        if qtype != "choice" and row["min"].strip():
+            try:
+                minimum = float(row["min"].strip())
+            except ValueError:
+                raise HTTPException(
+                    422,
+                    f"Step {step_number}: the minimum for '{name or 'question'}' "
+                    "must be a number — for a noul question 0–1 (e.g. 0.6), "
+                    "for a score question a level index (0 = lowest)",
+                ) from None
+            thresholds[name] = {"min": minimum}
+
+    on_fail_value = on_fail.strip()
+    if on_fail_value and on_fail_value not in ("fail_task", "needs_review"):
+        raise HTTPException(
+            422,
+            f"Step {step_number}: invalid decision failure action — use "
+            "'Fail the step' or 'Route the step for review'",
+        )
+    if thresholds:
+        threshold_policy: dict[str, Any] = {
+            "questions": thresholds,
+            "on_fail": on_fail_value or "fail_task",
+        }
+    elif on_fail_value:
+        raise HTTPException(
+            422,
+            f"Step {step_number}: you chose a failure action but set no "
+            "question minimum — set a minimum for at least one question, "
+            "or leave the failure action on 'Record answers only'",
+        )
+    else:
+        threshold_policy = None
+
+    config: dict[str, Any] = {"questions": questions}
+    state = _parse_env_vars(state_text)
+    if state:
+        config["state"] = state
+    if threshold_policy:
+        config["threshold_policy"] = threshold_policy
+    try:
+        validate_decision_config(config)
+    except ValueError as exc:
+        raise HTTPException(
+            422, f"Step {step_number} decision questions: {exc}"
+        ) from exc
+    return config
+
+
+def _parse_step_decision(
+    *,
+    raw_json: str,
+    rows: list[dict],
+    on_fail: str,
+    state_text: str,
+    step_number: int,
+    agent_type: str,
+    existing_config: dict | None = None,
+) -> dict | None:
+    """Resolve one wizard step's decision_config.
+
+    Precedence: non-empty raw JSON wins, then non-blank builder question
+    rows, then (edit only) the step's existing config kept untouched.
+    """
+    if agent_type != "decision-step":
+        if _row_has_decision_content(raw_json=raw_json, rows=rows):
+            raise HTTPException(
+                422,
+                f"Step {step_number} has decision questions but its agent "
+                f"is '{agent_type}' — decision questions require the "
+                "decision-step agent",
+            )
+        return None
+    if raw_json.strip():
+        return _parse_step_decision_config(
+            raw_json, step_number=step_number, agent_type=agent_type,
+        )
+    real_rows = [
+        row
+        for row in rows
+        if row["name"] or row["instructions"] or row["criteria"] or row["min"]
+    ]
+    if real_rows:
+        return _build_decision_config_from_rows(
+            real_rows,
+            on_fail=on_fail,
+            state_text=state_text,
+            step_number=step_number,
+        )
+    if existing_config is not None:
+        return existing_config
+    raise HTTPException(
+        422,
+        f"Step {step_number} uses the decision-step agent — add at least "
+        "one question in the Decision editor",
+    )
+
+
 @router.post("/workflows/new", response_class=HTMLResponse)
 async def workflow_create_from_wizard(request: Request):
     """Create a workflow from the non-technical wizard form."""
@@ -358,6 +589,13 @@ async def workflow_create_from_wizard(request: Request):
     action_output_schemas = _form_list(form, "action_output_schema_json")
     action_output_failures = _form_list(form, "action_output_failure")
     action_output_retries = _form_list(form, "action_output_retries")
+    action_decision_configs = _form_list(form, "action_decision_config_json")
+    action_decision_on_fail = _form_list(form, "action_decision_on_fail")
+    action_decision_states = _form_list(form, "action_decision_state_json")
+    action_decision_q_counts = _form_list(form, "action_decision_q_count")
+    action_decision_questions = _slice_decision_questions(
+        form, action_decision_q_counts
+    )
     from lucent.access_control import AccessControlService
     from lucent.db.sandbox_template import (
         SandboxTemplateRepository,
@@ -374,13 +612,24 @@ async def workflow_create_from_wizard(request: Request):
     for idx in range(max_actions):
         action_title = _form_value(action_titles, idx, title)
         action_prompt = _form_value(action_prompts, idx, description)
-        if not action_title and not action_prompt:
+        if not action_title and not action_prompt and not _row_has_decision_content(
+            raw_json=_form_value(action_decision_configs, idx),
+            rows=_row_slice(action_decision_questions, idx),
+        ):
             continue
         action_model = _form_value(action_models, idx) or None
         if action_model and not await access_control.can_access(
             str(user.id), "model", action_model, str(user.organization_id)
         ):
             raise HTTPException(403, "Model is not available to this user")
+        if action_model and (
+            _form_value(action_agents, idx, "code") or "code"
+        ) == "decision-step":
+            from lucent.model_registry import validate_decision_model
+
+            model_error = validate_decision_model(action_model)
+            if model_error:
+                raise HTTPException(422, model_error)
         try:
             stage = max(0, int(_form_value(action_stages, idx, str(idx + 1))) - 1)
         except ValueError as exc:
@@ -433,12 +682,27 @@ async def workflow_create_from_wizard(request: Request):
                 "fail", "fallback", "retry_then_fallback"
             }:
                 raise HTTPException(422, f"Invalid output failure policy for step {idx + 1}")
+        action_agent = _form_value(action_agents, idx, "code") or "code"
+        decision_cfg = _parse_step_decision(
+            raw_json=_form_value(action_decision_configs, idx),
+            rows=_row_slice(action_decision_questions, idx),
+            on_fail=_form_value(action_decision_on_fail, idx),
+            state_text=_form_value(action_decision_states, idx),
+            step_number=idx + 1,
+            agent_type=action_agent,
+        )
+        if decision_cfg and output_contract:
+            raise HTTPException(
+                422,
+                f"Step {idx + 1} combines decision questions with an output "
+                "contract — a decision step carries its own question schema",
+            )
         actions.append(
             {
                 "action_type": "task",
                 "title": action_title or f"{title} action {idx + 1}",
                 "description": action_prompt or description,
-                "agent_type": _form_value(action_agents, idx, "code") or "code",
+                "agent_type": action_agent,
                 "agent_definition_id": _form_value(action_agent_definition_ids, idx) or None,
                 "model": action_model,
                 "reasoning_effort": _form_value(action_efforts, idx) or None,
@@ -447,6 +711,7 @@ async def workflow_create_from_wizard(request: Request):
                 ),
                 "sandbox_config": sandbox_config or None,
                 "output_contract": output_contract,
+                "decision_config": decision_cfg,
                 "priority": _form_value(
                     action_priorities,
                     idx,
@@ -594,6 +859,7 @@ async def schedule_detail(
             "id": model["id"],
             "name": model["name"] or model["id"],
             "reasoning_efforts": list(model.get("reasoning_efforts") or []),
+            "model_class": model.get("model_class") or "language",
         }
         for model in model_rows
     ]
@@ -852,13 +1118,24 @@ async def schedule_edit(request: Request, schedule_id: str):
         action_output_schemas = _form_list(form, "action_output_schema_json")
         action_output_failures = _form_list(form, "action_output_failure")
         action_output_retries = _form_list(form, "action_output_retries")
+        action_decision_configs = _form_list(form, "action_decision_config_json")
+        action_decision_on_fail = _form_list(form, "action_decision_on_fail")
+        action_decision_states = _form_list(form, "action_decision_state_json")
+        action_decision_q_counts = _form_list(form, "action_decision_q_count")
+        action_decision_questions = _slice_decision_questions(
+            form, action_decision_q_counts
+        )
         existing_actions = _form_list(form, "action_existing_json")
         from lucent.access_control import AccessControlService
         from lucent.db.sandbox_template import (
             SandboxTemplateRepository,
             get_authorized_templates_pool,
         )
-        from lucent.model_registry import validate_model, validate_reasoning_effort
+        from lucent.model_registry import (
+            validate_decision_model,
+            validate_model,
+            validate_reasoning_effort,
+        )
 
         access_control = AccessControlService(pool)
         template_probe_repo = SandboxTemplateRepository(
@@ -872,10 +1149,14 @@ async def schedule_edit(request: Request, schedule_id: str):
             action_prompt = _form_value(action_prompts, idx)
             if not action_title and not action_prompt:
                 continue
+            step_agent = _form_value(action_agents, idx, "code") or "code"
             action_model = _form_value(action_models, idx) or None
             action_effort = _form_value(action_efforts, idx) or None
             if action_model:
-                model_error = validate_model(action_model, require_tools=True)
+                if step_agent == "decision-step":
+                    model_error = validate_decision_model(action_model)
+                else:
+                    model_error = validate_model(action_model, require_tools=True)
                 if model_error:
                     raise HTTPException(422, model_error)
                 if not await access_control.can_access(
@@ -883,7 +1164,7 @@ async def schedule_edit(request: Request, schedule_id: str):
                 ):
                     raise HTTPException(403, "Model is not available to this user")
                 effort_error = validate_reasoning_effort(action_model, action_effort)
-                if effort_error:
+                if effort_error and step_agent != "decision-step":
                     raise HTTPException(422, effort_error)
             elif action_effort:
                 raise HTTPException(422, "reasoning_effort requires model")
@@ -959,13 +1240,44 @@ async def schedule_edit(request: Request, schedule_id: str):
                     raise HTTPException(422, f"Invalid output failure policy for step {idx + 1}")
             elif output_schema_submitted:
                 output_contract = None
+            step_agent = _form_value(action_agents, idx, "code") or "code"
+            raw_decision = _form_value(action_decision_configs, idx)
+            step_rows = _row_slice(action_decision_questions, idx)
+            if step_agent != "decision-step":
+                if _row_has_decision_content(raw_json=raw_decision, rows=step_rows):
+                    raise HTTPException(
+                        422,
+                        f"Step {idx + 1} has decision questions but its agent "
+                        f"is '{step_agent}' — decision questions require the "
+                        "decision-step agent",
+                    )
+                # Switching the step away from decision-step clears its stale
+                # decision payload instead of failing downstream at trigger.
+                decision_cfg = None
+            else:
+                decision_cfg = _parse_step_decision(
+                    raw_json=raw_decision,
+                    rows=step_rows,
+                    on_fail=_form_value(action_decision_on_fail, idx),
+                    state_text=_form_value(action_decision_states, idx),
+                    step_number=idx + 1,
+                    agent_type=step_agent,
+                    existing_config=existing_action.get("decision_config"),
+                )
+            if decision_cfg and output_contract:
+                raise HTTPException(
+                    422,
+                    f"Step {idx + 1} combines decision questions with an "
+                    "output contract — a decision step carries its own "
+                    "question schema",
+                )
             actions.append(
                 {
                     **existing_action,
                     "action_type": "task",
                     "title": action_title or f"{sched['title']} step {idx + 1}",
                     "description": action_prompt,
-                    "agent_type": _form_value(action_agents, idx, "code") or "code",
+                    "agent_type": step_agent,
                     "agent_definition_id": _form_value(action_agent_definition_ids, idx) or None,
                     "model": action_model,
                     "reasoning_effort": action_effort,
@@ -975,6 +1287,7 @@ async def schedule_edit(request: Request, schedule_id: str):
                     ),
                     "sandbox_config": sandbox_config or None,
                     "output_contract": output_contract,
+                    "decision_config": decision_cfg,
                     "priority": _form_value(
                         action_priorities, idx, sched.get("priority") or "medium"
                     )

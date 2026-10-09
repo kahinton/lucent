@@ -586,3 +586,39 @@ class ModelRepository:
                 "SELECT id FROM models WHERE is_enabled = true"
             )
         return {r["id"] for r in rows}
+
+
+async def decision_models_available_for_user(
+    pool: asyncpg.Pool,
+    *,
+    user_id: str,
+    org_id: str,
+    requester_role: str = "member",
+) -> list[str]:
+    """Ids of decision-class models cleared for use by the principal.
+
+    The "is a decision model available to this user" probe shared by every
+    decision-step creation surface (REST, MCP create_task, workflow
+    trigger/wizard): decision-step tasks are gated on model availability
+    rather than a feature flag. Reads run through the same
+    clearance-driven, default-deny authorized pool the model picker uses.
+    """
+    from lucent.db.pool import get_authorized_pool_for_user
+
+    authorized = await get_authorized_pool_for_user(
+        pool,
+        {"id": str(user_id), "organization_id": str(org_id)},
+        MODELS_AUTH_POLICY,
+        "read",
+    )
+    result = await ModelRepository(authorized).list_models_accessible_by(
+        str(user_id),
+        str(org_id),
+        requester_role=requester_role,
+        enabled_only=True,
+    )
+    return [
+        str(row["id"])
+        for row in result["items"]
+        if row.get("model_class") == "decision"
+    ]

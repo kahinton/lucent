@@ -11,6 +11,7 @@ from lucent.tools.memories import _get_current_user_context
 FALLBACK_WORKFLOW_AGENT_TYPES = {
     "assessment",
     "code",
+    "decision-step",
     "documentation",
     "lucent",
     "memory",
@@ -431,6 +432,54 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
                     return json.dumps(
                         {"error": "server_function actions are reserved for built-in workflows"}
                     )
+                if action.get("action_type", "task") == "task" and (
+                    action.get("decision_config") or action.get("agent_type") == "decision-step"
+                ):
+                    from lucent.db.requests import validate_decision_config
+
+                    if action.get("agent_type") and action["agent_type"] != "decision-step":
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"actions_json[{idx}] '{action.get('title')}' "
+                                    f"sets decision_config but names agent_type "
+                                    f"'{action['agent_type']}' — a decision step "
+                                    "must use agent_type 'decision-step'"
+                                )
+                            }
+                        )
+                    try:
+                        validate_decision_config(action.get("decision_config"))
+                    except ValueError as exc:
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"actions_json[{idx}] '{action.get('title')}' "
+                                    f"has an invalid decision_config: {exc}"
+                                )
+                            }
+                        )
+                    if not action.get("decision_config"):
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"actions_json[{idx}] '{action.get('title')}' "
+                                    "uses agent_type 'decision-step' without "
+                                    "decision_config"
+                                )
+                            }
+                        )
+                    if action.get("output_contract") or action.get("output_schema"):
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"actions_json[{idx}] '{action.get('title')}' "
+                                    "combines decision_config with an output "
+                                    "contract — a decision step carries its own "
+                                    "question schema"
+                                )
+                            }
+                        )
                 normalized_actions.append(action)
             actions = normalized_actions
             try:

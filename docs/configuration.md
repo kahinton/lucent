@@ -278,6 +278,32 @@ If every asked question scores at or above the threshold, the request is **auto-
 
 The gate is fail-open: disabled flag, no available decision model, or an endpoint error falls back to the standard review. Requests with failed/`needs_review` tasks, linked memories requiring review-agent updates, or a `target_repo` never auto-approve — the pre-screen findings still surface, but the full review runs.
 
+#### Decision steps as tasks
+
+Decision-class models can also run as ordinary dispatchable tasks (`agent_type="decision-step"`) instead of a chat session, both created directly on a request and as workflow actions. Availability is not feature-flagged: a step is addable when at least one decision-class model is accessible to the requesting principal, and the daemon re-checks access at dispatch.
+
+The step is configured by a `decision_config` JSON document (validated at every creation surface — REST `POST /api/requests/{id}/tasks`, MCP `create_task`, workflow actions, and the workflow wizard):
+
+```json
+{
+  "questions": [
+    {"name": "report_complete", "type": "noul", "instructions": "Did the prior step finish the audit?"}
+  ],
+  "state": {"extra_hint": "focus on the security section"},
+  "model": "nimble",
+  "threshold_policy": {"questions": {"report_complete": {"min": 0.6}}, "on_fail": "fail_task"}
+}
+```
+
+- `questions` — 1–64 ordered questions; `noul` (probability), `score` (2–26 legend levels), or `choice` (2–255 options, classification — never thresholded). Names ≤128 chars, unique.
+- `state` — optional literal string fields merged last, over the generated state.
+- `threshold_policy` — optional per-question minimums (`{"min": 0.6}` or a bare float) plus `on_fail`: `"fail_task"` (default) fails the task on a miss and blocks downstream stages, or `"needs_review"` routes the step to review. Without a policy, answers are always recorded as output regardless of score.
+- `output_contract` and `decision_config` are mutually exclusive (schema-shaped output vs. decision answers).
+
+In the workflow wizard and the workflow edit page, every step card carries a visible two-way kind toggle — **Agent task** vs. **Decision check** — that reshapes the card: Decision check reveals a structured Decision editor (per-question rows: name, type with an explanation of what the type means, instructions, per-type options, optional minimum), a failure-action select for when a minimum is missed, and a collapsed Advanced section holding extra state fields and the raw `decision_config` JSON (which still overrides the fields above when non-empty), while the instructions, agent select, sandbox, and structured-output controls hide and the step's model list swaps to decision-class models — or "Daemon decision default (resolves at dispatch)". Agent task keeps the ordinary agent form and full chat-model list; the underlying form fields are unchanged either way (the toggle only drives the step's agent type), saving a decision step with the wrong kind still fails with a step-named validation message, and toggling back does not discard typed questions.
+
+At dispatch the daemon claims the task, builds state from the request, the task itself, and completed sibling tasks' results (a decision step can score an upstream step's output against it), then answers all questions in a single `/v1/systemone` call. The answers land as the task's human-readable result plus a structured payload (`result_structured`: answers, scores, choices, per-question thresholds) that downstream task context and the reviewer can read. Decision-model token usage is recorded under `engine="decision"`. A decision step never inherits a chat model default.
+
 #### Approval Flow
 
 Requests go through a two-stage gate:

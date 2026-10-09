@@ -492,3 +492,102 @@ class TestGetScheduleDetails:
             {"schedule_id": "00000000-0000-0000-0000-000000000000"},
         )
         assert "error" in result
+
+
+# ============================================================================
+# create_workflow decision steps
+# ============================================================================
+
+
+class TestCreateWorkflowDecisionSteps:
+    """Decision-step actions on create_workflow (agent_type 'decision-step')."""
+
+    def test_fallback_agent_types_include_decision_step(self):
+        assert "decision-step" in FALLBACK_WORKFLOW_AGENT_TYPES
+
+    def _decision_agent_sql(self, org_id, user_id):
+        return (
+            "INSERT INTO agent_definitions "
+            "(name, organization_id, content, status, owner_user_id) "
+            "VALUES ('decision-step', $1, 'test decision definition', "
+            "'active', $2) "
+            "ON CONFLICT (name, organization_id) DO UPDATE SET "
+            "status = 'active', owner_user_id = EXCLUDED.owner_user_id",
+            (str(org_id), str(user_id)),
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_workflow_accepts_decision_step(self, mcp, auth_user, db_pool):
+        sql, params = self._decision_agent_sql(auth_user["organization_id"], auth_user["id"])
+        async with db_pool.acquire() as conn:
+            await conn.execute(sql, *params)
+
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Decision workflow",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "task",
+                            "title": "Gate the audit",
+                            "agent_type": "decision-step",
+                            "sequence_order": 1,
+                            "decision_config": {
+                                "questions": [
+                                    {
+                                        "name": "report_complete",
+                                        "type": "noul",
+                                        "instructions": "The audit is complete.",
+                                    }
+                                ],
+                                "threshold_policy": {
+                                    "questions": {"report_complete": {"min": 0.6}},
+                                    "on_fail": "fail_task",
+                                },
+                            },
+                        }
+                    ]
+                ),
+            },
+        )
+        assert "id" in result, result
+        actions = result["actions"]
+        if isinstance(actions, str):
+            actions = json.loads(actions)
+        assert actions[0]["agent_type"] == "decision-step"
+        assert actions[0]["decision_config"]["questions"][0]["name"] == ("report_complete")
+
+    @pytest.mark.asyncio
+    async def test_create_workflow_rejects_bad_decision_config(self, mcp, auth_user):
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Bad decision workflow",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "task",
+                            "title": "Gate it",
+                            "agent_type": "decision-step",
+                            "decision_config": {
+                                "questions": [
+                                    {
+                                        "name": "q",
+                                        "type": "noul",
+                                        "instructions": "check",
+                                    }
+                                ],
+                                "threshold_policy": {"questions": {"missing": {"min": 0.5}}},
+                            },
+                        }
+                    ]
+                ),
+            },
+        )
+        assert "error" in result
+        assert "unknown question" in result["error"].lower()

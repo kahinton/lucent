@@ -1,5 +1,6 @@
 """Tests for first-class workflow behavior layered on schedules."""
 
+import json
 from uuid import uuid4
 
 import httpx
@@ -193,3 +194,191 @@ async def test_webhook_workflows_are_not_due_schedules(
     assert str(workflow["id"]) not in {str(item["id"]) for item in due}
     assert workflow["next_run_at"] is None
     assert workflow["status"] == "active"
+
+
+# ── Decision steps (decision-step agent + decision_config) ───────────────
+
+
+async def _insert_decision_agent(db_pool, org_id: str, user_id: str) -> None:
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_definitions (
+                name, description, content, status, scope,
+                organization_id, created_by, owner_user_id
+            )
+            VALUES (
+                'decision-step', 'test decision agent',
+                'decision agent content', 'active', 'instance',
+                $1::uuid, $2::uuid, $2::uuid
+            )
+            ON CONFLICT (name, organization_id) DO UPDATE
+            SET status = 'active', updated_at = now()
+            """,
+            org_id,
+            user_id,
+        )
+
+
+_DECISION_CONFIG = {
+    "questions": [
+        {
+            "name": "report_complete",
+            "type": "noul",
+            "instructions": "The prior step finished the audit.",
+        }
+    ],
+    "threshold_policy": {"questions": {"report_complete": {"min": 0.6}}, "on_fail": "fail_task"},
+}
+
+
+@pytest.mark.asyncio
+async def test_workflow_decision_step_materializes_as_task(
+    db_pool,
+    test_organization,
+    test_user,
+    workflow_cleanup,
+):
+    """A workflow decision action creates a decision-step task with config."""
+    from lucent.api.routers.schedules import _trigger_schedule_execution
+
+    org_id = str(test_organization["id"])
+    user_id = str(test_user["id"])
+    await _insert_code_agent(db_pool, org_id, user_id)
+    await _insert_decision_agent(db_pool, org_id, user_id)
+
+    repo = ScheduleRepository(db_pool)
+    workflow = await repo.create_schedule(
+        title="Decision workflow",
+        org_id=org_id,
+        schedule_type="webhook",
+        trigger_type="webhook",
+        description="Run an agent then a decision gate.",
+        created_by=user_id,
+        webhook_secret_hash=webhook_secret_hash("dsecret"),
+        request_template={
+            "title_prefix": "[Workflow]",
+            "title": "Decision run",
+            "description": "Two-stage run.",
+        },
+        actions=[
+            {
+                "action_type": "task",
+                "title": "Do the work",
+                "description": "Produce the audit.",
+                "agent_type": "code",
+                "sequence_order": 0,
+            },
+            {
+                "action_type": "task",
+                "title": "Gate the audit",
+                "description": "Score the audit output.",
+                "agent_type": "decision-step",
+                "sequence_order": 1,
+                "decision_config": _DECISION_CONFIG,
+            },
+        ],
+        review_instructions="Check outputs.",
+    )
+
+    result = await _trigger_schedule_execution(workflow["id"], None, pool=db_pool, force=True)
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, agent_type, sequence_order, decision_config, model
+               FROM tasks WHERE request_id = $1 ORDER BY sequence_order""",
+            result["request"]["id"],
+        )
+    by_agent = {row["agent_type"]: dict(row) for row in rows}
+    assert "decision-step" in by_agent
+    decision_task = by_agent["decision-step"]
+    assert str(decision_task["sequence_order"]) == str(1)
+    stored = decision_task["decision_config"]
+    stored = json.loads(stored) if isinstance(stored, str) else stored
+    assert stored == _DECISION_CONFIG
+    # A decision step never inherits the schedule's model default — pinned
+    # (cleared here since no override was authored either).
+    assert decision_task.get("model") in (None, "")
+
+
+@pytest.mark.asyncio
+async def test_workflow_decision_step_raises_on_bad_config(
+    db_pool,
+    test_organization,
+    test_user,
+    workflow_cleanup,
+):
+    """Authoring-time misses surface at trigger as a run failure (RuntimeError)."""
+    from lucent.api.routers.schedules import _trigger_schedule_execution
+    from lucent.db.requests import validate_decision_config
+
+    # Invalid shape (choice question thresholded) — authoring surfaces reject
+    # it before storage; a direct repo write must still fail the run loud.
+    bad = {
+        "questions": [
+            {
+                "name": "route",
+                "type": "choice",
+                "instructions": "pick",
+                "criteria": {"a": "", "b": ""},
+            }
+        ],
+        "threshold_policy": {"questions": {"route": 0.5}},
+    }
+    with pytest.raises(ValueError):
+        validate_decision_config(bad)
+
+    org_id = str(test_organization["id"])
+    user_id = str(test_user["id"])
+    await _insert_decision_agent(db_pool, org_id, user_id)
+    repo = ScheduleRepository(db_pool)
+    workflow = await repo.create_schedule(
+        title="Bad decision workflow",
+        org_id=org_id,
+        schedule_type="webhook",
+        trigger_type="webhook",
+        description="Should fail at trigger.",
+        created_by=user_id,
+        webhook_secret_hash=webhook_secret_hash("dsecret2"),
+        request_template={"title": "Decision run bad"},
+        actions=[
+            {
+                "action_type": "task",
+                "title": "Gate it",
+                "description": "Bad config stored directly.",
+                "agent_type": "decision-step",
+                "sequence_order": 0,
+                "decision_config": bad,
+            },
+        ],
+        review_instructions="x",
+    )
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _trigger_schedule_execution(workflow["id"], None, pool=db_pool, force=True)
+    # A direct repo write bypasses authoring validation; the run fails loud
+    # (500 with the underlying cause) after advancing the run record.
+    assert exc_info.value.status_code == 500
+    assert "invalid decision_config" in str(exc_info.value.detail)
+
+
+def test_workflow_decision_validator_rejects_on_create(monkeypatch):
+    """REST create/update surfaces reject decision actions with bad configs."""
+    from fastapi import HTTPException
+
+    from lucent.api.routers.schedules import _validate_workflow_decision_actions
+
+    good = {
+        "action_type": "task",
+        "title": "Gate",
+        "agent_type": "decision-step",
+        "sequence_order": 0,
+        "decision_config": _DECISION_CONFIG,
+    }
+    _validate_workflow_decision_actions([good])
+
+    bad = {**good, "decision_config": {"questions": []}}
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_workflow_decision_actions([bad])
+    assert exc_info.value.status_code == 422
+    assert "Gate" in str(exc_info.value.detail)

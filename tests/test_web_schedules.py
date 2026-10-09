@@ -995,3 +995,779 @@ class TestScheduleAccess:
             )
             assert attempt.status_code == 403
         _ = user
+
+
+class TestWorkflowWizardDecisionSteps:
+    """Decision-step rows in the workflow wizard (agent 'decision-step')."""
+
+    _DECISION_JSON = json.dumps(
+        {
+            "questions": [
+                {
+                    "name": "report_complete",
+                    "type": "noul",
+                    "instructions": "The prior step covered every item.",
+                }
+            ],
+            "threshold_policy": {
+                "questions": {"report_complete": {"min": 0.6}},
+                "on_fail": "fail_task",
+            },
+        }
+    )
+
+    async def test_wizard_creates_decision_step(self, client, db_pool, web_user):
+        _user, org, _token = web_user
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_definitions (
+                    name, description, content, status, scope,
+                    organization_id, created_by, owner_user_id
+                )
+                VALUES (
+                    'decision-step', 'test decision agent',
+                    'decision agent content', 'active', 'instance',
+                    $1::uuid, $2::uuid, $2::uuid
+                )
+                ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'
+                """,
+                org["id"],
+                _user["id"],
+            )
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard decision step",
+                    "description": "Decision-step wizard flow",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Score the audit output.",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_config_json": self._DECISION_JSON,
+                    "review_instructions": "Confirm the gate ran.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT actions FROM schedules
+                   WHERE organization_id = $1 AND title = 'Wizard decision step'""",
+                org["id"],
+            )
+        assert row is not None
+        action = row["actions"][0]
+        assert action["agent_type"] == "decision-step"
+        assert action["decision_config"]["questions"][0]["name"] == "report_complete"
+
+    async def test_wizard_rejects_decision_step_without_config(
+        self, client, db_pool, web_user
+    ):
+        _user, org, _token = web_user
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_definitions (
+                    name, description, content, status, scope,
+                    organization_id, created_by, owner_user_id
+                )
+                VALUES (
+                    'decision-step', 'test decision agent',
+                    'decision agent content', 'active', 'instance',
+                    $1::uuid, $2::uuid, $2::uuid
+                )
+                ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'
+                """,
+                org["id"],
+                _user["id"],
+            )
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard decision missing config",
+                    "description": "No decision JSON",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Gate the audit",
+                    "action_agent_type": "decision-step",
+                    "review_instructions": "Confirm.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 422
+        assert "decision-step" in resp.text
+
+    async def test_wizard_edit_keeps_decision_config(self, client, db_pool, web_user):
+        """Editing a workflow leaves an untouched decision config intact."""
+        _user, org, _token = web_user
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_definitions (
+                    name, description, content, status, scope,
+                    organization_id, created_by, owner_user_id
+                )
+                VALUES (
+                    'decision-step', 'test decision agent',
+                    'decision agent content', 'active', 'instance',
+                    $1::uuid, $2::uuid, $2::uuid
+                )
+                ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'
+                """,
+                org["id"],
+                _user["id"],
+            )
+        schedule = await ScheduleRepository(db_pool).create_schedule(
+            title="Decision edit workflow",
+            description="has a decision step",
+            trigger_type="manual",
+            schedule_type="manual",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            review_instructions="Confirm.",
+            actions=[
+                {
+                    "action_type": "task",
+                    "title": "Gate the audit",
+                    "description": "Score it.",
+                    "agent_type": "decision-step",
+                    "sequence_order": 0,
+                    "decision_config": json.loads(self._DECISION_JSON),
+                }
+            ],
+        )
+        workflow_id = schedule["id"]
+        existing = {
+            "action_type": "task",
+            "title": "Gate the audit",
+            "description": "Score it.",
+            "agent_type": "decision-step",
+            "model": None,
+            "reasoning_effort": None,
+            "priority": "medium",
+            "sequence_order": 0,
+            "decision_config": json.loads(self._DECISION_JSON),
+        }
+
+        resp = await client.post(
+            f"/workflows/{workflow_id}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Score it.",
+                    "action_agent_type": "decision-step",
+                    "action_model": "",
+                    "action_reasoning_effort": "",
+                    "action_stage": "1",
+                    "action_existing_json": json.dumps(existing),
+                    "action_sandbox_config_json": "{}",
+                    "action_timeout_seconds": "",
+                    "action_commit_approved": "false",
+                    "action_reuse_sandbox": "false",
+                    "action_output_schema_json": "",
+                    # decision questions textarea intentionally left empty
+                    "action_decision_config_json": "",
+                },
+            ),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        updated = await ScheduleRepository(db_pool).get_schedule(
+            str(workflow_id), str(org["id"])
+        )
+        assert updated is not None
+        actions = updated["actions"]
+        if isinstance(actions, str):
+            actions = json.loads(actions)
+        assert actions[0]["agent_type"] == "decision-step"
+        assert actions[0]["decision_config"]["questions"][0]["name"] == (
+            "report_complete"
+        )
+
+    @staticmethod
+    async def _seed_decision_agent(db_pool, org_id, user_id) -> None:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO agent_definitions (
+                    name, description, content, status, scope,
+                    organization_id, created_by, owner_user_id
+                )
+                VALUES (
+                    'decision-step', 'test decision agent',
+                    'decision agent content', 'active', 'instance',
+                    $1::uuid, $2::uuid, $2::uuid
+                )
+                ON CONFLICT (name, organization_id) DO UPDATE SET status = 'active'
+                """,
+                org_id,
+                user_id,
+            )
+
+    async def test_wizard_builder_creates_structured_config(
+        self, client, db_pool, web_user
+    ):
+        """Structured editor fields build the full decision_config document."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard structured decision",
+                    "description": "Builder-field decision step",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Check the audit output.",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_q_count": "2",
+                    "decision_q_name": ["fulfilled", "category"],
+                    "decision_q_type": ["noul", "choice"],
+                    "decision_q_instructions": [
+                        "Was the request fulfilled?",
+                        "Pick the outcome category.",
+                    ],
+                    "decision_q_criteria": [
+                        "",
+                        "Fulfilled = delivered, all done\nEscalated = needs a human",
+                    ],
+                    "decision_q_min": ["0.7", ""],
+                    "action_decision_on_fail": "fail_task",
+                    "action_decision_state_json": "ticket = AUD-1",
+                    "review_instructions": "Confirm the gate ran.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT actions FROM schedules
+                   WHERE organization_id = $1 AND title = 'Wizard structured decision'""",
+                org["id"],
+            )
+        assert row is not None
+        config = row["actions"][0]["decision_config"]
+        assert config["questions"] == [
+            {
+                "name": "fulfilled",
+                "type": "noul",
+                "instructions": "Was the request fulfilled?",
+            },
+            {
+                "name": "category",
+                "type": "choice",
+                "instructions": "Pick the outcome category.",
+                "criteria": {
+                    "Fulfilled": "delivered, all done",
+                    "Escalated": "needs a human",
+                },
+            },
+        ]
+        assert config["threshold_policy"] == {
+            "questions": {"fulfilled": {"min": 0.7}},
+            "on_fail": "fail_task",
+        }
+        assert config["state"] == {"ticket": "AUD-1"}
+
+    async def test_wizard_builder_score_question(self, client, db_pool, web_user):
+        """Score criteria lines become an ordered level list; min is the level index."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard score question",
+                    "description": "Score builder decision step",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Rate the audit",
+                    "action_prompt": "Rate it.",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": ["quality"],
+                    "decision_q_type": ["score"],
+                    "decision_q_instructions": ["Rate the audit quality."],
+                    "decision_q_criteria": ["low\nmedium\nhigh"],
+                    "decision_q_min": ["2"],
+                    "review_instructions": "Confirm.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT actions FROM schedules
+                   WHERE organization_id = $1 AND title = 'Wizard score question'""",
+                org["id"],
+            )
+        assert row is not None
+        config = row["actions"][0]["decision_config"]
+        assert config["questions"][0]["criteria"] == ["low", "medium", "high"]
+        assert config["threshold_policy"]["questions"] == {"quality": {"min": 2.0}}
+
+    async def test_wizard_builder_blank_row_rejected(self, client, db_pool, web_user):
+        """A decision step submitted with only the blank default row is a 422."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard blank decision row",
+                    "description": "Nothing filled in",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Gate the audit",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": [""],
+                    "decision_q_type": ["noul"],
+                    "decision_q_instructions": [""],
+                    "decision_q_criteria": [""],
+                    "decision_q_min": [""],
+                    "review_instructions": "Confirm.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 422
+        assert "at least" in resp.text and "Decision editor" in resp.text
+
+    async def test_wizard_builder_choice_with_min_rejected(
+        self, client, db_pool, web_user
+    ):
+        """A threshold on a choice question is rejected, naming question + step."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard choice threshold",
+                    "description": "Choice with minimum",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Classify the request",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": ["category"],
+                    "decision_q_type": ["choice"],
+                    "decision_q_instructions": ["Pick a category."],
+                    "decision_q_criteria": ["Yes = done\nNo = blocked"],
+                    "decision_q_min": ["0.5"],
+                    "review_instructions": "Confirm.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 422
+        assert "Step 1" in resp.text
+        assert "category" in resp.text
+        assert "choice" in resp.text
+
+    async def test_wizard_builder_on_fail_without_min_rejected(
+        self, client, db_pool, web_user
+    ):
+        """A failure action with no question minimum set is rejected."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard on fail without min",
+                    "description": "Failure action without a minimum",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Gate the audit",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": ["fulfilled"],
+                    "decision_q_type": ["noul"],
+                    "decision_q_instructions": ["Was it fulfilled?"],
+                    "decision_q_min": [""],
+                    "action_decision_on_fail": "fail_task",
+                    "review_instructions": "Confirm.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 422
+        assert "failure action" in resp.text and "minimum" in resp.text
+
+    async def test_wizard_rejects_decision_fields_on_non_decision_agent(
+        self, client, db_pool, web_user
+    ):
+        """Decision editor rows on a plain agent step are rejected."""
+        _user, org, _token = web_user
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard decision on code agent",
+                    "description": "Misplaced decision fields",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Regular step",
+                    "action_prompt": "Do normal work.",
+                    "action_agent_type": "code",
+                    "action_stage": "1",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": ["fulfilled"],
+                    "decision_q_type": ["noul"],
+                    "decision_q_instructions": ["Was it fulfilled?"],
+                    "decision_q_min": ["0.5"],
+                    "review_instructions": "Confirm.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 422
+        assert "decision-step" in resp.text
+
+    async def test_wizard_edit_round_trips_decision_editor(
+        self, client, db_pool, web_user
+    ):
+        """The edit page hydrates the structured editor and saves changes."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+        schedule = await ScheduleRepository(db_pool).create_schedule(
+            title="Decision round trip",
+            description="has a decision step",
+            trigger_type="manual",
+            schedule_type="manual",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            review_instructions="Confirm.",
+            actions=[
+                {
+                    "action_type": "task",
+                    "title": "Gate the audit",
+                    "description": "Score it.",
+                    "agent_type": "decision-step",
+                    "sequence_order": 0,
+                    "decision_config": {
+                        "questions": [
+                            {
+                                "name": "report_complete",
+                                "type": "noul",
+                                "instructions": "The prior step covered every item.",
+                            }
+                        ],
+                        "threshold_policy": {
+                            "questions": {"report_complete": {"min": 0.6}},
+                            "on_fail": "fail_task",
+                        },
+                    },
+                }
+            ],
+        )
+        workflow_id = schedule["id"]
+
+        page = await client.get(f"/workflows/{workflow_id}")
+        assert page.status_code == 200
+        # question row hydrated with its stored name and threshold
+        assert 'value="report_complete"' in page.text
+        assert 'value="0.6"' in page.text
+        # read-only chip on the step summary
+        assert "report_complete · noul" in page.text
+        assert "fails below min 0.6" in page.text
+
+        existing = {
+            "action_type": "task",
+            "title": "Gate the audit",
+            "description": "Score it.",
+            "agent_type": "decision-step",
+            "model": None,
+            "reasoning_effort": None,
+            "priority": "medium",
+            "sequence_order": 0,
+            "decision_config": {
+                "questions": [
+                    {
+                        "name": "report_complete",
+                        "type": "noul",
+                        "instructions": "The prior step covered every item.",
+                    }
+                ],
+                "threshold_policy": {
+                    "questions": {"report_complete": {"min": 0.6}},
+                    "on_fail": "fail_task",
+                },
+            },
+        }
+        resp = await client.post(
+            f"/workflows/{workflow_id}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Score it.",
+                    "action_agent_type": "decision-step",
+                    "action_model": "",
+                    "action_reasoning_effort": "",
+                    "action_stage": "1",
+                    "action_existing_json": json.dumps(existing),
+                    "action_sandbox_config_json": "{}",
+                    "action_timeout_seconds": "",
+                    "action_commit_approved": "false",
+                    "action_reuse_sandbox": "false",
+                    "action_output_schema_json": "",
+                    "action_decision_q_count": "2",
+                    "decision_q_name": ["report_complete", "escalated"],
+                    "decision_q_type": ["noul", "choice"],
+                    "decision_q_instructions": [
+                        "The prior step covered every item.",
+                        "Does the work need human escalation?",
+                    ],
+                    "decision_q_criteria": ["", "Yes = escalate\nNo = auto"],
+                    "decision_q_min": ["0.8", ""],
+                    "action_decision_on_fail": "fail_task",
+                    "action_decision_state_json": "",
+                    "action_decision_config_json": "",
+                },
+            ),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        updated = await ScheduleRepository(db_pool).get_schedule(
+            str(workflow_id), str(org["id"])
+        )
+        actions = updated["actions"]
+        if isinstance(actions, str):
+            actions = json.loads(actions)
+        config = actions[0]["decision_config"]
+        assert [q["name"] for q in config["questions"]] == [
+            "report_complete",
+            "escalated",
+        ]
+        assert config["threshold_policy"]["questions"]["report_complete"] == {
+            "min": 0.8
+        }
+        assert config["questions"][1]["criteria"] == {
+            "Yes": "escalate",
+            "No": "auto",
+        }
+
+    async def test_wizard_edit_clears_decision_config_when_agent_changes(
+        self, client, db_pool, web_user
+    ):
+        """Switching a decision step to a plain agent drops its decision_config."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+        schedule = await ScheduleRepository(db_pool).create_schedule(
+            title="Decision agent switch",
+            description="has a decision step",
+            trigger_type="manual",
+            schedule_type="manual",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            review_instructions="Confirm.",
+            actions=[
+                {
+                    "action_type": "task",
+                    "title": "Gate the audit",
+                    "description": "Score it.",
+                    "agent_type": "decision-step",
+                    "sequence_order": 0,
+                    "decision_config": json.loads(self._DECISION_JSON),
+                }
+            ],
+        )
+        existing = {
+            "action_type": "task",
+            "title": "Gate the audit",
+            "description": "Score it.",
+            "agent_type": "decision-step",
+            "sequence_order": 0,
+            "decision_config": json.loads(self._DECISION_JSON),
+        }
+
+        resp = await client.post(
+            f"/workflows/{schedule['id']}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Score it.",
+                    "action_agent_type": "code",
+                    "action_model": "",
+                    "action_reasoning_effort": "",
+                    "action_stage": "1",
+                    "action_existing_json": json.dumps(existing),
+                    "action_sandbox_config_json": "{}",
+                    "action_timeout_seconds": "",
+                    "action_commit_approved": "false",
+                    "action_reuse_sandbox": "false",
+                    "action_output_schema_json": "",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": [""],
+                    "decision_q_type": ["noul"],
+                    "decision_q_instructions": [""],
+                    "decision_q_criteria": [""],
+                    "decision_q_min": [""],
+                    "action_decision_config_json": "",
+                },
+            ),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        updated = await ScheduleRepository(db_pool).get_schedule(
+            str(schedule["id"]), str(org["id"])
+        )
+        actions = updated["actions"]
+        if isinstance(actions, str):
+            actions = json.loads(actions)
+        assert actions[0]["agent_type"] == "code"
+        assert not actions[0].get("decision_config")
+
+    async def test_wizard_edit_rejects_chat_model_on_decision_step(
+        self, client, db_pool, web_user
+    ):
+        """Decision steps validate their model override as a decision model."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+        schedule = await ScheduleRepository(db_pool).create_schedule(
+            title="Decision chat model",
+            description="has a decision step",
+            trigger_type="manual",
+            schedule_type="manual",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            review_instructions="Confirm.",
+            actions=[
+                {
+                    "action_type": "task",
+                    "title": "Gate the audit",
+                    "description": "Score it.",
+                    "agent_type": "decision-step",
+                    "sequence_order": 0,
+                    "decision_config": json.loads(self._DECISION_JSON),
+                }
+            ],
+        )
+        existing = {
+            "action_type": "task",
+            "title": "Gate the audit",
+            "description": "Score it.",
+            "agent_type": "decision-step",
+            "sequence_order": 0,
+            "decision_config": json.loads(self._DECISION_JSON),
+        }
+
+        resp = await client.post(
+            f"/workflows/{schedule['id']}/edit",
+            data=_csrf_data(
+                client,
+                {
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Score it.",
+                    "action_agent_type": "decision-step",
+                    "action_model": "gpt-4.1",
+                    "action_reasoning_effort": "",
+                    "action_stage": "1",
+                    "action_existing_json": json.dumps(existing),
+                    "action_sandbox_config_json": "{}",
+                    "action_timeout_seconds": "",
+                    "action_commit_approved": "false",
+                    "action_reuse_sandbox": "false",
+                    "action_output_schema_json": "",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": ["report_complete"],
+                    "decision_q_type": ["noul"],
+                    "decision_q_instructions": ["The prior step covered every item."],
+                    "decision_q_criteria": [""],
+                    "decision_q_min": ["0.6"],
+                    "action_decision_config_json": "",
+                },
+            ),
+            headers={"content-type": "application/x-www-form-urlencoded"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 422
+        assert "chat model" in resp.text
+
+    async def test_wizard_raw_json_overrides_builder_rows(
+        self, client, db_pool, web_user
+    ):
+        """Non-empty raw decision JSON wins over the structured editor fields."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard raw json wins",
+                    "description": "Raw JSON precedence",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Check the audit output.",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": ["wrong_name"],
+                    "decision_q_type": ["noul"],
+                    "decision_q_instructions": ["Ignored filler."],
+                    "decision_q_min": [""],
+                    "action_decision_config_json": self._DECISION_JSON,
+                    "review_instructions": "Confirm.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT actions FROM schedules
+                   WHERE organization_id = $1 AND title = 'Wizard raw json wins'""",
+                org["id"],
+            )
+        assert row is not None
+        config = row["actions"][0]["decision_config"]
+        assert [q["name"] for q in config["questions"]] == ["report_complete"]

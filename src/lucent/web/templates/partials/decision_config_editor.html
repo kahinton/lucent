@@ -1,0 +1,155 @@
+{#
+  Shared decision-step question editor for the workflow builder forms.
+
+  Usage (create - blank editor in the seeded step, plus one inert row
+  template per page): import decision_kind_toggle, decision_editor and
+  decision_question_template from this file; render decision_kind_toggle()
+  at the top of each step card, decision_editor() inside each action row and
+  decision_question_template() once, near the end of the form.
+
+  Usage (edit - hydrated from the stored action): render
+  decision_kind_toggle() at the top of each step card and
+  decision_editor(action, agent_type=action.agent_type or 'code') inside it.
+
+  Question rows are named form fields consumed server-side by
+  _parse_step_decision in web/routes/schedules.py; the shared JS lives in
+  /static/workflow_decision_ui.js (wireStep / syncDecision / resetDecision).
+#}
+
+{# Step-kind toggle shown at the top of every step card on a workflow form.
+   Purely a view control (never posted): the shared JS maps "Agent task" to
+   whatever non-decision agent the card had, and "Decision check" to the
+   decision-step agent, reshaping the card between the two modes. #}
+{% macro decision_kind_toggle() %}
+<div class="step-kind mb-3">
+    <div class="step-kind-toggle inline-flex rounded-lg border border-gray-300 bg-gray-100 p-0.5" role="group" aria-label="Step kind">
+        <button type="button" data-kind="agent" class="rounded-md bg-white px-3 py-1.5 font-medium text-gray-900 shadow-sm">Agent task</button>
+        <button type="button" data-kind="decision" class="rounded-md px-3 py-1.5 font-medium text-gray-500">Decision check</button>
+    </div>
+    <p class="step-kind-hint mt-1.5 text-xs text-gray-400">Runs the selected agent in a session — instructions, sandbox, and structured output apply.</p>
+</div>
+{% endmacro %}
+
+{% macro decision_question_row(index=1, name='', qtype='noul', instructions='', criteria_text='', min_text='') %}
+<div class="decision-question-row rounded-lg border border-gray-200 bg-white p-3 space-y-2">
+    <div class="flex items-center justify-between gap-2">
+        <span class="decision-question-index text-xs font-medium text-gray-600">Question {{ index }}</span>
+        <div class="flex items-center gap-1">
+            <button type="button" class="move-decision-question-up rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-800" title="Move question up" aria-label="Move question up"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" /></svg></button>
+            <button type="button" class="move-decision-question-down rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-800" title="Move question down" aria-label="Move question down"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg></button>
+            <button type="button" class="remove-decision-question rounded-md p-1.5 text-red-500 hover:bg-red-50 hover:text-red-700" title="Remove question" aria-label="Remove question"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg></button>
+        </div>
+    </div>
+    <div class="grid gap-3 md:grid-cols-3">
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+            <input name="decision_q_name" maxlength="128" value="{{ name }}" placeholder="e.g. request_fulfilled" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Type</label>
+            <select name="decision_q_type" class="decision-question-type w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">
+                <option value="noul" {% if qtype == 'noul' %}selected{% endif %}>noul — yes/no probability</option>
+                <option value="score" {% if qtype == 'score' %}selected{% endif %}>score — rated scale</option>
+                <option value="choice" {% if qtype == 'choice' %}selected{% endif %}>choice — classification</option>
+            </select>
+            <p class="decision-type-hint mt-1 text-xs text-gray-400">{% if qtype == 'score' %}Rates the work against an ordered scale — the answer is a scale position.{% elif qtype == 'choice' %}Pick exactly one option from a list — classification output; no threshold.{% else %}Probability (0–100%) that the condition in the instructions is true.{% endif %}</p>
+        </div>
+        <div class="decision-min-field{% if qtype == 'choice' %} hidden{% endif %}">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Minimum (threshold)</label>
+            <input name="decision_q_min" type="text" inputmode="decimal" value="{{ min_text }}" placeholder="e.g. 0.6" class="decision-question-min w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
+            <p class="decision-min-hint mt-1 text-xs text-gray-400">{% if qtype == 'score' %}Minimum level index — 0 = lowest level, 1 = second. Leave blank to record the answer without gating.{% else %}Threshold 0–1 (e.g. 0.6) — answers below it count as a miss. Leave blank to record the answer without gating.{% endif %}</p>
+        </div>
+    </div>
+    <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">Instructions</label>
+        <textarea name="decision_q_instructions" rows="2" placeholder="What should the decision model check against the request, this task, and the earlier steps' results?" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none">{{ instructions }}</textarea>
+    </div>
+    <div class="decision-criteria-field{% if qtype == 'noul' %} hidden{% endif %}">
+        <label class="decision-criteria-label block text-sm font-medium text-gray-700 mb-1">Options</label>
+        <textarea name="decision_q_criteria" rows="3" class="decision-question-criteria w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-mono">{{ criteria_text }}</textarea>
+        <p class="decision-criteria-hint mt-1 text-xs text-gray-400">{% if qtype == 'score' %}One level label per line, lowest first (e.g. Rejected / Needs work / Good). 2–26 levels.{% else %}One option per line, 'Option label = description' (description optional). 2–255 options.{% endif %}</p>
+    </div>
+</div>
+{% endmacro %}
+
+{% macro decision_editor(action=None, agent_type='code') %}
+{% set ns = namespace(on_fail='', state_text='', configured=False, rows=0) %}
+{% if action and action.decision_config is defined and action.decision_config is mapping and action.decision_config %}
+    {% set ns.configured = true %}
+{% endif %}
+{% set cfg = (action.decision_config if (action and action.decision_config is defined and action.decision_config is mapping) else {}) %}
+{% set policy = (cfg.threshold_policy if (cfg.threshold_policy is defined and cfg.threshold_policy is mapping) else {}) %}
+{% set policy_questions = (policy.questions if (policy.questions is defined and policy.questions is mapping) else {}) %}
+{% set ns.on_fail = policy.on_fail if (policy.on_fail is defined and policy.on_fail) else '' %}
+{% for key, value in (cfg.state if (cfg.state is defined and cfg.state is mapping) else {}).items() %}
+{% set ns.state_text = ns.state_text ~ key ~ ' = ' ~ value ~ '\n' %}
+{% endfor %}
+<details class="rounded-lg border border-gray-200 bg-gray-50 decision-step-details" {% if agent_type != 'decision-step' %}hidden{% endif %}>
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Decision questions{% if ns.configured %}<span class="ml-2 text-xs font-normal text-primary-600">Configured</span>{% endif %}</summary>
+    <div class="space-y-4 border-t border-gray-200 p-4">
+        <p class="text-sm text-gray-500">Runs this step through a decision model — no agent session. The model sees the request, this step, and the results of the completed steps before it.</p>
+        <div class="decision-questions space-y-3">
+            {% for q in (cfg.questions or []) %}
+            {% if q is mapping %}
+            {% set ns.rows = ns.rows + 1 %}
+            {% set raw_min = policy_questions.get(q.name or '') %}
+            {% set m = namespace(text='') %}
+            {% if raw_min is defined and raw_min is not none %}
+                {% if raw_min is mapping %}{% set m.text = raw_min.min if raw_min.min is defined else '' %}
+                {% else %}{% set m.text = raw_min %}{% endif %}
+            {% endif %}
+            {% if q.type == 'score' %}
+            {{ decision_question_row(index=loop.index, name=q.name or '', qtype=q.type, instructions=q.instructions or '', criteria_text=(q.criteria|join('\n') if q.criteria else ''), min_text=m.text) }}
+            {% elif q.type == 'choice' %}
+            {% set c = namespace(text='') %}
+            {% for key, value in ((q.criteria if (q.criteria is defined and q.criteria is mapping) else {}) or {}).items() %}
+            {% set c.text = c.text ~ key ~ ' = ' ~ value ~ '\n' %}
+            {% endfor %}
+            {{ decision_question_row(index=loop.index, name=q.name or '', qtype=q.type, instructions=q.instructions or '', criteria_text=c.text, min_text='') }}
+            {% else %}
+            {{ decision_question_row(index=loop.index, name=q.name or '', qtype=q.type, instructions=q.instructions or '', criteria_text='', min_text=m.text) }}
+            {% endif %}
+            {% endif %}
+            {% endfor %}
+            {% if ns.rows == 0 %}
+            {{ decision_question_row(index=1) }}
+            {% endif %}
+        </div>
+        <button type="button" class="add-decision-question inline-flex items-center gap-1.5 rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 hover:bg-primary-100"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>Add question</button>
+        <div class="grid gap-4 md:grid-cols-2">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">If a threshold is missed</label>
+                <select name="action_decision_on_fail" class="decision-on-fail w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
+                    <option value="" {% if ns.on_fail == '' %}selected{% endif %}>Record answers only (default)</option>
+                    <option value="fail_task" {% if ns.on_fail == 'fail_task' %}selected{% endif %}>Fail the step — later stages will not run</option>
+                    <option value="needs_review" {% if ns.on_fail == 'needs_review' %}selected{% endif %}>Route the step for review</option>
+                </select>
+                <p class="mt-1 text-xs text-gray-400">Applies to questions that have a minimum set. Steps without a minimum always record their answers.</p>
+            </div>
+        </div>
+        <details class="decision-advanced-editor rounded-lg border border-gray-200 bg-white">
+            <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">Advanced: extra state and raw JSON</summary>
+            <div class="space-y-4 border-t border-gray-200 p-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Extra state fields (sent to the model alongside the generated context)</label>
+                    <textarea name="action_decision_state_json" rows="2" placeholder="key = value" class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-mono">{{ ns.state_text }}</textarea>
+                    <p class="mt-1 text-xs text-gray-400">One field per line, 'key = value'. These literal fields are merged over the generated state.</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Raw decision JSON — overrides the fields above</label>
+                    <textarea name="action_decision_config_json" rows="6" placeholder='{"questions":[{"name":"fulfilled","type":"noul","instructions":"Was the task fulfilled?"}],"threshold_policy":{"questions":{"fulfilled":{"min":0.6}},"on_fail":"fail_task"}}' class="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 font-mono text-xs"></textarea>
+                    <p class="mt-1 text-xs text-gray-400">Leave blank to use the question editor. Anything here must match the full decision_config document.</p>
+                </div>
+            </div>
+        </details>
+        <input type="hidden" name="action_decision_mode" value="{{ 'builder' if agent_type == 'decision-step' else '' }}">
+        <input type="hidden" name="action_decision_q_count" value="{{ (cfg.questions | length) if (cfg.questions is defined and cfg.questions is sequence and cfg.questions is not mapping) else 1 }}">
+    </div>
+</details>
+{% endmacro %}
+
+{% macro decision_question_template() %}
+<template id="decision-question-template">
+{{ decision_question_row(index=1) }}
+</template>
+{% endmacro %}

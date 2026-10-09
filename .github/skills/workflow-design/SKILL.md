@@ -53,6 +53,42 @@ Create one to five actions. Each action must include:
 
 Use multiple actions only when order or accountability matters. Do not create multiple actions just to look thorough. If you cannot verify an agent type is active, use `code` for implementation/verification work, `documentation` for docs/changelog work, `research` for investigation, `memory` for memory maintenance, `api-testing` for endpoint checks, or `lucent` for coordination — but only when those names appear in the active-agent list.
 
+### Decision Steps (`decision-step`)
+
+When an action should be an automated judgment rather than agent work — "did
+the previous step actually satisfy X?", "route this to A or B", "score this
+0-3" — use a `task` action with `agent_type: "decision-step"` and a
+`decision_config`:
+
+```json
+{
+  "action_type": "task",
+  "title": "Check the audit report is complete",
+  "agent_type": "decision-step",
+  "sequence_order": 1,
+  "decision_config": {
+    "questions": [
+      {"name": "report_complete", "type": "noul",
+       "instructions": "The structured audit result in the context field covers every checked dependency with an upgrade decision."}
+    ],
+    "threshold_policy": {"questions": {"report_complete": {"min": 0.6}}, "on_fail": "fail_task"}
+  }
+}
+```
+
+Rules:
+
+- Only use `decision-step` when a decision-class model is actually available
+  (e.g. a local System One model); a normal step must never carry a
+  decision-class model in its `model` field — that is swapped away silently.
+- `noul` questions are truth probabilities, `score` questions are level-index
+  rubric positions, `choice` questions are classification (no thresholds).
+- `threshold_policy` makes a low score fail the step (`fail_task`) or route
+  it to review (`needs_review`); without a policy the answers are recorded as
+  the step's output and the workflow always proceeds.
+- Do not combine a decision step with an `output_contract` — the questions
+  are the schema.
+
 ### Step 4: Define Review Criteria
 
 Write `review_instructions` as a checklist. Include:

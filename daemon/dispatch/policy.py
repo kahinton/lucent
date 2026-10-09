@@ -22,6 +22,12 @@ class TaskValidationMixin:
 
         if not result:
             return False, "no output"
+        if task and task.get("decision_config"):
+            # Decision-step results are client-shaped structured answers, not
+            # agent prose — short output or "failed to find X" phrasing is
+            # legitimate scoring output here. Defense-in-depth: the decision
+            # dispatch branch never routes through this validator.
+            return True, "decision step result"
         if task and self._is_request_review_task(task):
             parsed = self._parse_review_decision(result)
             if not parsed["recognized"]:
@@ -104,7 +110,7 @@ def select_model_for_task(
 
 def task_skips_tool_validation(agent_type: str | None) -> bool:
     """Return whether task success must never depend on tool calls."""
-    return (agent_type or "").strip().lower() == "request-review"
+    return (agent_type or "").strip().lower() in ("request-review", "decision-step")
 
 
 def required_task_tool_names(

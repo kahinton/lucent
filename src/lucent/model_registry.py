@@ -776,6 +776,62 @@ def validate_model(model_id: str, *, require_tools: bool = False) -> str | None:
     return None  # Lenient: allow unknown
 
 
+def validate_decision_model(model_id: str) -> str | None:
+    """Validate a model selection specifically for decision-step tasks.
+
+    The inverse of :func:`validate_model`: the model must exist and be
+    enabled, and must be classified ``model_class="decision"``. Chat models
+    are rejected here because a decision step answers System One questions,
+    not chat turns. Unknown model ids follow the same validation mode as
+    chat models.
+    """
+    from lucent.settings import model_validation_mode
+
+    strict = model_validation_mode() != "lenient"
+
+    if _db_models is not None:
+        if model_id in _db_model_by_id:
+            if model_id not in _db_enabled_ids:
+                return f"Model '{model_id}' is disabled by admin. Choose an enabled model."
+            if _db_model_by_id[model_id].model_class != "decision":
+                return (
+                    f"Model '{model_id}' is a chat model, not a decision model. "
+                    "Decision steps require a model classified "
+                    "model_class='decision' and are answered through the "
+                    "System One decision API."
+                )
+            return None
+        if strict:
+            available = sorted(_db_enabled_ids)
+            return (
+                f"Unknown model '{model_id}'. "
+                f"Available models: {', '.join(available)}. "
+                f"Use list_available_models to see all options."
+            )
+        return None
+
+    if model_id in _MODEL_BY_ID:
+        if not _MODEL_BY_ID[model_id].enabled:
+            return f"Model '{model_id}' is disabled. Choose an enabled model."
+        if _MODEL_BY_ID[model_id].model_class != "decision":
+            return (
+                f"Model '{model_id}' is a chat model, not a decision model. "
+                "Decision steps require a model classified "
+                "model_class='decision' and are answered through the "
+                "System One decision API."
+            )
+        return None
+
+    if strict:
+        available = sorted(_HARDCODED_ENABLED_IDS)
+        return (
+            f"Unknown model '{model_id}'. "
+            f"Available models: {', '.join(available)}. "
+            f"Use list_available_models to see all options."
+        )
+    return None
+
+
 def validate_reasoning_effort(
     model_id: str,
     reasoning_effort: str | None,

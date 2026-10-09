@@ -27,6 +27,15 @@ from lucent.constants import (
     VALID_REQUEST_STATUSES,
 )
 from lucent.db.pool import scoped_acquire_on
+from lucent.llm.decision import (
+    MAX_QUESTIONS,
+    MAX_CHOICE_OPTIONS,
+    MAX_SCORE_LEVELS,
+    MIN_CHOICE_OPTIONS,
+    MIN_SCORE_LEVELS,
+    QUESTION_TYPES,
+    DecisionQuestion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -569,6 +578,207 @@ def _validate_output_contract(output_contract: dict | None) -> None:
     max_retries = output_contract.get("max_retries", 1)
     if not isinstance(max_retries, int) or max_retries < 0:
         raise ValueError("output_contract.max_retries must be an integer >= 0")
+
+
+def _validate_decision_threshold_policy(
+    threshold_policy: Any, questions: dict[str, str]
+) -> tuple[str, dict[str, dict]]:
+    """Validate a decision_config threshold_policy; returns (on_fail, thresholds).
+
+    ``questions`` maps question name → type. Noul thresholds mean truth
+    probabilities (bounded [0, 1]); score thresholds mean level-index
+    positions (documented, not bounded) — choice questions are never
+    thresholded because a choice answer is classification output, not a
+    degree of confidence in a condition.
+    """
+    if not isinstance(threshold_policy, dict):
+        raise ValueError("decision_config.threshold_policy must be an object")
+    on_fail = threshold_policy.get("on_fail", "fail_task")
+    if on_fail not in ("fail_task", "needs_review"):
+        raise ValueError(
+            "decision_config.threshold_policy.on_fail must be 'fail_task' "
+            f"or 'needs_review'; got {on_fail!r}"
+        )
+    raw_thresholds = threshold_policy.get("questions")
+    if not isinstance(raw_thresholds, dict) or not raw_thresholds:
+        raise ValueError(
+            "decision_config.threshold_policy.questions must be a non-empty "
+            "object mapping question name to a minimum"
+        )
+    thresholds: dict[str, dict] = {}
+    for name, minimum in raw_thresholds.items():
+        if name not in questions:
+            raise ValueError(
+                "decision_config.threshold_policy references unknown question "
+                f"'{name}'"
+            )
+        qtype = questions[name]
+        if qtype == "choice":
+            raise ValueError(
+                f"Question '{name}' is a choice question — choice answers are "
+                "classification output and cannot carry a threshold"
+            )
+        if isinstance(minimum, dict):
+            minimum = minimum.get("min")
+            if minimum is not None and isinstance(minimum, dict):
+                raise ValueError(f"decision_config threshold for '{name}' is malformed")
+        if minimum is None:
+            raise ValueError(f"decision_config threshold for '{name}' requires a 'min'")
+        try:
+            minimum = float(minimum)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"decision_config threshold for '{name}' must be a number; "
+                f"got {minimum!r}"
+            ) from None
+        if qtype == "noul" and not 0.0 <= minimum <= 1.0:
+            raise ValueError(
+                f"decision_config threshold for '{name}' must be between 0 "
+                f"and 1 for a noul question; got {minimum}"
+            )
+        thresholds[name] = {"min": minimum}
+    return on_fail, thresholds
+
+
+def validate_decision_config(config: dict | None) -> None:
+    """Validate a decision_config payload for a decision-step task.
+
+    Config format:
+      {
+        "questions": [ {"name", "type": "noul|choice|score",
+                        "instructions", "criteria"} ],   # 1..64, ordered
+        "state": {"<key>": "<literal>"}                  # optional
+        "model": "<decision model id>",                  # optional
+        "threshold_policy": {"questions": {name: {"min": f}},
+                             "on_fail": "fail_task|needs_review"},
+      }
+
+    Raises ValueError with an author-facing message on any malformed shape.
+    """
+    if config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError("decision_config must be an object")
+
+    raw_questions = config.get("questions")
+    if raw_questions is None:
+        raise ValueError("decision_config requires a 'questions' list")
+    if not isinstance(raw_questions, list) or not raw_questions:
+        raise ValueError(
+            "decision_config.questions must be a non-empty list of question "
+            "objects"
+        )
+    if len(raw_questions) > MAX_QUESTIONS:
+        raise ValueError(
+            f"Too many decision questions: {len(raw_questions)} "
+            f"(server allows at most {MAX_QUESTIONS})."
+        )
+
+    # Array (not object) so order is preserved and duplicate names surface.
+    questions: dict[str, str] = {}
+    for index, raw in enumerate(raw_questions):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"decision_config.questions[{index}] must be an object"
+            )
+        name = raw.get("name")
+        qtype = raw.get("type")
+        instructions = raw.get("instructions")
+        if not name or not isinstance(name, str):
+            raise ValueError(f"decision_config.questions[{index}] requires a 'name'")
+        if len(name) > 128:
+            raise ValueError(
+                f"decision question name '{name}' is too long (max 128 characters)"
+            )
+        if name in questions:
+            raise ValueError(
+                f"decision_config has duplicate question name '{name}'"
+            )
+        if qtype not in QUESTION_TYPES:
+            raise ValueError(
+                f"Question '{name}' has unknown type {qtype!r}. "
+                f"Expected one of: {', '.join(sorted(QUESTION_TYPES))}."
+            )
+        if not instructions or not isinstance(instructions, str):
+            raise ValueError(f"Question '{name}' requires instructions")
+        try:
+            DecisionQuestion(
+                name=name,
+                type=qtype,
+                instructions=instructions,
+                criteria=raw.get("criteria"),
+            )
+        except ValueError as exc:
+            message = str(exc).replace("Decision request", "decision_config")
+            raise ValueError(message) from None
+        questions[name] = qtype
+    # _validate_request's criteria checks run through DecisionQuestion above;
+    # construction itself does not validate criteria ranges, so enforce them
+    # here against the same client-side limits the client applies at send.
+    for raw in raw_questions:
+        name = raw["name"]
+        qtype = raw["type"]
+        criteria = raw.get("criteria")
+        if qtype == "choice":
+            options = criteria or {}
+            if not isinstance(options, dict):
+                raise ValueError(
+                    f"Choice question '{name}' criteria must be an "
+                    "option key → description mapping."
+                )
+            if not MIN_CHOICE_OPTIONS <= len(options) <= MAX_CHOICE_OPTIONS:
+                raise ValueError(
+                    f"Choice question '{name}' needs between {MIN_CHOICE_OPTIONS} "
+                    f"and {MAX_CHOICE_OPTIONS} options; got {len(options)}."
+                )
+        elif qtype == "score":
+            levels = criteria or []
+            if not isinstance(levels, list):
+                raise ValueError(
+                    f"Score question '{name}' criteria must be an ordered "
+                    "list of level labels."
+                )
+            if not MIN_SCORE_LEVELS <= len(levels) <= MAX_SCORE_LEVELS:
+                raise ValueError(
+                    f"Score question '{name}' needs between {MIN_SCORE_LEVELS} "
+                    f"and {MAX_SCORE_LEVELS} levels; got {len(levels)}."
+                )
+
+    state = config.get("state")
+    if state is not None:
+        if not isinstance(state, dict):
+            raise ValueError("decision_config.state must be an object of strings")
+        for key, value in state.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError("decision_config.state keys must be non-empty strings")
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"decision_config.state['{key}'] must be a string "
+                    "(literal state fields only)"
+                )
+
+    model = config.get("model")
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise ValueError("decision_config.model must be a non-empty model id")
+
+    if "threshold_policy" in config:
+        _validate_decision_threshold_policy(
+            config["threshold_policy"], questions
+        )
+
+    unknown = set(config) - {
+        "questions",
+        "state",
+        "model",
+        "threshold_policy",
+    }
+    if unknown:
+        raise ValueError(
+            "decision_config has unknown key(s): "
+            + ", ".join(sorted(unknown))
+        )
+
+    return None
 
 
 class RequestRepository:
@@ -1968,8 +2178,24 @@ class RequestRepository:
         sandbox_config: dict | None = None,
         requesting_user_id: str | None = None,
         output_contract: dict | None = None,
+        decision_config: dict | None = None,
     ) -> dict:
         _validate_output_contract(output_contract)
+        validate_decision_config(decision_config)
+        if output_contract and decision_config:
+            raise ValueError(
+                "A decision-step task carries its own question schema — "
+                "output_contract cannot be combined with decision_config"
+            )
+        if decision_config and agent_type != "decision-step":
+            raise ValueError(
+                "decision_config requires agent_type 'decision-step'"
+            )
+        if agent_type == "decision-step" and not decision_config:
+            raise ValueError(
+                "agent_type 'decision-step' requires decision_config "
+                "carrying the questions to answer"
+            )
         from lucent.secrets.utils import validate_sandbox_config_references
 
         validate_sandbox_config_references(sandbox_config)
@@ -1982,11 +2208,11 @@ class RequestRepository:
                    (request_id, parent_task_id, title, description, agent_type,
                     agent_definition_id, priority, sequence_order, organization_id,
                     model, reasoning_effort, sandbox_template_id, sandbox_config,
-                    requesting_user_id, output_contract)
+                    requesting_user_id, output_contract, decision_config)
                    VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                     COALESCE($14, (SELECT created_by FROM requests WHERE id = $1)),
-                    $15
+                    $15, $16
                    )
                    RETURNING *""",
                 UUID(request_id),
@@ -2006,6 +2232,7 @@ class RequestRepository:
                  else None),
                 UUID(requesting_user_id) if requesting_user_id else None,
                 json.dumps(output_contract) if output_contract else None,
+                json.dumps(decision_config) if decision_config else None,
             )
         task = dict(row)
         # Log creation event

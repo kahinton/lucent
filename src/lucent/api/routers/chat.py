@@ -1923,7 +1923,14 @@ async def chat_stream_v2(
                 "user. Keep explanations plain-language and reflect "
                 "the UI model: schedule/manual/webhook/integration-event trigger, "
                 "request, actions, Handoffs, outputs, review. Do not invent server_function "
-                "actions; those are source-defined built-in maintenance workflows."
+                "actions; those are source-defined built-in maintenance workflows. For "
+                "automated System One checks between steps, use a `task` action with "
+                "agent_type `decision-step` and a `decision_config` carrying named "
+                "noul/choice/score questions judged against the state built from the "
+                "prior step results; an optional `threshold_policy` fails the step or "
+                "sends it to review when a score falls below its min. Never put a "
+                "decision-class model in a normal step's `model` field — it is a "
+                "decision step (or nothing) for decision models."
             )
 
     system_prompt_parts.append(await _render_active_user_context(user, pool))
