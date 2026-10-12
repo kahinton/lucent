@@ -290,7 +290,12 @@ async def decide(
             f"{exc.response.text[:300]}"
         ) from exc
     except httpx.HTTPError as exc:
-        raise DecisionError(f"Decision endpoint call failed: {exc}") from exc
+        # str(exc) is empty for several httpx transport errors (bare
+        # ReadTimeout/ConnectError) — fall back to the exception class name
+        # so a skipped gate never surfaces as "failed: " with no cause.
+        raise DecisionError(
+            f"Decision endpoint call failed: {str(exc).strip() or type(exc).__name__}"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise DecisionError(f"Decision endpoint returned invalid JSON: {exc}") from exc
 

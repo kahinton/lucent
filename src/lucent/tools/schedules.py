@@ -121,7 +121,17 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
                 return json.dumps({"error": f"Invalid cron expression format: {cron_expression}"})
 
         # Validate model against registry
+        model_is_auto = False
         if model:
+            from lucent.llm.model_auto import split_auto_sentinel
+            from lucent.settings import auto_selection_enabled
+
+            model_is_auto, auto_error = split_auto_sentinel(
+                model, enabled=auto_selection_enabled(organization_id=str(org_id))
+            )
+            if auto_error:
+                return json.dumps({"error": auto_error})
+        if model and not model_is_auto:
             from lucent.model_registry import validate_model, validate_reasoning_effort
 
             error = validate_model(model)

@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
 from lucent.rbac import Role
+from lucent.settings import auto_selection_enabled
 
 from ._shared import _check_csrf, _parse_env_vars, get_user_context, templates
 
@@ -229,6 +230,18 @@ async def _workflow_form_options(pool, user) -> dict[str, Any]:
         for model in model_rows
     ]
     available_models.sort(key=lambda m: m["id"])
+    if auto_selection_enabled(organization_id=str(user.organization_id)):
+        # The pseudo-id resolves at dispatch through the auto-selection
+        # arbiter (flag-gated); decision-check cards exclude it client-side.
+        available_models.insert(
+            0,
+            {
+                "id": "auto",
+                "name": "Auto — chosen at dispatch",
+                "reasoning_efforts": [],
+                "model_class": "language",
+            },
+        )
     sandbox_pool = await get_authorized_templates_pool(
         pool, {"id": str(user.id), "organization_id": str(user.organization_id)}
     )
@@ -1152,7 +1165,24 @@ async def schedule_edit(request: Request, schedule_id: str):
             step_agent = _form_value(action_agents, idx, "code") or "code"
             action_model = _form_value(action_models, idx) or None
             action_effort = _form_value(action_efforts, idx) or None
+            is_auto = False
             if action_model:
+                from lucent.llm.model_auto import split_auto_sentinel
+                from lucent.settings import auto_selection_enabled
+
+                is_auto, auto_error = split_auto_sentinel(
+                    action_model,
+                    enabled=auto_selection_enabled(organization_id=org_id),
+                )
+                if auto_error:
+                    raise HTTPException(422, auto_error)
+                if is_auto and step_agent == "decision-step":
+                    raise HTTPException(
+                        422,
+                        'Model "auto" applies to chat tasks — decision-step '
+                        "tasks name a decision model directly",
+                    )
+            if action_model and not is_auto:
                 if step_agent == "decision-step":
                     model_error = validate_decision_model(action_model)
                 else:
@@ -1338,7 +1368,18 @@ async def schedule_edit(request: Request, schedule_id: str):
 
     effective_model = updates.get("model", sched.get("model"))
     effective_effort = updates.get("reasoning_effort", sched.get("reasoning_effort"))
+    schedule_model_is_auto = False
     if effective_model:
+        from lucent.llm.model_auto import split_auto_sentinel
+        from lucent.settings import auto_selection_enabled
+
+        schedule_model_is_auto, auto_error = split_auto_sentinel(
+            effective_model,
+            enabled=auto_selection_enabled(organization_id=org_id),
+        )
+        if auto_error:
+            raise HTTPException(422, auto_error)
+    if effective_model and not schedule_model_is_auto:
         from lucent.access_control import AccessControlService
         from lucent.model_registry import validate_model, validate_reasoning_effort
 

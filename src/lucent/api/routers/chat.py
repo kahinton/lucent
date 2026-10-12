@@ -97,6 +97,160 @@ def _resolve_chat_model(override: str | None = None) -> str:
     return get_default_model_id(preferred_model=chat_model_id())
 
 
+def _auto_selection_turn_metadata(choice) -> dict[str, Any]:
+    """Per-turn arbiter provenance for the assistant message and SSE badge."""
+    info: dict[str, Any] = {
+        "chosen": choice.model_id,
+        "source": choice.source,
+        "confidence": choice.confidence,
+        "arbiter_model": choice.arbiter_model_id,
+    }
+    if choice.fallback_reason:
+        info["fallback_reason"] = choice.fallback_reason
+    if choice.probabilities:
+        info["probabilities"] = dict(choice.probabilities)
+    return info
+
+
+def _assistant_turn_metadata(model_id: str, engine, auto_choice) -> dict[str, Any]:
+    """Assistant message metadata: what ran, plus arbiter provenance."""
+    metadata: dict[str, Any] = {"model": model_id, "engine": engine.name}
+    if auto_choice is not None:
+        metadata["auto_selection"] = _auto_selection_turn_metadata(auto_choice)
+    return metadata
+
+
+def _auto_selection_flag(user) -> bool:
+    """Chat's fail-open view of ``models.auto_selection_enabled``."""
+    from lucent.settings import auto_selection_enabled
+
+    try:
+        return bool(
+            auto_selection_enabled(organization_id=str(user["organization_id"]))
+        )
+    except Exception:  # noqa: BLE001 — flag read fails open to "off"
+        return False
+
+
+async def _auto_chat_model_choice(
+    *,
+    user,
+    pool,
+    messages: "list[ChatMessage]",
+    session_id: str | None,
+):
+    """Resolve the ``auto`` sentinel per message (flag off → 400).
+
+    Candidates come from the same authorized query as ``/chat/models``; a
+    last-message image attachment requires a vision-capable survivor and the
+    message text feeds the prompt-size estimate. All degradation — no
+    arbiter model, below-floor confidence, ties — resolves to the chat
+    default chain inside the shared core, so the resolved model is always
+    concrete and the existing validate/ACL/effort checks run unchanged.
+    """
+    from lucent.db.models import ModelRepository, get_authorized_models_pool
+    from lucent.llm import model_auto
+    from lucent.settings import auto_selection_enabled
+
+    try:
+        enabled = auto_selection_enabled(organization_id=str(user["organization_id"]))
+    except Exception:  # noqa: BLE001 — flag read fails open to "off"
+        enabled = False
+    if not enabled:
+        raise HTTPException(status_code=400, detail=model_auto.AUTO_DISABLED_MESSAGE)
+
+    model_pool = await get_authorized_models_pool(
+        pool, {"id": str(user["id"]), "organization_id": str(user["organization_id"])}
+    )
+    models = (
+        await ModelRepository(model_pool).list_models_accessible_by(
+            str(user["id"]), str(user["organization_id"])
+        )
+    )["items"]
+    candidates = [
+        model
+        for model in models
+        if model.get("is_enabled", True) and model.get("model_class") != "decision"
+    ]
+
+    attachments = _normalize_last_attachments(messages)
+    require_vision = any(
+        attachment.get("kind") == "image"
+        or str(attachment.get("mime_type") or "").startswith("image/")
+        for attachment in attachments
+    )
+    last_message = messages[-1].content if messages else ""
+
+    def _fallback_pick() -> tuple[str, str]:
+        # A sentinel never flows into the chain as an override — "auto"
+        # means "unset" for the ordinary default chain.
+        return _resolve_chat_model(), "chat default model chain"
+
+    choice = await model_auto.select_model_auto(
+        models=candidates,
+        prompt_excerpt=last_message[:4000],
+        require_vision=require_vision,
+        org_id=str(user["organization_id"]),
+        fallback_pick=_fallback_pick,
+    )
+    await _record_auto_selection_usage(
+        pool=pool, user=user, choice=choice, session_id=session_id
+    )
+    return choice
+
+
+async def _record_auto_selection_usage(*, pool, user, choice, session_id) -> None:
+    """Ledger the arbiter's own token spend (engine="decision")."""
+    if not choice.usage:
+        return
+    try:
+        from lucent.db.token_usage import TokenUsageRepository
+
+        await TokenUsageRepository(pool).record(
+            organization_id=str(user["organization_id"]),
+            user_id=str(user["id"]),
+            session_id=session_id,
+            turn_id=None,
+            message_id=None,
+            model=choice.arbiter_model_id or "",
+            engine="decision",
+            usage={
+                "input_tokens": choice.usage[0],
+                "output_tokens": choice.usage[1],
+            },
+        )
+    except Exception:
+        logger.warning("Auto-selection usage recording failed", exc_info=True)
+
+
+async def _stash_auto_selection_metadata(
+    *, chat_session: "PersistentChatSession", choice, org_id: str
+) -> None:
+    """Best-effort ``auto_selection`` summary in the session's metadata.
+
+    The session row already persists the resolved model; this records how it
+    was chosen so the session detail view can show arbiter provenance.
+    """
+    if not chat_session.session_id or not chat_session.repo:
+        return
+    try:
+        metadata = dict(chat_session.session_metadata or {})
+        metadata["auto_selection"] = {
+            "chosen": choice.model_id,
+            "source": choice.source,
+            "confidence": choice.confidence,
+            "arbiter_model": choice.arbiter_model_id,
+        }
+        await chat_session.repo.update_session(
+            chat_session.session_id,
+            org_id,
+            metadata=metadata,
+        )
+        chat_session.session_metadata = metadata
+    except Exception:
+        logger.warning("Auto-selection metadata stash failed", exc_info=True)
+
+
 def _chat_allowed_tools_for_agent(
     agent_name: str | None = None,
     skill_names: list[str] | None = None,
@@ -1281,6 +1435,19 @@ def _hook_event_payload(event: Any) -> dict[str, Any]:
         payload["memory_count"] = raw["memory_count"]
     if isinstance(raw.get("memories"), list):
         payload["injected"] = raw["memories"]
+    # Decision-model relevance gate (memory.inject_decision_gate_*): surface
+    # whether the screen ran and which model it used, plus gated counts and
+    # per-memory relevance scores (keyed by memory-id prefix, matching the
+    # "memories" entries above) so the chip can render confidence per memory.
+    # Absent when the gate is off (or on persisted pre-gate rows).
+    if raw.get("decision_model"):
+        payload["decision_model"] = raw["decision_model"]
+    if isinstance(raw.get("decision_gated"), int):
+        payload["decision_gated"] = raw["decision_gated"]
+    if isinstance(raw.get("decision_scores"), dict):
+        payload["decision_scores"] = raw["decision_scores"]
+    if raw.get("decision_skipped"):
+        payload["decision_skipped"] = raw["decision_skipped"]
     # Project-context injection (Projects v2): name/file_count/bytes describe
     # the standing block the engine appended to the system prompt. Promote
     # them like the other structured fields so the chip renders the summary
@@ -1322,7 +1489,20 @@ async def create_chat_session(request: Request, body: CreateChatSession):
     """Create a persisted chat session shell."""
     user, pool = await _get_session_user(request)
     from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.llm import model_auto
+    from lucent.settings import auto_selection_enabled
 
+    if model_auto.is_auto_model(body.model):
+        # Phase-2 authoring gate, chat flavor: the sentinel is only stored
+        # while the flag is on and resolved per message at stream time.
+        try:
+            auto_on = bool(
+                auto_selection_enabled(organization_id=str(user["organization_id"]))
+            )
+        except Exception:  # noqa: BLE001 — flag read fails open to "off"
+            auto_on = False
+        if not auto_on:
+            raise HTTPException(status_code=422, detail=model_auto.AUTO_DISABLED_MESSAGE)
     repo = LLMSessionRepository(pool)
     # Validate the project BEFORE creating the session shell: fail-closed on
     # unknown/foreign projects, never a filed shell pointing at nothing.
@@ -1459,7 +1639,7 @@ async def chat_stream(
 
     import asyncio
 
-    from lucent.llm import get_engine_for_model
+    from lucent.llm import get_engine_for_model, model_auto
     from lucent.llm.engine import SessionEvent, SessionEventType
     from lucent.model_registry import validate_model, validate_reasoning_effort
 
@@ -1468,7 +1648,25 @@ async def chat_stream(
         pool=pool,
         session_id=body.session_id,
     )
-    selected_model = _resolve_chat_model(body.model or session_defaults.get("model"))
+    raw_model = body.model or session_defaults.get("model")
+    auto_choice = None
+    # Trigger semantics mirror the daemon: an explicit sentinel engages the
+    # flag-gated arbiter (400 when off); an unset model engages only while
+    # the flag is on — otherwise today's default chain runs unchanged.
+    if model_auto.is_auto_model(raw_model) or (
+        not raw_model and _auto_selection_flag(user)
+    ):
+        # Sentinel: the flag-gated arbiter picks per message (400 when off);
+        # validate/ACL/effort then run against the RESOLVED id.
+        auto_choice = await _auto_chat_model_choice(
+            user=user,
+            pool=pool,
+            messages=body.messages,
+            session_id=body.session_id,
+        )
+        selected_model = auto_choice.model_id
+    else:
+        selected_model = _resolve_chat_model(raw_model)
     reasoning_effort = (
         body.reasoning_effort
         if body.reasoning_effort is not None
@@ -1500,6 +1698,12 @@ async def chat_stream(
         last_message=last_message,
         attachments=attachments,
     )
+    if auto_choice is not None:
+        await _stash_auto_selection_metadata(
+            chat_session=chat_session,
+            choice=auto_choice,
+            org_id=str(user["organization_id"]),
+        )
     await _mirror_handoff_user_turn(
         user=user,
         pool=pool,
@@ -1632,7 +1836,7 @@ async def chat_stream(
                 org_id=str(user["organization_id"]),
                 user_id=str(user["id"]),
                 turn_id=chat_session.turn_id,
-                metadata={"model": selected_model, "engine": engine.name},
+                metadata=_assistant_turn_metadata(selected_model, engine, auto_choice),
             )
             if engine.name == "copilot":
                 await chat_session.repo.mark_provider_initialized(
@@ -1653,6 +1857,12 @@ async def chat_stream(
     async def generate():
         if chat_session.session_id:
             session_event = {"type": "session", "session_id": chat_session.session_id}
+            if auto_choice is not None:
+                # Live provenance badge: the client appends a quiet line under
+                # this turn as soon as the session handshake arrives.
+                session_event["model_selected"] = _auto_selection_turn_metadata(
+                    auto_choice
+                )
             yield f"data: {json.dumps(session_event)}\n\n"
         if error:
             yield f"data: {json.dumps({'type': 'error', 'error': error})}\n\n"
@@ -1690,12 +1900,21 @@ async def chat_models(request: Request):
     )["items"]
     default_model = _resolve_chat_model()
     accessible_ids = {model["id"] for model in models}
+    from lucent.settings import auto_selection_enabled
+
+    try:
+        auto_enabled = bool(
+            auto_selection_enabled(organization_id=str(user["organization_id"]))
+        )
+    except Exception:  # noqa: BLE001 — flag read fails open to "off"
+        auto_enabled = False
     return {
         "default": (
             default_model
             if default_model in accessible_ids
             else next(iter(accessible_ids), None)
         ),
+        "auto_selection_enabled": auto_enabled,
         "models": [
             {
                 "id": model["id"],
@@ -1781,7 +2000,7 @@ async def chat_stream_v2(
 
     user, pool = await _get_session_user(request)
 
-    from lucent.llm import get_engine_for_model
+    from lucent.llm import get_engine_for_model, model_auto
     from lucent.llm.engine import SessionEvent, SessionEventType
     from lucent.llm.event_persistence import EventPersistBridge
     from lucent.model_registry import validate_model, validate_reasoning_effort
@@ -1791,7 +2010,25 @@ async def chat_stream_v2(
         pool=pool,
         session_id=body.session_id,
     )
-    selected_model = _resolve_chat_model(body.model or session_defaults.get("model"))
+    raw_model = body.model or session_defaults.get("model")
+    auto_choice = None
+    # Trigger semantics mirror the daemon: an explicit sentinel engages the
+    # flag-gated arbiter (400 when off); an unset model engages only while
+    # the flag is on — otherwise today's default chain runs unchanged.
+    if model_auto.is_auto_model(raw_model) or (
+        not raw_model and _auto_selection_flag(user)
+    ):
+        # Sentinel: the flag-gated arbiter picks per message (400 when off);
+        # validate/ACL/effort then run against the RESOLVED id.
+        auto_choice = await _auto_chat_model_choice(
+            user=user,
+            pool=pool,
+            messages=body.messages,
+            session_id=body.session_id,
+        )
+        selected_model = auto_choice.model_id
+    else:
+        selected_model = _resolve_chat_model(raw_model)
     reasoning_effort = (
         body.reasoning_effort
         if body.reasoning_effort is not None
@@ -1951,6 +2188,12 @@ async def chat_stream_v2(
         last_message=last_message,
         attachments=attachments,
     )
+    if auto_choice is not None:
+        await _stash_auto_selection_metadata(
+            chat_session=chat_session,
+            choice=auto_choice,
+            org_id=str(user["organization_id"]),
+        )
     await _mirror_handoff_user_turn(
         user=user,
         pool=pool,
@@ -2245,7 +2488,7 @@ async def chat_stream_v2(
                     org_id=str(user["organization_id"]),
                     user_id=str(user["id"]),
                     turn_id=chat_session.turn_id,
-                    metadata={"model": selected_model, "engine": engine.name},
+                    metadata=_assistant_turn_metadata(selected_model, engine, auto_choice),
                 )
                 if engine.name == "copilot":
                     await chat_session.repo.mark_provider_initialized(
@@ -2292,6 +2535,12 @@ async def chat_stream_v2(
         try:
             if chat_session.session_id:
                 session_event = {"type": "session", "session_id": chat_session.session_id}
+                if auto_choice is not None:
+                    # Live provenance badge: the client appends a quiet line
+                    # under this turn when the session handshake arrives.
+                    session_event["model_selected"] = _auto_selection_turn_metadata(
+                        auto_choice
+                    )
                 yield f"data: {json.dumps(session_event)}\n\n"
             while True:
                 event = await event_queue.get()

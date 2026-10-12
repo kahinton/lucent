@@ -1,6 +1,8 @@
 """Tests for chat model validation and per-model engine routing."""
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -8,6 +10,7 @@ from fastapi import HTTPException
 from lucent.api.routers import chat
 from lucent.auth_providers import SESSION_COOKIE_NAME
 from lucent.llm import copilot_engine
+from lucent.llm.model_auto import AutoChoice
 
 
 class _FakeRequest:
@@ -496,3 +499,374 @@ async def test_session_experience_model_can_skip_capture(monkeypatch):
         repo.updated_metadata["experience_capture"]["reason"]
         == "model_no_experience_needed"
     )
+
+
+# ── Auto model selection (Phase 4) ───────────────────────────────────────
+
+
+async def _fake_auto_choice(**kwargs):
+    return AutoChoice(
+        model_id="picked-a",
+        source="arbiter",
+        reason="arbiter pick",
+        confidence=0.9,
+        arbiter_model_id="nimble",
+    )
+
+
+def _patch_stream_base(monkeypatch):
+    """Common patches so chat_stream runs without the DB."""
+    monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr(chat, "_build_system_prompt", _fake_system_prompt)
+    monkeypatch.setattr(chat, "_can_user_access_model", _allow_model)
+    monkeypatch.setattr(
+        "lucent.model_registry.validate_model", lambda _model: None
+    )
+    monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: _FakeEngine())
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_flag_off_auto_sentinel_is_a_400(monkeypatch):
+    monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: False)
+
+    with pytest.raises(HTTPException) as exc:
+        await chat.chat_stream(
+            _FakeRequest(),
+            chat.ChatRequest(
+                messages=[chat.ChatMessage(role="user", content="hello")],
+                model="auto",
+            ),
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Auto model selection is disabled"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_flag_read_failure_fails_open_to_400(monkeypatch):
+    def _broken_flag(**_kwargs):
+        raise RuntimeError("settings db down")
+
+    monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", _broken_flag)
+
+    with pytest.raises(HTTPException) as exc:
+        await chat.chat_stream(
+            _FakeRequest(),
+            chat.ChatRequest(
+                messages=[chat.ChatMessage(role="user", content="hello")],
+                model="Auto",
+            ),
+        )
+
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_flag_on_auto_flows_arbiter_pick(monkeypatch):
+    seen_engine: dict[str, str] = {}
+    seen_prepare: dict = {}
+    auto_calls: list[dict] = []
+
+    async def fake_auto(**kwargs):
+        auto_calls.append(kwargs)
+        return AutoChoice(
+            model_id="picked-a",
+            source="arbiter",
+            reason="arbiter pick",
+            confidence=0.9,
+            arbiter_model_id="nimble",
+        )
+
+    async def fake_prepare(**kwargs):
+        seen_prepare.update(kwargs)
+        return chat.PersistentChatSession(
+            session_id=None,
+            provider_session_id=None,
+            provider_initialized=False,
+            turn_id="turn-id",
+            user_message_id=None,
+            previous_messages=[],
+            repo=None,
+        )
+
+    def fake_engine(model_id):
+        seen_engine["model"] = model_id
+        return _FakeEngine()
+
+    _patch_stream_base(monkeypatch)
+    monkeypatch.setattr(chat, "_auto_chat_model_choice", fake_auto)
+    monkeypatch.setattr(chat, "_prepare_persistent_chat_session", fake_prepare)
+    monkeypatch.setattr("lucent.llm.get_engine_for_model", fake_engine)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
+
+    response = await chat.chat_stream(
+        _FakeRequest(),
+        chat.ChatRequest(
+            messages=[chat.ChatMessage(role="user", content="hello")],
+            model="auto",
+        ),
+    )
+    async for _chunk in response.body_iterator:
+        pass
+
+    assert auto_calls[0]["session_id"] is None
+    # The RESOLVED id drives the engine and the session row — never "auto".
+    assert seen_engine["model"] == "picked-a"
+    assert seen_prepare["model"] == "picked-a"
+
+
+@pytest.mark.asyncio
+async def test_chat_unset_model_flag_on_consults_arbiter(monkeypatch):
+    auto_calls: list[dict] = []
+
+    async def fake_auto(**kwargs):
+        auto_calls.append(kwargs)
+        return AutoChoice(
+            model_id="picked-a",
+            source="arbiter",
+            reason="arbiter pick",
+            confidence=0.9,
+        )
+
+    _patch_stream_base(monkeypatch)
+    monkeypatch.setattr(chat, "_auto_chat_model_choice", fake_auto)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
+
+    response = await chat.chat_stream(
+        _FakeRequest(),
+        chat.ChatRequest(messages=[chat.ChatMessage(role="user", content="hello")]),
+    )
+    async for _chunk in response.body_iterator:
+        pass
+
+    assert len(auto_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_unset_model_flag_off_keeps_the_chain(monkeypatch):
+    auto_calls: list[dict] = []
+    seen_engine: dict[str, str] = {}
+
+    async def fake_auto(**kwargs):
+        auto_calls.append(kwargs)
+        raise AssertionError("arbiter must not run with the flag off")
+
+    _patch_stream_base(monkeypatch)
+
+    def fake_engine(model_id):
+        seen_engine["model"] = model_id
+        return _FakeEngine()
+
+    monkeypatch.setattr(chat, "_auto_chat_model_choice", fake_auto)
+    monkeypatch.setattr("lucent.llm.get_engine_for_model", fake_engine)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: False)
+
+    response = await chat.chat_stream(
+        _FakeRequest(),
+        chat.ChatRequest(messages=[chat.ChatMessage(role="user", content="hello")]),
+    )
+    async for _chunk in response.body_iterator:
+        pass
+
+    assert auto_calls == []
+    assert seen_engine["model"] == chat._resolve_chat_model()
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_v2_flag_on_auto_flows_arbiter_pick(monkeypatch):
+    seen_engine: dict[str, str] = {}
+
+    async def fake_auto(**_kwargs):
+        return AutoChoice(
+            model_id="picked-b",
+            source="fallback",
+            reason="chain",
+            fallback_reason="arbiter down",
+        )
+
+    _patch_stream_base(monkeypatch)
+    monkeypatch.setattr(chat, "_auto_chat_model_choice", fake_auto)
+
+    def fake_engine(model_id):
+        seen_engine["model"] = model_id
+        return _FakeEngine()
+
+    monkeypatch.setattr("lucent.llm.get_engine_for_model", fake_engine)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
+
+    response = await chat.chat_stream_v2(
+        _FakeRequest(),
+        chat.ChatStreamRequest(
+            messages=[chat.ChatMessage(role="user", content="hello")],
+            model="auto",
+        ),
+    )
+    async for _chunk in response.body_iterator:
+        pass
+
+    assert seen_engine["model"] == "picked-b"
+
+
+@pytest.mark.asyncio
+async def test_chat_models_payload_reports_auto_selection_flag(monkeypatch):
+    class _FakeRepo:
+        def __init__(self, _pool):
+            pass
+
+        async def list_models_accessible_by(self, *_args, **_kwargs):
+            return {
+                "items": [
+                    {
+                        "id": "m1",
+                        "name": "M1",
+                        "provider": "ollama",
+                        "category": "general",
+                        "reasoning_efforts": [],
+                        "supports_vision": False,
+                        "context_window": 0,
+                        "is_enabled": True,
+                        "model_class": "language",
+                    }
+                ]
+            }
+
+    async def fake_pool(_pool, _principal):
+        return _pool
+
+    monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr("lucent.db.models.get_authorized_models_pool", fake_pool)
+    monkeypatch.setattr("lucent.db.models.ModelRepository", _FakeRepo)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: False)
+
+    payload = await chat.chat_models(_FakeRequest())
+    assert payload["auto_selection_enabled"] is False
+
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
+    payload = await chat.chat_models(_FakeRequest())
+    assert payload["auto_selection_enabled"] is True
+    assert payload["models"][0]["id"] == "m1"
+
+
+class _CapturingRepo:
+    def __init__(self):
+        self.messages = []
+
+    async def add_message(self, *args, **kwargs):
+        self.messages.append((args, kwargs))
+        return {"id": "m1"}
+
+    async def update_session(self, *_args, **_kwargs):
+        return {}
+
+    async def list_messages(self, *_args, **_kwargs):
+        return []
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_auto_turn_metadata_reaches_message_and_sse(monkeypatch):
+    repo = _CapturingRepo()
+
+    async def fake_auto(**_kwargs):
+        return AutoChoice(
+            model_id="picked-a",
+            source="arbiter",
+            reason="arbiter pick",
+            confidence=0.81,
+            arbiter_model_id="nimble",
+        )
+
+    async def fake_prepare(**_kwargs):
+        return chat.PersistentChatSession(
+            session_id="session-id",
+            provider_session_id=None,
+            provider_initialized=False,
+            turn_id="turn-id",
+            user_message_id="message-id",
+            previous_messages=[],
+            repo=repo,
+        )
+
+    _patch_stream_base(monkeypatch)
+    monkeypatch.setattr(chat, "_auto_chat_model_choice", fake_auto)
+    monkeypatch.setattr(chat, "_prepare_persistent_chat_session", fake_prepare)
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
+
+    response = await chat.chat_stream(
+        _FakeRequest(),
+        chat.ChatRequest(
+            messages=[chat.ChatMessage(role="user", content="hello")],
+            model="auto",
+        ),
+    )
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+    body = "".join(chunks)
+
+    # Live badge: the session event carries the provenance.
+    session_line = next(line for line in body.splitlines() if '"model_selected"' in line)
+    badge = json.loads(session_line[len("data: "):])["model_selected"]
+    assert badge["chosen"] == "picked-a"
+    assert badge["source"] == "arbiter"
+    assert badge["confidence"] == 0.81
+
+    # Persisted: the assistant turn carries the same provenance.
+    (_args, kwargs) = repo.messages[0]
+    assert kwargs["role"] == "assistant"
+    auto_meta = kwargs["metadata"]["auto_selection"]
+    assert auto_meta["chosen"] == "picked-a"
+    assert auto_meta["confidence"] == 0.81
+
+
+def test_chat_template_renders_auto_selection_notes():
+    template = Path("src/lucent/web/templates/chat.html").read_text()
+
+    assert "function appendAutoSelectionNote(assistantEl, info)" in template
+    assert "appendAutoSelectionNote(assistantEl, event.model_selected);" in template
+    assert "if (autoInfo) appendAutoSelectionNote(assistantEl, autoInfo);" in template
+
+
+def test_hook_event_payload_promotes_decision_gate_fields():
+    event = SimpleNamespace(
+        raw={
+            "hook": "message_memory_lookup",
+            "memory_count": 2,
+            "memories": [
+                {"id": "a1b2c3d4", "tags": ["t"], "content": "c", "full": True},
+                {"id": "beefcafe", "tags": [], "content": "d", "full": False},
+            ],
+            "decision_model": "nimble:latest",
+            "decision_gated": 1,
+            "decision_scores": {"a1b2c3d4": 0.84, "beefcafe": 0.11},
+        },
+        content="",
+    )
+    payload = chat._hook_event_payload(event)
+    assert payload["decision_model"] == "nimble:latest"
+    assert payload["decision_gated"] == 1
+    assert payload["decision_scores"]["a1b2c3d4"] == 0.84
+    # Keys are aligned with the promoted "memories" entries so the UI can
+    # render a score next to each injected memory by id prefix.
+    assert {m["id"] for m in payload["injected"]} == set(payload["decision_scores"])
+
+
+def test_hook_event_payload_omits_gate_fields_when_absent():
+    event = SimpleNamespace(
+        raw={"hook": "message_memory_lookup", "memory_count": 1, "memories": []},
+        content="",
+    )
+    payload = chat._hook_event_payload(event)
+    for key in ("decision_model", "decision_gated", "decision_scores", "decision_skipped"):
+        assert key not in payload
+
+
+def test_message_ui_renders_memory_gate_confidence():
+    js = Path("src/lucent/web/static/chat-message-ui.js").read_text()
+
+    assert "decision_scores" in js
+    assert "hook-memory-score" in js
+    assert "Relevance gate" in js
+    template = Path("src/lucent/web/templates/chat.html").read_text()
+    assert ".hook-memory-score" in template

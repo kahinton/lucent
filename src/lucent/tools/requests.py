@@ -719,6 +719,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 get_authorized_models_pool,
             )
             from lucent.db.requests import validate_decision_config
+            from lucent.llm.model_auto import is_auto_model
             from lucent.model_registry import validate_decision_model
 
             try:
@@ -754,6 +755,15 @@ if the agent type is not approved or the sandbox template is invalid."""
                     }
                 )
             decision_model = model or decision_config.get("model") or ""
+            if is_auto_model(decision_model):
+                return json.dumps(
+                    {
+                        "error": (
+                            'Model "auto" applies to chat tasks — decision-step '
+                            "tasks name a decision model directly"
+                        )
+                    }
+                )
             model_pool_probe = await get_authorized_models_pool(
                 await _get_pool(), {"id": str(user_id), "organization_id": str(org_id)}
             )
@@ -883,23 +893,49 @@ if the agent type is not approved or the sandbox template is invalid."""
         # Validate model against registry (chat tasks only — decision tasks
         # validated above with the decision-class rules)
         if model and not decision_config:
-            from lucent.model_registry import validate_model, validate_reasoning_effort
+            from lucent.llm.model_auto import split_auto_sentinel
+            from lucent.settings import auto_selection_enabled
 
-            error = validate_model(model, require_tools=True)
-            if error:
-                return json.dumps({"error": error})
-            from lucent.db.models import ModelRepository, get_authorized_models_pool
-
-            # Usage is clearance-driven and default-deny — same gate the
-            # picker applies.
-            model_pool = await get_authorized_models_pool(
-                await _get_pool(), {"id": str(user_id), "organization_id": str(org_id)}
+            is_auto, auto_error = split_auto_sentinel(
+                model,
+                enabled=auto_selection_enabled(organization_id=str(org_id)),
             )
-            if not await ModelRepository(model_pool).get_usable_model(model):
-                return json.dumps({"error": "Model is not available to this user"})
-            effort_error = validate_reasoning_effort(model, reasoning_effort)
-            if effort_error:
-                return json.dumps({"error": effort_error})
+            if auto_error:
+                return json.dumps({"error": auto_error})
+            if is_auto and agent_type == "decision-step":
+                return json.dumps(
+                    {
+                        "error": (
+                            'Model "auto" applies to chat tasks — decision-step '
+                            "tasks name a decision model directly"
+                        )
+                    }
+                )
+            if not is_auto:
+                from lucent.model_registry import (
+                    validate_model,
+                    validate_reasoning_effort,
+                )
+
+                error = validate_model(model, require_tools=True)
+                if error:
+                    return json.dumps({"error": error})
+                from lucent.db.models import (
+                    ModelRepository,
+                    get_authorized_models_pool,
+                )
+
+                # Usage is clearance-driven and default-deny — same gate the
+                # picker applies.
+                model_pool = await get_authorized_models_pool(
+                    await _get_pool(),
+                    {"id": str(user_id), "organization_id": str(org_id)},
+                )
+                if not await ModelRepository(model_pool).get_usable_model(model):
+                    return json.dumps({"error": "Model is not available to this user"})
+                effort_error = validate_reasoning_effort(model, reasoning_effort)
+                if effort_error:
+                    return json.dumps({"error": effort_error})
         elif reasoning_effort:
             return json.dumps({"error": "reasoning_effort requires model"})
 

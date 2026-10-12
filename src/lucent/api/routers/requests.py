@@ -775,17 +775,38 @@ async def create_task(
                 raise HTTPException(422, arbiter_error)
             await _require_model_access(pool, arbiter_model, user)
     if body.model:
-        from lucent.model_registry import validate_model, validate_reasoning_effort
+        from lucent.llm.model_auto import split_auto_sentinel
+        from lucent.settings import auto_selection_enabled
 
-        if not body.decision_config:
-            error = validate_model(body.model, require_tools=True)
-            if error:
-                raise HTTPException(422, error)
-        await _require_model_access(pool, body.model, user)
-        if body.reasoning_effort and not body.decision_config:
-            effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
-            if effort_error:
-                raise HTTPException(422, effort_error)
+        is_auto, auto_error = split_auto_sentinel(
+            body.model,
+            enabled=auto_selection_enabled(organization_id=org_id),
+        )
+        if auto_error:
+            raise HTTPException(422, auto_error)
+        if is_auto and (body.decision_config or body.agent_type == "decision-step"):
+            raise HTTPException(
+                422,
+                'Model "auto" applies to chat tasks — decision-step tasks '
+                "name a decision model directly",
+            )
+        if not is_auto:
+            from lucent.model_registry import (
+                validate_model,
+                validate_reasoning_effort,
+            )
+
+            if not body.decision_config:
+                error = validate_model(body.model, require_tools=True)
+                if error:
+                    raise HTTPException(422, error)
+            await _require_model_access(pool, body.model, user)
+            if body.reasoning_effort and not body.decision_config:
+                effort_error = validate_reasoning_effort(
+                    body.model, body.reasoning_effort
+                )
+                if effort_error:
+                    raise HTTPException(422, effort_error)
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 
@@ -917,15 +938,31 @@ async def update_task_model(
         repo, str(task_id), str(user.organization_id), user
     )
     _require_request_mutation(req, user)
-    from lucent.model_registry import validate_model, validate_reasoning_effort
+    from lucent.llm.model_auto import split_auto_sentinel
+    from lucent.settings import auto_selection_enabled
 
-    error = validate_model(body.model, require_tools=True)
-    if error:
-        raise HTTPException(422, error)
-    await _require_model_access(pool, body.model, user)
-    effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
-    if effort_error:
-        raise HTTPException(422, effort_error)
+    is_auto, auto_error = split_auto_sentinel(
+        body.model,
+        enabled=auto_selection_enabled(organization_id=str(user.organization_id)),
+    )
+    if auto_error:
+        raise HTTPException(422, auto_error)
+    if is_auto and (task or {}).get("agent_type") == "decision-step":
+        raise HTTPException(
+            422,
+            'Model "auto" applies to chat tasks — decision-step tasks '
+            "name a decision model directly",
+        )
+    if not is_auto:
+        from lucent.model_registry import validate_model, validate_reasoning_effort
+
+        error = validate_model(body.model, require_tools=True)
+        if error:
+            raise HTTPException(422, error)
+        await _require_model_access(pool, body.model, user)
+        effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
+        if effort_error:
+            raise HTTPException(422, effort_error)
 
     result = await repo.update_task_model(
         str(task_id), body.model, org_id=str(user.organization_id)
@@ -980,15 +1017,38 @@ async def edit_pending_task(
         )
 
     if body.model:
-        from lucent.model_registry import validate_model, validate_reasoning_effort
+        from lucent.llm.model_auto import split_auto_sentinel
+        from lucent.settings import auto_selection_enabled
 
-        error = validate_model(body.model, require_tools=True)
-        if error:
-            raise HTTPException(422, error)
-        await _require_model_access(pool, body.model, user)
-        effort_error = validate_reasoning_effort(body.model, body.reasoning_effort)
-        if effort_error:
-            raise HTTPException(422, effort_error)
+        is_auto, auto_error = split_auto_sentinel(
+            body.model,
+            enabled=auto_selection_enabled(organization_id=org_id),
+        )
+        if auto_error:
+            raise HTTPException(422, auto_error)
+        if is_auto and (body.agent_type or (existing or {}).get("agent_type")) == (
+            "decision-step"
+        ):
+            raise HTTPException(
+                422,
+                'Model "auto" applies to chat tasks — decision-step tasks '
+                "name a decision model directly",
+            )
+        if not is_auto:
+            from lucent.model_registry import (
+                validate_model,
+                validate_reasoning_effort,
+            )
+
+            error = validate_model(body.model, require_tools=True)
+            if error:
+                raise HTTPException(422, error)
+            await _require_model_access(pool, body.model, user)
+            effort_error = validate_reasoning_effort(
+                body.model, body.reasoning_effort
+            )
+            if effort_error:
+                raise HTTPException(422, effort_error)
     elif body.reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 

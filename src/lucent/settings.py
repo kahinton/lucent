@@ -527,6 +527,64 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         ),
     ),
     RuntimeSettingDefinition(
+        key="models.auto_selection_enabled",
+        env_var="LUCENT_MODEL_AUTO_SELECTION_ENABLED",
+        value_type="boolean",
+        default=False,
+        title="Auto model selection",
+        section="Auto model selection",
+        description=(
+            "Let an arbiter pick the best model for tasks that do not name one "
+            "(or set model to 'auto'): rule filters narrow the accessible "
+            "chat models, then a decision-model choice question picks the "
+            "most fitting survivor."
+        ),
+        help_text=(
+            "Off by default. While off, authored model='auto' values are "
+            "rejected at authoring time and model-less resolution keeps the "
+            "existing default chain (daemon model, then category heuristics). "
+            "A decision-class arbiter model adds a System One call per "
+            "auto-resolved task or chat message."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="models.auto_selection_model",
+        env_var="LUCENT_MODEL_AUTO_SELECTION_MODEL",
+        value_type="string",
+        default="",
+        title="Auto-selection arbiter model",
+        section="Auto model selection",
+        description=(
+            "Decision-class model used by auto model selection to pick the "
+            "best model for a task."
+        ),
+        control="model",
+        option_source="decision_models",
+        allow_empty=True,
+        help_text=(
+            "Leave blank to use the first enabled decision-class model "
+            "(models ordered by provider, name)."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="models.auto_selection_confidence",
+        env_var="LUCENT_MODEL_AUTO_SELECTION_CONFIDENCE",
+        value_type="float",
+        default=0.6,
+        title="Auto-selection confidence floor",
+        section="Auto model selection",
+        description=(
+            "Minimum arbiter confidence in its top model pick; below the "
+            "floor the choice falls back to the standard default chain."
+        ),
+        min_value=0.05,
+        max_value=0.99,
+        help_text=(
+            "Raise it to make auto selection more conservative (falls back "
+            "more often); lower it to let marginal picks through."
+        ),
+    ),
+    RuntimeSettingDefinition(
         key="models.default_model",
         env_var="LUCENT_DEFAULT_MODEL",
         value_type="string",
@@ -1625,6 +1683,10 @@ def _setting_bool(key: str, *, organization_id: Any | None = None) -> bool:
     return bool(get_runtime_setting(key, organization_id=organization_id))
 
 
+def _setting_float(key: str, *, organization_id: Any | None = None) -> float:
+    return float(get_runtime_setting(key, organization_id=organization_id))
+
+
 def default_model_id(*, organization_id: Any | None = None) -> str | None:
     """Deployment/admin-selected default model, or None when unset."""
     return _setting_string("models.default_model", organization_id=organization_id) or None
@@ -1861,6 +1923,21 @@ def fusion_max_candidates(*, organization_id: Any | None = None) -> int:
 
 def fusion_arbiter_model_id(*, organization_id: Any | None = None) -> str | None:
     return _setting_string("fusion.arbiter_model", organization_id=organization_id) or None
+
+
+def auto_selection_enabled(*, organization_id: Any | None = None) -> bool:
+    return _setting_bool("models.auto_selection_enabled", organization_id=organization_id)
+
+
+def auto_selection_model_id(*, organization_id: Any | None = None) -> str | None:
+    return _setting_string("models.auto_selection_model", organization_id=organization_id) or None
+
+
+def auto_selection_confidence(*, organization_id: Any | None = None) -> float:
+    return _setting_float(
+        "models.auto_selection_confidence",
+        organization_id=organization_id,
+    )
 
 
 def shadow_forget_enabled(*, organization_id: Any | None = None) -> bool:

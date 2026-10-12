@@ -51,6 +51,7 @@ from daemon.decomposition.capability import DecompositionHelpersMixin
 from daemon.dispatch import policy as task_policy
 from daemon.dispatch import decision_step
 from daemon.dispatch import fusion
+from daemon.dispatch import model_auto
 from daemon.observability.tools import (
     _MEMORY_CAPTURE_TOOLS,
     _MEMORY_SEARCH_TOOLS,
@@ -449,30 +450,22 @@ async def _accessible_models_for_user(
     ]
 
 
-async def _select_model_for_user(
+def _default_model_chain(
     *,
-    user_id: str,
-    org_id: str,
-    agent_type: str | None = None,
-    title: str | None = None,
-    description: str | None = None,
-    explicit_model: str | None = None,
+    explicit_model: str | None,
+    accessible_models: list[Any],
+    agent_type: str | None,
+    title: str | None,
+    description: str | None,
 ) -> tuple[str, str]:
-    """Select a tool-capable model strictly from the owner's ACL-visible catalog."""
+    """The pre-auto selection chain, verbatim — the auto arbiter's fallback.
+
+    Daemon-model short-circuit first, then :func:`select_model_for_task`.
+    """
     from lucent.model_registry import select_model_for_task
 
-    accessible_models = await _accessible_models_for_user(user_id, org_id)
-    if not accessible_models:
-        raise ModelAccessDeniedError("No enabled tool-capable model is available to this user")
-    if explicit_model and not any(model.id == explicit_model for model in accessible_models):
-        raise ModelAccessDeniedError(
-            f"Model '{explicit_model}' is not available to this user"
-        )
-    if not explicit_model and MODEL and any(
-        model.id == MODEL for model in accessible_models
-    ):
+    if MODEL and any(model.id == MODEL for model in accessible_models):
         return MODEL, "configured daemon model is available to the task owner"
-
     selection = select_model_for_task(
         agent_type=agent_type,
         title=title,
@@ -483,6 +476,116 @@ async def _select_model_for_user(
         require_tools=True,
     )
     return selection.model_id, selection.reason
+
+
+async def _select_model_for_user(
+    *,
+    user_id: str,
+    org_id: str,
+    agent_type: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    explicit_model: str | None = None,
+    use_auto: bool = True,
+    selection_out: dict | None = None,
+    task: dict | None = None,
+) -> tuple[str, str]:
+    """Select a tool-capable model strictly from the owner's ACL-visible catalog.
+
+    With ``use_auto`` (the default), the flag-gated auto-selection arbiter
+    engages when the task carries the ``model="auto"`` sentinel or names no
+    model at all; the flag off (or any arbiter failure) falls back to
+    :func:`_default_model_chain`, behaviorally identical to pre-auto
+    dispatch. ``selection_out``, when given, receives a summary dict for the
+    dispatch loop's ``model_auto_selected`` / ``model_auto_disabled`` events.
+    """
+    from lucent.llm.model_auto import is_auto_model
+
+    accessible_models = await _accessible_models_for_user(user_id, org_id)
+    if not accessible_models:
+        raise ModelAccessDeniedError("No enabled tool-capable model is available to this user")
+    if explicit_model and not is_auto_model(explicit_model):
+        if not any(model.id == explicit_model for model in accessible_models):
+            raise ModelAccessDeniedError(
+                f"Model '{explicit_model}' is not available to this user"
+            )
+    sentinel = is_auto_model(explicit_model)
+    requested_model = explicit_model
+    if sentinel:
+        # The pseudo-id is not in any catalog: normalize to unset so the
+        # fallback chain and later access checks see a concrete absence.
+        explicit_model = None
+
+    engage_auto = False
+    if use_auto and (sentinel or not requested_model):
+        try:
+            from lucent import settings
+
+            engage_auto = bool(
+                settings.auto_selection_enabled(organization_id=org_id)
+            )
+        except Exception as flag_error:  # noqa: BLE001 — flag read fails open
+            log(f"Auto-selection flag read failed: {flag_error}", "WARN")
+            engage_auto = False
+
+    if selection_out is not None:
+        selection_out.update(
+            {
+                "trigger": (
+                    "sentinel"
+                    if sentinel
+                    else ("unset_model" if not requested_model else "explicit")
+                ),
+                "engaged": engage_auto,
+                "sentinel": sentinel,
+            }
+        )
+
+    def _chain_pick() -> tuple[str, str]:
+        return _default_model_chain(
+            explicit_model=explicit_model,
+            accessible_models=accessible_models,
+            agent_type=agent_type,
+            title=title,
+            description=description,
+        )
+
+    if not engage_auto:
+        if sentinel:
+            log(
+                "Auto model selection is disabled — resolving the \"auto\" "
+                "sentinel via the default chain",
+                "WARN",
+            )
+        return _chain_pick()
+
+    try:
+        choice = await model_auto.select_task_model(
+            user_id=user_id,
+            org_id=org_id,
+            task=task or {},
+            agent_type=agent_type,
+            title=title,
+            description=description,
+            accessible_models=accessible_models,
+            fallback_pick=_chain_pick,
+        )
+    except Exception as arbiter_error:  # noqa: BLE001 — the arbiter may never break dispatch
+        picked, reason = _chain_pick()
+        log(f"Auto-selection arbiter failed: {arbiter_error}; using the default chain", "WARN")
+        if selection_out is not None:
+            from lucent.llm.model_auto import AutoChoice
+
+            selection_out["choice"] = AutoChoice(
+                model_id=picked,
+                source="fallback",
+                reason=reason,
+                fallback_reason=f"Auto-selection arbiter failed: {arbiter_error}",
+            )
+        return picked, reason
+    if selection_out is not None:
+        selection_out["choice"] = choice
+    return choice.model_id, choice.reason
 
 
 async def _assert_model_accessible_by_user(
@@ -2251,6 +2354,7 @@ class LucentDaemon(
                     agent_type=agent_type,
                     title=schedule_title,
                     description=description,
+                    use_auto=False,  # internal hygiene pass — keep the cheap chain
                 )
                 result = await self.run_session(
                     f"{schedule_title.lower().replace(' ', '-')}-{user_id[:8]}",
@@ -2577,6 +2681,7 @@ class LucentDaemon(
             user_id=user_id,
             org_id=org_id,
             agent_type="planning",
+            use_auto=False,  # internal hygiene pass — keep the cheap chain
         )
         await self.run_session(
             f"rejections-{user_id[:8]}",
@@ -3037,6 +3142,7 @@ class LucentDaemon(
                         agent_type="planning",
                         title=req.get("title"),
                         description=req.get("description"),
+                        use_auto=False,  # internal hygiene pass — keep the cheap chain
                     )
                     log(
                         f"Decomp backfill: request {request_id[:8]} model selection: "
@@ -4211,6 +4317,10 @@ class LucentDaemon(
                     await _fail_owned(task_id, f"Decision step failed: {exc}")
                 continue
 
+            # Auto model selection (flag-gated, default off): the sentinel
+            # or an unset model routes through the decision-model arbiter;
+            # selection_out surfaces what happened for the task events below.
+            auto_selection: dict = {}
             try:
                 selected_model, model_reason = await _select_model_for_user(
                     user_id=requesting_user_id,
@@ -4219,6 +4329,8 @@ class LucentDaemon(
                     title=title,
                     description=description,
                     explicit_model=task_model,
+                    task=dict(task),
+                    selection_out=auto_selection,
                 )
             except ModelAccessDeniedError as exc:
                 reason = f"Model dispatch denied: {exc}"
@@ -4226,6 +4338,27 @@ class LucentDaemon(
                 await _fail_owned(task_id, reason)
                 await RequestAPI.add_event(task_id, "dispatch_denied", reason)
                 continue
+            choice_obj = auto_selection.get("choice")
+            if auto_selection.get("sentinel") and not auto_selection.get("engaged"):
+                # Authoring accepted the sentinel, so the flag flipped off
+                # mid-queue: degrade like fusion_disabled, never strand it.
+                log(f"Task {task_id[:8]} auto selection disabled; default chain", "WARN")
+                await RequestAPI.add_event(
+                    task_id,
+                    "model_auto_disabled",
+                    'Auto model selection is disabled — resolving model "auto" '
+                    "via the normal default chain",
+                    {"trigger": auto_selection.get("trigger")},
+                )
+            elif choice_obj is not None:
+                await RequestAPI.add_event(
+                    task_id,
+                    "model_auto_selected",
+                    model_auto.selection_event_detail(choice_obj),
+                    model_auto.selection_event_metadata(
+                        choice_obj, trigger=auto_selection.get("trigger") or ""
+                    ),
+                )
 
             if task_reasoning_effort:
                 try:

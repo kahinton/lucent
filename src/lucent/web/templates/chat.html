@@ -301,6 +301,7 @@
         .hook-file-ref { background-color: rgba(255, 63, 155, 0.12) !important; border-color: rgba(255, 63, 155, 0.35) !important; color: #ff8fc4 !important; }
         .hook-memory-tag { background-color: rgba(255, 63, 155, 0.12) !important; color: #ff8fc4 !important; }
         .hook-memory-id { color: #ff3f9b !important; }
+        .hook-memory-score { color: rgba(255, 143, 196, 0.75) !important; }
     }
 
     #empty-state .grid button {
@@ -862,6 +863,17 @@ function applySessionConfig(session) {
         select.innerHTML = '';
         state.modelsById = {};
         const byProvider = {};
+        if (data.auto_selection_enabled) {
+            state.modelsById['auto'] = { id: 'auto', name: 'Auto', reasoning_efforts: [], supports_vision: true };
+            const autoGroup = document.createElement('optgroup');
+            autoGroup.label = 'Auto';
+            const autoOpt = document.createElement('option');
+            autoOpt.value = 'auto';
+            autoOpt.textContent = 'Auto — best model per message';
+            if (!data.default) autoOpt.selected = true;
+            autoGroup.appendChild(autoOpt);
+            select.appendChild(autoGroup);
+        }
         for (const m of data.models) {
             state.modelsById[m.id] = m;
             (byProvider[m.provider] = byProvider[m.provider] || []).push(m);
@@ -1253,6 +1265,8 @@ function renderSessionMessages(messages, events = []) {
         } else {
             const assistantEl = appendAssistantMessage(msg.content || '');
             replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || []);
+            const autoInfo = msg.metadata && msg.metadata.auto_selection;
+            if (autoInfo) appendAutoSelectionNote(assistantEl, autoInfo);
         }
     }
     hideStatus();
@@ -1379,6 +1393,9 @@ async function sendMessage(e) {
                             state.sessionId = event.session_id;
                             history.replaceState(null, '', `/chat/${event.session_id}`);
                             loadSessions();
+                            if (event.model_selected) {
+                                appendAutoSelectionNote(assistantEl, event.model_selected);
+                            }
                             break;
 
                         case 'text_delta':
@@ -1571,6 +1588,24 @@ function appendAssistantMessage(text) {
     contentEl.innerHTML = renderMarkdown(text || '');
     scrollToBottom();
     return assistantEl;
+}
+
+function appendAutoSelectionNote(assistantEl, info) {
+    // Quiet provenance line for "Auto" turns: what ran, and how confident
+    // the arbiter was (or why it fell back to the default chain).
+    if (!assistantEl || !info || !info.chosen) return;
+    const note = document.createElement('div');
+    note.className = 'auto-selection-note mt-2 text-xs text-gray-400';
+    let text = info.source === 'arbiter'
+        ? `Auto picked ${info.chosen}`
+        : `Auto used the default chain → ${info.chosen}`;
+    if (info.source === 'arbiter' && typeof info.confidence === 'number') {
+        text += ` (confidence ${info.confidence.toFixed(2)})`;
+    }
+    if (info.fallback_reason) text += ` — ${info.fallback_reason}`;
+    note.textContent = text;
+    const container = assistantEl.querySelector('.assistant-response > .min-w-0');
+    (container || assistantEl).appendChild(note);
 }
 
 // ═══════════════════════════════════════════════════════════════════

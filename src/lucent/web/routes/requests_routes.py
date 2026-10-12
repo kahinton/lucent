@@ -488,6 +488,20 @@ async def request_detail(request: Request, request_id: str):
             for model in model_rows
         ]
         available_models.sort(key=lambda m: m["id"])
+        from lucent.settings import auto_selection_enabled
+
+        if auto_selection_enabled(organization_id=str(user.organization_id)):
+            # The pseudo-id resolves at dispatch through the auto-selection
+            # arbiter (flag-gated); decision-check cards exclude it client-side.
+            available_models.insert(
+                0,
+                {
+                    "id": "auto",
+                    "name": "Auto — chosen at dispatch",
+                    "tags": [],
+                    "reasoning_efforts": [],
+                },
+            )
 
         # Usage picks are clearance-driven and default-deny.
         from lucent.db.definitions import get_authorized_definitions_pool
@@ -667,19 +681,37 @@ async def edit_task(request: Request, task_id: str):
 
     # Validate model + agent against the allowed sets
     if model:
-        from lucent.access_control import AccessControlService
-        from lucent.model_registry import validate_model, validate_reasoning_effort
+        from lucent.llm.model_auto import split_auto_sentinel
+        from lucent.settings import auto_selection_enabled
 
-        err = validate_model(model)
-        if err:
-            raise HTTPException(422, err)
-        if not await AccessControlService(pool).can_access(
-            str(user.id), "model", model, org_id
-        ):
-            raise HTTPException(403, "Model is not available to this user")
-        effort_err = validate_reasoning_effort(model, reasoning_effort)
-        if effort_err:
-            raise HTTPException(422, effort_err)
+        is_auto, auto_error = split_auto_sentinel(
+            model, enabled=auto_selection_enabled(organization_id=org_id)
+        )
+        if auto_error:
+            raise HTTPException(422, auto_error)
+        if is_auto and agent_type == "decision-step":
+            raise HTTPException(
+                422,
+                'Model "auto" applies to chat tasks — decision-step tasks '
+                "name a decision model directly",
+            )
+        if not is_auto:
+            from lucent.access_control import AccessControlService
+            from lucent.model_registry import (
+                validate_model,
+                validate_reasoning_effort,
+            )
+
+            err = validate_model(model)
+            if err:
+                raise HTTPException(422, err)
+            if not await AccessControlService(pool).can_access(
+                str(user.id), "model", model, org_id
+            ):
+                raise HTTPException(403, "Model is not available to this user")
+            effort_err = validate_reasoning_effort(model, reasoning_effort)
+            if effort_err:
+                raise HTTPException(422, effort_err)
     elif reasoning_effort:
         raise HTTPException(422, "reasoning_effort requires model")
 

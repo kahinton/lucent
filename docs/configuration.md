@@ -205,7 +205,9 @@ few turns of conversation, the chat project name, and one field per
 surviving candidate memory (its ~1000-char search preview); the decision
 model answers one `noul` relevance question per candidate, and only
 memories scoring at or above the threshold are injected. The injection cap
-still applies to the survivors.
+still applies to the survivors. The memory chip in chat shows when the gate
+ran (which model, how many candidates it gated out) and each injected
+memory's relevance score, both live and on session replay.
 
 The gate is fail-open — any gate error (model unavailable, endpoint
 failure, timeout) leaves the pre-gate candidate set untouched, and a
@@ -353,7 +355,30 @@ The `fusion_config` shape (validated at every authoring surface; `arbiter.questi
 
 Scoring: the arbiter is asked the authored questions **once per candidate** (prefixed `cand0_fulfilled`, `cand1_fulfilled`, …) in one `/v1/systemone` call per batch, so aggregates are directly comparable; ties and threshold failures break deterministically (highest normalized aggregate, then fewer failing thresholds, then earlier candidate). Candidates run sequentially inside one dispatch, so an enabled fusion task spends several full chat sessions' worth of tokens up front — the `fusion_completed` event's `totals` object (candidate/arbiter/synthesis/refine input- and output-token sums) plus `engine="decision"` arbiter ledger rows exist so admins can compare against a single-model baseline before keeping the flags on. Fusion tasks cannot use sandboxes, required tools, or `decision_config`; their `output_contract` still applies to the shipped result. Full candidate texts are not persisted — only the winner's result plus per-candidate excerpts in the event metadata.
 
+### Auto Model Selection
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LUCENT_MODEL_AUTO_SELECTION_ENABLED` | `false` | Env fallback for **Settings → Runtime Settings → Auto model selection**. Enables the `model="auto"` sentinel and, while on, routes model-unset daemon tasks (and model-unset chat messages) through the selection arbiter. |
+| `LUCENT_MODEL_AUTO_SELECTION_MODEL` | *(blank / first enabled decision model)* | Decision-class model used as the selection arbiter. Leave blank to use the first enabled decision-class model via the ordinary decision-model resolution. |
+| `LUCENT_MODEL_AUTO_SELECTION_CONFIDENCE` | `0.6` (`0.05`–`0.99`) | Confidence floor for adopting the arbiter's pick; lower results fall back to the caller's default chain. |
+| `LUCENT_MODEL_AUTO_TIMEOUT_SECONDS` | `60` | Timeout for each arbiter `/v1/systemone` call. One retry is attempted on error before resolution degrades. |
+
+#### How auto selection works
+
+Every surface keeps its pre-auto default chain; auto selection **only** runs while the flag is on, and any resolution failure behaves exactly like the flag being off (fail-open):
+
+- **Triggers** — daemon tasks: the reserved sentinel `model="auto"` (authorable via REST, MCP, the web edit form, workflow actions, and schedule overrides; refused with `422 Auto model selection is disabled` while the flag is off) or, while the flag is on, **no model set at all**. Chat: `model="auto"` from the picker (or an unset model while the flag is on). Decision-step tasks never take the sentinel.
+- **Rule filters run first** — candidates must be enabled (and decision-class models are never chat candidates); an image-bearing chat message requires `supports_vision`; and when a model declares a context window (`> 0`), it must fit the estimated prompt size plus 8k headroom. Models with an unknown window (0) are never filtered on suspicion. Candidates are capped at 32 options, keeping the default chain's pick in the pool.
+- **One `choice` question** — a decision-class model answers `best_model` over the surviving model ids, given task title/description/agent type (or the chat message excerpt) and each model's metadata line (name, category, tags, context window, notes). Models tagged with a parameter count (`763b`, `31b`, …) surface it in both the metadata line and the choice criteria (`… (fast, 763B params)`), and the instructions ask for size-matching — simple, short requests go to small models, not heavyweights.
+- **Answer rule** — unknown option or probability below the confidence floor falls back; a tie (top-two within 0.10 probability) goes to the default chain's pick when it is the runner-up; a single surviving model is chosen directly without consulting the arbiter.
+- **Observability** — daemon dispatch emits `model_auto_selected` (chosen source, probabilities, survivors, dropped reasons, arbiter usage) or `model_auto_disabled` (sentinel encountered with the flag off); the arbiter's own token spend lands in the token-usage ledger with `engine="decision"`, and chat sessions stash an `auto_selection` summary in session metadata; in chat the streaming `session` event also carries a live `model_selected` payload, and the rendered turn shows a quiet note (picked model + confidence, or the fallback reason when the arbiter degraded), persisted on the assistant message so it survives replays.
+- **One-shot on tasks** — dispatch persists the resolved concrete model back onto the task (`tasks.model`), so retries never re-consult the arbiter. Chat consults per message but persists the resolved model on the session row.
+
+Background daemon passes (memory maintenance, rejection processing, decomposition backfill) deliberately skip auto selection — internal hygiene stays on the cheap default chain.
+
 ### Daemon Git Operations
+
 
 | Variable | Default | Description |
 |----------|---------|-------------|

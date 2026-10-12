@@ -236,6 +236,24 @@
         if (!Number.isInteger(fileCount)) fileCount = null;
         if (!Number.isInteger(blockBytes)) blockBytes = null;
 
+        // Message-injection decision gate (memory.inject_decision_gate_*):
+        // model id, how many candidates it gated out, and per-memory
+        // relevance scores keyed by memory-id prefix (matching the
+        // "memories" entries). Absent when the gate is off or on legacy rows.
+        const decisionModel = asString(pick('decision_model'));
+        const decisionGatedRaw = pick('decision_gated');
+        const decisionGated = Number.isInteger(decisionGatedRaw) ? decisionGatedRaw : null;
+        let decisionScores = null;
+        const decisionScoresRaw = pick('decision_scores');
+        if (decisionScoresRaw && typeof decisionScoresRaw === 'object' && !Array.isArray(decisionScoresRaw)) {
+            decisionScores = {};
+            for (const [key, value] of Object.entries(decisionScoresRaw)) {
+                const num = Number(value);
+                if (Number.isFinite(num)) decisionScores[key] = num;
+            }
+        }
+        const decisionSkipped = asString(pick('decision_skipped'));
+
         return {
             hookName: asString(pick('hook')) || 'hook',
             phase: asString(pick('phase')),
@@ -247,6 +265,10 @@
             projectName,
             fileCount,
             blockBytes,
+            decisionModel,
+            decisionGated,
+            decisionScores,
+            decisionSkipped,
             text,
         };
     }
@@ -290,9 +312,26 @@
         const refsBlock = hook.fileRefs.length
             ? `<div class="hook-detail-row hook-detail-column">${detailLabel('Matched files')}<div class="hook-ref-list">${hook.fileRefs.map(ref => `<span class="hook-file-ref">${escapeHtml(ref)}</span>`).join('')}</div></div>`
             : '';
+        // Relevance-gate summary: only when the decision-model screen ran
+        // (its model id is present). Reports the model, how many candidates
+        // it gated out, or the skip reason when the screen failed open.
+        const gateParts = [];
+        if (hook.decisionModel) gateParts.push(escapeHtml(hook.decisionModel));
+        if (Number.isInteger(hook.decisionGated) && hook.decisionGated > 0) gateParts.push(`${hook.decisionGated} gated out`);
+        if (hook.decisionGated === 0 && hook.decisionModel && !hook.decisionSkipped) gateParts.push('kept all');
+        let gateBlock = '';
+        if (hook.decisionModel || hook.decisionSkipped) {
+            const gateValue = hook.decisionSkipped
+                ? `skipped${hook.decisionSkipped.length ? ` — ${hook.decisionSkipped}` : ''}${gateParts.length ? ` · ${gateParts.join(' · ')}` : ''}`
+                : gateParts.join(' · ');
+            gateBlock = `<div class="hook-detail-row">${detailLabel('Relevance gate')}<span class="hook-detail-value">${gateValue ? escapeHtml(gateValue) : 'ran'}</span></div>`;
+        }
         const memoryItems = hook.memories.map(memory => {
             const tags = (memory.tags || []).map(tag => `<span class="hook-memory-tag">${escapeHtml(tag)}</span>`).join('');
-            return `<li class="hook-memory-item"><span class="hook-memory-id">${escapeHtml(memory.id || '')}</span>${tags ? `<span class="hook-memory-tags">${tags}</span>` : ''}<span class="hook-memory-content">${escapeHtml(memory.content || '')}</span></li>`;
+            const score = hook.decisionScores && Number.isFinite(hook.decisionScores[memory.id])
+                ? ` <span class="hook-memory-score" title="Decision-model relevance">${hook.decisionScores[memory.id].toFixed(2)}</span>`
+                : '';
+            return `<li class="hook-memory-item"><span class="hook-memory-id">${escapeHtml(memory.id || '')}</span>${score}${tags ? `<span class="hook-memory-tags">${tags}</span>` : ''}<span class="hook-memory-content">${escapeHtml(memory.content || '')}</span></li>`;
         }).join('');
         const memoriesBlock = memoryItems
             ? `<div class="hook-detail-row hook-detail-column">${detailLabel(`Injected memories (${hook.memories.length})`)}<ul class="hook-memory-list">${memoryItems}</ul></div>`
@@ -313,7 +352,7 @@
             </button>
             <div id="details-${hookId}" class="tool-details">
                 <div class="mt-1 ml-6 hook-details rounded-lg border p-3 text-xs font-mono">
-                    ${triggerBlock}${phaseBlock}${projectBlock}${decisionBlock}${refsBlock}${memoriesBlock}${contextBlock}
+                    ${triggerBlock}${phaseBlock}${projectBlock}${decisionBlock}${gateBlock}${refsBlock}${memoriesBlock}${contextBlock}
                 </div>
             </div>`;
         container.appendChild(wrapper);
