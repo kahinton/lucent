@@ -26,6 +26,7 @@ def test_core_read_only_tools_are_annotated():
         "list_queued_tasks",
         "list_planning_targets",
         "list_available_models",
+        "list_engines",
         "list_agent_definitions",
         "list_handoffs",
         "get_handoff",

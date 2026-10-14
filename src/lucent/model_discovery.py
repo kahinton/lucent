@@ -83,6 +83,35 @@ def model_provider_secret_scope(organization_id: str) -> SecretScope:
     return SecretScope(organization_id=str(organization_id), system_managed=True)
 
 
+async def resolve_provider_credential(provider: str, *, org_id: str | None = None) -> str:
+    """Resolve a model-provider API key: saved secret (DB) first, then env vars.
+
+    Shared by discovery, the LangChain engine, and the native coding-engine paths
+    so a provider key entered once under Settings → Models → LLM Providers serves
+    every engine that uses that provider.
+    """
+    definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get((provider or "").strip().lower())
+    if not definition:
+        return ""
+    if org_id:
+        try:
+            secret_provider = SecretRegistry.get()
+            value = await secret_provider.get(
+                definition.secret_key, model_provider_secret_scope(org_id)
+            )
+            if value and value.strip():
+                return value.strip()
+        except KeyError:
+            pass
+        except Exception:
+            logger.debug("Failed to read saved %s credential", provider, exc_info=True)
+    for env_var in definition.env_vars:
+        env_value = os.environ.get(env_var, "").strip()
+        if env_value:
+            return env_value
+    return ""
+
+
 @dataclass(slots=True)
 class DiscoveredModel:
     """Normalized model metadata discovered from a provider catalog."""

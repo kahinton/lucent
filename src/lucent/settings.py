@@ -17,6 +17,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from lucent.llm.engine_registry import engine_names as _engine_names
+
+# Engines selectable as the deployment default, derived from the engine registry
+# (single source of truth) rather than a hardcoded tuple.
+_LLM_ENGINE_CHOICES: tuple[str, ...] = tuple(_engine_names(implemented_only=True))
+
 RuntimeSettingType = Literal["boolean", "integer", "float", "string", "json"]
 RuntimeSettingSource = Literal["database", "environment", "default"]
 RuntimeSettingControl = Literal["auto", "toggle", "select", "model", "url", "text"]
@@ -637,8 +643,21 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         title="LLM engine",
         section="Models & LLM",
         description="Default engine for model execution when a model does not override it.",
-        choices=("copilot", "langchain"),
+        choices=_LLM_ENGINE_CHOICES,
         requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="models.engine_auto_route",
+        env_var="LUCENT_ENGINE_AUTO_ROUTE",
+        value_type="boolean",
+        default=False,
+        title="Auto-route by task type",
+        section="Models & LLM",
+        description=(
+            "When enabled, code/agentic work prefers a coding-agent engine and "
+            "plain chat uses the general LLM engine. Off keeps the configured "
+            "default engine for every model unless a model or task overrides it."
+        ),
     ),
     RuntimeSettingDefinition(
         key="models.validation_mode",
@@ -1705,6 +1724,11 @@ def daemon_model_id(*, organization_id: Any | None = None) -> str | None:
 def llm_engine_name(*, organization_id: Any | None = None) -> str:
     """Configured default LLM engine name."""
     return _setting_string("models.llm_engine", organization_id=organization_id).lower()
+
+
+def engine_auto_route(*, organization_id: Any | None = None) -> bool:
+    """Whether code/agentic work auto-routes to a coding-agent engine."""
+    return _setting_bool("models.engine_auto_route", organization_id=organization_id)
 
 
 def model_validation_mode(*, organization_id: Any | None = None) -> str:

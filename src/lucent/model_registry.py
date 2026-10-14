@@ -35,7 +35,10 @@ class ModelInfo:
     tags: list[str] = field(default_factory=list)
     # Selectable provider reasoning/thinking levels reported by provider metadata.
     reasoning_efforts: list[str] = field(default_factory=list)
-    engine: str | None = None  # engine override: None=auto, "copilot", "langchain"
+    engine: str | None = None  # engine override: None=auto, "copilot", "langchain", ...
+    # Explicit engine backend binding (migration 136). None = resolve via the
+    # engine/provider match or the configured default engine.
+    backend_id: str | None = None
     # Explicit classification separating standard chat LLMs from System One
     # decision models (Jev-style choice/noul/score served by Ollama 0.35+).
     # Decision models never participate in chat-model selection or the
@@ -363,6 +366,7 @@ async def load_models_from_db(pool) -> list[ModelInfo]:
                 tags=list(r.get("tags") or []),
                 reasoning_efforts=list(r.get("reasoning_efforts") or []),
                 engine=r.get("engine"),
+                backend_id=r.get("backend_id"),
                 model_class=r.get("model_class") or "language",
             )
             loaded.append(m)

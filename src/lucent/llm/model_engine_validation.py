@@ -1,11 +1,24 @@
-"""Validation helpers for model engine overrides."""
+"""Validation helpers for model engine overrides.
+
+Engine identity is derived from :mod:`lucent.llm.engine_registry` so the set of
+valid engines and the providers each supports live in one place.
+"""
 
 from __future__ import annotations
 
 from importlib.util import find_spec
 
-ALLOWED_ENGINES = {"copilot", "langchain"}
-COPILOT_SUPPORTED_PROVIDERS = {"anthropic", "copilot", "google", "ollama", "openai", "xai"}
+from lucent.llm.engine_registry import engine_names, engine_spec
+
+# Only engines that exist in this build are selectable. Declared-but-unimplemented
+# engines (e.g. claude_code, codex) are excluded until they ship.
+ALLOWED_ENGINES = set(engine_names(implemented_only=True))
+
+# Providers the Copilot harness can drive (from its registry spec).
+COPILOT_SUPPORTED_PROVIDERS = set(engine_spec("copilot").provider_support or ())
+
+# Provider → LangChain integration package. This is genuinely LangChain-specific
+# (how the general engine reaches each provider), so it stays here.
 LANGCHAIN_PROVIDER_PACKAGES = {
     "anthropic": "langchain_anthropic",
     "openai": "langchain_openai",
@@ -24,7 +37,8 @@ def normalize_engine(engine: str | None) -> str | None:
         return None
     if normalized in ALLOWED_ENGINES:
         return normalized
-    raise ValueError("Invalid engine value. Expected null, 'copilot', or 'langchain'.")
+    allowed = ", ".join(f"'{name}'" for name in sorted(ALLOWED_ENGINES))
+    raise ValueError(f"Invalid engine value. Expected null or one of: {allowed}.")
 
 
 def validate_engine_override(provider: str, engine: str | None) -> list[str]:
@@ -38,8 +52,7 @@ def validate_engine_override(provider: str, engine: str | None) -> list[str]:
 
     if normalized_engine == "copilot" and normalized_provider not in COPILOT_SUPPORTED_PROVIDERS:
         warnings.append(
-            f"Provider '{provider}' may not be supported by Copilot SDK. "
-            "Model was saved anyway."
+            f"Provider '{provider}' may not be supported by Copilot SDK. Model was saved anyway."
         )
 
     if normalized_engine == "langchain":

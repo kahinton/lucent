@@ -526,6 +526,79 @@ MODEL_TAGS = [
 MODEL_PROVIDERS = ["anthropic", "copilot", "google", "ollama", "openai", "xai"]
 
 
+def _engine_options() -> list[dict[str, str]]:
+    """Coding engines a model can be pinned to.
+
+    Everything that does not run through a coding engine runs through the general
+    LangChain layer, so LangChain is not offered as an explicit engine choice —
+    the empty "Auto" option means the general LLM layer.
+    """
+    from lucent.llm.engine_registry import engine_names, engine_spec
+
+    return [
+        {"name": name, "label": engine_spec(name).display_name}
+        for name in engine_names(kind="coding_agent")
+    ]
+
+
+def _coding_engines_context(
+    backends: list[dict], provider_statuses: list[dict]
+) -> list[dict[str, object]]:
+    """Per-engine sections for the Coding Engines panel.
+
+    Each engine carries its own availability, the provider options it actually
+    supports (native + compatible local providers), its config schema, its
+    configured backends, and (for Copilot) the credential status it owns — so the
+    UI only ever offers valid combinations and keeps "configured" visually
+    separate from "add new".
+    """
+    from lucent.llm.engine_injection import (
+        compatible_provider_options,
+        local_provider_for_backend,
+    )
+    from lucent.llm.engine_registry import engine_availability, engine_names, engine_spec
+    from lucent.llm.local_providers import resolve_local_base_url
+
+    sections: list[dict[str, object]] = []
+    for name in engine_names(kind="coding_agent"):
+        spec = engine_spec(name)
+        availability = engine_availability(name)
+        provider_options = compatible_provider_options(name)
+        labels = {o["name"]: o["label"] for o in provider_options}
+
+        engine_backends: list[dict] = []
+        for backend in backends:
+            if backend["engine"] != name:
+                continue
+            row = dict(backend)
+            row["provider_label"] = labels.get(row["provider"], row["provider"])
+            row["default_model"] = (row.get("config") or {}).get("model")
+            local_spec = local_provider_for_backend(row)
+            row["resolved_base_url"] = (
+                resolve_local_base_url(
+                    local_spec, configured_base_url=(row.get("config") or {}).get("base_url")
+                )
+                if local_spec is not None
+                else None
+            )
+            engine_backends.append(row)
+
+        sections.append(
+            {
+                "name": name,
+                "display_name": spec.display_name,
+                "notes": spec.notes,
+                "available": availability.available,
+                "availability_detail": availability.detail,
+                "provider_options": provider_options,
+                "backends": engine_backends,
+                # Engine-owned provider credential (Copilot's GitHub token).
+                "credential_status": {s.get("provider"): s for s in provider_statuses}.get(name),
+            }
+        )
+    return sections
+
+
 async def _require_admin(request: Request):
     user = await get_user_context(request)
     role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
@@ -651,6 +724,16 @@ async def models_list(request: Request):
         pool, str(user.organization_id),
     ) if models else {}
     enabled_count = sum(1 for m in models if m["is_enabled"])
+    from lucent.db.backends import BackendRepository
+
+    backends = await BackendRepository(pool).list(org_id=str(user.organization_id))
+    coding_engines = _coding_engines_context(backends, provider_statuses)
+    # The Copilot GitHub token is a coding-engine credential, not an LLM-provider
+    # one — it is presented inside the Copilot engine card instead.
+    llm_provider_statuses = [s for s in provider_statuses if s.get("provider") != "copilot"]
+    from lucent.model_registry import list_models as _list_registry_models
+
+    all_model_ids = [m.id for m in _list_registry_models(include_disabled=False)]
 
     return templates.TemplateResponse(
         request,
@@ -665,7 +748,10 @@ async def models_list(request: Request):
             "all_model_classes": MODEL_CLASSES,
             "all_tags": MODEL_TAGS,
             "all_providers": MODEL_PROVIDERS,
-            "provider_statuses": provider_statuses,
+            "all_engines": _engine_options(),
+            "coding_engines": coding_engines,
+            "all_model_ids": all_model_ids,
+            "llm_provider_statuses": llm_provider_statuses,
             "owner_groups": owner_groups,
             "owner_users": owner_users,
             "model_grants": model_grants,
@@ -769,6 +855,175 @@ async def clear_model_provider_credential(request: Request, provider: str):
     if deleted:
         return _models_redirect(success=f"{definition.name} credential cleared")
     return _models_redirect(warning=f"{definition.name} had no saved credential")
+
+
+@router.post("/models/backends")
+async def create_engine_backend(request: Request):
+    """Create an engine backend (engine + provider + config/credential binding)."""
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.backends import BackendRepository
+    from lucent.llm.engine_injection import provider_allowed_for_engine
+    from lucent.llm.engine_registry import UnknownEngineError, engine_spec
+
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    engine = str(form.get("engine", "")).strip().lower()
+    provider = str(form.get("provider", "")).strip().lower()
+    if not name or not engine or not provider:
+        return _models_redirect(error="Name, engine, and provider are required")
+    try:
+        spec = engine_spec(engine)
+    except UnknownEngineError:
+        return _models_redirect(error=f"Unknown engine: {engine}")
+    if spec.kind != "coding_agent":
+        return _models_redirect(error=f"'{engine}' is not a coding engine")
+    if not provider_allowed_for_engine(engine, provider):
+        return _models_redirect(
+            error=f"Provider '{provider}' is not supported by the {engine} engine"
+        )
+
+    repo = BackendRepository(pool)
+    org_id = str(user.organization_id)
+    existing = await repo.list(org_id=org_id, engine=engine, provider=provider)
+    if any(row["name"] == name for row in existing):
+        return _models_redirect(error="A backend with that name already exists")
+    config: dict = {}
+    base_url = str(form.get("base_url", "")).strip()
+    if base_url:
+        config["base_url"] = base_url
+    default_model = str(form.get("model", "")).strip()
+    if default_model:
+        config["model"] = default_model
+    backend = await repo.create(
+        name=name, engine=engine, provider=provider, config=config, org_id=org_id
+    )
+
+    await AdminAuditRepository(pool).log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_UPDATE,
+        entity_type="engine_backend",
+        entity_id=backend["id"],
+        entity_label=name,
+        changed_fields=["created"],
+        new_values={"engine": engine, "provider": provider},
+        notes="engine backend created from Models UI",
+    )
+    return _models_redirect(success=f"Backend '{name}' created")
+
+
+@router.post("/models/backends/{backend_id}/delete")
+async def delete_engine_backend(request: Request, backend_id: str):
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.backends import BackendRepository
+
+    repo = BackendRepository(pool)
+    org_id = str(user.organization_id)
+    existing = await repo.get(backend_id, org_id=org_id)
+    if not existing:
+        return _models_redirect(error="Backend not found")
+    await repo.delete(backend_id, org_id=org_id)
+    await AdminAuditRepository(pool).log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_RESET,
+        entity_type="engine_backend",
+        entity_id=backend_id,
+        entity_label=existing["name"],
+        changed_fields=["deleted"],
+        notes="engine backend deleted from Models UI",
+    )
+    return _models_redirect(success="Backend deleted")
+
+
+@router.post("/models/backends/{backend_id}/secrets")
+async def set_engine_backend_secret(request: Request, backend_id: str):
+    """Store one secret field for a backend in the secret provider."""
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.backends import BackendRepository
+    from lucent.llm.engine_credentials import engine_config_schema, secret_key_for
+    from lucent.model_discovery import model_provider_secret_scope
+    from lucent.secrets import SecretRegistry
+
+    form = await request.form()
+    field = str(form.get("field", "")).strip()
+    value = str(form.get("value", "")).strip()
+    if not field or not value:
+        return _models_redirect(error="Secret field and value are required")
+
+    repo = BackendRepository(pool)
+    org_id = str(user.organization_id)
+    backend = await repo.get(backend_id, org_id=org_id)
+    if not backend:
+        return _models_redirect(error="Backend not found")
+    secret_fields = {f.key for f in engine_config_schema(backend["engine"]) if f.is_secret}
+    if field not in secret_fields:
+        return _models_redirect(error=f"'{field}' is not a secret field of this engine")
+
+    key = secret_key_for(backend["engine"], backend["name"], field)
+    await SecretRegistry.get().set(key, value, model_provider_secret_scope(org_id))
+    secret_refs = dict(backend.get("secret_refs") or {})
+    secret_refs[field] = key
+    await repo.update(backend_id, secret_refs=secret_refs, org_id=org_id)
+
+    await AdminAuditRepository(pool).log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_UPDATE,
+        entity_type="engine_backend",
+        entity_id=backend_id,
+        entity_label=backend["name"],
+        changed_fields=[f"secret_refs.{field}"],
+        new_values={"field": field, "secret_key": key, "configured": True},
+        notes="engine backend secret updated from Models UI",
+    )
+    return _models_redirect(success=f"Secret '{field}' saved")
+
+
+@router.post("/models/backends/{backend_id}/secrets/clear")
+async def clear_engine_backend_secret(request: Request, backend_id: str):
+    await _check_csrf(request)
+    user = await _require_admin(request)
+    pool = await get_pool()
+    from lucent.db.backends import BackendRepository
+    from lucent.model_discovery import model_provider_secret_scope
+    from lucent.secrets import SecretRegistry
+
+    form = await request.form()
+    field = str(form.get("field", "")).strip()
+    repo = BackendRepository(pool)
+    org_id = str(user.organization_id)
+    backend = await repo.get(backend_id, org_id=org_id)
+    if not backend:
+        return _models_redirect(error="Backend not found")
+
+    secret_refs = dict(backend.get("secret_refs") or {})
+    key = secret_refs.pop(field, None)
+    if key:
+        try:
+            await SecretRegistry.get().delete(key, model_provider_secret_scope(org_id))
+        except Exception:
+            pass
+        await repo.update(backend_id, secret_refs=secret_refs, org_id=org_id)
+
+    await AdminAuditRepository(pool).log_for_user(
+        user,
+        request,
+        action=audit_actions.SETTING_RESET,
+        entity_type="engine_backend",
+        entity_id=backend_id,
+        entity_label=backend["name"],
+        changed_fields=[f"secret_refs.{field}"],
+        new_values={"field": field, "configured": False},
+        notes="engine backend secret cleared from Models UI",
+    )
+    return _models_redirect(success=f"Secret '{field}' cleared")
 
 
 @router.post("/models/discover")

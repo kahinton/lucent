@@ -187,6 +187,7 @@ class TaskCreate(BaseModel):
     output_schema: dict | None = None  # Backwards-compatible alias for output_contract.json_schema
     decision_config: dict | None = None  # Decision-step payload (System One questions)
     fusion_config: dict | None = None  # Fusion payload (chat candidates + decision arbiter)
+    backend_id: str | None = None  # Pin a coding-engine backend (e.g. Codex via Ollama)
 
 
 class TaskEventCreate(BaseModel):
@@ -854,6 +855,15 @@ async def create_task(
             "max_retries": 1,
         }
 
+    if body.backend_id:
+        from lucent.llm.backend_selection import validate_backend_selection
+
+        backend_error = await validate_backend_selection(
+            pool, body.backend_id, org_id=org_id, model_id=body.model
+        )
+        if backend_error:
+            raise HTTPException(422, backend_error)
+
     try:
         task = await repo.create_task(
             request_id=str(request_id),
@@ -873,6 +883,7 @@ async def create_task(
             output_contract=output_contract,
             decision_config=body.decision_config,
             fusion_config=body.fusion_config,
+            backend_id=body.backend_id,
         )
         task["sandboxes_enabled"] = org_sandboxes_enabled
         task["custom_tooling_enabled"] = custom_tooling_enabled(organization_id=org_id)
@@ -984,6 +995,8 @@ class TaskEditBody(BaseModel):
     agent_type: str | None = None
     sandbox_template_id: str | None = None
     clear_sandbox_template: bool = False
+    backend_id: str | None = None
+    clear_backend: bool = False
 
 
 @router.patch("/tasks/{task_id}")
@@ -1090,6 +1103,15 @@ async def edit_pending_task(
             # Sandbox templates module optional in some deployments
             pass
 
+    if body.backend_id and not body.clear_backend:
+        from lucent.llm.backend_selection import validate_backend_selection
+
+        backend_error = await validate_backend_selection(
+            pool, body.backend_id, org_id=org_id, model_id=body.model
+        )
+        if backend_error:
+            raise HTTPException(422, backend_error)
+
     next_reasoning_effort = (
         body.reasoning_effort if body.model is None else (body.reasoning_effort or "")
     )
@@ -1104,6 +1126,8 @@ async def edit_pending_task(
         agent_type=body.agent_type,
         sandbox_template_id=body.sandbox_template_id if not body.clear_sandbox_template else None,
         clear_sandbox_template=body.clear_sandbox_template,
+        backend_id=body.backend_id if not body.clear_backend else None,
+        clear_backend=body.clear_backend,
     )
     if not result:
         raise HTTPException(

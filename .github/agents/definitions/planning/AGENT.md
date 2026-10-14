@@ -43,6 +43,8 @@ Follow the **daemon-task-authoring** skill for detailed guidance on writing effe
 
 If a task requires a specific model tier (complex reasoning vs. simple lookup), follow the **model-selection** skill to assign the appropriate model.
 
+**Coding engines.** If the request is genuine code work and a coding engine backend is configured, follow the **model-selection** skill's Coding Engines section: call `list_engines`, choose one backend for the request, and set the same `backend_id` (and one of that backend's `model`s) on **every** task doing that work. Decide once per request — do not put some coding tasks on the engine and others on the general layer.
+
 ### 3. Create the Request and Tasks
 
 ```

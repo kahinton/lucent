@@ -1,80 +1,57 @@
-"""Engine factory — selects and instantiates LLM engines.
+"""Engine factory — resolves and returns LLM engines via the engine registry.
 
-Supports multi-engine routing: cloud providers use the Copilot SDK engine,
-local/custom providers (Ollama, etc.) use the LangChain engine.
+Routing:
+  - ``get_engine()``: the configured default engine (``LUCENT_LLM_ENGINE`` /
+    ``models.llm_engine``).
+  - ``get_engine_for_model(model_id)``: per-model routing — explicit
+    ``models.engine`` override, then the runtime registry override, then the
+    provider's forced engine, else the configured default.
 
-  - get_engine(): Returns the default engine (based on LUCENT_LLM_ENGINE)
-  - get_engine_for_model(model_id): Routes to the correct engine per-model
+Engine identity, capabilities, and construction live in
+``lucent.llm.engine_registry``; this module is a thin resolver over it so the
+engine set is data-driven rather than hardcoded.
 """
 
 from __future__ import annotations
 
+from lucent.llm import engine_registry
 from lucent.llm.engine import LLMEngine
-from lucent.settings import github_token, llm_engine_name
-
-_engine: LLMEngine | None = None
-_langchain_engine: LLMEngine | None = None
-_copilot_engine: LLMEngine | None = None
-
-# Providers that require the LangChain engine (not supported by Copilot SDK)
-_LANGCHAIN_PROVIDERS = {"ollama"}
 
 
 def get_engine_name() -> str:
     """Get the configured default engine name."""
+    # Imported lazily so ``lucent.settings`` can import the engine registry (for
+    # its choice list) without a circular import through this module.
+    from lucent.settings import llm_engine_name
+
     return llm_engine_name()
 
 
-def _get_copilot_engine() -> LLMEngine:
-    """Get or create the Copilot SDK engine singleton."""
-    global _copilot_engine
-    if _copilot_engine is None:
-        from lucent.llm.copilot_engine import CopilotEngine
+def _implemented_engine(engine_name: str | None) -> LLMEngine | None:
+    """Return the engine for a name when it exists and is implemented, else None.
 
-        token = github_token()
-        _copilot_engine = CopilotEngine(github_token=token or None)
-    return _copilot_engine
-
-
-def _get_langchain_engine() -> LLMEngine:
-    """Get or create the LangChain engine singleton."""
-    global _langchain_engine
-    if _langchain_engine is None:
-        from lucent.llm.langchain_engine import LangChainEngine
-
-        _langchain_engine = LangChainEngine()
-    return _langchain_engine
+    Unknown or declared-but-unimplemented engine names are ignored (routing
+    falls through), matching the previous behavior where unrecognized overrides
+    were normalized away rather than failing a request.
+    """
+    if not engine_name:
+        return None
+    try:
+        spec = engine_registry.engine_spec(engine_name)
+    except engine_registry.UnknownEngineError:
+        return None
+    if not spec.implemented:
+        return None
+    return engine_registry.get_engine(engine_name)
 
 
 def get_engine() -> LLMEngine:
-    """Get the default engine based on LUCENT_LLM_ENGINE env var."""
-    global _engine
-    if _engine is not None:
-        return _engine
-
-    engine_name = get_engine_name()
-
-    if engine_name == "copilot":
-        _engine = _get_copilot_engine()
-    elif engine_name == "langchain":
-        _engine = _get_langchain_engine()
-    else:
-        raise ValueError(
-            f"Unknown LLM engine: {engine_name!r}. "
-            "Expected 'copilot' or 'langchain'. "
-            "Set LUCENT_LLM_ENGINE env var."
-        )
-
-    return _engine
+    """Get the default engine based on LUCENT_LLM_ENGINE / models.llm_engine."""
+    return engine_registry.get_engine(get_engine_name())
 
 
 def get_engine_for_model(model_id: str) -> LLMEngine:
-    """Route to the correct engine based on explicit override or provider.
-
-    If a model has an explicit runtime engine override ("copilot" or "langchain"),
-    use it directly. Otherwise fall back to provider-based routing:
-    cloud models use the default engine and local/custom models (Ollama) use LangChain.
-    """
+    """Route to the correct engine based on explicit override or provider."""
     try:
         from lucent.llm.langchain_engine import _resolve_model, get_registered_engine
         from lucent.model_registry import get_model
@@ -92,20 +69,18 @@ def get_engine_for_model(model_id: str) -> LLMEngine:
                 "Use lucent.llm.decision.decide() for decision-model work."
             )
 
-        if model_info and model_info.engine == "copilot":
-            return _get_copilot_engine()
-        if model_info and model_info.engine == "langchain":
-            return _get_langchain_engine()
+        engine = _implemented_engine(model_info.engine if model_info else None)
+        if engine is not None:
+            return engine
 
-        engine_override = get_registered_engine(model_id)
-        if engine_override == "copilot":
-            return _get_copilot_engine()
-        if engine_override == "langchain":
-            return _get_langchain_engine()
+        engine = _implemented_engine(get_registered_engine(model_id))
+        if engine is not None:
+            return engine
 
         provider = model_info.provider if model_info else _resolve_model(model_id)[0]
-        if provider in _LANGCHAIN_PROVIDERS:
-            return _get_langchain_engine()
+        forced = engine_registry.engine_default_for_provider(provider)
+        if forced:
+            return engine_registry.get_engine(forced)
     except ImportError:
         pass
 
@@ -113,8 +88,5 @@ def get_engine_for_model(model_id: str) -> LLMEngine:
 
 
 def reset_engine() -> None:
-    """Reset the engine singleton (for testing)."""
-    global _engine, _copilot_engine, _langchain_engine
-    _engine = None
-    _copilot_engine = None
-    _langchain_engine = None
+    """Reset the engine singletons (for testing or config reload)."""
+    engine_registry.reset_engines()

@@ -84,9 +84,22 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 
 ## LLM Engine
 
+Lucent engines come in two kinds:
+
+- **`llm_access`** — `langchain`, the general LLM layer for plain
+  text/reasoning models (Ollama, OpenAI, Anthropic, Google, and any
+  OpenAI-compatible endpoint). Lucent owns the tool loop.
+- **`coding_agent`** — product-specific agent harnesses that bring their own
+  agent loop, tools, and auth: `copilot` (GitHub Copilot SDK) today, with
+  `claude_code` and `codex` declared in the registry for future releases.
+
+Engine identity, capabilities, and config schemas live in one data-driven
+registry (`lucent.llm.engine_registry`); every other surface derives from it.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_LLM_ENGINE` | `copilot` | LLM backend: `copilot` (GitHub Copilot SDK) or `langchain` |
+| `LUCENT_LLM_ENGINE` | `copilot` | Default engine when a model or task does not override it (`copilot` or `langchain`) |
+| `LUCENT_ENGINE_AUTO_ROUTE` | `false` | When enabled, code/agentic work prefers a `coding_agent` engine and plain chat uses the general `llm_access` engine. Off keeps the configured default engine for every model. |
 | `LUCENT_CHAT_MODEL` | *(model registry default)* | Optional override for chat sessions |
 | `LUCENT_MODEL_VALIDATION` | `strict` | Model validation mode: `strict` rejects unknown models, `lenient` allows them |
 | `LUCENT_CHAT_MCP_URL` | `http://localhost:8766/mcp` | MCP URL for chat-initiated tool calls |
@@ -99,6 +112,53 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 | `GOOGLE_API_KEY` | — | Google API key (only when `LUCENT_LLM_ENGINE=langchain`) |
 | `OLLAMA_HOST` | `http://host.docker.internal:11434` | Ollama host URL for local models |
 | `GITHUB_TOKEN` | — | GitHub token for Copilot SDK authentication |
+
+### Engine Backends
+
+A **backend** binds one engine to one provider family with its own config and
+credentials (**Settings → Models → Engine Backends**, or
+`/api/admin/backends`). Models reference a backend; tasks/workflows can pin one;
+otherwise a model resolves through its pinned `(engine, provider)` match or the
+configured default engine. Backends are additive — a model with no backend
+resolves exactly as before.
+
+Non-secret config (base URL, wire protocol, local provider, gateway URL) is
+stored on the backend; secret fields are stored in the secret provider and only
+their key names appear on the backend. Each field has an environment-variable
+fallback (for example the Copilot BYOK fields `COPILOT_PROVIDER_BASE_URL`,
+`COPILOT_PROVIDER_TYPE`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_MODEL`).
+
+### Coding Engines
+
+Three product harnesses run alongside the general LangChain engine. Each is
+backed by an official Python SDK that bundles (Claude Code) or auto-installs
+(Codex) its own CLI, so no Node/npm or separate CLI install is required. These
+ship in the base install — the engines are available out of the box:
+
+| Engine | SDK | Notes |
+|--------|-----|-------|
+| `copilot` | `github-copilot-sdk` | GitHub Copilot harness |
+| `claude_code` | `claude-agent-sdk` | Bundles the Claude Code CLI |
+| `codex` | `openai-codex` | Pulls the Codex CLI runtime |
+
+Each coding engine can run either **its own provider-native models** (Anthropic
+for Claude Code, OpenAI/ChatGPT for Codex, GitHub-hosted for Copilot) or models
+from a **local provider**. Local providers are described non-specifically — a
+provider declares which API surfaces it exposes, and each engine consumes the
+surface it supports:
+
+| Local provider | Surfaces | Claude Code | Copilot | Codex |
+|---|---|---|---|---|
+| `ollama` | `openai`, `anthropic`, `codex-oss` | ✅ `ANTHROPIC_BASE_URL` | ✅ BYOK | ✅ `model_provider` |
+| `lmstudio` | `openai`, `codex-oss` | — | ✅ BYOK | ✅ `model_provider` |
+| `openai-compatible` | `openai`, `anthropic` | ✅ | ✅ | — |
+
+To use a local provider with a coding engine, create an **Engine Backend** with
+that `provider` (e.g. `engine=codex, provider=ollama`) and pin it to a model or
+task. The base URL resolves config → env (`OLLAMA_HOST`) → provider default. Adding
+a new local provider is one spec in `src/lucent/llm/local_providers.py` — no engine
+changes. Anthropic-native and OpenAI-native models work the same way with a
+`provider=anthropic` / `provider=openai` backend.
 
 ### Model Reasoning Effort
 

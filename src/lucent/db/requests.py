@@ -2388,6 +2388,7 @@ class RequestRepository:
         output_contract: dict | None = None,
         decision_config: dict | None = None,
         fusion_config: dict | None = None,
+        backend_id: str | None = None,
     ) -> dict:
         _validate_output_contract(output_contract)
         validate_decision_config(decision_config)
@@ -2434,11 +2435,11 @@ class RequestRepository:
                     agent_definition_id, priority, sequence_order, organization_id,
                     model, reasoning_effort, sandbox_template_id, sandbox_config,
                     requesting_user_id, output_contract, decision_config,
-                    fusion_config)
+                    fusion_config, backend_id)
                    VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
                     COALESCE($14, (SELECT created_by FROM requests WHERE id = $1)),
-                    $15, $16, $17
+                    $15, $16, $17, $18
                    )
                    RETURNING *""",
                 UUID(request_id),
@@ -2460,6 +2461,7 @@ class RequestRepository:
                 json.dumps(output_contract) if output_contract else None,
                 json.dumps(decision_config) if decision_config else None,
                 json.dumps(fusion_config) if fusion_config else None,
+                UUID(backend_id) if backend_id else None,
             )
         task = dict(row)
         # Log creation event
@@ -3217,6 +3219,8 @@ class RequestRepository:
         agent_type: str | None = None,
         sandbox_template_id: str | None = None,
         clear_sandbox_template: bool = False,
+        backend_id: str | None = None,
+        clear_backend: bool = False,
     ) -> dict | None:
         """Edit a task in place. Returns the updated task or None.
 
@@ -3225,7 +3229,8 @@ class RequestRepository:
         failed, cancelled, needs_review, etc. are all editable. Tasks in
         ``claimed``, ``running``, or ``completed`` cannot be modified.
         Pass ``clear_sandbox_template=True`` to explicitly null out the
-        sandbox template (distinguishes "no change" from "remove").
+        sandbox template (distinguishes "no change" from "remove"). Likewise
+        ``clear_backend=True`` clears a pinned engine backend.
         """
         sets: list[str] = []
         params: list = []
@@ -3250,6 +3255,11 @@ class RequestRepository:
         elif sandbox_template_id is not None:
             params.append(UUID(sandbox_template_id))
             sets.append(f"sandbox_template_id = ${len(params)}")
+        if clear_backend:
+            sets.append("backend_id = NULL")
+        elif backend_id is not None:
+            params.append(UUID(backend_id))
+            sets.append(f"backend_id = ${len(params)}")
 
         if not sets:
             return await self.get_task(task_id, org_id=org_id)

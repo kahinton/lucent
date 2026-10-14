@@ -53,6 +53,35 @@ A `429` response with `Retry-After` header is returned when the limit is exceede
 
 ---
 
+## Engine & Backend Admin
+
+Admin endpoints for the engine registry and engine backends. All require an
+admin/owner role; backend endpoints are organization-scoped.
+
+```
+GET  /api/admin/engines                  # engine specs: kind, capabilities, config schema, availability
+GET  /api/admin/backends                 # list backends (org + shared); filters: engine, provider
+POST /api/admin/backends                 # create {name, engine, provider, config, secret_refs, is_enabled}
+PATCH /api/admin/backends/{id}           # update name/config/secret_refs/is_enabled
+DELETE /api/admin/backends/{id}          # delete
+POST /api/admin/backends/{id}/secrets    # set {field, value} — value stored in the secret provider
+POST /api/admin/backends/{id}/secrets/clear  # clear {field} so an env fallback applies
+```
+
+`GET /api/admin/engines` returns each engine's `kind` (`llm_access` or
+`coding_agent`), `implemented` flag, `capabilities`, `config_schema` (field list
+with `is_secret`), and runtime `availability` (`available`, `detail`, `missing`).
+It also returns `local_providers` — the registered local/OSS providers with the
+API `flavors` each exposes and the `codex_provider_id` Codex uses for it.
+
+A backend binds one engine to one provider family (e.g. `engine=codex,
+provider=ollama` for a local model). `config` holds non-secret settings (notably
+`base_url`); `secret_refs` holds only secret **key names** (values live in the
+secret provider). Model and task `engine` fields accept any engine name the
+registry knows — `copilot`, `claude_code`, `codex`, `langchain`.
+
+---
+
 ## Health Check
 
 ```

@@ -12,6 +12,8 @@ hardcoding model IDs that may not be enabled in a deployment.
 ## When to Use
 
 - Creating a task via `create_task` and deciding whether to set the `model` field
+- Deciding whether a task should run on a **coding engine** (Copilot / Claude
+  Code / Codex) and, if so, which backend — see [Coding Engines](#coding-engines)
 - Daemon dispatch deciding which model to assign to a sub-agent
 - Reviewing task failures that might be caused by model mismatch
 - Optimizing cost by avoiding premium models where the default is sufficient
@@ -22,6 +24,35 @@ Default first. Use the configured/enabled default model whenever there is no
 clear reason to specialize. Model catalogs are provider- and user-specific, so
 do not hardcode model IDs in plans, prompts, or task decomposition. Ask for the
 available models and choose by capability category.
+
+## Coding Engines
+
+Most work runs through the general LLM layer and needs only a `model`. Separately,
+Lucent can run a task on a **coding engine** — GitHub Copilot, Claude Code, or
+OpenAI Codex — by setting the task's `backend_id`. Each engine runs either its own
+provider's models or a local model server (e.g. Ollama).
+
+Call `list_engines` to see the engines, their availability, and the backends
+available to you. Every backend lists the models it can run and may declare a
+`default_model`.
+
+Choose a coding engine when the task is genuine code work that benefits from the
+engine's own agent loop and tooling (file edits, refactors, multi-file
+implementation, sustained edit-test cycles). Otherwise leave `backend_id` unset
+and just pick a `model` as above.
+
+```text
+list_engines()                       # engines + backends (+ each backend's models)
+create_task(request_id=..., title=..., description=..., agent_type="code",
+            model="<a model that backend lists>", backend_id="<backend id>")
+```
+
+**Be consistent within a request.** Decide once whether this request's work runs
+on a coding engine, and set the same `backend_id` on *every* task that does
+comparable work. Setting it on some tasks but not others yields mixed execution —
+part of the work on the engine, part on the general layer — and is almost always a
+mistake. If a backend declares a `default_model`, you may omit `model` and the
+backend's default is used.
 
 ## Capability Categories
 

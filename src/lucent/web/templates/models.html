@@ -36,12 +36,12 @@
 <div class="mb-8 bg-white rounded-xl border border-gray-200 overflow-hidden">
     <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
         <div>
-            <h2 class="text-base font-semibold text-gray-900">Provider Credentials</h2>
-            <p class="mt-1 text-sm text-gray-500">Saved credentials are encrypted through Lucent secret storage and override environment fallback values.</p>
+            <h2 class="text-base font-semibold text-gray-900">LLM Providers</h2>
+            <p class="mt-1 text-sm text-gray-500">API keys for the general LLM layer (LangChain), used for all non-coding work. Encrypted through Lucent secret storage; overrides environment fallbacks.</p>
         </div>
     </div>
     <div class="divide-y divide-gray-100">
-        {% for provider_config in provider_statuses %}
+        {% for provider_config in llm_provider_statuses %}
         <div class="p-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,28rem)] lg:items-start">
             <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
@@ -79,6 +79,135 @@
                 </form>
             </div>
             {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<!-- Coding engines: product harnesses (Copilot / Claude Code / Codex) -->
+<div class="mb-8">
+    <div class="mb-3">
+        <h2 class="text-lg font-semibold text-gray-700">Coding Engines</h2>
+        <p class="mt-1 text-sm text-gray-500">Product harnesses that bring their own agent loop and tools. Each runs on its own provider's models, or on models from a local provider you run yourself. Everything else runs through the general LLM layer above.</p>
+    </div>
+
+    <datalist id="engine-model-ids">
+        {% for mid in all_model_ids %}<option value="{{ mid }}"></option>{% endfor %}
+    </datalist>
+
+    <div class="space-y-4">
+        {% for engine in coding_engines %}
+        <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div class="px-5 py-4 flex flex-wrap items-center gap-2">
+                <h3 class="text-base font-semibold text-gray-900">{{ engine.display_name }}</h3>
+                {% if not engine.available %}
+                <span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-700" title="{{ engine.availability_detail }}">unavailable</span>
+                {% endif %}
+                <span class="ml-auto text-xs text-gray-400">{{ engine.backends|length }} backend{{ '' if engine.backends|length == 1 else 's' }}</span>
+            </div>
+            {% if engine.notes %}
+            <p class="px-5 pb-4 -mt-2 text-xs text-gray-500">{{ engine.notes }}</p>
+            {% endif %}
+
+            {% if engine.credential_status and engine.credential_status.secret_key %}
+            <div class="px-5 pb-4 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-4">
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm font-medium text-gray-700">{{ engine.credential_status.credential_label }}</span>
+                        {% if engine.credential_status.configured %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">configured</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">not configured</span>
+                        {% endif %}
+                        {% if engine.credential_status.source == 'database' %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">saved</span>
+                        {% elif engine.credential_status.source == 'environment' %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">env</span>
+                        {% endif %}
+                    </div>
+                    {% if engine.credential_status.env_vars %}
+                    <p class="mt-1 text-xs text-gray-500">Fallback: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ engine.credential_status.env_vars|join(', ') }}</code></p>
+                    {% endif %}
+                </div>
+                <div class="flex flex-1 flex-wrap gap-2 sm:justify-end">
+                    <form method="POST" action="/settings/models/providers/{{ engine.credential_status.provider }}/credential" class="flex gap-2">
+                        <input name="credential" type="password" autocomplete="off" placeholder="Paste {{ engine.credential_status.credential_label|lower }}" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        <button type="submit" class="px-3 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Save</button>
+                    </form>
+                    <form method="POST" action="/settings/models/providers/{{ engine.credential_status.provider }}/credential/clear">
+                        <button type="submit" class="px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 text-sm font-medium whitespace-nowrap">Clear</button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if engine.backends %}
+            <div class="border-t border-gray-100 divide-y divide-gray-100">
+                {% for backend in engine.backends %}
+                <div class="px-5 py-4">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-sm font-semibold text-gray-900">{{ backend.name }}</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-primary-100 text-primary-700">{{ backend.provider_label }}</span>
+                        {% if backend.organization_id %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">org</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">shared</span>
+                        {% endif %}
+                        {% if backend.is_enabled %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">enabled</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">disabled</span>
+                        {% endif %}
+                        <form method="POST" action="/settings/models/backends/{{ backend.id }}/delete" class="ml-auto">
+                            <button type="submit" class="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 text-xs font-medium">Delete</button>
+                        </form>
+                    </div>
+                    {% if backend.default_model %}
+                    <p class="mt-1 text-xs text-gray-500">Default model: <span class="font-mono">{{ backend.default_model }}</span></p>
+                    {% endif %}
+                    {% if backend.resolved_base_url %}
+                    <p class="mt-1 text-xs text-gray-500 font-mono">{{ backend.resolved_base_url }}</p>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="px-5 py-3 border-t border-gray-100 text-sm text-gray-500">No backends configured.</p>
+            {% endif %}
+
+            <details class="border-t border-gray-100 bg-gray-50">
+                <summary class="px-5 py-3 text-sm font-medium text-primary-700 cursor-pointer select-none">+ Add a backend</summary>
+                <form method="POST" action="/settings/models/backends" class="px-5 py-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+                    <input type="hidden" name="engine" value="{{ engine.name }}">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+                        <input name="name" placeholder="e.g. {{ engine.display_name }} via Ollama" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Model source</label>
+                        <select name="provider" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            {% set native = engine.provider_options | selectattr('group', 'equalto', 'native') | list %}
+                            {% set local = engine.provider_options | selectattr('group', 'equalto', 'local') | list %}
+                            {% if native %}
+                            <optgroup label="Provider models">
+                                {% for o in native %}<option value="{{ o.name }}">{{ o.label }}</option>{% endfor %}
+                            </optgroup>
+                            {% endif %}
+                            {% if local %}
+                            <optgroup label="Local providers">
+                                {% for o in local %}<option value="{{ o.name }}">{{ o.label }}</option>{% endfor %}
+                            </optgroup>
+                            {% endif %}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-600 mb-1">Default model <span class="text-gray-400 font-normal">(optional)</span></label>
+                        <input name="model" list="engine-model-ids" placeholder="e.g. qwen3-coder" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                    </div>
+                    <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Add backend</button>
+                    <p class="sm:col-span-4 text-xs text-gray-500">Tasks run this backend's default model unless they name one. Local providers use the address configured on the server (for example <code class="font-mono">OLLAMA_HOST</code>).</p>
+                </form>
+            </details>
         </div>
         {% endfor %}
     </div>
@@ -322,11 +451,12 @@
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Engine</label>
                 <select name="engine" class="w-full px-3 py-2 border rounded-lg text-sm">
-                    <option value="">Auto (recommended)</option>
-                    <option value="copilot">Copilot SDK</option>
-                    <option value="langchain">LangChain</option>
+                    <option value="">Auto — general LLM (LangChain)</option>
+                    {% for e in all_engines %}
+                    <option value="{{ e.name }}">{{ e.label }}</option>
+                    {% endfor %}
                 </select>
-                <p class="mt-1 text-xs text-gray-500">Auto selects the best engine for this provider. Override if you want to use a specific backend (e.g. LangChain for direct API access to Anthropic).</p>
+                <p class="mt-1 text-xs text-gray-500">Models run through the general LLM layer by default. Pin a coding engine only to force this model through Copilot / Claude Code / Codex.</p>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
@@ -405,11 +535,12 @@
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Engine</label>
                 <select name="engine" id="edit-engine" class="w-full px-3 py-2 border rounded-lg text-sm">
-                    <option value="">Auto (recommended)</option>
-                    <option value="copilot">Copilot SDK</option>
-                    <option value="langchain">LangChain</option>
+                    <option value="">Auto — general LLM (LangChain)</option>
+                    {% for e in all_engines %}
+                    <option value="{{ e.name }}">{{ e.label }}</option>
+                    {% endfor %}
                 </select>
-                <p class="mt-1 text-xs text-gray-500">Auto selects the best engine for this provider. Override if you want to use a specific backend (e.g. LangChain for direct API access to Anthropic).</p>
+                <p class="mt-1 text-xs text-gray-500">Models run through the general LLM layer by default. Pin a coding engine only to force this model through Copilot / Claude Code / Codex.</p>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
@@ -453,7 +584,17 @@ function openEditModal(btn) {
     document.getElementById('edit-tags').value = d.tags || '';
     document.getElementById('edit-supports-tools').checked = d.supportsTools === 'true';
     document.getElementById('edit-supports-vision').checked = d.supportsVision === 'true';
-    document.getElementById('edit-engine').value = d.engine || '';
+    const engineSelect = document.getElementById('edit-engine');
+    engineSelect.value = d.engine || '';
+    // Preserve a legacy/engine value that isn't in the (coding-engines-only) list
+    // so editing a model never silently drops an existing override.
+    if ((d.engine || '') && engineSelect.value !== d.engine) {
+        const opt = document.createElement('option');
+        opt.value = d.engine;
+        opt.textContent = d.engine + ' (current)';
+        engineSelect.appendChild(opt);
+        engineSelect.value = d.engine;
+    }
     document.getElementById('edit-reasoning-efforts').value = (d.reasoningEfforts || '').split(',').filter(Boolean).join(', ');
     document.getElementById('edit-model-form').action = '/settings/models/' + encodeURIComponent(d.id) + '/edit';
     document.getElementById('edit-model-modal').classList.remove('hidden');

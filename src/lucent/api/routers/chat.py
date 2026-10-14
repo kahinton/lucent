@@ -38,6 +38,8 @@ from pydantic import BaseModel, Field
 
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import UserRepository, get_pool
+from lucent.llm.engine_registry import capabilities_for
+from lucent.llm.engine_resolution import resolve_engine
 from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
 from lucent.prompts.memory_usage import render_active_user_context
@@ -865,7 +867,7 @@ async def _prepare_persistent_chat_session(
                 status="active",
             )
         else:
-            provider_session_id = str(uuid4()) if engine_name == "copilot" else None
+            provider_session_id = str(uuid4()) if capabilities_for(engine_name).resume else None
             session = await repo.create_session(
                 org_id=org_id,
                 user_id=user_id,
@@ -880,7 +882,7 @@ async def _prepare_persistent_chat_session(
             session_id = str(session["id"])
 
         provider_session_id = session.get("provider_session_id")
-        if engine_name == "copilot" and not provider_session_id:
+        if capabilities_for(engine_name).resume and not provider_session_id:
             provider_session_id = str(uuid4())
             session = await repo.update_session(
                 session_id,
@@ -1681,7 +1683,16 @@ async def chat_stream(
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
 
-    engine = get_engine_for_model(selected_model)
+    try:
+        engine = (
+            await resolve_engine(
+                selected_model,
+                org_id=str(user["organization_id"]),
+                pool=pool,
+            )
+        ).engine
+    except Exception:
+        engine = get_engine_for_model(selected_model)
 
     system_prompt = await _build_system_prompt(user, pool, body.page_context)
     agent_hooks = await _load_agent_hooks(pool, None)
@@ -1714,14 +1725,14 @@ async def chat_stream(
     fallback_history = [_chat_message_to_dict(m) for m in body.messages[:-1]]
     persisted_history = chat_session.previous_messages or fallback_history
     resume_provider = bool(
-        engine.name == "copilot"
+        capabilities_for(engine).resume
         and chat_session.provider_session_id
         and chat_session.provider_initialized
     )
     prompt = last_message if resume_provider else _history_prompt(persisted_history, last_message)
     message_history = (
         _message_history_for_engine(chat_session.previous_messages)
-        if engine.name == "langchain" and chat_session.previous_messages
+        if not capabilities_for(engine).resume and chat_session.previous_messages
         else None
     )
 
@@ -1782,7 +1793,7 @@ async def chat_stream(
     # key is absent.
     session_state_for_engine = (
         _chat_session_state(chat_session.session_id)
-        if engine.name == "langchain"
+        if capabilities_for(engine).hooks
         else None
     )
     if session_state_for_engine is not None:
@@ -1838,7 +1849,7 @@ async def chat_stream(
                 turn_id=chat_session.turn_id,
                 metadata=_assistant_turn_metadata(selected_model, engine, auto_choice),
             )
-            if engine.name == "copilot":
+            if capabilities_for(engine).resume:
                 await chat_session.repo.mark_provider_initialized(
                     chat_session.session_id,
                     str(user["organization_id"]),
@@ -2044,7 +2055,16 @@ async def chat_stream_v2(
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
 
-    engine = get_engine_for_model(selected_model)
+    try:
+        engine = (
+            await resolve_engine(
+                selected_model,
+                org_id=str(user["organization_id"]),
+                pool=pool,
+            )
+        ).engine
+    except Exception:
+        engine = get_engine_for_model(selected_model)
 
     # Build system prompt — load the agent definition (skills, managed tools).
     # When no agent is explicitly selected, fall back to the built-in `lucent`
@@ -2203,14 +2223,14 @@ async def chat_stream_v2(
     fallback_history = [_chat_message_to_dict(m) for m in body.messages[:-1]]
     persisted_history = chat_session.previous_messages or fallback_history
     resume_provider = bool(
-        engine.name == "copilot"
+        capabilities_for(engine).resume
         and chat_session.provider_session_id
         and chat_session.provider_initialized
     )
     prompt = last_message if resume_provider else _history_prompt(persisted_history, last_message)
     message_history = (
         _message_history_for_engine(chat_session.previous_messages)
-        if engine.name == "langchain" and chat_session.previous_messages
+        if not capabilities_for(engine).resume and chat_session.previous_messages
         else None
     )
 
@@ -2321,7 +2341,7 @@ async def chat_stream_v2(
                 usage=event.usage,
             )
             return
-        if engine.name == "langchain" or payload.get("type") != "tool_result":
+        if not capabilities_for(engine).native_agent_loop or payload.get("type") != "tool_result":
             return
         try:
             from lucent.db.tool_audit import ToolAuditRepository, classify_tool_result
@@ -2427,7 +2447,7 @@ async def chat_stream_v2(
     # key is absent.
     session_state_for_engine = (
         _chat_session_state(chat_session.session_id)
-        if engine.name == "langchain"
+        if capabilities_for(engine).hooks
         else None
     )
     if session_state_for_engine is not None:
@@ -2463,7 +2483,9 @@ async def chat_stream_v2(
                 current_user_text=last_message,
                 approve_permissions=False,
                 attachments=attachments,
-                managed_tools=agent_managed_tools if engine.name == "langchain" else None,
+                managed_tools=(
+                    agent_managed_tools if capabilities_for(engine).managed_tools else None
+                ),
                 audit_context={
                     "source": "chat.stream_v2",
                     "organization_id": str(user["organization_id"]),
@@ -2490,7 +2512,7 @@ async def chat_stream_v2(
                     turn_id=chat_session.turn_id,
                     metadata=_assistant_turn_metadata(selected_model, engine, auto_choice),
                 )
-                if engine.name == "copilot":
+                if capabilities_for(engine).resume:
                     await chat_session.repo.mark_provider_initialized(
                         chat_session.session_id,
                         str(user["organization_id"]),

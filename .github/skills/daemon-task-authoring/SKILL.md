@@ -71,7 +71,7 @@ For each task within a request, follow these steps:
 3. **Choose agent_type** — Match the task to an agent using the [Agent Type Selection](#agent-type-selection) table. If it edits files → `code`. If it reads and synthesizes → `research`.
 4. **Set priority and size** — Use [Priority Calibration](#priority-calibration) for priority. Ensure the task fits within a single 720-second session (see [Task Size](#task-size)); decompose if too large.
 5. **Add context** — Include specific file paths, search terms, constraints, and references to prior task results stored in memory. Omit nothing the agent would need.
-6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=...)`. Set `model` per the model-selection skill (MANDATORY).
+6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=..., backend_id=...)`. Set `model` per the model-selection skill (MANDATORY). Set `backend_id` too when the request's work should run on a coding engine (Copilot / Claude Code / Codex) — choose one backend via `list_engines` and apply it to every comparable task in the request (see the model-selection skill's Coding Engines section).
 
 ### Target Repository
 

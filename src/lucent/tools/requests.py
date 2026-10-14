@@ -663,6 +663,10 @@ Args:
         best candidate (best_of_n) or synthesizes a merged answer (synthesize),
         with an optional bounded refine pass. Gated by the fusion.* runtime
         settings (off by default); model access applies to every named model.
+    backend_id: Optional coding-engine backend to run this task on (e.g. a
+        Codex or Claude Code backend, optionally against a local model server).
+        Call list_engines to see the available backends and their IDs. Omit to
+        use the default routing.
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved or the sandbox template is invalid."""
@@ -682,6 +686,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         output_contract: dict | None = None,
         decision_config: dict | None = None,
         fusion_config: dict | None = None,
+        backend_id: str | None = None,
     ) -> str:
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
@@ -1086,6 +1091,14 @@ if the agent type is not approved or the sandbox template is invalid."""
                 )
 
         requesting_user_id = request_owner_id
+        if backend_id:
+            from lucent.llm.backend_selection import validate_backend_selection
+
+            backend_error = await validate_backend_selection(
+                await _get_pool(), backend_id, org_id=str(org_id), model_id=model
+            )
+            if backend_error:
+                return json.dumps({"error": backend_error})
         try:
             task = await repo.create_task(
                 request_id=request_id,
@@ -1104,6 +1117,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 output_contract=output_contract,
                 decision_config=decision_config,
                 fusion_config=fusion_config,
+                backend_id=backend_id,
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
@@ -2215,23 +2229,35 @@ daemon execution may also update visible system work."""
 
     @mcp.tool(
         annotations=MUTATING,
-        description="""Update the title or description of an inactive task.
+        description="""Update the title, description, or engine backend of an inactive task.
 
 Tasks that are claimed, running, or completed cannot be edited. You may edit
-only tasks belonging to requests you are allowed to update."""
+only tasks belonging to requests you are allowed to update.
+
+Args:
+    task_id: ID of the task to edit.
+    title: New title (optional).
+    description: New description (optional).
+    backend_id: Pin a coding-engine backend (see list_engines) to run this task.
+    clear_backend: Set true to remove a pinned backend and use default routing.
+"""
     )
     async def update_task(
         task_id: str,
         title: str | None = None,
         description: str | None = None,
+        backend_id: str | None = None,
+        clear_backend: bool = False,
     ) -> str:
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
         if title is not None and not title.strip():
             return json.dumps({"error": "title cannot be blank"})
-        if title is None and description is None:
-            return json.dumps({"error": "Provide title or description to update"})
+        if title is None and description is None and not backend_id and not clear_backend:
+            return json.dumps(
+                {"error": "Provide title, description, backend_id, or clear_backend to update"}
+            )
         repo = await _get_request_repository()
         pair = await _get_mutable_task(
             repo,
@@ -2246,11 +2272,21 @@ only tasks belonging to requests you are allowed to update."""
         task, _request = pair
         if task.get("status") in repo._NON_EDITABLE_TASK_STATUSES:
             return json.dumps({"error": "Task is running or completed and cannot be edited"})
+        if backend_id and not clear_backend:
+            from lucent.llm.backend_selection import validate_backend_selection
+
+            backend_error = await validate_backend_selection(
+                await _get_pool(), backend_id, org_id=str(org_id), model_id=task.get("model")
+            )
+            if backend_error:
+                return json.dumps({"error": backend_error})
         updated = await repo.update_pending_task(
             task_id,
             str(org_id),
             title=title.strip() if title is not None else None,
             description=description,
+            backend_id=backend_id if not clear_backend else None,
+            clear_backend=clear_backend,
         )
         if not updated:
             return json.dumps({"error": "Task could not be updated"})
@@ -2519,6 +2555,39 @@ provided, the recommended model plus a selection reason."""
                 "alternatives": selection.alternatives,
             }
         return json.dumps(result)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List coding engines and the backends a task can run on.
+
+Coding engines (GitHub Copilot, Claude Code, OpenAI Codex) run agent work with
+their own tools and models; everything else runs through the general LLM layer.
+Each engine has zero or more configured backends — pass a backend's ``id`` as
+``backend_id`` to ``create_task`` to run that task on the engine, optionally
+against a local model server (e.g. Ollama).
+
+Returns JSON: engines with availability, their supported model sources, and the
+configured backends (with ids)."""
+    )
+    async def list_engines() -> str:
+        from lucent.llm.backend_selection import engine_catalog
+
+        _, org_id, _, _, _ = await _get_current_user_context()
+        catalog = await engine_catalog(
+            await _get_pool(), org_id=str(org_id) if org_id else None
+        )
+        return json.dumps(
+            {
+                "engines": catalog,
+                "guidance": (
+                    "Pass a backend id to create_task(backend_id=...) to run a task on that "
+                    "engine. Each backend lists the models it can run (its ``models``) and an "
+                    "optional ``default_model``; set the task's ``model`` to one of those. A "
+                    "backend whose provider is a local server (e.g. Ollama) runs that server's "
+                    "models. Without a backend a task uses default routing."
+                ),
+            }
+        )
 
     @mcp.tool(
         description="""List pending tracked tasks in the queue.

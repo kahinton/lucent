@@ -456,8 +456,13 @@ def create_copilot_client(
     *,
     github_token: str | None = None,
     log_level: str = "warning",
+    on_list_models: Any = None,
 ) -> Any:
-    """Create a Copilot SDK 1.x client using its runtime-connection API."""
+    """Create a Copilot SDK 1.x client using its runtime-connection API.
+
+    ``on_list_models`` (when given) is the SDK's client-level hook for surfacing
+    BYOK/local models from ``client.list_models()``.
+    """
     if not _ensure_sdk():
         raise RuntimeError(
             "Copilot engine requires the github-copilot-sdk package. "
@@ -465,11 +470,14 @@ def create_copilot_client(
         )
     cli_path = resolve_copilot_cli_path()
     connection = _StdioRuntimeConnection(path=cli_path) if cli_path else None
-    return _CopilotClient(
-        connection=connection,
-        log_level=log_level,
-        github_token=github_token,
-    )
+    kwargs: dict[str, Any] = {
+        "connection": connection,
+        "log_level": log_level,
+        "github_token": github_token,
+    }
+    if on_list_models is not None:
+        kwargs["on_list_models"] = on_list_models
+    return _CopilotClient(**kwargs)
 
 
 class CopilotEngine(LLMEngine):
@@ -507,12 +515,35 @@ class CopilotEngine(LLMEngine):
             logger.warning("Failed to load saved Copilot provider credential", exc_info=True)
             return None
 
-    def _make_client(self, github_token: str | None = None) -> Any:
+    def _make_client(self, github_token: str | None = None, on_list_models: Any = None) -> Any:
         """Create a CopilotClient using the configured runtime and credential."""
         return create_copilot_client(
             github_token=github_token or self._github_token,
             log_level=self._log_level,
+            on_list_models=on_list_models,
         )
+
+    def _backend_provider(
+        self, audit_context: dict[str, Any] | None, model: str
+    ) -> dict[str, Any] | None:
+        """BYOK provider config for a local-provider backend, or None.
+
+        When the resolved backend targets a local provider (e.g. Ollama), Copilot
+        runs against it via a per-session ``provider`` (``ProviderConfig`` dict)
+        rather than GitHub-hosted models. Passed per session, so it is safe for
+        multiple organizations in one process.
+        """
+        backend = (audit_context or {}).get("engine_backend")
+        try:
+            from lucent.llm.engine_injection import backend_local_injection
+
+            injection = backend_local_injection("copilot", backend, model=model)
+        except Exception:
+            logger.debug("Local-provider injection failed for Copilot", exc_info=True)
+            return None
+        if injection is None:
+            return None
+        return injection.kwargs.get("provider")
 
     def _make_session_kwargs(
         self,
@@ -522,12 +553,15 @@ class CopilotEngine(LLMEngine):
         reasoning_effort: str | None = None,
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
+        provider: dict[str, Any] | None = None,
     ) -> dict:
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
             "model": model,
             "mcp_servers": _strip_internal_markers(mcp_config or {}),
         }
+        if provider:
+            kwargs["provider"] = provider
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         if enable_config_discovery:
@@ -619,6 +653,7 @@ class CopilotEngine(LLMEngine):
                 reasoning_effort=reasoning_effort,
                 enable_config_discovery=enable_config_discovery,
                 approve_permissions=approve_permissions,
+                provider=self._backend_provider(audit_context, model),
             )
             session = await self._open_session(
                 client,
@@ -722,6 +757,7 @@ class CopilotEngine(LLMEngine):
                 reasoning_effort=reasoning_effort,
                 enable_config_discovery=enable_config_discovery,
                 approve_permissions=approve_permissions,
+                provider=self._backend_provider(audit_context, model),
             )
             session = await self._open_session(
                 client,

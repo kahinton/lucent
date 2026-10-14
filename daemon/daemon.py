@@ -146,6 +146,16 @@ try:
 except ImportError:
     _COPILOT_SDK_AVAILABLE = False
 
+
+def _engine_supports_expected_surface(engine: object) -> bool:
+    """Whether an engine understands the Layer-2 expected_surface kwarg."""
+    try:
+        from lucent.llm.engine_registry import capabilities_for
+
+        return capabilities_for(engine).expected_surface
+    except Exception:
+        return False
+
 # Optional: adaptation module for environment assessment
 try:
     from daemon.adaptation.pipeline import AdaptationPipeline, parse_assessment_output
@@ -500,6 +510,19 @@ async def _select_model_for_user(
     dispatch loop's ``model_auto_selected`` / ``model_auto_disabled`` events.
     """
     from lucent.llm.model_auto import is_auto_model
+
+    # A task pinned to a coding-engine backend runs that backend's default model
+    # when the task names none.
+    if not explicit_model and task and task.get("backend_id"):
+        try:
+            from lucent.db import get_pool
+            from lucent.llm.backend_selection import backend_default_model
+
+            explicit_model = await backend_default_model(
+                await get_pool(), str(task["backend_id"]), org_id=org_id
+            )
+        except Exception:
+            explicit_model = None
 
     accessible_models = await _accessible_models_for_user(user_id, org_id)
     if not accessible_models:
@@ -3679,7 +3702,22 @@ class LucentDaemon(
         expected_surface: dict | None = None,
     ) -> str | None:
         """Run session using the LLM engine abstraction layer."""
-        engine = get_engine_for_model(model) if _LLM_ENGINE_AVAILABLE else get_engine()
+        if _LLM_ENGINE_AVAILABLE:
+            try:
+                from lucent.llm.engine_resolution import resolve_engine
+
+                engine = (
+                    await resolve_engine(
+                        model,
+                        org_id=str((audit_context or {}).get("organization_id") or "") or None,
+                        agent_type=(audit_context or {}).get("agent_type"),
+                        task_backend_id=(audit_context or {}).get("backend_id"),
+                    )
+                ).engine
+            except Exception:
+                engine = get_engine_for_model(model)
+        else:
+            engine = get_engine()
         session_id = f"engine-session-{name}"
         self.active_sessions.append(session_id)
         terminal_outcome: dict[str, str | bool | None] = {
@@ -3699,7 +3737,9 @@ class LucentDaemon(
         try:
 
             async def audit_stream_tool_result(event: SessionEvent) -> None:
-                if getattr(engine, "name", "") == "langchain" or not event.tool_name:
+                from lucent.llm.engine_registry import capabilities_for
+
+                if not capabilities_for(engine).native_agent_loop or not event.tool_name:
                     return
                 try:
                     from lucent.db import init_db
@@ -3834,11 +3874,13 @@ class LucentDaemon(
                 },
                 enable_config_discovery=enable_config_discovery,
                 **(
-                    # CopilotEngine has no expected_surface parameter — Layer 2
-                    # validation is LangChain-engine-only. Pass it only when set
-                    # so a Copilot-engine fallback doesn't TypeError.
+                    # Layer-2 composition validation is only understood by engines
+                    # that declare expected_surface support (LangChain today).
+                    # Pass it only when set and supported so a coding-engine
+                    # fallback doesn't TypeError.
                     {"expected_surface": expected_surface}
                     if expected_surface is not None
+                    and _engine_supports_expected_surface(engine)
                     else {}
                 ),
             )
@@ -5113,6 +5155,7 @@ class LucentDaemon(
                         "task_id": task_id,
                         "agent_definition_id": str(agent_data["id"]),
                         "agent_type": agent_type,
+                        "backend_id": str(task.get("backend_id") or "") or None,
                         "skill_names": [s.get("name") for s in skills if s.get("name")],
                         "model": selected_model,
                         "reasoning_effort": task_reasoning_effort,
@@ -5238,6 +5281,7 @@ class LucentDaemon(
                             "task_id": task_id,
                             "agent_definition_id": str(agent_data["id"]),
                             "agent_type": agent_type,
+                            "backend_id": str(task.get("backend_id") or "") or None,
                             "model": selected_model,
                             "reasoning_effort": task_reasoning_effort,
                         },

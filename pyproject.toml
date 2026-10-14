@@ -38,6 +38,12 @@ dependencies = [
     "langchain-google-genai>=4.3.3",
     "langchain-ollama>=1.1.0",
     "github-copilot-sdk>=1.0.9,<2.0",
+    # Coding-agent engines. Each SDK bundles (Claude Code) or auto-installs (Codex)
+    # its own CLI runtime, so no Node/npm or separate CLI install is required. These
+    # are first-class engines the product offers, so they ship in the base install
+    # (alongside github-copilot-sdk) rather than as optional extras.
+    "claude-agent-sdk>=0.2.165",
+    "openai-codex>=0.162.1",
     "jsonschema>=4.26.0",
     "PyYAML>=6.0.3",
     "langsmith>=0.11.0",

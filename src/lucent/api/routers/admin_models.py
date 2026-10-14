@@ -31,7 +31,7 @@ class ModelUpsertRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     reasoning_efforts: list[str] = Field(default_factory=list)
     is_enabled: bool = True
-    engine: Literal["copilot", "langchain"] | None = None
+    engine: str | None = None
     # Models belong to the organization (131): owner fields are retired, and
     # old payloads carrying them are rejected loudly rather than ignored.
     model_config = ConfigDict(extra="forbid")
@@ -60,7 +60,7 @@ class ModelPatchRequest(BaseModel):
     tags: list[str] | None = None
     reasoning_efforts: list[str] | None = None
     is_enabled: bool | None = None
-    engine: Literal["copilot", "langchain"] | None = None
+    engine: str | None = None
     # See ModelUpsertRequest: owner fields are retired (131).
     model_config = ConfigDict(extra="forbid")
 

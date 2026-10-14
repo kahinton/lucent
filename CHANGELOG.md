@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+#### LLM Engines and Backends
+- **Coding engines**: added `claude_code` (Claude Agent SDK) and `codex` (OpenAI Codex SDK) as first-class `coding_agent` engines alongside `copilot`. Each is a thin adapter over an official Python SDK that bundles/auto-installs its own CLI, so no Node/Homebrew install is required. Both SDKs ship in the base install, so all three engines are available out of the box.
+- **Local-provider injection**: a non-specific local-provider registry (`llm/local_providers.py`) where each provider declares the API surfaces it exposes (`openai` / `anthropic` / `codex-oss`); `llm/engine_injection.py` maps them per engine — Copilot BYOK, Claude Code `ANTHROPIC_BASE_URL`, Codex `model_provider`. Ollama (>= 0.14, which serves the Anthropic Messages API) works with all three; LM Studio and generic OpenAI-/Anthropic-compatible endpoints are modelled too. Adding a provider is one spec, no engine changes.
+- Data-driven **engine registry** that reframes Lucent's engines into two kinds: `langchain` as the general `llm_access` layer (Ollama, OpenAI, Anthropic, Google, OpenAI-compatible) and `coding_agent` harnesses. Engine capability flags replace engine-name string checks across chat and daemon.
+- First-class **engine backends** binding an engine to a provider family with its own non-secret config and secret references. Admin surfaces: **Settings → Models → Engine Backends**, plus `GET /api/admin/engines` and `/api/admin/backends` CRUD. **Migration 136** (`backends`, `models.backend_id`, `tasks.backend_id`).
+- Backend-aware engine resolution: requested backend → task/workflow backend pin → model backend/`(engine, provider)` match → task-type auto-routing → default engine. Additive — models without a backend resolve exactly as before.
+- New runtime setting `models.engine_auto_route` (default off): when enabled, code/agentic work prefers a `coding_agent` engine and plain chat uses the general engine.
+
 #### Hosting Operations
 - Added the instance-level `hyperadmin` role and hyperadmin-only organization APIs for create, list, cross-tenant lookup/update, suspend, and resume. Organization suspension retains tenant data while blocking normal session and API-key authentication; hyperadmins retain recovery access. **Migration 107**.
 - Hardened tenant-bound authentication so REST, MCP, basic login, legacy API-key login, and OAuth identity reuse reject suspended organizations or mismatched organization context. User accounts remain single-organization; multi-organization memberships and tenant switching require a separate membership model.

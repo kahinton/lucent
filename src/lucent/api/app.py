@@ -627,6 +627,20 @@ def create_app() -> FastAPI:
         prefix="/api/admin/lifecycle",
         tags=["Admin Lifecycle"],
     )
+    from lucent.api.routers import admin_engines as admin_engines_router
+
+    app.include_router(
+        admin_engines_router.router,
+        prefix="/api/admin/engines",
+        tags=["Admin Engines"],
+    )
+    from lucent.api.routers import admin_backends as admin_backends_router
+
+    app.include_router(
+        admin_backends_router.router,
+        prefix="/api/admin/backends",
+        tags=["Admin Backends"],
+    )
 
     # Include team-only API routers
     if is_team_mode():

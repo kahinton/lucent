@@ -121,9 +121,17 @@ src/lucent/
 │   └── models.py       # SandboxConfig, SandboxInfo, ExecResult
 ├── llm/
 │   ├── engine.py       # Abstract LLM engine interface
+│   ├── engine_registry.py # Data-driven engine registry (kinds, capabilities, specs)
+│   ├── engine_resolution.py # Backend-aware engine resolution
+│   ├── engine_credentials.py # Per-engine config field schemas
+│   ├── engine_injection.py # Local-provider → engine injection
+│   ├── local_providers.py # Registry of local/OSS model providers
+│   ├── mcp_translate.py # MCP config → engine-native shapes
 │   ├── copilot_engine.py # GitHub Copilot SDK implementation
-│   ├── langchain_engine.py # LangChain multi-provider implementation
-│   ├── factory.py      # Engine selection factory
+│   ├── claude_code_engine.py # Claude Agent SDK implementation
+│   ├── codex_engine.py # OpenAI Codex SDK implementation
+│   ├── langchain_engine.py # LangChain multi-provider implementation (general llm_access engine)
+│   ├── factory.py      # Engine selection via the registry
 │   ├── mcp_bridge.py   # MCP bridge for LLM tool access
 │   └── model_engine_validation.py # Model-engine compatibility checks
 ├── secrets/
@@ -157,6 +165,52 @@ src/lucent/
 ├── models/             # Pydantic models (memory, user, organization, audit, validation)
 └── prompts/            # System prompt templates
 ```
+
+## LLM Engines and Backends
+
+Engines come in two **kinds**, described in a single data-driven registry
+(`lucent.llm.engine_registry`):
+
+- **`llm_access`** — `langchain`, the general LLM layer. Lucent owns the tool
+  loop (`langchain_engine._run_with_tools` + `MCPToolBridge`).
+- **`coding_agent`** — product harnesses that bring their own agent loop, tools,
+  and auth: `copilot` (GitHub Copilot SDK) today; `claude_code` and `codex` are
+  declared in the registry (not yet implemented) so the taxonomy, validation,
+  and UI are already complete.
+
+Each `EngineSpec` carries capability flags (`native_agent_loop`, `resume`,
+`hooks`, `managed_tools`, `expected_surface`, `injection`, `discovery`). Call
+sites branch on capabilities rather than engine-name strings, so adding an
+engine is a single spec plus its module.
+
+A **backend** (`backends` table, migration 136) binds one engine to one provider
+family with non-secret `config` and secret references. `BackendRepository` and
+`resolve_backend_for_model` implement resolution; `lucent.llm.engine_resolution`
+applies it in precedence order: requested backend → task/workflow pin
+(`tasks.backend_id`) → the model's own backend or `(engine, provider)` match →
+task-type auto-routing (`models.engine_auto_route`) → the existing
+factory routing (model `engine` override, provider default, configured default).
+
+Engines resolve provider credentials per call from the request organization
+(`audit_context["organization_id"]`), so per-name engine singletons stay
+stateless and never leak one tenant's credentials to another.
+
+### Coding engines and local providers
+
+`copilot`, `claude_code`, and `codex` are `coding_agent` engines, each a thin
+adapter over an official Python SDK (`github-copilot-sdk`, `claude-agent-sdk`,
+`openai-codex`) that bring their own bundled CLI and agent loop. They emit the
+same normalized `SessionEvent` stream as the LangChain engine, so chat, the
+daemon, event persistence, and tool audit are engine-agnostic.
+
+Local (OSS) providers are described in `llm/local_providers.py`: each declares
+the API surfaces it exposes (`openai` / `anthropic` / `codex-oss`), and
+`llm/engine_injection.py` translates a provider into the wording each engine
+understands — Copilot BYOK `provider=` kwargs, Claude Code `ANTHROPIC_BASE_URL`
+env, or Codex `model_provider`. Because the mapping is surface-based, a new
+self-hosted provider (LM Studio, vLLM, a LiteLLM gateway) is a single spec with
+no engine changes. The resolved backend reaches the engine through
+`audit_context["engine_backend"]`.
 
 ## Memory System
 
@@ -274,6 +328,7 @@ Approval and rejection of proposed definitions are human review actions and are 
 | `create_review` | Create a review for a request or task |
 | `list_reviews` | List reviews with filters |
 | `list_available_models` | List available LLM models for task assignment |
+| `list_engines` | List coding engines (Copilot / Claude Code / Codex) and their backends + models |
 
 ### Export & Import Tools
 

@@ -14,21 +14,43 @@ Usage:
     )
 """
 
-from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, SessionEventType
-from lucent.llm.factory import get_engine, get_engine_for_model, get_engine_name
 from lucent.llm.decision import (
     DecisionError,
-    DecisionRequest,
     DecisionQuestion,
+    DecisionRequest,
     DecisionResponse,
     decide,
 )
+from lucent.llm.engine import LLMEngine, ModelNotAvailableError, SessionEvent, SessionEventType
+from lucent.llm.engine_registry import (
+    EngineCapabilities,
+    EngineKind,
+    EngineSpec,
+    UnknownEngineError,
+    engine_availability,
+    engine_kind,
+    engine_names,
+    engine_spec,
+)
+from lucent.llm.engine_registry import (
+    get_engine as get_registered_engine,
+)
+from lucent.llm.factory import get_engine, get_engine_for_model, get_engine_name
 
 __all__ = [
     "LLMEngine",
     "ModelNotAvailableError",
     "SessionEvent",
     "SessionEventType",
+    "EngineCapabilities",
+    "EngineKind",
+    "EngineSpec",
+    "UnknownEngineError",
+    "engine_availability",
+    "engine_kind",
+    "engine_names",
+    "engine_spec",
+    "get_registered_engine",
     "get_engine",
     "get_engine_for_model",
     "get_engine_name",
