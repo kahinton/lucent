@@ -170,6 +170,7 @@ from daemon.runtime.autonomic import AutonomicMixin
 from daemon.runtime.cognitive import CognitiveCycleMixin
 from daemon.runtime.configuration import RuntimeConfigurationMixin
 from daemon.runtime.loops import RuntimeLoopsMixin
+from daemon.runtime.supervisor import SupervisorMixin, WorkerLifecycleMixin
 from daemon.runtime.scheduling import SchedulingMixin
 from daemon.sandbox.lifecycle import SandboxLifecycleMixin
 from daemon.validation.output import process_task_output
@@ -224,10 +225,24 @@ LEARNING_INTERVAL = runtime_settings.daemon_learning_interval_cycles()
 MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
 
 # ── Role-based loop configuration ─────────────────────────────────────────
-# Each daemon instance can run a subset of roles. Multi-instance deployments
-# can split work across instances (e.g. one cognitive, N dispatchers).
-# Roles: dispatcher, cognitive, scheduler, autonomic (or 'all')
+# Each daemon instance can run a subset of roles. "all" is the always-on set:
+# the controller supervises ephemeral per-org workers and the scheduler fires
+# due work. The dispatcher role runs only inside the workers the controller
+# spawns, so it is never implied by "all".
 DAEMON_ROLES_STR = runtime_settings.daemon_roles()
+# Set by the launcher on containers the controller spawns. A worker is a
+# dispatcher for exactly one org and is the only process that idle-exits.
+DAEMON_WORKER = os.environ.get("LUCENT_DAEMON_WORKER", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# Workers the controller keeps alive for an org even with nothing queued.
+WORKER_MIN_WARM = runtime_settings.daemon_worker_min_warm()
+# Seconds a worker above the warm floor stays alive with no work before exiting.
+WORKER_IDLE_SECONDS = runtime_settings.daemon_worker_idle_seconds()
+# Seconds between controller reconcile passes.
+WORKER_RECONCILE_SECONDS = runtime_settings.daemon_worker_reconcile_seconds()
 # Source reload is useful for local development but can interrupt durable work.
 DAEMON_SOURCE_RELOAD_ENABLED = runtime_settings.daemon_source_reload_enabled()
 # Dispatch loop: how often to poll if PG LISTEN misses a signal
@@ -344,7 +359,6 @@ ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
 DAEMON_DIR = Path(__file__).parent
 COGNITIVE_PROMPT_PATH = DAEMON_DIR / "prompts" / "cognitive.md"
 AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "lucent.agent.md"
-LOG_FILE = DAEMON_DIR / "daemon.log"
 # MCP configuration — passed to all sessions
 MCP_URL = runtime_settings.daemon_mcp_url()
 MCP_API_KEY = runtime_settings.daemon_mcp_api_key()
@@ -356,6 +370,7 @@ def _refresh_config_from_runtime_settings() -> None:
     global STALE_HEARTBEAT_MINUTES, SESSION_TOTAL_TIMEOUT, SESSION_IDLE_TIMEOUT
     global WATCHDOG_TIMEOUT, AUTONOMIC_INTERVAL, LEARNING_INTERVAL
     global MAX_RESULT_LENGTH, DAEMON_ROLES_STR, DAEMON_SOURCE_RELOAD_ENABLED
+    global WORKER_MIN_WARM, WORKER_IDLE_SECONDS, WORKER_RECONCILE_SECONDS
     global DISPATCH_POLL_SECONDS
     global SCHEDULER_CHECK_SECONDS, AUTONOMIC_MINUTES, LEARNING_MINUTES
     global VITALITY_SCORING_MINUTES, SHADOW_FORGET_SCORING_MINUTES
@@ -376,6 +391,9 @@ def _refresh_config_from_runtime_settings() -> None:
     MAX_RESULT_LENGTH = runtime_settings.daemon_max_result_length()
     DAEMON_ROLES_STR = runtime_settings.daemon_roles()
     DAEMON_SOURCE_RELOAD_ENABLED = runtime_settings.daemon_source_reload_enabled()
+    WORKER_MIN_WARM = runtime_settings.daemon_worker_min_warm()
+    WORKER_IDLE_SECONDS = runtime_settings.daemon_worker_idle_seconds()
+    WORKER_RECONCILE_SECONDS = runtime_settings.daemon_worker_reconcile_seconds()
     DISPATCH_POLL_SECONDS = runtime_settings.daemon_dispatch_poll_seconds()
     SCHEDULER_CHECK_SECONDS = runtime_settings.daemon_scheduler_check_seconds()
     AUTONOMIC_MINUTES = runtime_settings.daemon_autonomic_minutes()
@@ -931,12 +949,17 @@ def _get_required_memory_scope(task_title: str, request_title: str) -> str | Non
 
 
 async def _verify_api_key(api_key: str) -> bool:
-    """Check if an API key is accepted by the server.
+    """Whether the daemon may keep using ``api_key``.
 
-    Uses /api/search (available in all modes) rather than /api/users/me
-    which only exists in team mode.
+    True unless the server *definitively* rejects the key (HTTP 401/403). An
+    indeterminate probe result (timeout, transport error, 5xx) also returns
+    True: the key is kept rather than re-provisioned. The probe targets the
+    dedicated lightweight /api/auth/verify endpoint (an indexed api_keys
+    lookup, available in all modes unlike /api/users/me), so a slow/failed
+    probe is a transport problem, never an auth verdict — treating it as an
+    auth rejection is what produced the ~60s re-provisioning loop.
     """
-    return await key_verification.verify_api_key(api_key)
+    return not await key_verification.is_api_key_rejected(api_key)
 
 
 def _get_key_time_remaining() -> timedelta | None:
@@ -1500,20 +1523,52 @@ class RequestAPI(InstanceAPI, TaskAPI):
 # ============================================================================
 
 
+def _is_writable_directory(directory: Path) -> bool:
+    """Whether a log file can actually be created in ``directory``."""
+    import tempfile
+
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, prefix=".lucent-probe-"):
+            return True
+    except Exception:
+        return False
+
+
+def _resolve_log_file() -> str:
+    """Pick where to write the daemon log, or "" to disable file logging.
+
+    A repo checkout writes next to the daemon source, matching the documented
+    ``nohup ... >> daemon/daemon.log`` pattern. When the daemon runs from an
+    installed wheel that directory is inside ``site-packages`` — not writable by
+    the runtime user, and the wrong place for a log regardless — so fall back to
+    the working directory, and then to no file at all (stderr only).
+    """
+    for directory in (DAEMON_DIR, Path.cwd()):
+        if _is_writable_directory(directory):
+            return str(directory / "daemon.log")
+    return ""
+
+
 def _configure_daemon_logging():
     """Configure structured logging for the daemon process."""
     os.environ.setdefault("LUCENT_LOG_FORMAT", "human")
-    os.environ.setdefault("LUCENT_LOG_FILE", str(LOG_FILE))
+    log_file = _resolve_log_file()
+    os.environ.setdefault("LUCENT_LOG_FILE", log_file)
+    if log_file:
+        # The daemon is typically launched with stderr redirected to LOG_FILE
+        # (e.g. `nohup python -m daemon.daemon >> daemon/daemon.log 2>&1`).
+        # Without this, every log line would be written twice to the file:
+        # once by the rotating file handler, and again when the stderr handler
+        # flushes to the redirected fd. Any real Python crash/traceback that
+        # bypasses the logger still reaches the file through the stderr
+        # redirection.
+        os.environ.setdefault("LUCENT_LOG_STDERR", "false")
+    else:
+        # Nowhere to write a file (e.g. an installed wheel in a container):
+        # keep logging to stderr so output is not silently discarded.
+        os.environ.setdefault("LUCENT_LOG_STDERR", "true")
     os.environ.setdefault("LUCENT_LOG_FILE_MAX_BYTES", "10485760")  # 10 MB
     os.environ.setdefault("LUCENT_LOG_FILE_BACKUP_COUNT", "5")
-    # The daemon is typically launched with stderr redirected to LOG_FILE
-    # (e.g. `nohup python -m daemon.daemon >> daemon/daemon.log 2>&1`).
-    # Without this, every log line would be written twice to the file:
-    # once by the rotating file handler, and again when the stderr handler
-    # flushes to the redirected fd. Any real Python crash/traceback that
-    # bypasses the logger still reaches the file through the stderr
-    # redirection.
-    os.environ.setdefault("LUCENT_LOG_STDERR", "false")
 
     # Add src to path so lucent package is importable
     src_dir = str(DAEMON_DIR.parent / "src")
@@ -1779,6 +1834,8 @@ async def _load_request_owner_context(user_id: str, org_id: str) -> str:
 
 class LucentDaemon(
     RuntimeLoopsMixin,
+    SupervisorMixin,
+    WorkerLifecycleMixin,
     CognitiveCycleMixin,
     RuntimeConfigurationMixin,
     SchedulingMixin,
@@ -1797,7 +1854,15 @@ class LucentDaemon(
             - decomposition: immediately turns new requests into tasks
     """
 
-    ALL_ROLES = frozenset({"dispatcher", "scheduler"})
+    # "all" is the always-on set: the controller supervises ephemeral per-org
+    # workers, the scheduler fires due work. The dispatcher runs only inside the
+    # workers the controller spawns, so it is explicit-only and never implied by
+    # "all" — a process with the dispatcher role is a worker (or a deliberately
+    # hand-run in-process dispatcher).
+    ALL_ROLES = frozenset({"scheduler", "controller"})
+    DISPATCHER_ROLE = "dispatcher"
+    CONTROLLER_ROLE = "controller"
+    SCHEDULER_ROLE = "scheduler"
 
     def __init__(self):
         self.active_sessions: list = []
@@ -1805,17 +1870,23 @@ class LucentDaemon(
         self._session_terminal_outcomes: dict[str, dict[str, str | bool | None]] = {}
         self.running = False
         self.draining = False  # True = stop new work, wait for in-flight sessions
+        self._shutdown_started = False  # idempotence guard for shutdown signals
         self.cycle_count = 0
         # Whether built-in system schedules have been seeded for the bound org.
         # Starts False; set once seeding succeeds (may defer on brand-new
         # instances until an organization exists — the scheduler loop retries).
         self._schedules_seeded = False
+        # Worker idle-exit clock: last time this process was doing work. Only
+        # read by an on-demand worker; unused (and never advanced) otherwise.
+        self._last_work_at = time.monotonic()
+        # Controller state: the launcher is built lazily on first reconcile.
+        self._launcher = None
         # Unique instance ID for distributed coordination
         hostname = platform.node() or "unknown"
         self.instance_id = f"{hostname}-{os.getpid()}-{int(datetime.now(timezone.utc).timestamp())}"
 
         # Role-based loop configuration
-        self.roles = self._parse_roles(DAEMON_ROLES_STR)
+        self.roles = self._resolve_roles(DAEMON_ROLES_STR)
 
         # PG LISTEN infrastructure for event-driven dispatch
         self._listen_conn = None
@@ -1892,14 +1963,50 @@ class LucentDaemon(
 
     @staticmethod
     def _parse_roles(roles_str: str) -> set[str]:
-        """Parse role configuration into a set of enabled roles."""
-        roles = {r.strip().lower() for r in roles_str.split(",")}
-        if "all" in roles:
-            return set(LucentDaemon.ALL_ROLES)
-        unknown = roles - LucentDaemon.ALL_ROLES
+        """Parse role configuration into a set of enabled roles.
+
+        ``all`` expands to ALL_ROLES only. The dispatcher is accepted when named
+        explicitly but is never implied by ``all``, so the always-on process
+        supervises rather than dispatching unless an operator opts in.
+        """
+        known = LucentDaemon.ALL_ROLES | {LucentDaemon.DISPATCHER_ROLE}
+        roles = {r.strip().lower() for r in roles_str.split(",") if r.strip()}
+        unknown = roles - known - {"all"}
         if unknown:
             log(f"Unknown daemon roles ignored: {unknown}", "WARN")
-        return roles & LucentDaemon.ALL_ROLES
+        selected = (roles - {"all"}) & known
+        if "all" in roles:
+            selected |= set(LucentDaemon.ALL_ROLES)
+        return selected
+
+    def _resolve_roles(self, roles_str: str) -> set[str]:
+        """Parse the configured roles for this process."""
+        return self._parse_roles(roles_str)
+
+    async def _task_matches_bound_org(self, claimed: dict) -> bool:
+        """Confirm a freshly claimed task belongs to this daemon's bound org.
+
+        The claim query is already org-scoped server-side, so this is defense in
+        depth. It matters most for ephemeral workers, whose org binding was
+        injected by the controller rather than resolved locally: a worker must
+        never run a session for an org it was not bound to. On mismatch the task
+        is released so the right worker can pick it up, and the caller must not
+        start a session.
+        """
+        task_org = str(claimed.get("organization_id") or "")
+        if not task_org:
+            # Nothing to compare; the server-side org scope stands on its own.
+            return True
+        bound = await self._get_daemon_org_id()
+        if bound and task_org != str(bound):
+            log(
+                f"Refusing task {str(claimed.get('id', ''))[:8]}: org "
+                f"{task_org[:8]} does not match bound org {str(bound)[:8]}",
+                "ERROR",
+            )
+            await RequestAPI.release_task(str(claimed["id"]), self.instance_id)
+            return False
+        return True
 
     async def start(self):
         """Start the daemon."""
@@ -1952,7 +2059,7 @@ class LucentDaemon(
 
                     await load_runtime_settings_from_db(_pool)
                     _refresh_config_from_runtime_settings()
-                    self.roles = self._parse_roles(DAEMON_ROLES_STR)
+                    self.roles = self._resolve_roles(DAEMON_ROLES_STR)
                 except Exception as settings_exc:
                     log(f"Failed to load runtime settings from DB: {settings_exc}", "WARN")
                 try:
@@ -3323,12 +3430,30 @@ class LucentDaemon(
             await conn.close()
 
     def _handle_shutdown(self):
-        """Handle shutdown signal."""
-        self.running = False
+        """Handle shutdown signal.
+
+        Signals arrive on the event loop but the handler cannot await, so the
+        drain is scheduled as a task. Draining lets an in-flight LLM session
+        finish (or release its claim) instead of being cancelled mid-flight —
+        which matters most for ephemeral workers being scaled down.
+        """
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
         log("Shutdown signal received")
-        for task in asyncio.all_tasks():
-            if task is not asyncio.current_task():
-                task.cancel()
+        self.draining = True
+        asyncio.ensure_future(self._begin_shutdown_drain())
+
+    async def _begin_shutdown_drain(self):
+        """Drain in-flight work, then let run_forever fall through to stop()."""
+        try:
+            await self._drain_active_sessions()
+        except Exception as error:
+            log(f"Shutdown drain failed: {error}", "WARN")
+        finally:
+            # Setting running=False breaks every `while self.running` loop, so
+            # run_forever's FIRST_COMPLETED wait returns and stop() runs.
+            self.running = False
 
     async def stop(self):
         """Stop the daemon, revoke API key, and clean up."""
@@ -4325,6 +4450,8 @@ class LucentDaemon(
                     self._claim_operations -= 1
                 if not claimed:
                     continue
+                if not await self._task_matches_bound_org(claimed):
+                    continue
                 try:
                     await RequestAPI.update_task_model_settings(
                         task_id, model=decision_model
@@ -4431,6 +4558,8 @@ class LucentDaemon(
             finally:
                 self._claim_operations -= 1
             if not claimed:
+                continue
+            if not await self._task_matches_bound_org(claimed):
                 continue
 
             # Persist the resolved model before dispatch so it's recorded even if the task fails
@@ -5510,26 +5639,7 @@ class LucentDaemon(
         log(f"Daemon roles enabled: {', '.join(sorted(self.roles))}")
 
         try:
-            loops: list[asyncio.Task] = []
-
-            loops.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
-
-            if "dispatcher" in self.roles:
-                loops.append(asyncio.create_task(self._dispatch_loop(), name="dispatch"))
-            if "scheduler" in self.roles:
-                loops.append(asyncio.create_task(self._scheduler_loop(), name="scheduler"))
-                loops.append(
-                    asyncio.create_task(
-                        self._decomposition_loop(), name="request-decomposition"
-                    )
-                )
-
-            if DAEMON_SOURCE_RELOAD_ENABLED:
-                loops.append(
-                    asyncio.create_task(self._reload_watcher(), name="reload-watcher")
-                )
-            else:
-                log("Daemon source reload disabled by runtime setting")
+            loops = self._build_loops()
 
             if len(loops) <= 1:
                 log("No roles enabled — nothing to do", "ERROR")
@@ -5547,6 +5657,47 @@ class LucentDaemon(
             log("Main run loop cancelled", "DEBUG")
         finally:
             await self.stop()
+
+    def _build_loops(self) -> list[asyncio.Task]:
+        """Create the task loops enabled by this instance's roles.
+
+        Factored out of :meth:`run_forever` so the loop set can be asserted in
+        tests without running anything. The always-on process supervises and
+        schedules; only a spawned worker dispatches and idle-exits.
+        """
+        loops: list[asyncio.Task] = [
+            asyncio.create_task(self._heartbeat_loop(), name="heartbeat")
+        ]
+
+        if self.SCHEDULER_ROLE in self.roles:
+            loops.append(asyncio.create_task(self._scheduler_loop(), name="scheduler"))
+            loops.append(
+                asyncio.create_task(
+                    self._decomposition_loop(), name="request-decomposition"
+                )
+            )
+        if self.CONTROLLER_ROLE in self.roles:
+            loops.append(
+                asyncio.create_task(self._supervisor_loop(), name="worker-supervisor")
+            )
+        if self.DISPATCHER_ROLE in self.roles:
+            loops.append(asyncio.create_task(self._dispatch_loop(), name="dispatch"))
+            if DAEMON_WORKER:
+                # Exactly a worker: it dispatches for one org and exits once idle
+                # (unless it is holding the org's warm floor). A hand-run
+                # in-process dispatcher is not a worker and keeps running.
+                loops.append(
+                    asyncio.create_task(self._idle_exit_loop(), name="worker-idle-exit")
+                )
+
+        if DAEMON_SOURCE_RELOAD_ENABLED:
+            loops.append(
+                asyncio.create_task(self._reload_watcher(), name="reload-watcher")
+            )
+        else:
+            log("Daemon source reload disabled by runtime setting")
+
+        return loops
 
     async def run_once(self, task: str | None = None):
         """Run a single cycle or specific sub-agent task, then exit.
@@ -5612,8 +5763,8 @@ def main():
         type=str,
         default=None,
         help=(
-            "Comma-separated roles to enable: dispatcher, cognitive, scheduler, autonomic "
-            "(or 'all'). Overrides LUCENT_DAEMON_ROLES env var."
+            "Comma-separated roles to enable: scheduler, controller, dispatcher "
+            "(or 'all' = scheduler+controller). Overrides LUCENT_DAEMON_ROLES env var."
         ),
     )
     args = parser.parse_args()

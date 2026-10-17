@@ -514,15 +514,19 @@ Enable with `docker compose --profile observability up -d`:
 
 For observability setup details, see [Observability](observability.md).
 
-### Multi-Daemon
+### Daemon workers
 
-Plain `docker compose up` starts `daemon-1` by default. Enable the multi-daemon profile to add `daemon-2`:
+Plain `docker compose up` starts `daemon-1`, which is the always-on controller: it spawns
+and supervises the ephemeral per-org worker containers that dispatch work. Extra capacity
+comes from the warm floor, not from additional daemon services:
 
 ```bash
-docker compose --profile multi-daemon up
+# Keep N workers ready per organization even with an empty queue (0 = scale to zero).
+LUCENT_DAEMON_WORKER_MIN_WARM=1 docker compose up -d daemon-1
 ```
 
-Uses the same daemon environment variables listed above. See `docker-compose.yml` for the `daemon-1` and `daemon-2` service definitions.
+Uses the same daemon environment variables listed above. See `docker-compose.yml` for the
+`daemon-1` service definition.
 
 ## Docker Deployment
 

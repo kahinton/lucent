@@ -680,6 +680,17 @@ class DockerBackend(SandboxBackend):
         )
         return containers[0] if containers else None
 
+    async def rebind_bridge(self, sandbox_id: str, config: SandboxConfig) -> bool:
+        """Replace the bridge sidecar so it serves ``config``'s task.
+
+        The old sidecar is always removed; a new one starts only when the config
+        carries a task, mirroring ``create()``.
+        """
+        await self._remove_bridge(sandbox_id)
+        if not mcp_enabled(config):
+            return True
+        return await self._start_mcp_bridge(sandbox_id, config)
+
     async def _remove_bridge(self, sandbox_id: str) -> None:
         bridge = self._find_bridge(sandbox_id)
         if bridge is None:

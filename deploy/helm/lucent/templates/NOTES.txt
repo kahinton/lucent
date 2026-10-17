@@ -49,6 +49,17 @@ Thank you for installing {{ include "lucent.fullname" . }}.
 {{- end }}
 {{- end }}
 
+{{- if .Values.daemon.enabled }}
+
+Daemon:
+   Controller Deployment: {{ printf "%s-daemon" (include "lucent.fullname" .) }} (roles: {{ .Values.daemon.roles }})
+   Worker Jobs run in namespace {{ include "lucent.workerNamespace" . }} via the {{ .Values.daemon.workerLauncher }} launcher, warm floor {{ .Values.daemon.workerMinWarm }} per org.
+   Logs: kubectl -n {{ .Release.Namespace }} logs deployment/{{ printf "%s-daemon" (include "lucent.fullname" .) }} -c daemon -f
+{{- else }}
+
+Daemon: disabled (daemon.enabled=false). No controller was deployed and no workers will be spawned.
+{{- end }}
+
 Useful commands:
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
   kubectl -n {{ .Release.Namespace }} get svc {{ printf "%s-server" (include "lucent.fullname" .) }}

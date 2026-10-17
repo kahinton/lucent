@@ -39,14 +39,14 @@ spec:
               protocol: TCP
           resources:
             requests:
-              cpu: {{ dig "ollama" "resources" "requests" "cpu" "250m" .Values }}
-              memory: {{ dig "ollama" "resources" "requests" "memory" "1Gi" .Values }}
+              cpu: {{ dig "resources" "requests" "cpu" "250m" (.Values.ollama | default dict) }}
+              memory: {{ dig "resources" "requests" "memory" "1Gi" (.Values.ollama | default dict) }}
               {{- if .Values.ollama.gpu.enabled }}
               nvidia.com/gpu: {{ .Values.ollama.gpu.count }}
               {{- end }}
             limits:
-              cpu: {{ dig "ollama" "resources" "limits" "cpu" "2000m" .Values }}
-              memory: {{ dig "ollama" "resources" "limits" "memory" "8Gi" .Values }}
+              cpu: {{ dig "resources" "limits" "cpu" "2000m" (.Values.ollama | default dict) }}
+              memory: {{ dig "resources" "limits" "memory" "8Gi" (.Values.ollama | default dict) }}
               {{- if .Values.ollama.gpu.enabled }}
               nvidia.com/gpu: {{ .Values.ollama.gpu.count }}
               {{- end }}

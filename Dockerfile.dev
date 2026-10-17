@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy project files for initial install
 COPY pyproject.toml README.md ./
 COPY src/ src/
+# Top-level daemon package — required by the editable install too, so the
+# daemon imports even without the Compose bind mount.
+COPY daemon/ daemon/
 
 # Keep pip patched in development images as well as local virtualenvs.
 RUN python -m pip install --no-cache-dir --upgrade pip

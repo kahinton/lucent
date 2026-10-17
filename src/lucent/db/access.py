@@ -174,36 +174,6 @@ class AccessRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
-    async def get_search_history(
-        self,
-        memory_id: UUID,
-        limit: int = 50,
-        organization_id: UUID | None = None,
-        user_id: UUID | None = None,
-    ) -> list[dict[str, Any]]:
-        """Get the search queries that returned this memory.
-
-        Args:
-            memory_id: The UUID of the memory.
-            limit: Maximum entries to return.
-
-        Returns:
-            List of search access entries with query context.
-        """
-        query = """
-            SELECT id, memory_id, user_id, organization_id, access_type,
-                   accessed_at, context
-            FROM memory_access_log
-            WHERE memory_id = $1 AND access_type = 'search_result'
-            ORDER BY accessed_at DESC
-            LIMIT $2
-        """
-
-        async with scoped_acquire(organization_id=organization_id, user_id=user_id) as conn:
-            rows = await conn.fetch(query, str(memory_id), limit)
-
-        return [self._row_to_dict(row) for row in rows]
-
     async def get_user_activity(
         self,
         user_id: UUID,

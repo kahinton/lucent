@@ -118,6 +118,32 @@ def delete_test_organizations():
     return _delete_test_organizations
 
 
+@pytest.fixture
+def cleanup_test_organizations():
+    """Return an awaitable that deletes organizations by name pattern.
+
+    Same FK-aware deletion as ``delete_test_organizations``, but it opens its
+    own short-lived connection instead of taking one. Suites whose seed
+    helpers create organizations inline (no per-test prefix fixture) hang an
+    autouse cleanup off this: they must NOT depend on ``db_pool`` directly,
+    since ``pytest_collection_modifyitems`` classifies any test that does as
+    integration — which would drag the module's pure unit tests into the
+    integration set and leave them unrunnable without a database.
+    """
+
+    async def _cleanup(name_patterns: list[str]) -> None:
+        import asyncpg
+
+        database_url = os.environ.get("DATABASE_URL", _DEFAULT_TEST_DATABASE_URL)
+        conn = await asyncpg.connect(database_url)
+        try:
+            await _delete_test_organizations(conn, name_patterns)
+        finally:
+            await conn.close()
+
+    return _cleanup
+
+
 @pytest.fixture(autouse=True)
 def _bypass_ssrf_validation_in_tests(request):
     """Bypass SSRF URL validation for all tests except SSRF-specific ones.
@@ -248,6 +274,68 @@ def cleanup_orphaned_test_data(request):
     asyncio.run(_cleanup())
     yield
     asyncio.run(_cleanup())
+
+
+_BASELINE_OWNER_ORG = "test_baseline_owner_org"
+_BASELINE_OWNER_EXTERNAL_ID = "test_baseline_owner"
+_BASELINE_OWNER_EMAIL = "test_baseline_owner@test.com"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_baseline_owner(request, cleanup_orphaned_test_data):
+    """Provision one human owner so the integration DB mirrors a real instance.
+
+    A provisioned instance always has a human owner, so ``is_first_run`` is
+    False and the web routes render (or redirect to /login). A freshly created
+    — or freshly cleaned — test container has no human user, so every
+    unauthenticated web request 303s to /setup and the web suites that assert
+    login/redirect behaviour fail. This suite used to pass only because leaked
+    organizations supplied a human user; provisioning exactly one owner keeps
+    that precondition without restoring the pollution. The owner owns no
+    schedules, so it cannot interfere with the cross-org schedule sweep whose
+    servicing is what the leak originally starved.
+
+    It depends on ``cleanup_orphaned_test_data`` so it is provisioned *after*
+    that fixture's session-start sweep and removed by its session-end sweep —
+    the ``test_`` names put it back in scope of the same cleanup, leaving the
+    container pristine (zero organizations) after every run. Runs only when the
+    session contains integration tests; unit-only runs never touch the database.
+    """
+    import asyncio
+
+    has_integration_tests = any(
+        item.get_closest_marker("integration") for item in request.session.items
+    )
+    if not has_integration_tests:
+        yield
+        return
+
+    async def _ensure():
+        from lucent.db import OrganizationRepository, UserRepository
+        from lucent.db.pool import close_db, init_db
+
+        database_url = os.environ.get("DATABASE_URL", _DEFAULT_TEST_DATABASE_URL)
+        pool = await init_db(database_url)
+        try:
+            if await pool.fetchval(
+                "SELECT 1 FROM users WHERE external_id = $1",
+                _BASELINE_OWNER_EXTERNAL_ID,
+            ):
+                return
+            org = await OrganizationRepository(pool).create(name=_BASELINE_OWNER_ORG)
+            await UserRepository(pool).create(
+                external_id=_BASELINE_OWNER_EXTERNAL_ID,
+                provider="local",
+                organization_id=org["id"],
+                email=_BASELINE_OWNER_EMAIL,
+                display_name="Baseline Owner",
+                role="owner",
+            )
+        finally:
+            await close_db()
+
+    asyncio.run(_ensure())
+    yield
 
 
 @pytest_asyncio.fixture

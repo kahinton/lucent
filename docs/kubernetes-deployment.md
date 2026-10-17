@@ -162,7 +162,7 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `llm.engine` | string | `copilot` | LLM backend: `copilot` or `langchain` |
-| `llm.daemonModel` | string | `""` | Optional model override for daemon cognitive loop |
+| `llm.daemonModel` | string | `""` | Fallback model for daemon sessions when `daemon.model` is empty |
 | `llm.providers.anthropic.secretRef` | string | `""` | Secret containing `ANTHROPIC_API_KEY` |
 | `llm.providers.openai.secretRef` | string | `""` | Secret containing `OPENAI_API_KEY` |
 | `llm.providers.google.secretRef` | string | `""` | Secret containing `GOOGLE_API_KEY` |
@@ -207,10 +207,12 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `networkPolicy.enabled` | bool | `false` | Deploy NetworkPolicies (default-deny + allow rules) |
-| `serviceAccount.create` | bool | `true` | Create a ServiceAccount |
-| `serviceAccount.name` | string | `""` | ServiceAccount name (auto-generated if empty) |
-| `serviceAccount.annotations` | object | `{}` | ServiceAccount annotations (e.g., IRSA) |
+| `networkPolicy.enabled` | bool | `true` | Deploy NetworkPolicies (default-deny + allow rules), including the daemon and worker policies |
+| `serviceAccount.create` | bool | `true` | Create the server ServiceAccount |
+| `serviceAccount.name` | string | `""` | Server ServiceAccount name (auto-generated if empty) |
+| `serviceAccount.annotations` | object | `{}` | Server ServiceAccount annotations (e.g., IRSA) |
+| `daemon.serviceAccount.create` | bool | `true` | Create a separate ServiceAccount for the daemon controller |
+| `daemon.serviceAccount.name` | string | `""` | Controller ServiceAccount name (auto-generated if empty) |
 
 ### Observability
 
@@ -226,13 +228,70 @@ All parameters are set via `--set` flags or `values.yaml` overrides. The chart s
 
 ### Daemon
 
+The daemon is a long-running **controller** that supervises ephemeral per-organization
+**worker** Jobs. When `daemon.enabled` is `true` the chart deploys:
+
+| Object | Name | Purpose |
+|---|---|---|
+| Deployment | `<release>-daemon` | The controller: runs `python -m daemon.daemon` with `LUCENT_DAEMON_ROLES=all` (scheduler + controller). Single replica, `Recreate` strategy. |
+| ServiceAccount | `<release>-daemon` | The controller's own identity (not the server's). |
+| Role / RoleBinding | `<release>-daemon-controller` | Least privilege in the worker namespace: manage `batch/jobs`, read `pods`. |
+| NetworkPolicy | `<release>-daemon` | Controller egress (DB, OpenBao, server API, Kubernetes API, DNS). |
+| NetworkPolicy | `<release>-daemon-worker` | Egress for worker Jobs, selected by `io.lucent.worker.managed=true`. |
+
+Workers are created at runtime by the controller, one Job per organization with work, named
+`lucent-worker-<org8>-<rand>` and labelled `io.lucent.worker.org=<org_id>` and
+`io.lucent.worker.controller=<instance_id>`. A worker runs the `dispatcher` role for exactly
+one org, drains its queue, then exits (scale-to-zero). The controller never runs LLM sessions
+itself.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `daemon.enabled` | bool | `true` | Enable the autonomous daemon process |
-| `daemon.model` | string | `""` | Optional model override for daemon cognitive loop |
-| `daemon.maxConcurrentSessions` | int | `3` | Max parallel sub-agent sessions |
+| `daemon.enabled` | bool | `true` | Deploy the daemon controller (and its RBAC/namespace objects). `false` removes every daemon workload. |
+| `daemon.replicaCount` | int | `1` | Controller replicas. Keep at `1` — there is no leader election yet, so two controllers duplicate supervision. |
+| `daemon.model` | string | `""` | Model override for daemon-run sessions (`LUCENT_DAEMON_MODEL`) |
+| `daemon.maxConcurrentSessions` | int | `3` | Max parallel sessions per process (`LUCENT_MAX_SESSIONS`); inherited by workers |
+| `daemon.roles` | string | `all` | Controller roles (`LUCENT_DAEMON_ROLES`). `all` = scheduler + controller; the dispatcher runs only in workers |
+| `daemon.workerLauncher` | string | `kubernetes` | Worker spawn backend (`LUCENT_WORKER_LAUNCHER`) |
+| `daemon.workerNamespace` | string | `""` | Namespace worker Jobs run in (`LUCENT_WORKER_NAMESPACE`). Empty reuses the release namespace. The Role, RoleBinding, and worker NetworkPolicy are created in whichever namespace this resolves to. |
+| `daemon.workerImage` | string | `""` | Image worker Jobs run (`LUCENT_WORKER_IMAGE`). Empty uses the server image — one image serves both roles. |
+| `daemon.workerMinWarm` | int | `1` | Warm workers kept per org with nothing queued (`LUCENT_DAEMON_WORKER_MIN_WARM`). `0` scales execution to zero. |
+| `daemon.workerIdleSeconds` | int | `300` | Seconds an above-floor worker stays idle before exiting (`LUCENT_DAEMON_WORKER_IDLE_SECONDS`) |
+| `daemon.workerReconcileSeconds` | int | `15` | Controller reconcile interval, and the fallback when a task notification is missed (`LUCENT_DAEMON_WORKER_RECONCILE_SECONDS`) |
+| `daemon.resources` | object | requests 100m/256Mi, limits 500m/512Mi | Controller resource requests/limits |
+| `daemon.podAnnotations` / `daemon.podLabels` | object | `{}` | Extra metadata on the controller Pod |
+| `daemon.nodeSelector` / `daemon.tolerations` / `daemon.affinity` | object/list | `{}` / `[]` / `{}` | Controller scheduling constraints |
+| `daemon.serviceAccount.create` | bool | `true` | Create the controller ServiceAccount |
+| `daemon.serviceAccount.name` | string | `""` | Controller ServiceAccount name (defaults to `<release>-daemon`) |
+| `daemon.serviceAccount.annotations` | object | `{}` | Controller ServiceAccount annotations |
 | `daemon.env.LUCENT_DAEMON_INTERVAL` | string | `15` | Minutes between cognitive cycles |
 | `daemon.env.LUCENT_STALE_HEARTBEAT_MINUTES` | string | `30` | Minutes before a claimed task is considered stale |
+
+**Worker namespace.** By default workers run in the release namespace, so the chart needs no
+cluster-scoped `Namespace` object and the RBAC stays a namespaced `Role`. Point
+`daemon.workerNamespace` at a dedicated namespace (created out-of-band) to isolate worker Jobs
+from the server; the controller's `Role`/`RoleBinding` and the worker `NetworkPolicy` follow it
+automatically.
+
+**Controller RBAC.** The controller's `Role` grants only what supervising workers requires:
+`create`/`get`/`list`/`watch`/`delete` on `batch/jobs`, and read-only `get`/`list`/`watch` on
+`pods`, in the worker namespace alone. It has no access to application resources and nothing
+cluster-wide.
+
+**Reachability note.** Workers call the Lucent server back over HTTP (MCP/API), so the
+controller passes an in-cluster service URL (`http://<release>-server.<namespace>.svc:<port>/mcp`),
+never `localhost`. It is set as `LUCENT_MCP_URL` on the controller and inherited by workers. The
+server's MCP transport only accepts loopback `Host` headers by default, so the chart also sets
+`LUCENT_MCP_ALLOWED_HOSTS` to that service DNS name (override via
+`server.env.LUCENT_MCP_ALLOWED_HOSTS`); without it, daemon and worker MCP calls fail with HTTP
+421.
+
+**Sandbox RBAC (follow-up).** When `sandbox.backend=kubernetes`, the process that runs a
+session creates sandbox Pods, so the *worker* identity needs pod-creation rights in
+`sandbox.kubernetes.namespace` (or a dedicated worker ServiceAccount does). This chart grants
+that to the server and manages the controller side; wiring a worker ServiceAccount is pending the
+Kubernetes worker Job template.
+
 
 ---
 
@@ -932,14 +991,26 @@ auto-unseal feature. See [operator-guide.md](operator-guide.md) for operator-man
 
 ### Checking daemon health
 
+The daemon runs in its own Deployment (`<release>-daemon`), not as a sidecar in the server Pod.
+It exposes no HTTP health endpoint — it reports status only through outbound heartbeats — so
+health is observed from its logs and from the worker Jobs it spawns.
+
 ```bash
-# View daemon logs
-kubectl -n lucent logs deployment/lucent-server -c daemon --tail=100 -f
+# Controller logs
+kubectl -n lucent logs deployment/lucent-daemon -c daemon --tail=100 -f
+
+# Worker Jobs the controller has spawned
+kubectl -n lucent get jobs -l io.lucent.worker.managed=true
+kubectl -n lucent get pods -l io.lucent.worker.managed=true
 
 # Check daemon cognitive cycle via API (requires auth)
 curl -H "Authorization: Bearer TOKEN" \
   http://lucent.example.com/api/daemon/status
 ```
+
+If no workers appear, confirm `daemon.enabled=true`, that the controller Pod is `Running`
+(`kubectl -n lucent get deploy lucent-daemon`), that `LUCENT_WORKER_LAUNCHER=kubernetes` is set on
+it, and that its `Role` grants `batch/jobs` in the worker namespace.
 
 ---
 

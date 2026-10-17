@@ -1593,7 +1593,6 @@ Base path: `/api/access`
 | Method | Path | Role | Description |
 |--------|------|------|-------------|
 | `GET` | `/memory/{memory_id}` | any | Access history for a memory |
-| `GET` | `/memory/{memory_id}/searches` | any | Search queries that surfaced a memory |
 | `GET` | `/user/{user_id}` | any/admin | A user's memory access activity |
 | `GET` | `/most-accessed` | any | Most frequently accessed memories (`?organization_wide=true` for admins) |
 

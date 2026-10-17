@@ -497,9 +497,12 @@ class TestCreateTask:
 class TestLogTaskEvent:
     @pytest_asyncio.fixture
     async def task_id(self, mcp, auth_user, repo, test_organization, db_pool):
+        # created_by is required: a request with no owner is a system request,
+        # visible only to admins/owners, so a member could not log events on it.
         req = await repo.create_request(
             title="Event Test Request",
             org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
         )
         task = await repo.create_task(
             request_id=str(req["id"]),

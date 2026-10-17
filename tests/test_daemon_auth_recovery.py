@@ -1,10 +1,38 @@
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 import daemon.daemon as daemon_module
+from daemon.api import key_verification as key_verification_module
 from daemon.daemon import AuthFailureDetectedError, LucentDaemon
 from daemon.runtime.module_proxy import RuntimeModuleProxy
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+
+def _patch_key_probe(monkeypatch, *, status_code: int | None = None, exc: Exception | None = None):
+    """Replace key_verification's httpx client with a scripted probe."""
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+        async def get(self, *args, **kwargs):
+            if exc is not None:
+                raise exc
+            return _FakeResponse(status_code)
+
+    monkeypatch.setattr(key_verification_module.httpx, "AsyncClient", _Client)
 
 
 def test_runtime_proxy_writes_to_live_daemon_module():
@@ -505,3 +533,99 @@ async def test_cognitive_cycle_keeps_preloop_verification(monkeypatch):
 
     assert verify_calls["n"] == 1
     assert run_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_classify_api_key_separates_rejection_from_transient(monkeypatch):
+    """Only an explicit 401/403 is a rejection; a slow/failed probe is unknown."""
+    _patch_key_probe(monkeypatch, status_code=200)
+    assert (
+        await key_verification_module.classify_api_key("hs_ok")
+        == key_verification_module.KEY_VALID
+    )
+
+    _patch_key_probe(monkeypatch, status_code=401)
+    assert (
+        await key_verification_module.classify_api_key("hs_bad")
+        == key_verification_module.KEY_REJECTED
+    )
+    assert await key_verification_module.is_api_key_rejected("hs_bad") is True
+
+    _patch_key_probe(monkeypatch, exc=httpx.ReadTimeout("probe timed out"))
+    assert (
+        await key_verification_module.classify_api_key("hs_slow")
+        == key_verification_module.KEY_UNKNOWN
+    )
+    # A transient probe timeout must never be treated as a rejection.
+    assert await key_verification_module.is_api_key_rejected("hs_slow") is False
+
+
+@pytest.mark.asyncio
+async def test_transient_probe_failure_keeps_key_without_reprovisioning(monkeypatch):
+    """Regression: a timed-out /api/search probe must not re-mint the key.
+
+    The probe hits the heavy /api/search endpoint. When it times out (as it
+    does under the daemon's own concurrent 60s loop ticks), the old code read
+    that as an auth failure and re-provisioned a fresh 24h key every cycle —
+    the "Auth failure detected — re-provisioning" loop. A transient probe
+    result must leave the current key in place.
+    """
+    prev_key = daemon_module.MCP_API_KEY
+    prev_id = daemon_module._current_key_db_id
+    prev_exp = daemon_module._current_key_expires_at
+    provisioned: list[str] = []
+
+    async def _provision(instance_id: str) -> str:
+        provisioned.append(instance_id)
+        return "hs_reprovisioned"
+
+    try:
+        daemon_module.MCP_API_KEY = "hs_daemon_service_key"
+        daemon_module._current_key_db_id = "daemon-key-id"
+        daemon_module._current_key_expires_at = datetime.now(timezone.utc) + timedelta(
+            hours=23
+        )
+        _patch_key_probe(monkeypatch, exc=httpx.ReadTimeout("probe timed out"))
+        monkeypatch.setattr(daemon_module, "_provision_daemon_api_key", _provision)
+
+        assert await daemon_module._verify_and_provision_key("instance-transient") is True
+        assert provisioned == []
+        assert daemon_module.MCP_API_KEY == "hs_daemon_service_key"
+    finally:
+        daemon_module.MCP_API_KEY = prev_key
+        daemon_module._current_key_db_id = prev_id
+        daemon_module._current_key_expires_at = prev_exp
+
+
+@pytest.mark.asyncio
+async def test_definitive_rejection_reprovisions_key(monkeypatch):
+    """A real 401 from the server still rotates the key."""
+    prev_key = daemon_module.MCP_API_KEY
+    prev_id = daemon_module._current_key_db_id
+    prev_exp = daemon_module._current_key_expires_at
+    provisioned: list[str] = []
+
+    async def _provision(instance_id: str) -> str:
+        provisioned.append(instance_id)
+        daemon_module._current_key_db_id = "new-daemon-key-id"
+        daemon_module._current_key_expires_at = datetime.now(timezone.utc) + timedelta(
+            hours=24
+        )
+        return "hs_new_key"
+
+    try:
+        daemon_module.MCP_API_KEY = "hs_stale_key"
+        daemon_module._current_key_db_id = "daemon-key-id"
+        daemon_module._current_key_expires_at = datetime.now(timezone.utc) + timedelta(
+            hours=23
+        )
+        _patch_key_probe(monkeypatch, status_code=401)
+        monkeypatch.setattr(daemon_module, "_provision_daemon_api_key", _provision)
+
+        assert await daemon_module._verify_and_provision_key("instance-rejected") is True
+        assert provisioned == ["instance-rejected"]
+        assert daemon_module.MCP_API_KEY == "hs_new_key"
+    finally:
+        daemon_module.MCP_API_KEY = prev_key
+        daemon_module._current_key_db_id = prev_id
+        daemon_module._current_key_expires_at = prev_exp

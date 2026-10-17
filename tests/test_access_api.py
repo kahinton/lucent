@@ -198,33 +198,6 @@ class TestMemoryAccessHistory:
 # ============================================================================
 
 
-class TestMemorySearchHistory:
-    async def test_search_history_empty(self, member_client, acc_memory):
-        resp = await member_client.get(f"/api/access/memory/{acc_memory['id']}/searches")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, list)
-
-    async def test_search_history_after_search(
-        self, member_client, db_pool, acc_memory, acc_member
-    ):
-        """After logging a search_result access, it should appear."""
-        access_repo = AccessRepository(db_pool)
-        await access_repo.log_access(
-            memory_id=acc_memory["id"],
-            access_type="search_result",
-            user_id=acc_member["id"],
-            organization_id=acc_member["organization_id"],
-            context={"query": "test search"},
-        )
-
-        resp = await member_client.get(f"/api/access/memory/{acc_memory['id']}/searches")
-        assert resp.status_code == 200
-        entries = resp.json()
-        search_entries = [e for e in entries if e["access_type"] == "search_result"]
-        assert len(search_entries) >= 1
-
-
 # ============================================================================
 # GET /api/access/user/{user_id} — user activity
 # ============================================================================

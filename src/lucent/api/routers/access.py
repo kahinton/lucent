@@ -191,38 +191,6 @@ async def get_memory_access_history(
 
 
 @router.get(
-    "/memory/{memory_id}/searches",
-    response_model=list[AccessLogEntry],
-)
-async def get_memory_search_history(
-    memory_id: UUID,
-    user: AuthenticatedUser,
-    limit: int = Query(default=50, ge=1, le=100),
-) -> list[AccessLogEntry]:
-    """Get search queries that returned a specific memory.
-
-    Useful for understanding how memories are being discovered.
-    """
-    pool = await get_pool()
-    access_repo = AccessRepository(pool)
-
-    entries = await access_repo.get_search_history(
-        memory_id=memory_id,
-        limit=limit,
-        organization_id=user.organization_id,
-        user_id=user.id,
-    )
-
-    # Filter based on permissions
-    if not user.has_permission(Permission.ACCESS_VIEW_ORG):
-        entries = [e for e in entries if e.get("user_id") == user.id]
-    else:
-        entries = [e for e in entries if e.get("organization_id") == user.organization_id]
-
-    return [_entry_to_response(e) for e in entries]
-
-
-@router.get(
     "/user/{user_id}",
     response_model=list[AccessLogEntry],
 )

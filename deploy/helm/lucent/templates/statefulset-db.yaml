@@ -74,11 +74,11 @@ spec:
           livenessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
-            periodSeconds: {{ dig "database" "health" "livenessPeriodSeconds" 10 .Values }}
+            periodSeconds: {{ dig "health" "livenessPeriodSeconds" 10 (.Values.database | default dict) }}
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
-            periodSeconds: {{ dig "database" "health" "readinessPeriodSeconds" 10 .Values }}
+            periodSeconds: {{ dig "health" "readinessPeriodSeconds" 10 (.Values.database | default dict) }}
           {{- with .Values.database.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

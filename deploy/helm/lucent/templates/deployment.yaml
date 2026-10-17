@@ -51,12 +51,12 @@ spec:
             httpGet:
               path: /api/health
               port: http
-            periodSeconds: {{ dig "server" "health" "livenessPeriodSeconds" 10 .Values }}
+            periodSeconds: {{ dig "health" "livenessPeriodSeconds" 10 (.Values.server | default dict) }}
           readinessProbe:
             httpGet:
               path: /api/health
               port: http
-            periodSeconds: {{ dig "server" "health" "readinessPeriodSeconds" 10 .Values }}
+            periodSeconds: {{ dig "health" "readinessPeriodSeconds" 10 (.Values.server | default dict) }}
           resources:
             {{- toYaml .Values.server.resources | nindent 12 }}
           envFrom:

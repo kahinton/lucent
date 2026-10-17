@@ -23,12 +23,12 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
-      {{- if (dig "openbao" "unseal" "enabled" false .Values) }}
+      {{- if (dig "unseal" "enabled" false (.Values.openbao | default dict)) }}
       initContainers:
         - name: init-unseal
           image: {{ printf "%s:%s" .Values.openbao.image.repository .Values.openbao.image.tag | quote }}
           imagePullPolicy: {{ .Values.openbao.image.pullPolicy }}
-          command: ["sh", "-c", {{ (dig "openbao" "unseal" "command" "echo openbao unseal init enabled" .Values) | quote }}]
+          command: ["sh", "-c", {{ (dig "unseal" "command" "echo openbao unseal init enabled" (.Values.openbao | default dict)) | quote }}]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -61,12 +61,12 @@ spec:
             httpGet:
               path: /v1/sys/health
               port: http
-            periodSeconds: {{ dig "openbao" "health" "livenessPeriodSeconds" 10 .Values }}
+            periodSeconds: {{ dig "health" "livenessPeriodSeconds" 10 (.Values.openbao | default dict) }}
           readinessProbe:
             httpGet:
               path: /v1/sys/health
               port: http
-            periodSeconds: {{ dig "openbao" "health" "readinessPeriodSeconds" 10 .Values }}
+            periodSeconds: {{ dig "health" "readinessPeriodSeconds" 10 (.Values.openbao | default dict) }}
           {{- with .Values.openbao.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

@@ -1,0 +1,177 @@
+{{- if .Values.daemon.enabled }}
+{{/*
+The always-on daemon controller. It runs the scheduler + controller roles and
+supervises ephemeral per-org worker Jobs; it never runs LLM sessions itself.
+It is a singleton (replicaCount must stay 1 until leader election exists) and
+uses a Recreate strategy so a rollout never runs two controllers at once.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-daemon" (include "lucent.fullname" .) }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+spec:
+  replicas: {{ .Values.daemon.replicaCount }}
+  strategy:
+    # Never overlap two controllers during an update: duplicate supervision
+    # would spawn duplicate workers (claims stay atomic, so it is not fatal,
+    # but it is wasteful and confusing until leader election lands).
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "lucent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: daemon
+  template:
+    metadata:
+      labels:
+        {{- include "lucent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: daemon
+        {{- with .Values.daemon.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.daemon.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "lucent.daemonServiceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: daemon
+          image: {{ printf "%s:%s" .Values.server.image.repository .Values.server.image.tag | quote }}
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          command: ["python", "-m", "daemon.daemon"]
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          # No HTTP probes: the daemon exposes no health endpoint (it reports
+          # status only via outbound heartbeats). Adding a probe would require a
+          # daemon change, which is out of scope here.
+          resources:
+            {{- toYaml .Values.daemon.resources | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ printf "%s-config" (include "lucent.fullname" .) }}
+          env:
+            # Controller role + worker-spawn contract. These are the fixed
+            # names the Kubernetes worker launcher reads; do not rename.
+            - name: LUCENT_DAEMON_ROLES
+              value: {{ .Values.daemon.roles | quote }}
+            - name: LUCENT_WORKER_LAUNCHER
+              value: {{ .Values.daemon.workerLauncher | quote }}
+            - name: LUCENT_WORKER_NAMESPACE
+              value: {{ include "lucent.workerNamespace" . | quote }}
+            - name: LUCENT_WORKER_IMAGE
+              value: {{ include "lucent.workerImage" . | quote }}
+            - name: LUCENT_DAEMON_WORKER_MIN_WARM
+              value: {{ .Values.daemon.workerMinWarm | quote }}
+            - name: LUCENT_DAEMON_WORKER_IDLE_SECONDS
+              value: {{ .Values.daemon.workerIdleSeconds | quote }}
+            - name: LUCENT_DAEMON_WORKER_RECONCILE_SECONDS
+              value: {{ .Values.daemon.workerReconcileSeconds | quote }}
+            # Workers call the server back over HTTP, so the controller must
+            # carry an in-cluster, service-reachable MCP URL (not localhost).
+            - name: LUCENT_MCP_URL
+              value: {{ include "lucent.daemonMcpUrl" . | quote }}
+            - name: LUCENT_MODE
+              value: {{ .Values.server.env.LUCENT_MODE | quote }}
+            - name: LUCENT_SECRET_PROVIDER
+              value: {{ .Values.server.env.LUCENT_SECRET_PROVIDER | quote }}
+            - name: OLLAMA_HOST
+              value: {{ .Values.server.env.OLLAMA_HOST | quote }}
+            # Container logging: the daemon defaults to file-only logging, which
+            # hides output from `kubectl logs`. Send it to stderr instead.
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: LUCENT_LOG_STDERR
+              value: "true"
+            - name: LUCENT_LOG_FILE
+              value: ""
+            # Least privilege: when a restricted lucent_daemon DSN is provided,
+            # the daemon prefers it and drops the broader DATABASE_URL before
+            # spawning workers. Optional — falls back to DATABASE_URL.
+            - name: DAEMON_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: DAEMON_DATABASE_URL
+                  optional: true
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: DATABASE_URL
+            - name: LUCENT_MCP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: LUCENT_MCP_API_KEY
+                  optional: true
+            - name: LUCENT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: LUCENT_SECRET_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: GOOGLE_API_KEY
+                  optional: true
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: GITHUB_TOKEN
+                  optional: true
+            - name: VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" (include "lucent.fullname" .) }}
+                  key: VAULT_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.daemon.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemon.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemon.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

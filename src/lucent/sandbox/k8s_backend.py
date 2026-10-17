@@ -452,6 +452,16 @@ class KubernetesBackend(SandboxBackend):
             created_at=pod.metadata.creation_timestamp,
         )
 
+    async def rebind_bridge(self, sandbox_id: str, config: SandboxConfig) -> bool:
+        """Kubernetes runs the bridge as a sidecar container in the sandbox pod.
+
+        A pod's containers cannot be replaced in place, so the bridge cannot be
+        re-pointed at a different task without recreating the pod — which would
+        defeat the reuse in the first place. Refuse, so a reusing task gets a
+        fresh sandbox instead of inheriting the previous task's bridge identity.
+        """
+        return False
+
     async def stop(self, sandbox_id: str) -> None:
         await self.destroy(sandbox_id)
 

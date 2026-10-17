@@ -83,6 +83,29 @@ def _request_visibility_args(
     }
 
 
+def _can_access_sandbox(
+    sandbox: dict[str, Any] | None,
+    *,
+    user_id: UUID | None,
+    role: str | None,
+    memory_scope: str | None,
+) -> bool:
+    """Whether this caller may act on a sandbox record.
+
+    Sandboxes are owner-scoped. A scoped (task) session may only reach a sandbox
+    it created — without this, any task in the org could exec into any other
+    task's sandbox given its id. Org admins and owners keep org-wide access,
+    matching the rest of the tool surface. An ownerless record is refused for a
+    scoped session rather than assumed safe.
+    """
+    if sandbox is None:
+        return False
+    if role in {"admin", "owner"} and memory_scope is None:
+        return True
+    owner = sandbox.get("created_by")
+    return owner is not None and user_id is not None and str(owner) == str(user_id)
+
+
 def _can_mutate_request(
     request: dict[str, Any], user_id: UUID | None, role: str | None
 ) -> bool:
@@ -1379,13 +1402,22 @@ Returns: JSON confirmation."""
         detail: str = "",
     ) -> str:
         # Anti-spoofing V6: require authentication
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
+        # The task id is caller-supplied: confirm the task is one this caller can
+        # see before writing to its timeline.
+        task = await repo.get_task_for_requester(
+            task_id,
+            str(org_id),
+            **_request_visibility_args(user_id, user_role, memory_scope),
+        )
+        if not task:
+            return json.dumps({"error": "Task not found"})
         try:
             event = await repo.add_task_event(task_id, event_type, detail, org_id=str(org_id))
         except ValueError as exc:
@@ -1413,7 +1445,7 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
         cwd: str | None = None,
         timeout: int = 300,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
@@ -1461,6 +1493,16 @@ Returns: JSON with exit_code, stdout, stderr, duration_ms, timed_out, and sandbo
             else getattr(info, "organization_id", None)
         )
         if info_org_id and str(info_org_id) != str(org_id):
+            return json.dumps({"error": "Sandbox not found"})
+        # Ownership, not just org membership: a scoped session may only reach a
+        # sandbox it created. Reported as "not found" so the caller learns
+        # nothing about other tasks' sandboxes.
+        if not _can_access_sandbox(
+            info if isinstance(info, dict) else None,
+            user_id=user_id,
+            role=user_role,
+            memory_scope=memory_scope,
+        ):
             return json.dumps({"error": "Sandbox not found"})
 
         result = await manager.exec(
@@ -1614,14 +1656,19 @@ Returns: JSON with the created output artifact."""
         metadata: dict | None = None,
         is_primary: bool = False,
     ) -> str:
-        user_id, org_id, _, _, _ = await _get_current_user_context()
+        user_id, org_id, user_role, memory_scope, _ = await _get_current_user_context()
         if not user_id:
             return json.dumps({"error": "Authentication required"})
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
         repo = await _get_request_repository()
-        task = await repo.get_task(task_id, org_id=str(org_id))
+        # Caller-supplied task id: only attach outputs to a task this caller sees.
+        task = await repo.get_task_for_requester(
+            task_id,
+            str(org_id),
+            **_request_visibility_args(user_id, user_role, memory_scope),
+        )
         if not task:
             return json.dumps({"error": "Task not found"})
 

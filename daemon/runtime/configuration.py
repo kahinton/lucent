@@ -90,7 +90,7 @@ class RuntimeConfigurationMixin:
                     await load_runtime_settings_from_db(pool)
                     await load_models_from_db(pool)
                     runtime._refresh_config_from_runtime_settings()
-                    self.roles = self._parse_roles(runtime.DAEMON_ROLES_STR)
+                    self.roles = self._resolve_roles(runtime.DAEMON_ROLES_STR)
                     self._settings_reloaded_at = now
                 finally:
                     clear_tenant_scope()

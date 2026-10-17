@@ -40,6 +40,17 @@ V6 - MCP log_task_event / link_task_memory missing auth:
     These tools had no authentication check, allowing unauthenticated callers to
     log events and link memories to tasks. Mitigated: added auth context check.
 
+V7 - MCP log_task_event / record_task_output trusted a caller-supplied task id:
+    Both tools accepted any task UUID and checked only that it was in the
+    caller's organization, so a task agent could write events and outputs onto
+    another user's task. Mitigated: both now require the task's request to be
+    visible to the caller (same rule as the request list tools).
+
+V8 - MCP exec_sandbox_command checked only the organization:
+    Given a sandbox UUID, any caller in the org could execute commands inside
+    another user's sandbox — reading its workspace and files. Mitigated: the
+    sandbox must belong to the caller (admins/owners keep org-wide access).
+
 Additional Findings (SAFE):
     - All API routers use AuthenticatedUser/AdminUser dependency injection
     - No custom X-User-Id or X-Username headers accepted anywhere
@@ -66,6 +77,7 @@ from lucent.db import (
     OrganizationRepository,
     UserRepository,
 )
+from lucent.db.requests import RequestRepository
 
 # ============================================================================
 # Fixtures
@@ -716,3 +728,196 @@ class TestDaemonTaskAntiSpoofing:
         assert existing.get("deleted_at") is None
 
         await repo.delete(task["id"], organization_id=user_a["organization_id"])
+
+
+# ============================================================================
+# V7: Task-writing tools must respect task ownership
+# ============================================================================
+
+
+async def _cleanup_request(db_pool, request):
+    """Remove a request and its tasks so user teardown is not blocked by FKs."""
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM requests WHERE id = $1", UUID(str(request["id"])))
+
+
+class TestTaskWriteOwnership:
+    """V7: log_task_event / record_task_output must not accept another user's task.
+
+    Both tools take a caller-supplied task id. Org membership alone is not
+    enough — without an ownership check, a task agent running for one user could
+    write events and outputs onto another user's task in the same organization.
+    """
+
+    async def _request_and_task(self, db_pool, org, owner, prefix):
+        repo = RequestRepository(db_pool)
+        request = await repo.create_request(
+            title=f"{prefix}Owned request", org_id=str(org["id"]),
+            created_by=str(owner["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(request["id"]), title=f"{prefix}Step",
+            org_id=str(org["id"]),
+        )
+        return request, task
+
+    async def test_log_task_event_rejects_another_users_task(
+        self, db_pool, org_a, user_a, user_b, spoof_prefix
+    ):
+        request, task = await self._request_and_task(db_pool, org_a, user_a, spoof_prefix)
+
+        from mcp.server import MCPServer as FastMCP
+
+        from lucent.tools.requests import register_request_tools
+
+        mcp = FastMCP("test")
+        register_request_tools(mcp)
+
+        set_current_user(
+            {
+                "id": user_b["id"],
+                "organization_id": user_b["organization_id"],
+                "role": "member",
+                "display_name": user_b["display_name"],
+                "email": user_b["email"],
+            }
+        )
+        try:
+            result = await mcp._tool_manager.call_tool(
+                "log_task_event",
+                {"task_id": str(task["id"]), "event_type": "progress", "detail": "spoofed"},
+                None,
+            )
+            payload = json.loads(result)
+            assert "error" in payload
+            assert "not found" in payload["error"].lower()
+        finally:
+            set_current_user(None)
+
+        # No event should have been written on the owner's task.
+        repo = RequestRepository(db_pool)
+        events = await repo.list_task_events(str(task["id"]), org_id=str(org_a["id"]))
+        assert not any(e.get("event_type") == "progress" for e in events["items"])
+        await _cleanup_request(db_pool, request)
+
+    async def test_log_task_event_still_allows_the_owner(
+        self, db_pool, org_a, user_a, spoof_prefix
+    ):
+        """Positive control: the owning user can still write to their own task."""
+        request, task = await self._request_and_task(db_pool, org_a, user_a, spoof_prefix)
+
+        from mcp.server import MCPServer as FastMCP
+
+        from lucent.tools.requests import register_request_tools
+
+        mcp = FastMCP("test")
+        register_request_tools(mcp)
+        set_current_user(
+            {
+                "id": user_a["id"],
+                "organization_id": user_a["organization_id"],
+                "role": "member",
+                "display_name": user_a["display_name"],
+                "email": user_a["email"],
+            }
+        )
+        try:
+            result = await mcp._tool_manager.call_tool(
+                "log_task_event",
+                {"task_id": str(task["id"]), "event_type": "progress", "detail": "mine"},
+                None,
+            )
+            payload = json.loads(result)
+            assert "error" not in payload
+        finally:
+            set_current_user(None)
+        await _cleanup_request(db_pool, request)
+
+    async def test_record_task_output_rejects_another_users_task(
+        self, db_pool, org_a, user_a, user_b, spoof_prefix
+    ):
+        request, task = await self._request_and_task(db_pool, org_a, user_a, spoof_prefix)
+
+        from mcp.server import MCPServer as FastMCP
+
+        from lucent.tools.requests import register_request_tools
+
+        mcp = FastMCP("test")
+        register_request_tools(mcp)
+        set_current_user(
+            {
+                "id": user_b["id"],
+                "organization_id": user_b["organization_id"],
+                "role": "member",
+                "display_name": user_b["display_name"],
+                "email": user_b["email"],
+            }
+        )
+        try:
+            result = await mcp._tool_manager.call_tool(
+                "record_task_output",
+                {"task_id": str(task["id"]), "title": "spoofed output"},
+                None,
+            )
+            payload = json.loads(result)
+            assert "error" in payload
+            assert "not found" in payload["error"].lower()
+        finally:
+            set_current_user(None)
+        await _cleanup_request(db_pool, request)
+
+
+# ============================================================================
+# V8: Sandbox access must respect sandbox ownership
+# ============================================================================
+
+
+class TestSandboxOwnership:
+    """V8: exec_sandbox_command must not reach another user's sandbox."""
+
+    async def test_exec_rejects_another_users_sandbox(
+        self, db_pool, org_a, user_a, user_b, spoof_prefix
+    ):
+        from lucent.db.sandbox import SandboxRepository
+
+        sandbox = await SandboxRepository(db_pool).create(
+            id=str(uuid4()),
+            name=f"{spoof_prefix}sandbox-a",
+            status="ready",
+            image="python:3.12-slim",
+            config={},
+            organization_id=str(org_a["id"]),
+            created_by=str(user_a["id"]),
+        )
+
+        from mcp.server import MCPServer as FastMCP
+
+        from lucent.tools.requests import register_request_tools
+
+        mcp = FastMCP("test")
+        register_request_tools(mcp)
+        set_current_user(
+            {
+                "id": user_b["id"],
+                "organization_id": user_b["organization_id"],
+                "role": "member",
+                "display_name": user_b["display_name"],
+                "email": user_b["email"],
+            }
+        )
+        try:
+            result = await mcp._tool_manager.call_tool(
+                "exec_sandbox_command",
+                {"command": "cat /workspace/secret", "sandbox_id": str(sandbox["id"])},
+                None,
+            )
+            payload = json.loads(result)
+            assert "error" in payload
+            # Reported as not found so the caller learns nothing about it.
+            assert "not found" in payload["error"].lower()
+        finally:
+            set_current_user(None)
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM sandboxes WHERE id = $1", UUID(str(sandbox["id"]))
+                )

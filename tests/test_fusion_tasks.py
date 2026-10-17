@@ -6,11 +6,28 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport
 
 from daemon.daemon import LucentDaemon
 from lucent.db.requests import validate_fusion_config
 from lucent.llm.decision import DecisionResponse, DecisionUsage, NoulAnswer
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _cleanup_seeded_orgs(request, cleanup_test_organizations):
+    """Delete the organizations this suite seeds inline, after each test.
+
+    The REST tests seed org/user/request rows through
+    ``test_decision_tasks._seed_decision_org`` (no per-test prefix fixture), so
+    without this their orgs outlive the test and pile up in the shared test
+    database. Gated on the integration marker so the module's pure unit tests
+    never open a connection.
+    """
+    is_integration = request.node.get_closest_marker("integration") is not None
+    yield
+    if is_integration:
+        await cleanup_test_organizations(["fusion_%"])
 
 
 def _noul(name: str = "fulfilled"):

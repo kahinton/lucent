@@ -548,6 +548,86 @@ class DaemonRepository:
         )
         return int(count or 0)
 
+    async def try_reserve_idle_exit(
+        self,
+        organization_id: str,
+        instance_id: str,
+        min_warm: int,
+        *,
+        stale_seconds: int = 300,
+    ) -> bool:
+        """Whether an idle worker may leave without dropping below the warm floor.
+
+        Serialized per organization with an advisory lock, so two idle workers
+        cannot both read "there are two of us" and both leave. On approval the
+        caller is marked ``stopping`` inside the same transaction, so the next
+        worker's count already excludes it.
+
+        Only dispatcher instances count as workers, so the controller — which
+        registers for the org it supervises — never inflates the floor.
+        """
+        async with self.conn.transaction():
+            await self.conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                f"worker-warm-floor:{organization_id}",
+            )
+            remaining = await self.conn.fetchval(
+                """SELECT COUNT(*) FROM daemon_instances
+                   WHERE organization_id = $1::uuid
+                     AND status = 'active'
+                     AND instance_id <> $2
+                     AND 'dispatcher' = ANY(roles)
+                     AND last_seen_at > NOW() - ($3::int * INTERVAL '1 second')""",
+                organization_id,
+                instance_id,
+                int(stale_seconds),
+            )
+            if int(remaining or 0) < max(0, min_warm):
+                return False
+            await self.conn.execute(
+                """UPDATE daemon_instances
+                   SET status = 'stopping', updated_at = NOW()
+                   WHERE organization_id = $1::uuid AND instance_id = $2""",
+                organization_id,
+                instance_id,
+            )
+            return True
+
+    async def count_work_for_org(self, organization_id: str) -> dict[str, int]:
+        """Count the work an organization actually has, for worker supervision.
+
+        Counts only — never selects tenant content (no title, description, or
+        result, and no joins beyond the request row the gate needs). The
+        controller uses this to decide how many workers an org needs without
+        learning what the work is.
+
+        ``pending`` counts only *dispatchable* tasks, using the dispatcher's own
+        predicate: raw ``pending`` rows include leftovers from cancelled requests
+        and stage-gated tasks that will never be claimed, and spawning workers
+        for those would churn containers forever.
+
+        ``running`` counts claimed/running tasks and matters as much as
+        ``pending``: when no worker is alive, a crashed worker's task sits
+        ``claimed`` with an expired lease. Seeing it lets the controller spawn a
+        worker, whose dispatch loop then releases the stale claim and retries.
+        """
+        from lucent.db.requests import (
+            DISPATCHABLE_TASK_PREDICATE,
+            DISPATCHABLE_TASKS_FROM,
+        )
+
+        pending = await self.conn.fetchval(
+            f"SELECT COUNT(*) {DISPATCHABLE_TASKS_FROM} "
+            f"WHERE {DISPATCHABLE_TASK_PREDICATE}",
+            organization_id,
+        )
+        running = await self.conn.fetchval(
+            "SELECT COUNT(*) FROM tasks "
+            "WHERE organization_id = $1::uuid AND status IN ('claimed', 'running')",
+            organization_id,
+        )
+        return {"pending": int(pending or 0), "running": int(running or 0)}
+
     async def listen_connection_alive(self) -> bool:
         return bool(await self.conn.fetchval("SELECT 1"))
 

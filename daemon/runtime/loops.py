@@ -352,16 +352,16 @@ class RuntimeLoopsMixin:
                 runtime.log(f"Reload watcher error: {error}", "WARN")
             await asyncio.sleep(30)
 
-    async def _graceful_restart(self):
-        """Drain in-flight sessions and replace the process."""
+    async def _drain_active_sessions(self) -> bool:
+        """Wait for in-flight sessions/claims to finish.
+
+        Returns True when everything drained cleanly, False when the wait hit
+        ``DRAIN_TIMEOUT`` with sessions still active. Shared by the source-reload
+        restart and the shutdown path so both drain identically.
+        """
         from daemon.runtime.module_proxy import runtime
 
         active_count = len(self.active_sessions)
-        runtime.log(
-            "Source files changed — entering drain mode "
-            f"({active_count} active session{'s' if active_count != 1 else ''})"
-        )
-        self.draining = True
         if self._tracer:
             self._drain_active.add(1)
         span = (
@@ -373,24 +373,37 @@ class RuntimeLoopsMixin:
             else contextlib.nullcontext()
         )
         with span:
-            if active_count:
-                deadline = time.time() + self.DRAIN_TIMEOUT
-                while self.active_sessions and time.time() < deadline:
-                    runtime.log(
-                        f"Drain: waiting for {len(self.active_sessions)} session(s) "
-                        f"({int(deadline - time.time())}s remaining)"
-                    )
-                    await asyncio.sleep(5)
-                if self.active_sessions:
-                    runtime.log(
-                        f"Drain timeout — {len(self.active_sessions)} session(s) still active, "
-                        "proceeding with restart",
-                        "WARN",
-                    )
-                else:
-                    runtime.log("Drain complete — all sessions finished cleanly")
-            self.running = False
-            self._restart_self()
+            if not active_count:
+                return True
+            deadline = time.time() + self.DRAIN_TIMEOUT
+            while self.active_sessions and time.time() < deadline:
+                runtime.log(
+                    f"Drain: waiting for {len(self.active_sessions)} session(s) "
+                    f"({int(deadline - time.time())}s remaining)"
+                )
+                await asyncio.sleep(5)
+            if self.active_sessions:
+                runtime.log(
+                    f"Drain timeout — {len(self.active_sessions)} session(s) still active",
+                    "WARN",
+                )
+                return False
+            runtime.log("Drain complete — all sessions finished cleanly")
+            return True
+
+    async def _graceful_restart(self):
+        """Drain in-flight sessions and replace the process."""
+        from daemon.runtime.module_proxy import runtime
+
+        active_count = len(self.active_sessions)
+        runtime.log(
+            "Source files changed — entering drain mode "
+            f"({active_count} active session{'s' if active_count != 1 else ''})"
+        )
+        self.draining = True
+        await self._drain_active_sessions()
+        self.running = False
+        self._restart_self()
 
     def _snapshot_source_files(self) -> dict[str, float]:
         """Capture mtimes for daemon Python and prompt files."""

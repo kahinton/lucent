@@ -84,34 +84,7 @@ class SandboxManager:
                 "features.sandboxes_enabled setting"
             )
         key_id: UUID | None = None
-        effective_config = SandboxConfig(**asdict(config))
-
-        # Bridge routing and credentials are Lucent-controlled. Remove any
-        # caller-supplied values before provisioning the task-scoped key.
-        for bridge_env_key in (
-            "LUCENT_API_URL",
-            "LUCENT_SANDBOX_MCP_API_KEY",
-            "LUCENT_SANDBOX_MCP_ENABLED",
-            "LUCENT_SANDBOX_TASK_ID",
-            "LUCENT_SANDBOX_MCP_PORT",
-        ):
-            effective_config.env_vars.pop(bridge_env_key, None)
-
-        if effective_config.task_id:
-            key_id, raw_key, bridge_org_id = await self._create_task_scoped_api_key(
-                effective_config
-            )
-            effective_config.env_vars = dict(effective_config.env_vars)
-            effective_config.env_vars["LUCENT_API_URL"] = os.environ.get(
-                "LUCENT_SANDBOX_BRIDGE_API_URL",
-                "http://host.docker.internal:8766/api",
-            )
-            effective_config.env_vars["LUCENT_SANDBOX_MCP_API_KEY"] = raw_key
-            effective_config.env_vars["LUCENT_SANDBOX_MCP_ENABLED"] = "1"
-            effective_config.env_vars["LUCENT_SANDBOX_TASK_ID"] = effective_config.task_id
-            effective_config.env_vars["LUCENT_SANDBOX_MCP_PORT"] = str(
-                effective_config.mcp_bridge_port
-            )
+        effective_config, key_id, bridge_org_id = await self._prepare_bridge(config)
 
         # Create the container via backend
         info = await self._backend.create(effective_config)
@@ -180,6 +153,70 @@ class SandboxManager:
 
         return info
 
+    async def _prepare_bridge(
+        self, config: SandboxConfig
+    ) -> tuple[SandboxConfig, UUID | None, str | None]:
+        """Strip caller-supplied bridge values and provision this task's bridge key.
+
+        Bridge routing and credentials are Lucent-controlled. Shared by
+        ``create`` and the reuse path so a reused sandbox's bridge ends up scoped
+        exactly like a freshly created one.
+        """
+        effective_config = SandboxConfig(**asdict(config))
+        for bridge_env_key in (
+            "LUCENT_API_URL",
+            "LUCENT_SANDBOX_MCP_API_KEY",
+            "LUCENT_SANDBOX_MCP_ENABLED",
+            "LUCENT_SANDBOX_TASK_ID",
+            "LUCENT_SANDBOX_MCP_PORT",
+        ):
+            effective_config.env_vars.pop(bridge_env_key, None)
+
+        if not effective_config.task_id:
+            return effective_config, None, None
+
+        key_id, raw_key, bridge_org_id = await self._create_task_scoped_api_key(
+            effective_config
+        )
+        effective_config.env_vars = dict(effective_config.env_vars)
+        effective_config.env_vars["LUCENT_API_URL"] = os.environ.get(
+            "LUCENT_SANDBOX_BRIDGE_API_URL",
+            "http://host.docker.internal:8766/api",
+        )
+        effective_config.env_vars["LUCENT_SANDBOX_MCP_API_KEY"] = raw_key
+        effective_config.env_vars["LUCENT_SANDBOX_MCP_ENABLED"] = "1"
+        effective_config.env_vars["LUCENT_SANDBOX_TASK_ID"] = effective_config.task_id
+        effective_config.env_vars["LUCENT_SANDBOX_MCP_PORT"] = str(
+            effective_config.mcp_bridge_port
+        )
+        return effective_config, key_id, bridge_org_id
+
+    async def _rebind_bridge_for_task(
+        self, sandbox_id: str, config: SandboxConfig
+    ) -> bool:
+        """Make a reused sandbox's bridge serve ``config``'s task.
+
+        Reuse hands a live container to a later task, but the bridge sidecar in
+        it still carries the *previous* task's id and scoped key — so the later
+        task would quietly write events and memory links onto its predecessor.
+        Rebuild the bridge for this task (or retire it when this task has none).
+
+        Returns False when the sandbox cannot be safely handed over, in which
+        case the caller creates a fresh sandbox.
+        """
+        effective, key_id, bridge_org_id = await self._prepare_bridge(config)
+        if not await self._backend.rebind_bridge(sandbox_id, effective):
+            if key_id:
+                await self._revoke_api_key(key_id, bridge_org_id)
+            return False
+
+        previous = self._sandbox_bridge_api_keys.pop(sandbox_id, None)
+        if previous:
+            await self._revoke_api_key(*previous)
+        if key_id:
+            self._sandbox_bridge_api_keys[sandbox_id] = (key_id, bridge_org_id)
+        return True
+
     async def get_or_create_for_request(
         self,
         config: SandboxConfig,
@@ -211,8 +248,13 @@ class SandboxManager:
                     sandbox_id = str(existing["id"])
                     live = await self.get_live(sandbox_id)
                     if live and live.status in {SandboxStatus.READY, SandboxStatus.RUNNING}:
-                        self._touch(sandbox_id)
-                        return live, True
+                        if await self._rebind_bridge_for_task(sandbox_id, config):
+                            self._touch(sandbox_id)
+                            return live, True
+                        logger.info(
+                            "Not reusing sandbox %s: its bridge belongs to another task",
+                            sandbox_id[:12],
+                        )
             except Exception as exc:
                 logger.warning("Failed to look up reusable request sandbox: %s", exc)
         return await self.create(config), False

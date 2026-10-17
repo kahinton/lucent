@@ -716,74 +716,93 @@ class TestSearchAccessControl:
 
 
 class TestSearchAccessLogging:
-    """Search results trigger access logging."""
+    """A search must NOT be recorded as memory access.
 
-    async def test_search_logs_access(self, srch_client, db_pool, srch_user, srch_prefix):
-        """Searching memories logs access entries."""
-        from lucent.db import AccessRepository
+    A search returns a ranked window that the caller may never open, so it is
+    not evidence of use. Logging it wrote one `search_result` row per returned
+    memory (the bulk of memory_access_log), inflated every access count,
+    saturated vitality scoring, and resurrected archived memories. Search now
+    writes no log row and mutates no memory state; direct reads still log a
+    `view`.
+    """
 
-        await _seed_memories(db_pool, srch_user, srch_prefix)
+    async def test_search_does_not_log_access(self, srch_client, db_pool, srch_user, srch_prefix):
+        """A search writes no memory_access_log row for its results."""
+        memories = await _seed_memories(db_pool, srch_user, srch_prefix)
+        memory_ids = [m["id"] for m in memories]
 
-        # Perform a search
         resp = await srch_client.post(
             "/api/search",
-            json={
-                "username": f"{srch_prefix}user",
-            },
+            json={"username": f"{srch_prefix}user"},
         )
         assert resp.status_code == 200
-        data = resp.json()
+        assert resp.json()["memories"]
 
-        if data["memories"]:
-            # Check that access was logged
-            access_repo = AccessRepository(db_pool)
-            memory_id = UUID(data["memories"][0]["id"])
-            access_log = await access_repo.get_access_history(
-                memory_id=memory_id,
-                limit=10,
-                organization_id=srch_user["organization_id"],
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT count(*) FROM memory_access_log WHERE memory_id = ANY($1::uuid[])",
+                memory_ids,
             )
-            # Should have at least one search_result entry
-            search_entries = [
-                e for e in access_log["entries"] if e.get("access_type") == "search_result"
-            ]
-            assert len(search_entries) >= 1
+        assert count == 0
 
-    async def test_search_full_logs_access(self, srch_client, db_pool, srch_user, srch_prefix):
-        """Full search also logs access entries."""
-        from lucent.db import AccessRepository
-
-        await _seed_memories(db_pool, srch_user, srch_prefix)
+    async def test_search_full_does_not_log_access(
+        self, srch_client, db_pool, srch_user, srch_prefix
+    ):
+        """Full search writes no memory_access_log row for its results."""
+        memories = await _seed_memories(db_pool, srch_user, srch_prefix)
+        memory_ids = [m["id"] for m in memories]
 
         resp = await srch_client.post(
             "/api/search/full",
-            json={
-                "query": srch_prefix,
-            },
+            json={"query": srch_prefix},
         )
         assert resp.status_code == 200
-        data = resp.json()
+        assert resp.json()["memories"]
 
-        if data["memories"]:
-            access_repo = AccessRepository(db_pool)
-            memory_id = UUID(data["memories"][0]["id"])
-            access_log = await access_repo.get_access_history(
-                memory_id=memory_id,
-                limit=10,
-                organization_id=srch_user["organization_id"],
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT count(*) FROM memory_access_log WHERE memory_id = ANY($1::uuid[])",
+                memory_ids,
             )
-            search_entries = [
-                e for e in access_log["entries"] if e.get("access_type") == "search_result"
-            ]
-            assert len(search_entries) >= 1
+        assert count == 0
+
+    async def test_search_does_not_reactivate_archived_memory(
+        self, srch_client, db_pool, srch_user, srch_prefix
+    ):
+        """A search must not bump last_accessed_at or flip an archived memory
+        back to 'active'."""
+        memories = await _seed_memories(db_pool, srch_user, srch_prefix)
+        target = memories[0]
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE memories SET lifecycle_stage = 'archived', last_accessed_at = NULL "
+                "WHERE id = $1",
+                target["id"],
+            )
+
+        # include_archived=True so the archived memory is guaranteed to be
+        # among the returned results (the exclude-archived rollout flag is
+        # off by default, but this keeps the test independent of it).
+        resp = await srch_client.post(
+            "/api/search",
+            json={"username": f"{srch_prefix}user", "include_archived": True},
+        )
+        assert resp.status_code == 200
+        assert any(m["id"] == str(target["id"]) for m in resp.json()["memories"])
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT lifecycle_stage, last_accessed_at FROM memories WHERE id = $1",
+                target["id"],
+            )
+        assert row["lifecycle_stage"] == "archived"
+        assert row["last_accessed_at"] is None
 
     async def test_empty_search_does_not_log(self, srch_client, srch_prefix):
         """Search returning no results does not log any access."""
         resp = await srch_client.post(
             "/api/search",
-            json={
-                "query": f"{srch_prefix}nonexistent_zzzzz",
-            },
+            json={"query": f"{srch_prefix}nonexistent_zzzzz"},
         )
         assert resp.status_code == 200
         assert resp.json()["memories"] == []

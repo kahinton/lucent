@@ -793,26 +793,14 @@ Returns:
                 include_archived=include_archived,
             )
 
-            # Log access for returned memories — fire-and-forget so search
-            # latency is not held by access-log row locks. The log is already
-            # best-effort (see Fix 1 in
-            # docs/investigations/2026-06-search-memories-tag-timeout.md).
-            if result["memories"]:
-                memory_ids_accessed = [m["id"] for m in result["memories"]]
-                asyncio.create_task(
-                    _safe_log_batch_access(
-                        memory_ids=memory_ids_accessed,
-                        access_type="search_result",
-                        user_id=user_id,
-                        organization_id=org_id,
-                        context={
-                            "query": search_input.query,
-                            "type": search_input.type.value if search_input.type else None,
-                            "tags": search_input.tags,
-                        },
-                        log_label="search_memories access log",
-                    )
-                )
+            # Search results are intentionally NOT logged as memory access.
+            # A search only returns a ranked window; it is not evidence the
+            # caller used the memory. The old `search_result` logging wrote one
+            # row per returned memory, inflated access counts, saturated
+            # vitality scoring, and resurrected archived memories back to
+            # 'active' (via `log_batch_access`). Direct reads — `get_memory` /
+            # `get_memories` — still log a `view`; that remains the signal of
+            # actual use.
 
             # Serialize the results
             serialized = {
@@ -896,24 +884,8 @@ Returns:
                 include_archived=include_archived,
             )
 
-            # Log access for returned memories — fire-and-forget (see Fix 1
-            # in docs/investigations/2026-06-search-memories-tag-timeout.md).
-            if result["memories"]:
-                memory_ids_accessed = [m["id"] for m in result["memories"]]
-                asyncio.create_task(
-                    _safe_log_batch_access(
-                        memory_ids=memory_ids_accessed,
-                        access_type="search_result",
-                        user_id=user_id,
-                        organization_id=org_id,
-                        context={
-                            "query": query.strip(),
-                            "search_type": "full",
-                            "type": memory_type.value if memory_type else None,
-                        },
-                        log_label="search_memories_full access log",
-                    )
-                )
+            # Search results are intentionally NOT logged as access — see the
+            # note in `search_memories` above.
 
             serialized = {
                 "memories": [_serialize_truncated_memory(m) for m in result["memories"]],

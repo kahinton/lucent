@@ -1744,7 +1744,7 @@ class TestAccessRepository:
 
         await repo.log_batch_access(
             memory_ids=memory_ids,
-            access_type="search_result",
+            access_type="view",
             user_id=test_user["id"],
             organization_id=test_user["organization_id"],
             context={"query": "batch test"},
@@ -1814,33 +1814,6 @@ class TestAccessRepository:
 
         assert len(result["entries"]) == 2
         assert result["has_more"] is True
-
-    async def test_get_search_history(self, db_pool, test_memory, test_user):
-        """Test retrieving search queries that returned a memory."""
-        repo = AccessRepository(db_pool)
-
-        # Log a view and a search_result access
-        await repo.log_access(
-            memory_id=test_memory["id"],
-            access_type="view",
-            user_id=test_user["id"],
-            organization_id=test_user["organization_id"],
-        )
-        await repo.log_access(
-            memory_id=test_memory["id"],
-            access_type="search_result",
-            user_id=test_user["id"],
-            organization_id=test_user["organization_id"],
-            context={"query": "test search"},
-        )
-
-        results = await repo.get_search_history(
-            test_memory["id"], organization_id=test_user["organization_id"]
-        )
-
-        assert len(results) >= 1
-        # Should only contain search_result entries
-        assert all(e["access_type"] == "search_result" for e in results)
 
     async def test_get_user_activity(self, db_pool, test_memory, test_user):
         """Test retrieving access activity for a user."""
@@ -2003,7 +1976,7 @@ class TestAccessRepository:
         )
         await repo.log_access(
             memory_id=test_memory["id"],
-            access_type="search_result",
+            access_type="view",
             user_id=test_user["id"],
             organization_id=test_user["organization_id"],
         )

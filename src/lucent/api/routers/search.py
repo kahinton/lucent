@@ -11,7 +11,7 @@ from lucent.api.models import (
     SearchResponse,
     SearchResultMemory,
 )
-from lucent.db import AccessRepository, MemoryRepository, get_pool
+from lucent.db import MemoryRepository, get_pool
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
 from lucent.memory.observability import maybe_log_boost_comparison
@@ -70,7 +70,6 @@ async def search_memories(
         GitHubRepoAccessService(pool),
         is_admin=_memory_admin_override(user),
     )
-    access_repo = AccessRepository(pool)
     effective_user_id = _effective_memory_user_id(user)
 
     logger.info(
@@ -122,23 +121,16 @@ async def search_memories(
         search_kind="search",
     )
 
-    # Log access for returned memories
-    if result["memories"]:
-        memory_ids = [m["id"] for m in result["memories"]]
-        await access_repo.log_batch_access(
-            memory_ids=memory_ids,
-            access_type="search_result",
-            user_id=effective_user_id,
-            organization_id=user.organization_id,
-            context={
-                "query": data.query,
-                "type": data.type,
-                "tags": data.tags,
-            },
-        )
-        counts = await access_repo.get_access_counts(memory_ids)
-        for memory in result["memories"]:
-            memory["access_count"] = counts.get(memory["id"], 0)
+    # Search results are intentionally NOT logged as memory access.
+    #
+    # A search only *returns* a ranked window; it is not evidence the caller
+    # used the memory. Logging it wrote one `search_result` row per returned
+    # memory (99.8% of the 11M+ rows in memory_access_log), inflated every
+    # consumer that counts `view` and `search_result` together, saturated
+    # vitality's recency/frequency signals, and — through `log_batch_access` —
+    # flipped archived/consolidating memories back to 'active' on every query.
+    # Direct reads still log a `view` (see the memory detail route and the
+    # `get_memory` tool); that remains the signal of actual use.
 
     return SearchResponse(
         memories=[_memory_to_search_result(m) for m in result["memories"]],
@@ -209,7 +201,6 @@ async def search_memories_full(
         GitHubRepoAccessService(pool),
         is_admin=_memory_admin_override(user),
     )
-    access_repo = AccessRepository(pool)
     effective_user_id = _effective_memory_user_id(user)
 
     result = await memory_access.search_full(
@@ -248,23 +239,9 @@ async def search_memories_full(
         search_kind="search_full",
     )
 
-    # Log access for returned memories
-    if result["memories"]:
-        memory_ids = [m["id"] for m in result["memories"]]
-        await access_repo.log_batch_access(
-            memory_ids=memory_ids,
-            access_type="search_result",
-            user_id=effective_user_id,
-            organization_id=user.organization_id,
-            context={
-                "query": data.query,
-                "search_type": "full",
-                "type": data.type,
-            },
-        )
-        counts = await access_repo.get_access_counts(memory_ids)
-        for memory in result["memories"]:
-            memory["access_count"] = counts.get(memory["id"], 0)
+    # Search results are intentionally NOT logged as access — see the note in
+    # ``search_memories`` above for the full rationale and the consequences of
+    # the old `search_result` logging.
 
     return SearchResponse(
         memories=[_memory_to_search_result(m) for m in result["memories"]],

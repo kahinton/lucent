@@ -21,9 +21,9 @@ from fastapi.staticfiles import StaticFiles
 
 from lucent.api.routers import admin_lifecycle as admin_lifecycle_router
 from lucent.api.routers import admin_models as admin_models_router
+from lucent.api.routers import auth, export, memories, search
 from lucent.api.routers import daemon_messages as daemon_messages_router
 from lucent.api.routers import daemon_tasks as daemon_tasks_router
-from lucent.api.routers import export, memories, search
 from lucent.api.system_schedules import (
     start_server_system_schedule_runner,
     stop_server_system_schedule_runner,
@@ -607,6 +607,10 @@ def create_app() -> FastAPI:
     app.include_router(export.router, prefix="/api/memories/export", tags=["Export"])
     app.include_router(memories.router, prefix="/api/memories", tags=["Memories"])
     app.include_router(search.router, prefix="/api/search", tags=["Search"])
+    # Cheap, always-registered auth probe target (used by the daemon's own
+    # periodic key verification). Must NOT be team-only so personal-mode
+    # daemons can verify their key; see lucent.api.routers.auth.
+    app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
     app.include_router(
         daemon_tasks_router.router,
         prefix="/api/daemon/tasks",

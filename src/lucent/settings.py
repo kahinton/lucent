@@ -778,8 +778,55 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         section="Daemon",
         description=(
             "Enabled daemon loops: all, or comma-separated "
-            "cognitive/dispatcher/scheduler/autonomic."
+            "scheduler/controller/dispatcher. 'all' is the always-on set "
+            "(scheduler + controller); the dispatcher role runs only in the "
+            "ephemeral workers the controller spawns."
         ),
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.worker_min_warm",
+        env_var="LUCENT_DAEMON_WORKER_MIN_WARM",
+        value_type="integer",
+        default=1,
+        title="Warm workers per organization",
+        section="Daemon",
+        description=(
+            "How many workers the controller keeps alive for this organization "
+            "even with nothing queued. Defaults to 1, so work starts immediately "
+            "instead of paying a cold start. Set 0 to scale execution to zero, or "
+            "raise it for a larger standby pool. Workers above this floor exit "
+            "when idle."
+        ),
+        min_value=0,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.worker_idle_seconds",
+        env_var="LUCENT_DAEMON_WORKER_IDLE_SECONDS",
+        value_type="integer",
+        default=300,
+        title="Worker idle exit",
+        section="Daemon",
+        description=(
+            "Seconds a worker above the warm floor stays alive with no claimed "
+            "work and no active session before it exits."
+        ),
+        min_value=30,
+        requires_restart=True,
+    ),
+    RuntimeSettingDefinition(
+        key="daemon.worker_reconcile_seconds",
+        env_var="LUCENT_DAEMON_WORKER_RECONCILE_SECONDS",
+        value_type="integer",
+        default=15,
+        title="Controller reconcile interval",
+        section="Daemon",
+        description=(
+            "Seconds between controller passes that decide how many workers each "
+            "organization needs. Also the fallback when a task notification is missed."
+        ),
+        min_value=5,
         requires_restart=True,
     ),
     RuntimeSettingDefinition(
@@ -1790,6 +1837,19 @@ def daemon_interval_minutes(*, organization_id: Any | None = None) -> int:
 
 def daemon_roles(*, organization_id: Any | None = None) -> str:
     return _setting_string("daemon.roles", organization_id=organization_id)
+
+
+def daemon_worker_min_warm(*, organization_id: Any | None = None) -> int:
+    """Workers the controller keeps alive for an org regardless of queue depth."""
+    return _setting_int("daemon.worker_min_warm", organization_id=organization_id)
+
+
+def daemon_worker_idle_seconds(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.worker_idle_seconds", organization_id=organization_id)
+
+
+def daemon_worker_reconcile_seconds(*, organization_id: Any | None = None) -> int:
+    return _setting_int("daemon.worker_reconcile_seconds", organization_id=organization_id)
 
 
 def daemon_source_reload_enabled(*, organization_id: Any | None = None) -> bool:

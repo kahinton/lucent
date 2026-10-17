@@ -302,7 +302,7 @@ async def run_server_system_schedules_once() -> int:
 
     sched_repo = ScheduleRepository(pool)
 
-    due = await sched_repo.get_due_schedules()
+    due = await sched_repo.get_due_server_system_schedules()
     executed = 0
 
     for sched in due:
@@ -314,6 +314,7 @@ async def run_server_system_schedules_once() -> int:
         try:
             result = await execute_stale_task_reaper_schedule(sched)
         except Exception:
+            logger.exception("Server stale-task reaper schedule failed: %s", sched.get("id"))
             executed += 1
             continue
         if result and result.get("already_fired"):

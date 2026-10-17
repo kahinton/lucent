@@ -159,11 +159,13 @@ export LUCENT_MCP_API_KEY=hs_your_api_key_here  # Same key from step 2
 python -m daemon.daemon
 ```
 
-For additional worker capacity, enable the multi-daemon profile. This keeps the default worker and adds a second:
+For more worker capacity, raise the warm floor rather than adding daemon services.
+The compose daemon is the always-on controller; it spawns per-org workers, and
+`LUCENT_DAEMON_WORKER_MIN_WARM` decides how many of those stay ready:
 
 ```bash
-# Set your API key in .env first: LUCENT_MCP_API_KEY=hs_...
-docker compose --profile multi-daemon up -d
+# Keep one worker warm per organization instead of scaling to zero.
+LUCENT_DAEMON_WORKER_MIN_WARM=1 docker compose up -d daemon-1
 ```
 
 See [Architecture — Autonomous Daemon](architecture.md#autonomous-daemon) for details on the four daemon loops.

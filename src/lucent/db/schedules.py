@@ -1072,6 +1072,33 @@ class ScheduleRepository:
             )
             return [dict(r) for r in rows]
 
+    async def get_due_server_system_schedules(self) -> list[dict]:
+        """Return every due server-side system schedule across all orgs.
+
+        This is the enumeration for the API-side system-schedule runner, which
+        is a global sweep and the fallback that keeps built-in maintenance
+        workflows (e.g. the stale-task reaper) firing when no daemon is present.
+        ``get_due_schedules()`` caps its result at 10 — right for a single org's
+        daemon/API path, but wrong for a sweep that must reach every org: in a
+        multi-tenant deployment the reaper would only ever be due-enumerated for
+        the orgs at the front of that capped list, so expired claims for the
+        others would never be recovered. Enumerating all due server-side system
+        schedules keeps each org's maintenance from being starved by unrelated
+        schedules ahead of it.
+        """
+        async with scoped_acquire(organization_id=None) as conn:
+            rows = await conn.fetch(
+                """SELECT * FROM schedules
+                   WHERE enabled = true
+                     AND status = 'active'
+                     AND trigger_type = 'schedule'
+                     AND next_run_at <= now()
+                     AND is_system = true
+                     AND trigger_config->>'execution_mode' = 'server_side'
+                   ORDER BY next_run_at ASC"""
+            )
+            return [dict(r) for r in rows]
+
     # ── Built-in schedule eligibility checks ───────────────────────────────
 
     async def built_in_schedule_has_work(

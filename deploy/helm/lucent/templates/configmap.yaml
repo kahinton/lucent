@@ -6,13 +6,18 @@ metadata:
     {{- include "lucent.labels" . | nindent 4 }}
 data:
   LUCENT_LLM_ENGINE: {{ .Values.llm.engine | quote }}
-  LUCENT_DAEMON_MODEL: {{ .Values.daemon.model | quote }}
+  LUCENT_DAEMON_MODEL: {{ default .Values.llm.daemonModel .Values.daemon.model | quote }}
   LUCENT_MAX_SESSIONS: {{ .Values.daemon.maxConcurrentSessions | quote }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.server.env.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}
   OTEL_ENABLED: {{ .Values.server.env.OTEL_ENABLED | quote }}
   LUCENT_SANDBOX_BACKEND: {{ .Values.sandbox.backend | quote }}
   LUCENT_SANDBOX_K8S_NAMESPACE: {{ default .Release.Namespace .Values.sandbox.kubernetes.namespace | quote }}
   LUCENT_SANDBOX_BRIDGE_API_URL: {{ printf "http://%s.%s.svc:%v/api" (include "lucent.fullname" .) .Release.Namespace .Values.server.service.port | quote }}
+  # The server's MCP transport only permits loopback Host headers by default;
+  # the daemon and its workers reach /mcp over the service DNS name, so that
+  # name must be allowlisted or every call fails with HTTP 421. Mirrors the
+  # daemon's LUCENT_MCP_URL host. Override via server.env.LUCENT_MCP_ALLOWED_HOSTS.
+  LUCENT_MCP_ALLOWED_HOSTS: {{ default (printf "%s-server.%s.svc" (include "lucent.fullname" .) .Release.Namespace) .Values.server.env.LUCENT_MCP_ALLOWED_HOSTS | quote }}
   {{- with .Values.daemon.env }}
   {{- range $key, $value := . }}
   {{ $key }}: {{ $value | quote }}

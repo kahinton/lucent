@@ -11,10 +11,26 @@ import json
 from uuid import uuid4
 
 import httpx
+import pytest_asyncio
 from httpx import ASGITransport
 
 from lucent.auth_providers import CSRF_COOKIE_NAME, CSRF_FIELD_NAME, SESSION_COOKIE_NAME
 from lucent.llm.model_auto import AUTO_DISABLED_MESSAGE, split_auto_sentinel
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _cleanup_seeded_orgs(request, cleanup_test_organizations):
+    """Delete the organizations this suite seeds inline, after each test.
+
+    The seed helpers build org/user/request rows by hand rather than through a
+    per-test prefix fixture, so without this their orgs outlive the test and
+    pile up in the shared test database. Gated on the integration marker so the
+    module's pure unit tests never open a connection.
+    """
+    is_integration = request.node.get_closest_marker("integration") is not None
+    yield
+    if is_integration:
+        await cleanup_test_organizations(["auto_%"])
 
 
 async def _set_flag(db_pool, org_id, user_id, on: bool) -> None:

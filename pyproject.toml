@@ -74,9 +74,13 @@ otel = [
 
 [project.scripts]
 lucent = "lucent.server:main"
+lucent-daemon = "daemon.daemon:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/lucent"]
+# The daemon is a top-level package (not under src/). It must be listed
+# explicitly or it is silently omitted from the wheel — which is what made the
+# production image unable to run a daemon at all. Keep both entries.
+packages = ["src/lucent", "daemon"]
 
 [tool.ruff]
 target-version = "py312"

@@ -86,9 +86,64 @@ llm:
       secretRef: ""
 
 daemon:
+  # Enable the always-on daemon controller plus the RBAC and worker namespace
+  # it needs. Disabling this removes every daemon workload and leaves only the
+  # server. When enabled, no work is executed unless workers are spawned, so
+  # this is what makes the chart "actually deploy the daemon".
   enabled: true
+  # Keep at 1. The controller is a singleton: it supervises workers by
+  # reconciling the queue, and two controllers would duplicate that supervision
+  # (spawning duplicate workers) until leader election exists. The Deployment
+  # uses a Recreate strategy for the same reason.
+  replicaCount: 1
   model: ""
   maxConcurrentSessions: 3
+  # Daemon role set for the controller process. "all" is the always-on pair
+  # (scheduler + controller); the dispatcher role runs only inside the ephemeral
+  # workers the controller spawns. Maps to LUCENT_DAEMON_ROLES.
+  roles: "all"
+  # Worker spawn backend (LUCENT_WORKER_LAUNCHER). Only "kubernetes" is wired up
+  # for a cluster deployment; "docker" exists for local parity.
+  workerLauncher: kubernetes
+  # Namespace worker Jobs run in (LUCENT_WORKER_NAMESPACE). Empty reuses the
+  # release namespace; set a dedicated namespace (created out-of-band) to
+  # isolate worker Jobs from the server. The controller Role/RoleBinding and
+  # the worker NetworkPolicy are created in whichever namespace this resolves to.
+  workerNamespace: ""
+  # Image worker Jobs run (LUCENT_WORKER_IMAGE). Empty uses the server image,
+  # since one image serves both the controller and worker roles.
+  workerImage: ""
+  # Warm workers kept per organization with nothing queued
+  # (LUCENT_DAEMON_WORKER_MIN_WARM). 0 scales execution to zero; 1+ keeps a
+  # standby pool so work starts without a cold start.
+  workerMinWarm: 1
+  # Seconds an above-floor worker stays alive idle before exiting
+  # (LUCENT_DAEMON_WORKER_IDLE_SECONDS).
+  workerIdleSeconds: 300
+  # Seconds between controller reconcile passes, and the fallback when a task
+  # notification is missed (LUCENT_DAEMON_WORKER_RECONCILE_SECONDS).
+  workerReconcileSeconds: 15
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Annotations/labels added to the controller Pod.
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # The controller gets its own ServiceAccount because it is more privileged
+  # than the server in one specific way: it creates worker Jobs.
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  # Extra environment passed to the controller (and, when a key is on the worker
+  # env allowlist, inherited by workers). Prefer the typed keys above.
   env:
     LUCENT_DAEMON_INTERVAL: "15"
     LUCENT_STALE_HEARTBEAT_MINUTES: "30"

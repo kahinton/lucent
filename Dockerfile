@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy project files
 COPY pyproject.toml README.md ./
 COPY src/ src/
+# The daemon is a top-level package, outside src/. Without this the wheel has
+# no daemon module and `python -m daemon.daemon` cannot run in this image.
+COPY daemon/ daemon/
 
 # Keep pip patched before building and installing project wheels.
 RUN python -m pip install --no-cache-dir --upgrade pip
@@ -35,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed packages from builder
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin/lucent /usr/local/bin/lucent
+COPY --from=builder /usr/local/bin/lucent-daemon /usr/local/bin/lucent-daemon
 
 # Create non-root user
 RUN groupadd --gid 1000 lucent && \

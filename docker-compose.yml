@@ -261,10 +261,12 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Default daemon worker. A plain `docker compose up` starts daemon-1 with the
-  # rest of Lucent. The multi-daemon profile adds daemon-2 alongside it:
-  #   docker compose up                            # daemon-1 only
-  #   docker compose --profile multi-daemon up     # daemon-1 + daemon-2
+  # The daemon service. A plain `docker compose up` starts it with the rest of
+  # Lucent. It is the always-on controller: it spawns and supervises the
+  # ephemeral per-org worker containers that actually dispatch work. Extra
+  # capacity comes from the per-org warm floor (LUCENT_DAEMON_WORKER_MIN_WARM),
+  # not from adding more of these services — a second controller would only
+  # duplicate supervision of the same organizations.
   daemon-1:
     build:
       context: .
@@ -283,6 +285,19 @@ services:
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
       LUCENT_DAEMON_SOURCE_RELOAD: ${LUCENT_DAEMON_SOURCE_RELOAD:-false}
+      # This service is the always-on controller: it supervises ephemeral
+      # per-org worker containers instead of dispatching itself. 'all' is the
+      # always-on role set (scheduler + controller); the dispatcher runs only
+      # in the workers the controller spawns.
+      LUCENT_DAEMON_ROLES: ${LUCENT_DAEMON_ROLES:-all}
+      # Workers kept alive per organization even with nothing queued. Defaults
+      # to 1 so a worker is always warm and work starts without a cold start;
+      # set 0 to scale to zero, or raise it for a standby pool.
+      LUCENT_DAEMON_WORKER_MIN_WARM: ${LUCENT_DAEMON_WORKER_MIN_WARM:-1}
+      # How long a worker above the floor lives with no work before it exits.
+      LUCENT_DAEMON_WORKER_IDLE_SECONDS: ${LUCENT_DAEMON_WORKER_IDLE_SECONDS:-300}
+      # Worker spawn backend (only "docker" exists today).
+      LUCENT_WORKER_LAUNCHER: ${LUCENT_WORKER_LAUNCHER:-docker}
       # A daemon is single-tenant. Leave unset to auto-bind to the single real
       # org (the default for local / docker-compose). Set to an org id or name
       # to pin the daemon when multiple organizations exist.
@@ -323,55 +338,6 @@ services:
       - ./src:/app/src:cached
       # Read-only access to the OpenBao token written by openbao-init, so the
       # Transit secret provider can authenticate to decrypt provider secrets.
-      - ./.openbao/shared:/shared:ro
-    command: ["python", "-m", "daemon.daemon"]
-    restart: unless-stopped
-
-  daemon-2:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    profiles: ["multi-daemon"]
-    depends_on:
-      lucent:
-        condition: service_healthy
-    environment:
-      LUCENT_MCP_URL: http://lucent:8766/mcp
-      LUCENT_MCP_API_KEY: ${LUCENT_MCP_API_KEY:-}
-      LUCENT_DEFAULT_MODEL: ${LUCENT_DEFAULT_MODEL:-}
-      LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
-      LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-}
-      LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
-      LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
-      LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
-      LUCENT_DAEMON_SOURCE_RELOAD: ${LUCENT_DAEMON_SOURCE_RELOAD:-false}
-      # A daemon is single-tenant. Leave unset to auto-bind to the single real
-      # org (the default for local / docker-compose). Set to an org id or name
-      # to pin the daemon when multiple organizations exist.
-      LUCENT_DAEMON_ORG: ${LUCENT_DAEMON_ORG:-}
-      # Container logging: send logs to stdout/stderr (see daemon-1 note).
-      PYTHONUNBUFFERED: "1"
-      LUCENT_LOG_STDERR: "true"
-      LUCENT_LOG_FILE: ""
-      DAEMON_DATABASE_URL: postgresql://lucent_daemon:${DAEMON_DB_PASSWORD:-change-me-insecure-daemon-password}@postgres:5432/lucent
-      # Ollama (local models) — see daemon-1 note. Needs OLLAMA_HOST to run
-      # local-model discovery/sessions; without it calls fail with
-      # "OLLAMA_HOST is not configured".
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
-      # Secret storage — see daemon-1 note. Required so the daemon can decrypt
-      # transit-encrypted model-provider credentials when running LLM sessions.
-      LUCENT_SECRET_PROVIDER: ${LUCENT_SECRET_PROVIDER:-auto}
-      VAULT_ADDR: http://openbao:8200
-      VAULT_TOKEN_FILE: /shared/vault-token
-      # Task sandbox lifecycle uses the same restricted Docker API as the server.
-      DOCKER_HOST: tcp://docker-socket-proxy:2375
-    extra_hosts:
-      # Required so host.docker.internal resolves on Linux hosts.
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ./daemon:/app/daemon:cached
-      - ./src:/app/src:cached
-      # Read-only access to the OpenBao token (see daemon-1 note).
       - ./.openbao/shared:/shared:ro
     command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped

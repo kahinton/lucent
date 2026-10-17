@@ -10,6 +10,7 @@ create-session sentinel authoring gate.
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
 
 from lucent.api.routers import chat
@@ -19,6 +20,21 @@ from lucent.settings import clear_runtime_setting_cache, set_runtime_setting_cac
 
 FLAG_KEY = "models.auto_selection_enabled"
 ARB_ID = "22222222-aaaa-bbbb-cccc-222222222222"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _cleanup_seeded_orgs(request, cleanup_test_organizations):
+    """Delete the organizations this suite seeds inline, after each test.
+
+    ``_seed_chat_org`` builds org/user rows by hand (no per-test prefix
+    fixture); the tests only undo their models and flags, so without this the
+    orgs outlive the test and pile up in the shared test database. Gated on the
+    integration marker so the module's pure unit tests never open a connection.
+    """
+    is_integration = request.node.get_closest_marker("integration") is not None
+    yield
+    if is_integration:
+        await cleanup_test_organizations(["autoc_%"])
 
 
 async def _seed_chat_org(db_pool, prefix: str):

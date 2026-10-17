@@ -989,6 +989,47 @@ def validate_fusion_config(
     return None
 
 
+# The tasks a dispatcher is actually willing to claim: pending or planned, on
+# an approved and non-terminal request, and past the sequence_order stage gate.
+#
+# Shared deliberately. The daemon's on-demand work discovery must ask the same
+# question the dispatcher asks — counting raw `pending` rows would spawn workers
+# for work that can never be claimed (a cancelled request's leftovers, or a
+# stage-gated task), which then idle out and get respawned forever.
+DISPATCHABLE_TASKS_FROM = "FROM tasks t JOIN requests r ON t.request_id = r.id"
+
+DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
+                     AND t.status IN ('pending', 'planned')
+                     AND r.approval_status IN ('auto_approved', 'approved')
+                     AND r.status NOT IN ('cancelled', 'completed', 'failed')
+                                         AND NOT EXISTS (
+                                             SELECT 1 FROM tasks unfinished
+                                             WHERE unfinished.request_id = t.request_id
+                                                 AND unfinished.sequence_order < t.sequence_order
+                                                 AND unfinished.status NOT IN (
+                                                     'completed', 'failed', 'cancelled'
+                                                 )
+                                         )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM (
+                           SELECT DISTINCT sequence_order AS seq
+                           FROM tasks
+                           WHERE request_id = t.request_id
+                             AND sequence_order < t.sequence_order
+                       ) earlier_seqs
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM tasks t2
+                           WHERE t2.request_id = t.request_id
+                             AND t2.sequence_order = earlier_seqs.seq
+                             AND CASE COALESCE(r.dependency_policy, 'strict')
+                                 WHEN 'permissive'
+                                   THEN t2.status IN ('completed', 'failed', 'cancelled')
+                                 ELSE t2.status = 'completed'
+                                 END
+                       )
+                     )"""
+
+
 class RequestRepository:
     """Manages requests, tasks, events, and memory links."""
 
@@ -2489,6 +2530,36 @@ class RequestRepository:
                 )
         return dict(row) if row else None
 
+    async def get_task_for_requester(
+        self,
+        task_id: str,
+        org_id: str,
+        *,
+        requester_user_id: str | None = None,
+        include_system: bool = False,
+    ) -> dict | None:
+        """Fetch a task only if its request is visible to the requester.
+
+        Same visibility rule the request list tools use: a scoped session sees
+        only requests it created (plus daemon/system requests when allowed).
+        Tool handlers that accept a caller-supplied task id must go through this
+        rather than ``get_task``, or a task can write events and outputs onto
+        another task in the same organization.
+        """
+        params: list[Any] = [UUID(task_id), UUID(org_id)]
+        where = "t.id = $1 AND t.organization_id = $2"
+        if requester_user_id is not None:
+            params.extend([UUID(requester_user_id), include_system])
+            where += " AND " + self._request_visibility_condition("$3", "$4")
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            row = await conn.fetchrow(
+                f"""SELECT t.* FROM tasks t
+                    JOIN requests r ON r.id = t.request_id
+                    WHERE {where}""",
+                *params,
+            )
+        return dict(row) if row else None
+
     async def get_request_memory_links(self, request_id: str, org_id: str) -> list[dict]:
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
@@ -2969,37 +3040,8 @@ class RequestRepository:
           - 'permissive': completed, failed, and cancelled all count as
             acceptable terminal states.
         """
-        base = """FROM tasks t JOIN requests r ON t.request_id = r.id
-                   WHERE t.organization_id = $1
-                     AND t.status IN ('pending', 'planned')
-                     AND r.approval_status IN ('auto_approved', 'approved')
-                     AND r.status NOT IN ('cancelled', 'completed', 'failed')
-                                         AND NOT EXISTS (
-                                             SELECT 1 FROM tasks unfinished
-                                             WHERE unfinished.request_id = t.request_id
-                                                 AND unfinished.sequence_order < t.sequence_order
-                                                 AND unfinished.status NOT IN (
-                                                     'completed', 'failed', 'cancelled'
-                                                 )
-                                         )
-                     AND NOT EXISTS (
-                       SELECT 1 FROM (
-                           SELECT DISTINCT sequence_order AS seq
-                           FROM tasks
-                           WHERE request_id = t.request_id
-                             AND sequence_order < t.sequence_order
-                       ) earlier_seqs
-                       WHERE NOT EXISTS (
-                           SELECT 1 FROM tasks t2
-                           WHERE t2.request_id = t.request_id
-                             AND t2.sequence_order = earlier_seqs.seq
-                             AND CASE COALESCE(r.dependency_policy, 'strict')
-                                 WHEN 'permissive'
-                                   THEN t2.status IN ('completed', 'failed', 'cancelled')
-                                 ELSE t2.status = 'completed'
-                                 END
-                       )
-                     )"""
+        base = f"""{DISPATCHABLE_TASKS_FROM}
+                   WHERE {DISPATCHABLE_TASK_PREDICATE}"""
         params: list[Any] = [UUID(org_id)]
         if requester_user_id is not None:
             params.extend([UUID(requester_user_id), include_system])

@@ -1,0 +1,46 @@
+{{- if .Values.daemon.enabled }}
+{{/*
+Least-privilege RBAC for the daemon controller: the only thing it may do
+cluster-side is create/track worker Jobs in the worker namespace and read the
+Pods they produce. It is granted no write access to application resources and
+nothing cluster-wide, so a compromised controller cannot read tenant data or
+touch the server. The worker namespace is {{ include "lucent.workerNamespace" . | quote }}.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-daemon-controller" (include "lucent.fullname" .) }}
+  namespace: {{ include "lucent.workerNamespace" . }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+rules:
+  # Spawn, track and reap ephemeral per-org worker Jobs. The Kubernetes launcher
+  # creates Jobs at runtime and deletes them after ttlSecondsAfterFinished, so
+  # it needs create/get/list/watch (count running workers) and delete (prune).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Read-only view of worker Pods for status/reaping. No create: the controller
+  # never runs pods itself and must not be able to.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-daemon-controller" (include "lucent.fullname" .) }}
+  namespace: {{ include "lucent.workerNamespace" . }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lucent.daemonServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-daemon-controller" (include "lucent.fullname" .) }}
+{{- end }}

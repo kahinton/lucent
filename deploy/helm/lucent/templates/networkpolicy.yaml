@@ -1,8 +1,9 @@
 {{- if .Values.networkPolicy.enabled }}
-{{- $dbPodSelector := dig "networkPolicy" "database" "podSelector" dict .Values -}}
-{{- $dbNamespaceSelector := dig "networkPolicy" "database" "namespaceSelector" dict .Values -}}
-{{- $openbaoPodSelector := dig "networkPolicy" "openbao" "podSelector" dict .Values -}}
-{{- $openbaoNamespaceSelector := dig "networkPolicy" "openbao" "namespaceSelector" dict .Values -}}
+{{- $np := .Values.networkPolicy | default dict -}}
+{{- $dbPodSelector := dig "database" "podSelector" dict $np -}}
+{{- $dbNamespaceSelector := dig "database" "namespaceSelector" dict $np -}}
+{{- $openbaoPodSelector := dig "openbao" "podSelector" dict $np -}}
+{{- $openbaoNamespaceSelector := dig "openbao" "namespaceSelector" dict $np -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -101,4 +102,171 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+{{- if .Values.daemon.enabled }}
+---
+{{/*
+The controller is outbound-only (it creates Jobs and talks to Postgres); it
+serves nothing, so ingress stays denied by the namespace default-deny. Egress
+is exactly what supervision needs: the database and OpenBao, the server API,
+the Kubernetes API server (443) and DNS.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-daemon" (include "lucent.fullname" .) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "lucent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: daemon
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        {{- if .Values.database.embedded }}
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: db
+        {{- else if $dbPodSelector }}
+        - podSelector:
+            {{- toYaml $dbPodSelector | nindent 14 }}
+        {{- else if $dbNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml $dbNamespaceSelector | nindent 14 }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        {{- if .Values.openbao.embedded }}
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: openbao
+        {{- else if $openbaoPodSelector }}
+        - podSelector:
+            {{- toYaml $openbaoPodSelector | nindent 14 }}
+        {{- else if $openbaoNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml $openbaoNamespaceSelector | nindent 14 }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8200
+    # The server API (daemon key provisioning / bootstrap).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.service.port }}
+    # Kubernetes API server (Job create/delete) and model-provider APIs, plus DNS.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+{{/*
+Worker Jobs. Selected by the launcher's label (io.lucent.worker.managed=true),
+created at runtime. Without this policy the namespace default-deny would leave
+workers with no egress at all, so they could neither claim work nor run a
+session. Workers are also outbound-only.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-daemon-worker" (include "lucent.fullname" .) }}
+  namespace: {{ include "lucent.workerNamespace" . }}
+  labels:
+    {{- include "lucent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: daemon-worker
+spec:
+  podSelector:
+    matchLabels:
+      io.lucent.worker.managed: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        {{- if .Values.database.embedded }}
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: db
+        {{- else if $dbPodSelector }}
+        - podSelector:
+            {{- toYaml $dbPodSelector | nindent 14 }}
+        {{- else if $dbNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml $dbNamespaceSelector | nindent 14 }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        {{- if .Values.openbao.embedded }}
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: openbao
+        {{- else if $openbaoPodSelector }}
+        - podSelector:
+            {{- toYaml $openbaoPodSelector | nindent 14 }}
+        {{- else if $openbaoNamespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml $openbaoNamespaceSelector | nindent 14 }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8200
+    # The worker calls the server back over HTTP (MCP/API) to run sessions.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "lucent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: server
+      ports:
+        - protocol: TCP
+          port: {{ .Values.server.service.port }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
 {{- end }}
+{{- end }}
+

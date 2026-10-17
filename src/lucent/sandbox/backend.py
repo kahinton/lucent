@@ -43,6 +43,21 @@ class SandboxBackend(abc.ABC):
         """Get current state of a sandbox."""
 
     @abc.abstractmethod
+    async def rebind_bridge(self, sandbox_id: str, config: SandboxConfig) -> bool:
+        """Point an existing sandbox's MCP bridge at ``config``'s task.
+
+        A reused container keeps the bridge sidecar built for the task that
+        created it — that task's id and its task-scoped key. Without rebinding,
+        the reusing task would write events and memory links onto its
+        predecessor. This makes the bridge match what a fresh
+        ``create(config)`` would have produced, including having no bridge when
+        ``config`` carries no task.
+
+        Returns False when the backend cannot rebind in place; the caller must
+        then not reuse the sandbox for a different task.
+        """
+
+    @abc.abstractmethod
     async def stop(self, sandbox_id: str) -> None:
         """Stop a running sandbox (can be resumed)."""
 
