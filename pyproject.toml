@@ -47,6 +47,17 @@ dependencies = [
     "jsonschema>=4.26.0",
     "PyYAML>=6.0.3",
     "langsmith>=0.11.0",
+    # Cloud runtime SDKs. These sit alongside `docker` and `kubernetes` in the
+    # base install because a deployment picks its backend at runtime with an env
+    # var, and the image is built from the base wheel with no extras. The worker
+    # launcher, the Azure Blob file-storage provider, and the ACI sandbox backend
+    # import them lazily, so a local install never pays to load them.
+    "azure-identity>=1.26.0",
+    "azure-storage-blob>=12.25.0",
+    "azure-mgmt-appcontainers>=5.1.0",
+    "azure-mgmt-containerinstance>=10.1.0",
+    # ACI exec is a raw WebSocket (password frame first, then output frames).
+    "websockets>=15.0.0",
 ]
 
 [project.urls]
@@ -75,6 +86,11 @@ otel = [
 [project.scripts]
 lucent = "lucent.server:main"
 lucent-daemon = "daemon.daemon:main"
+# Provisioning CLIs. `lucent-migrate` applies (or rolls back) schema migrations
+# and exits; `lucent-bootstrap` creates the first user/org/model non-interactively
+# so a fresh instance can be provisioned without a browser.
+lucent-migrate = "lucent.migrate:main"
+lucent-bootstrap = "lucent.bootstrap:main"
 
 [tool.hatch.build.targets.wheel]
 # The daemon is a top-level package (not under src/). It must be listed

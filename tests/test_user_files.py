@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx
+import pydantic
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
@@ -11,14 +12,28 @@ from mcp.server import MCPServer as FastMCP
 
 from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
+from lucent.api.models import safe_media_type
+from lucent.api.routers.files import UserFileCreate
 from lucent.auth import set_current_user
 from lucent.db import UserRepository
 from lucent.db.llm_sessions import LLMSessionRepository
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import clear_llm_context, set_llm_context
-from lucent.storage.providers import FileStorageRegistry, LocalFileStorageProvider
+from lucent.storage.providers import (
+    FileStorageRegistry,
+    LocalFileStorageProvider,
+    reset_file_storage_registry,
+)
 from lucent.storage.service import UserFileService
 from lucent.tools.requests import register_request_tools
+
+
+@pytest.fixture(autouse=True)
+def _fresh_process_storage_registry():
+    """Keep env-path-sensitive API/MCP tests isolated from the process cache."""
+    reset_file_storage_registry()
+    yield
+    reset_file_storage_registry()
 
 
 def test_file_detail_template_embeds_svg_preview_as_an_image():
@@ -27,6 +42,55 @@ def test_file_detail_template_embeds_svg_preview_as_an_image():
     assert "file.mime_type == 'image/svg+xml'" in template
     assert 'src="/files/{{ file.id }}/content"' in template
     assert 'alt="Preview of {{ file.display_name }}"' in template
+
+
+@pytest.mark.parametrize(
+    "mime_type",
+    [
+        "text/plain\r\nX-Evil: 1",
+        "text/plain\nX-Evil: 1",
+        "text/plain\rX-Evil: 1",
+        "text/plain\x00",
+        "text/plain\x1b[31m",
+        "text plain",
+        "text/plain; charset=utf-8",
+        "textplain",
+        "text/",
+        "/plain",
+        "text plain/plain",
+    ],
+)
+def test_user_file_create_rejects_invalid_mime_types(mime_type):
+    with pytest.raises(pydantic.ValidationError):
+        UserFileCreate(filename="note.txt", content="hello", mime_type=mime_type)
+
+
+def test_user_file_create_accepts_and_normalises_valid_mime_types():
+    assert (
+        UserFileCreate(
+            filename="note.txt", content="hello", mime_type=" Text/Plain "
+        ).mime_type
+        == "text/plain"
+    )
+    assert (
+        UserFileCreate(
+            filename="image.svg", content="<svg/>", mime_type="image/svg+xml"
+        ).mime_type
+        == "image/svg+xml"
+    )
+    # Absent/empty means "infer from filename" (the service treats it that way).
+    assert UserFileCreate(filename="note.txt", content="hello").mime_type is None
+    assert (
+        UserFileCreate(filename="note.txt", content="hello", mime_type="").mime_type
+        is None
+    )
+
+
+def test_safe_media_type_never_returns_a_header_splitting_value():
+    assert safe_media_type("text/plain\r\nX-Evil: 1") == "application/octet-stream"
+    assert safe_media_type("not a mime type") == "application/octet-stream"
+    assert safe_media_type(None) == "application/octet-stream"
+    assert safe_media_type("IMAGE/SVG+XML") == "image/svg+xml"
 
 
 def _service(db_pool, tmp_path) -> UserFileService:
@@ -77,7 +141,9 @@ async def test_user_file_content_is_private_to_its_owner(
     )
     assert owned is not None
     assert owned[1] == b"# Private notes\n"
-    assert created["storage_key"] not in created["content_url"]
+    # Provider-internal keys never appear in metadata responses.
+    assert "storage_key" not in created
+    assert created["content_url"] == f"/files/{created['id']}/content"
 
     denied = await service.read_owned(
         str(created["id"]), str(test_organization["id"]), str(other_user["id"])
@@ -406,6 +472,64 @@ async def test_file_api_returns_404_to_another_user(
         listed = await client.get("/api/files")
         assert listed.status_code == 200
         assert listed.json()["items"] == []
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_file_api_rejects_crlf_mime_type_and_sanitises_stored_values(
+    db_pool, test_user, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LUCENT_FILE_STORAGE_PATH", str(tmp_path))
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: CurrentUser(
+        id=test_user["id"],
+        organization_id=test_user["organization_id"],
+        role="member",
+        email=test_user.get("email"),
+        display_name=test_user.get("display_name"),
+        auth_method="api_key",
+    )
+
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        rejected = await client.post(
+            "/api/files",
+            json={
+                "filename": "evil.txt",
+                "content": "hello",
+                "mime_type": "text/plain\r\nX-Evil: 1",
+            },
+        )
+        assert rejected.status_code == 422
+        assert "mime_type" in rejected.text
+
+        accepted = await client.post(
+            "/api/files",
+            json={
+                "filename": "ok.txt",
+                "content": "hello",
+                "mime_type": "text/plain",
+            },
+        )
+        assert accepted.status_code == 200
+        file_id = accepted.json()["id"]
+
+        # Simulate a row written before validation existed (or via a path that
+        # bypasses the API): the download must still never emit the raw value.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE user_files SET mime_type = $1 WHERE id = $2",
+                "text/plain\r\nX-Evil: 1",
+                file_id,
+            )
+
+        content = await client.get(f"/api/files/{file_id}/content")
+        assert content.status_code == 200
+        assert content.headers["content-type"] == "application/octet-stream"
+        assert "x-evil" not in content.headers
 
     app.dependency_overrides.clear()
 

@@ -7,9 +7,10 @@ import binascii
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from lucent.api.deps import AuthenticatedUser, get_pool
+from lucent.api.models import normalize_mime_type, safe_media_type
 from lucent.storage import UserFileService
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -25,6 +26,15 @@ class UserFileCreate(BaseModel):
     task_id: UUID | None = None
     metadata: dict = Field(default_factory=dict)
     is_primary: bool = False
+
+    @field_validator("mime_type")
+    @classmethod
+    def _validate_mime_type(cls, value: str | None) -> str | None:
+        # An empty/whitespace value means "infer from the filename" (the
+        # service already treats it as absent).
+        if value is None or not value.strip():
+            return None
+        return normalize_mime_type(value)
 
 
 class UserFileUpdate(BaseModel):
@@ -192,14 +202,18 @@ async def get_file_content(
     await service.repository.mark_current_revision_viewed_owned(
         str(item["id"]), str(user.organization_id), _owner_id(user)
     )
-    active_content = item["mime_type"] in {
+    # Never pass a stored, user-supplied value straight into a response header:
+    # legacy rows may predate validation. safe_media_type falls back to
+    # application/octet-stream for an invalid value.
+    media_type = safe_media_type(item["mime_type"])
+    active_content = media_type in {
         "text/html",
         "application/xhtml+xml",
         "image/svg+xml",
     }
     return Response(
         content=content,
-        media_type=item["mime_type"],
+        media_type=media_type,
         headers={
             "Content-Disposition": (
                 f'attachment; filename="{item["filename"]}"'

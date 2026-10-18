@@ -358,7 +358,25 @@ ALLOW_GIT_PUSH = runtime_settings.daemon_git_push_allowed()
 # Paths
 DAEMON_DIR = Path(__file__).parent
 COGNITIVE_PROMPT_PATH = DAEMON_DIR / "prompts" / "cognitive.md"
-AGENT_DEF_PATH = DAEMON_DIR.parent / ".github" / "agents" / "lucent.agent.md"
+
+
+def _resolve_agent_def_path() -> Path:
+    """Locate the daemon's cognitive agent definition.
+
+    In a source checkout it sits beside the daemon package. In a container the
+    package lives under site-packages, so the image ships the definitions at
+    /app/.github — the same path the server's built-in sync looks for. Prefer
+    whichever exists; fall back to the checkout path so a missing file degrades
+    to the existing "no definition" behaviour rather than raising.
+    """
+    candidates = (
+        Path("/app/.github/agents/lucent.agent.md"),
+        DAEMON_DIR.parent / ".github" / "agents" / "lucent.agent.md",
+    )
+    return next((path for path in candidates if path.exists()), candidates[-1])
+
+
+AGENT_DEF_PATH = _resolve_agent_def_path()
 # MCP configuration — passed to all sessions
 MCP_URL = runtime_settings.daemon_mcp_url()
 MCP_API_KEY = runtime_settings.daemon_mcp_api_key()

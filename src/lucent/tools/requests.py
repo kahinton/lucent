@@ -1745,7 +1745,17 @@ Returns: JSON metadata with id, URL, content URL, and task output ID when linked
         resolved_request_id = _valid_uuid(request_id) or _valid_uuid(
             llm_context.get("request_id")
         )
+        from lucent.api.models import normalize_mime_type
         from lucent.storage import UserFileService
+
+        # The stored value is later emitted as the download's Content-Type, so
+        # validate it here too rather than trusting the tool caller.
+        try:
+            normalized_mime_type = (
+                normalize_mime_type(mime_type) if (mime_type or "").strip() else None
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
 
         try:
             item = await UserFileService(await _get_pool()).create(
@@ -1755,7 +1765,7 @@ Returns: JSON metadata with id, URL, content URL, and task output ID when linked
                 filename=filename,
                 content=content.encode("utf-8"),
                 display_name=display_name or None,
-                mime_type=mime_type or None,
+                mime_type=normalized_mime_type,
                 task_id=resolved_task_id,
                 request_id=resolved_request_id,
                 session_id=_valid_uuid(llm_context.get("session_id")),

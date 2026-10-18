@@ -15,6 +15,10 @@ COPY src/ src/
 # Top-level daemon package — required by the editable install too, so the
 # daemon imports even without the Compose bind mount.
 COPY daemon/ daemon/
+# Built-in definitions (skills, agents, sandbox templates). Compose bind-mounts
+# these at runtime, but the image should stand on its own: without this a dev
+# image started without the mounts silently has no built-in skills.
+COPY .github/ /app/.github/
 
 # Keep pip patched in development images as well as local virtualenvs.
 RUN python -m pip install --no-cache-dir --upgrade pip

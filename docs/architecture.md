@@ -426,11 +426,12 @@ linked requests, mutating tools, substantial multi-turn transcripts, or
 work-oriented session kinds. Trivial sessions — jokes, thanks, greetings, or
 simple status checks without work side effects — are skipped.
 
-When a session crosses the threshold, Lucent uses a skill-guided summarization
-model call by default to write the actual experience memory content. The
-`session-experience-capture` skill tells the summarizer to produce a narrative
-with `Session Summary`, `What Happened`, `Why It Matters`, and `Follow-up`
-sections. Operators can disable this extra model call with
+When a session crosses the threshold, Lucent makes a summarization model call by
+default to write the actual experience memory content. The summarizer's system
+prompt is internal prompt content (a module constant in the chat router, not a
+seeded skill — nothing grants it to an agent or shows it in the UI) and asks for
+a narrative with `Session Summary`, `What Happened`, `Why It Matters`, and
+`Follow-up` sections. Operators can disable this extra model call with
 `LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED=false`, in which case Lucent falls
 back to a deterministic summary assembled from session metadata and transcript
 previews. Lucent does not impose a fixed session-context character cap for this

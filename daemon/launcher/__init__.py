@@ -3,7 +3,8 @@
 ``get_launcher`` returns the backend named by ``LUCENT_WORKER_LAUNCHER``
 (default ``docker``). ``docker`` spawns workers as sibling containers for local
 dev parity with the Compose stack; ``kubernetes`` spawns them as Jobs on a
-cluster. Both plug in here without touching the controller.
+cluster; ``azure`` spawns them as executions of a Container Apps Job. All three
+plug in here without touching the controller.
 """
 
 from __future__ import annotations
@@ -43,4 +44,8 @@ def get_launcher(*, controller_id: str = "") -> WorkerLauncher:
         from daemon.launcher.kubernetes_launcher import KubernetesLauncher
 
         return KubernetesLauncher(controller_id=controller_id)
+    if kind == "azure":
+        from daemon.launcher.azure_launcher import AzureLauncher
+
+        return AzureLauncher(controller_id=controller_id)
     raise ValueError(f"Unknown worker launcher: {kind!r}")

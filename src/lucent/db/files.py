@@ -8,13 +8,30 @@ from typing import Any
 from asyncpg import Pool
 from lucent.db.pool import scoped_acquire
 
+# Advisory-lock namespace for file-storage quota accounting ("LFQT" — Lucent
+# File QuoTA). Kept distinct from every other advisory-lock family in the repo
+# so a file upload never blocks an unrelated workload.
+FILE_QUOTA_LOCK_NAMESPACE = 0x4C465154
+
+# An in-flight reservation older than this no longer counts. The window only
+# has to cover one provider write, so it is generous relative to an upload and
+# bounded so a crashed process cannot pin quota forever.
+FILE_QUOTA_RESERVATION_TTL_SECONDS = 15 * 60
+
+# Kept in step with the storage provider's soft-delete retention. The service
+# passes the org-scoped ``files.soft_delete_retention_days`` setting; this is
+# only the fallback for direct repository callers.
+DEFAULT_SOFT_DELETE_RETENTION_DAYS = 7
+
 
 class UserFileRepository:
     def __init__(self, pool: Pool):
         self.pool = pool
 
     @staticmethod
-    def _to_dict(row: Any) -> dict[str, Any]:
+    def _to_dict(
+        row: Any, *, include_storage_key: bool = False
+    ) -> dict[str, Any]:
         item = dict(row)
         metadata = item.get("metadata") or {}
         if isinstance(metadata, str):
@@ -25,15 +42,226 @@ class UserFileRepository:
         item["metadata"] = metadata
         item["url"] = f"/files/{item['id']}"
         item["content_url"] = f"/files/{item['id']}/content"
+        # ``storage_key`` is a provider-internal address, never an authorization
+        # boundary; keep it out of metadata responses. Internal read paths ask
+        # for it explicitly.
+        if not include_storage_key:
+            item.pop("storage_key", None)
         return item
+
+    @staticmethod
+    async def _enforce_quota(
+        conn: Any,
+        *,
+        org_id: str,
+        user_id: str,
+        new_bytes: int,
+        max_bytes_per_user: int | None,
+        max_bytes_per_org: int | None,
+        soft_delete_retention_days: int = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+        exclude_reservation_id: str | None = None,
+    ) -> None:
+        """Serialize, measure, and reject an over-quota write in one transaction.
+
+        Must run inside the *same* transaction as the INSERT it guards (or the
+        reservation INSERT). A plain SUM-before-insert is racy: two concurrent
+        uploads both read the pre-insert total and both pass. The advisory lock
+        (transaction-scoped, released on commit/rollback) makes the
+        measure-then-insert pair atomic for one owner.
+
+        The lock key is the **organization id alone**. Both caps are checked in
+        this one measure-then-insert window, and the per-org cap is shared by
+        every user in the org, so an ``"<org_id>:<user_id>"`` key was not
+        enough: two different users took different keys, both read the
+        pre-insert org total concurrently, and could jointly overshoot the org
+        ceiling by the concurrent delta. Keying on the org makes the per-org
+        cap hold. A second, user-granularity lock nested inside it would buy
+        nothing — both are held to commit, so the org lock already excludes
+        every same-org upload — and would only add deadlock surface.
+
+        Contention: uploads in the *same* organization briefly serialize for
+        the duration of the check-and-reserve (and the final measure-and-insert
+        at finalisation). That is the right trade for an org-wide resource
+        ceiling — both critical sections are short: one count query plus an
+        INSERT, with no network or storage I/O under the lock.
+
+        Counted bytes are:
+
+        * the SUM over ``user_file_revisions`` of every file that is live, or
+          was deleted inside the provider's soft-delete window
+          (``soft_delete_retention_days``), because soft delete frees logical
+          rows while the provider still stores and bills the blobs; plus
+        * the SUM of unexpired in-flight reservations for this organization
+          (``exclude_reservation_id`` omits the caller's own reservation when
+          the write it was reserving for is being finalised).
+
+        A file's true footprint is the sum of every retained revision, not
+        ``user_files.size_bytes`` (which is only the current one). A deletion
+        lowers quota only once the retention window has passed — the same
+        moment the provider actually expires the bytes.
+        """
+        if max_bytes_per_user is None and max_bytes_per_org is None:
+            return
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock($1, hashtext($2)::int)",
+            FILE_QUOTA_LOCK_NAMESPACE,
+            str(org_id),
+        )
+        row = await conn.fetchrow(
+            """WITH retained AS (
+                   SELECT f.user_id AS user_id, r.size_bytes AS bytes
+                   FROM user_file_revisions r
+                   JOIN user_files f ON f.id = r.file_id
+                   WHERE f.organization_id = $1::uuid
+                     AND (
+                         f.deleted_at IS NULL
+                         OR (
+                             $3 > 0
+                             AND f.deleted_at > NOW() - make_interval(days => $3)
+                         )
+                     )
+               ),
+               inflight AS (
+                   SELECT res.user_id AS user_id, res.reserved_bytes AS bytes
+                   FROM user_file_reservations res
+                   WHERE res.organization_id = $1::uuid
+                     AND res.expires_at > NOW()
+                     AND ($4::uuid IS NULL OR res.id <> $4::uuid)
+               )
+               SELECT
+                   COALESCE(SUM(bytes) FILTER (WHERE user_id = $2::uuid), 0)
+                       AS user_bytes,
+                   COALESCE(SUM(bytes), 0) AS org_bytes
+               FROM (
+                   SELECT user_id, bytes FROM retained
+                   UNION ALL
+                   SELECT user_id, bytes FROM inflight
+               ) accounted""",
+            org_id,
+            user_id,
+            int(soft_delete_retention_days),
+            exclude_reservation_id,
+        )
+        used_user = int(row["user_bytes"] or 0)
+        used_org = int(row["org_bytes"] or 0)
+        if max_bytes_per_user is not None and used_user + new_bytes > max_bytes_per_user:
+            raise ValueError(
+                "Storage quota exceeded: this write needs "
+                f"{used_user + new_bytes} bytes, which is "
+                f"{used_user + new_bytes - max_bytes_per_user} bytes over the "
+                f"per-user limit of {max_bytes_per_user} bytes."
+            )
+        if max_bytes_per_org is not None and used_org + new_bytes > max_bytes_per_org:
+            raise ValueError(
+                "Storage quota exceeded: this write needs "
+                f"{used_org + new_bytes} bytes, which is "
+                f"{used_org + new_bytes - max_bytes_per_org} bytes over the "
+                f"organization limit of {max_bytes_per_org} bytes."
+            )
+
+    async def reserve(
+        self,
+        *,
+        org_id: str,
+        user_id: str,
+        new_bytes: int,
+        max_bytes_per_user: int | None,
+        max_bytes_per_org: int | None,
+        soft_delete_retention_days: int = DEFAULT_SOFT_DELETE_RETENTION_DAYS,
+    ) -> str | None:
+        """Reserve quota for a write, before any bytes reach the provider.
+
+        The check-and-reserve pair runs under the same per-organization
+        advisory lock as the final insert, so concurrent uploads cannot jointly
+        reserve past either cap. A live reservation counts toward quota for
+        ``FILE_QUOTA_RESERVATION_TTL_SECONDS``; the caller releases it on
+        failure, and expiry covers a crashed process.
+
+        Returns the reservation id, or ``None`` when neither cap is configured
+        (nothing to reserve).
+        """
+        if max_bytes_per_user is None and max_bytes_per_org is None:
+            return None
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+            async with conn.transaction():
+                await self._enforce_quota(
+                    conn,
+                    org_id=str(org_id),
+                    user_id=str(user_id),
+                    new_bytes=new_bytes,
+                    max_bytes_per_user=max_bytes_per_user,
+                    max_bytes_per_org=max_bytes_per_org,
+                    soft_delete_retention_days=soft_delete_retention_days,
+                )
+                # Cheap housekeeping: rows past their window no longer count,
+                # so remove them while the org lock is already held.
+                await conn.execute(
+                    """DELETE FROM user_file_reservations
+                       WHERE organization_id = $1::uuid AND expires_at <= NOW()""",
+                    org_id,
+                )
+                row = await conn.fetchrow(
+                    """INSERT INTO user_file_reservations (
+                           organization_id, user_id, reserved_bytes, expires_at
+                       ) VALUES (
+                           $1::uuid, $2::uuid, $3,
+                           NOW() + make_interval(secs => $4)
+                       ) RETURNING id""",
+                    org_id,
+                    user_id,
+                    int(new_bytes),
+                    FILE_QUOTA_RESERVATION_TTL_SECONDS,
+                )
+        return str(row["id"])
+
+    async def release_reservation(
+        self, reservation_id: str | None, *, org_id: str, user_id: str
+    ) -> None:
+        """Drop an in-flight reservation after a failed write (idempotent)."""
+        if not reservation_id:
+            return
+        async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
+            await conn.execute(
+                """DELETE FROM user_file_reservations
+                   WHERE id = $1::uuid AND organization_id = $2::uuid
+                     AND user_id = $3::uuid""",
+                reservation_id,
+                org_id,
+                user_id,
+            )
+
+    @staticmethod
+    def _retention_days(values: dict[str, Any]) -> int:
+        retention = values.get("soft_delete_retention_days")
+        return (
+            DEFAULT_SOFT_DELETE_RETENTION_DAYS
+            if retention is None
+            else int(retention)
+        )
 
     async def create(self, **values: Any) -> dict[str, Any]:
         # The row's own org+user stamp is available in values — bind it so the
         # INSERT is structurally scoped like every other file query.
+        reservation_id = values.get("reservation_id")
         async with scoped_acquire(
             organization_id=values["org_id"], user_id=values["user_id"]
         ) as conn:
             async with conn.transaction():
+                # Lock + measure + insert share this transaction, so a
+                # concurrent upload cannot slip past the quota check. This
+                # final measurement is authoritative; the caller's own
+                # reservation is excluded because the actual bytes are counted
+                # here instead.
+                await self._enforce_quota(
+                    conn,
+                    org_id=str(values["org_id"]),
+                    user_id=str(values["user_id"]),
+                    new_bytes=int(values["size_bytes"]),
+                    max_bytes_per_user=values.get("max_bytes_per_user"),
+                    max_bytes_per_org=values.get("max_bytes_per_org"),
+                    soft_delete_retention_days=self._retention_days(values),
+                    exclude_reservation_id=reservation_id,
+                )
                 row = await conn.fetchrow(
                     """INSERT INTO user_files (
                            organization_id, user_id, created_by, request_id, task_id,
@@ -88,9 +316,25 @@ class UserFileRepository:
                     values.get("request_id"),
                     values.get("task_id"),
                 )
+                if reservation_id:
+                    await conn.execute(
+                        """DELETE FROM user_file_reservations
+                           WHERE id = $1::uuid AND organization_id = $2::uuid
+                             AND user_id = $3::uuid""",
+                        reservation_id,
+                        values["org_id"],
+                        values["user_id"],
+                    )
         return self._to_dict(row)
 
-    async def get_owned(self, file_id: str, org_id: str, user_id: str) -> dict[str, Any] | None:
+    async def get_owned(
+        self,
+        file_id: str,
+        org_id: str,
+        user_id: str,
+        *,
+        include_storage_key: bool = False,
+    ) -> dict[str, Any] | None:
         async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
                 """SELECT * FROM user_files
@@ -100,10 +344,17 @@ class UserFileRepository:
                 org_id,
                 user_id,
             )
-        return self._to_dict(row) if row else None
+        if not row:
+            return None
+        return self._to_dict(row, include_storage_key=include_storage_key)
 
     async def find_owned_by_filename(
-        self, filename: str, org_id: str, user_id: str
+        self,
+        filename: str,
+        org_id: str,
+        user_id: str,
+        *,
+        include_storage_key: bool = False,
     ) -> list[dict[str, Any]]:
         """Find current files by an exact owner-scoped filename."""
         async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
@@ -117,11 +368,15 @@ class UserFileRepository:
                 org_id,
                 user_id,
             )
-        return [self._to_dict(row) for row in rows]
+        return [
+            self._to_dict(row, include_storage_key=include_storage_key)
+            for row in rows
+        ]
 
     async def append_revision(self, **values: Any) -> dict[str, Any] | None:
         # Bind the file row's org+user — the ownership SELECT ... FOR UPDATE
         # and the revision INSERT both need it.
+        reservation_id = values.get("reservation_id")
         async with scoped_acquire(
             organization_id=values["org_id"], user_id=values["user_id"]
         ) as conn:
@@ -137,6 +392,21 @@ class UserFileRepository:
                 )
                 if not file_row:
                     return None
+                # A revision adds a full new copy of the bytes, so enforce the
+                # same quota under the same org-scoped advisory lock before
+                # inserting the revision row (see _enforce_quota). The actual
+                # revision size is authoritative; the caller's reservation is
+                # excluded so it is not counted twice.
+                await self._enforce_quota(
+                    conn,
+                    org_id=str(values["org_id"]),
+                    user_id=str(values["user_id"]),
+                    new_bytes=int(values["size_bytes"]),
+                    max_bytes_per_user=values.get("max_bytes_per_user"),
+                    max_bytes_per_org=values.get("max_bytes_per_org"),
+                    soft_delete_retention_days=self._retention_days(values),
+                    exclude_reservation_id=reservation_id,
+                )
                 revision_number = int(file_row["current_revision"]) + 1
                 revision = await conn.fetchrow(
                     """INSERT INTO user_file_revisions (
@@ -178,10 +448,21 @@ class UserFileRepository:
                     values["checksum_sha256"],
                     revision_number,
                 )
+                if reservation_id:
+                    await conn.execute(
+                        """DELETE FROM user_file_reservations
+                           WHERE id = $1::uuid AND organization_id = $2::uuid
+                             AND user_id = $3::uuid""",
+                        reservation_id,
+                        values["org_id"],
+                        values["user_id"],
+                    )
         return self._revision_to_dict(revision)
 
     @staticmethod
-    def _revision_to_dict(row: Any) -> dict[str, Any]:
+    def _revision_to_dict(
+        row: Any, *, include_storage_key: bool = False
+    ) -> dict[str, Any]:
         item = dict(row)
         session_id = item.get("session_id")
         request_id = item.get("request_id")
@@ -195,6 +476,8 @@ class UserFileRepository:
             if request_id
             else None
         )
+        if not include_storage_key:
+            item.pop("storage_key", None)
         return item
 
     async def list_revisions_owned(
@@ -225,6 +508,8 @@ class UserFileRepository:
         revision_number: int,
         org_id: str,
         user_id: str,
+        *,
+        include_storage_key: bool = False,
     ) -> dict[str, Any] | None:
         async with scoped_acquire(organization_id=org_id, user_id=user_id) as conn:
             row = await conn.fetchrow(
@@ -243,7 +528,9 @@ class UserFileRepository:
                 org_id,
                 user_id,
             )
-        return self._revision_to_dict(row) if row else None
+        if not row:
+            return None
+        return self._revision_to_dict(row, include_storage_key=include_storage_key)
 
     async def list_storage_keys_owned(
         self, file_id: str, org_id: str, user_id: str

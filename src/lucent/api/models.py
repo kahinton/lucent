@@ -1,5 +1,6 @@
 """Pydantic models for API requests and responses."""
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -7,6 +8,49 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from lucent.models.memory import GoalStatus
+
+# RFC 6838 restricted-name token: type and subtype start with an ASCII
+# alphanumeric and continue with alphanumerics or !#$&^_.+-. Parameters such as
+# ``; charset=utf-8`` are deliberately NOT accepted because these values are
+# placed directly into ``Response(media_type=...)``; the pattern also rejects
+# CR/LF and every other control character, so a value can never split a
+# response header.
+_MIME_TYPE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+)
+DEFAULT_MIME_TYPE = "application/octet-stream"
+
+
+def normalize_mime_type(value: str) -> str:
+    """Validate and canonicalise a media type as a bare ``type/subtype`` token.
+
+    Raises ``ValueError`` for anything that is not a valid media type, which
+    includes CR/LF-bearing values and other control-character injection
+    attempts. Surrounding whitespace is trimmed and the result is lowercased.
+    """
+    candidate = value.strip().lower()
+    if not candidate or not _MIME_TYPE_RE.fullmatch(candidate):
+        raise ValueError(
+            "mime_type must be a valid media type of the form 'type/subtype' "
+            "(no parameters, CR/LF, or other control characters)"
+        )
+    return candidate
+
+
+def safe_media_type(value: str | None) -> str:
+    """Return a header-safe media type for a stored value.
+
+    Used when rendering a download: rows written before validation existed (or
+    through any path that bypasses it) must never reach
+    ``Response(media_type=...)`` unchecked. Invalid values fall back to
+    ``application/octet-stream``.
+    """
+    if not isinstance(value, str):
+        return DEFAULT_MIME_TYPE
+    try:
+        return normalize_mime_type(value)
+    except ValueError:
+        return DEFAULT_MIME_TYPE
 
 # =============================================================================
 # Memory Models

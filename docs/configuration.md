@@ -472,18 +472,73 @@ For the full two-tier model, recommended setup profiles (simple / team / enterpr
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_SANDBOX_BACKEND` | `docker` | Sandbox backend: `docker` or `kubernetes` |
-| `LUCENT_SANDBOX_BRIDGE_API_URL` | `http://host.docker.internal:8766/api` | API URL accessible from inside sandboxes |
+| `LUCENT_SANDBOX_BACKEND` | `docker` | Sandbox backend: `docker`, `kubernetes`, or `aci`. Unknown values fail closed |
+| `LUCENT_SANDBOX_BRIDGE_API_URL` | `http://host.docker.internal:8766/api` | API URL accessible from inside sandboxes. On ACI this must be the Lucent server URL; the Docker default is rejected |
+| `LUCENT_SANDBOX_BRIDGE_IMAGE` | `lucent-sandbox:base` | Python-capable image for the trusted MCP bridge sidecar |
 | `DOCKER_HOST` | *(system default)* | Docker daemon socket URL for sandbox creation |
 | `LUCENT_SANDBOX_K8S_NAMESPACE` | `lucent-sandboxes` | Namespace for Kubernetes sandbox pods and NetworkPolicies |
 | `LUCENT_SANDBOX_KUBECONFIG` | *(in-cluster or default config)* | Optional kubeconfig path used outside a cluster |
+| `AZURE_SUBSCRIPTION_ID` | *(required for ACI)* | Subscription used by the ACI management client (`DefaultAzureCredential`) |
+| `LUCENT_SANDBOX_ACI_RESOURCE_GROUP` | *(required for ACI)* | Resource group for ACI container groups |
+| `LUCENT_SANDBOX_ACI_SUBNET_ID` | *(required for ACI)* | Delegated VNet subnet id; groups get a Private IP and no public endpoint |
+| `LUCENT_SANDBOX_ACI_IDENTITY_ID` | *(optional)* | **Dedicated** user-assigned identity for private ACR (`*.azurecr.io`) pulls. Attached to **both** the group `identity` and `imageRegistryCredentials[].identity` because ACI requires both; public images get no identity. Must hold only `AcrPull` on the registry and no other role anywhere — see the warning below |
+| `LUCENT_SANDBOX_ACI_LOCATION` | *(required for ACI)* | Azure region for container groups |
+| `LUCENT_SANDBOX_ACI_ALLOW_SUBNET_EGRESS` | `0` | Acknowledge that ACI cannot enforce a per-sandbox allowlist; `1` permits `allowlist` sandboxes to rely on subnet-wide NSG egress |
+
+> **ACI pull identity is reachable from sandbox code.** ACI mandates that the
+> same user-assigned identity appear in both the container group's `identity`
+> block and `imageRegistryCredentials[].identity`; without the group identity,
+> a private ACR pull fails with `InvalidImageRegistryIdentity`. This is a
+> platform constraint, not a Lucent design choice. The backend attaches the
+> identity **only** when the image comes from `*.azurecr.io`, and never sends
+> a registry username, password, or key. Untrusted code in any container of
+> the group can reach IMDS and obtain a token for that identity. The
+> mitigation is scope, not secrecy: `LUCENT_SANDBOX_ACI_IDENTITY_ID` must name
+> a **dedicated** pull identity whose only role assignment is `AcrPull` on the
+> container registry. It must never be the app, controller, or provisioner
+> identity. A token then grants registry read (pull images) and nothing else:
+> no storage, database, Key Vault, application API, or tenant data. Terraform
+> provisions the identity with exactly `AcrPull`; the backend cannot verify
+> the role, so the live PoC checks that no other role assignments exist. See
+> `docs/sandbox-azure-poc.md`.
 
 Templates share image, repository, setup, environment, working directory,
-resource, network, and lifecycle settings across both backends. Docker bind
+resource, network, and lifecycle settings across all backends. Docker bind
 mounts are local-runtime settings and only appear in the UI when the Docker
-backend is active. Kubernetes uses an `emptyDir` workspace bounded by the
-template disk limit and requires a CNI plugin that enforces NetworkPolicy for
-isolated or allowlisted egress.
+backend is active. ACI ignores bind mounts (no host bind mounts), cannot build
+Dockerfiles, and applies the template working directory to exec sessions rather
+than a container-level `workingDir`. ACI supports only
+`securityContext.privileged` (it rejects `runAsUser`, capabilities, and seccomp),
+so the sandbox image must ship a non-root `USER`;
+`sandbox-images/Dockerfile.base` does. A private ACI group still requires a
+non-empty `ipAddress.ports`, so the backend declares one unused high port; it is
+not a public endpoint (the group is Private with no DNS name label).
+
+Resource enforcement is platform-dependent. Docker applies `memory_limit` and
+`cpu_limit`, and `disk_limit` only when the storage driver supports quotas (a
+warning is logged otherwise). Kubernetes applies memory/CPU to the user
+container and `disk_limit` as the workspace `emptyDir.sizeLimit`. **ACI cannot
+enforce `disk_limit`** — an `emptyDir` has no size quota — so the value is
+accepted but best-effort; ACI also clamps CPU/memory to the container-group
+maximum.
+
+Network modes mean different things per backend, so do not treat `none` as
+uniform egress isolation:
+
+- **Docker** — `none` gives the container no network at all; `bridge` is full
+  egress on the sandbox bridge network; `allowlist` installs in-container
+  iptables rules restricted to `allowed_hosts` (requires `NET_ADMIN` and
+  iptables in the image, and fails closed if it cannot be applied).
+- **Kubernetes** — `none` applies a default-deny egress NetworkPolicy;
+  `bridge` applies no egress policy (full egress); `allowlist` applies a
+  NetworkPolicy allowing `allowed_hosts`, DNS, and the Lucent API host. The
+  isolated modes require a CNI plugin that enforces NetworkPolicy.
+- **ACI** — there is no per-container-group network policy and the group is
+  always private with no public IP. `none` and `bridge` both leave actual
+  egress to the delegated subnet's NSG (they do not differ in enforcement);
+  `allowlist` cannot be enforced per sandbox and fails closed unless
+  `LUCENT_SANDBOX_ACI_ALLOW_SUBNET_EGRESS=1` acknowledges the subnet-wide
+  deviation.
 
 ## Docker Compose
 

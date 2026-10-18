@@ -1,0 +1,20 @@
+# Terraform working directories and state. State contains the generated
+# database passwords and every secret written to Key Vault — never commit it.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Variable files other than the checked-in example may hold secrets.
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+
+# CLI configuration files.
+.terraformrc
+terraform.rc
+
+# .terraform.lock.hcl is deliberately NOT ignored: committing it is what pins the
+# exact provider builds a later `terraform init` will select.

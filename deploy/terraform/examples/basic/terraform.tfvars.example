@@ -1,0 +1,85 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored because it
+# will contain secrets.
+
+###############################################################################
+# Required
+###############################################################################
+
+# Your Microsoft Entra ID tenant.
+tenant_id = "00000000-0000-0000-0000-000000000000"
+
+# Optional. Leave commented out to use the subscription your credentials select.
+# The controller is told this subscription so its Azure worker launcher can find
+# the workers job.
+# subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# The image the Container Apps pull. Nothing in the repository builds or pushes
+# an image, so this must already exist in a registry the new environment can
+# reach. See deploy/terraform/README.md, "Before you apply".
+#
+# If you let this module create the registry, the login server is
+# <name_prefix><environment><4 random chars>.azurecr.io, which is not known until
+# after the first apply. Two ways out, both documented in the README:
+#   * create the registry first with `-target=module.lucent.azurerm_container_registry.this`,
+#     push the image, then run the full apply;
+#   * or point `image` at an existing registry and set
+#     create_container_registry = false with existing_container_registry_id and
+#     existing_container_registry_login_server.
+image = "example.azurecr.io/lucent:0.4.0"
+
+# The Entra ID principal that becomes the PostgreSQL administrator. It is the
+# only identity that can run CREATE EXTENSION on the server. A security group is
+# strongly preferred over a personal account.
+entra_admin_object_id      = "00000000-0000-0000-0000-000000000000"
+entra_admin_principal_name = "lucent-postgres-admins"
+
+###############################################################################
+# Only useful if you also re-enable public network access on the vault
+###############################################################################
+
+# The Key Vault is PRIVATE by default (key_vault_public_network_access_enabled =
+# false), and Terraform must reach its data plane to write and re-read the
+# secrets. While public access is disabled, IP rules are ignored — so this list
+# does NOT let a workstation in on its own. Add the public address of the machine
+# running Terraform (find it with `curl -s https://api.ipify.org`, append /32)
+# ONLY if you also set key_vault_public_network_access_enabled = true. Otherwise,
+# run Terraform from inside the VNet. See the README, "Writing secrets into a
+# private vault".
+key_vault_allowed_ip_ranges = ["203.0.113.7/32"]
+
+###############################################################################
+# Strongly recommended
+###############################################################################
+
+location    = "eastus2"
+name_prefix = "lucent"
+environment = "beta"
+
+tags = {
+  owner = "platform"
+}
+
+###############################################################################
+# Optional: task sandboxes on Azure Container Instances
+###############################################################################
+
+# "docker" (the default) creates no ACI infrastructure. "aci" provisions the
+# delegated sandbox subnet, NAT egress, image-pull identity, narrow RBAC and
+# diagnostics policy, and injects the LUCENT_SANDBOX_* variables into the web
+# app. The bridge image must exist in a registry the sandbox identity can pull
+# from — nothing in this repository builds or pushes it. See the README,
+# "Task sandboxes on Azure Container Instances".
+# sandbox_backend = "aci"
+
+# Optional. Defaults to <registry login server>/lucent-sandbox:base.
+# sandbox_bridge_image = "example.azurecr.io/lucent-sandbox:base"
+
+###############################################################################
+# Optional provider credentials. Anything omitted is simply not stored.
+###############################################################################
+
+# Required by Lucent's default Copilot engine.
+# github_token = "github_pat_..."
+
+# Only needed if you switch LUCENT_LLM_ENGINE to langchain.
+# anthropic_api_key = "sk-ant-..."

@@ -302,6 +302,83 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         help_text="Turn off to disable project context injection without moving chats.",
     ),
     RuntimeSettingDefinition(
+        key="files.max_bytes_per_file",
+        env_var="LUCENT_MAX_USER_FILE_BYTES",
+        value_type="integer",
+        default=10 * 1024 * 1024,
+        title="Max bytes per file",
+        section="Files",
+        description=(
+            "Largest single upload or revision, in bytes, that one user file may store."
+        ),
+        help_text=(
+            "Checked before any bytes reach the storage provider, so an oversized "
+            "upload fails fast. The legacy LUCENT_MAX_USER_FILE_BYTES env var is "
+            "still honoured as the fallback."
+        ),
+        min_value=1,
+    ),
+    RuntimeSettingDefinition(
+        key="files.max_bytes_per_user",
+        env_var="LUCENT_MAX_USER_FILE_BYTES_PER_USER",
+        value_type="integer",
+        default=1024 * 1024 * 1024,
+        title="Max bytes per user",
+        section="Files",
+        description=(
+            "Total bytes one user may store across all files and revisions."
+        ),
+        help_text=(
+            "Counts every revision of the user's live files, not just the current "
+            "content, because revisions are retained. Bytes from a deleted file "
+            "keep counting until the storage provider's soft-delete window "
+            "(files.soft_delete_retention_days) has passed, because the provider "
+            "still stores them. Defaults to 1 GiB."
+        ),
+        min_value=1,
+    ),
+    RuntimeSettingDefinition(
+        key="files.max_bytes_per_org",
+        env_var="LUCENT_MAX_USER_FILE_BYTES_PER_ORG",
+        value_type="integer",
+        default=10 * 1024 * 1024 * 1024,
+        title="Max bytes per organization",
+        section="Files",
+        description=(
+            "Total bytes the whole organization may store across all users' files "
+            "and revisions."
+        ),
+        help_text=(
+            "A ceiling above the per-user cap so one tenant cannot exhaust disk. "
+            "As with the per-user cap, deleted file bytes count until the "
+            "provider's soft-delete window expires. Defaults to 10 GiB."
+        ),
+        min_value=1,
+    ),
+    RuntimeSettingDefinition(
+        key="files.soft_delete_retention_days",
+        env_var="LUCENT_FILE_SOFT_DELETE_RETENTION_DAYS",
+        value_type="integer",
+        default=7,
+        title="Storage soft-delete retention",
+        section="Files",
+        description=(
+            "Days the storage provider keeps deleted blobs recoverable. Bytes "
+            "from deleted files stay counted against the file quotas for this "
+            "window."
+        ),
+        help_text=(
+            "Must agree with the provider's actual soft-delete retention. The "
+            "Azure deployment sets it with the storage_soft_delete_retention_days "
+            "Terraform variable (default 7 days) and the two have to match: a "
+            "value below the provider's window under-counts stored bytes and "
+            "lets deleted data be replaced; a higher value is conservative. Set "
+            "0 only when every provider deletes immediately."
+        ),
+        min_value=0,
+        max_value=365,
+    ),
+    RuntimeSettingDefinition(
         key="requests.daemon_auto_approve",
         env_var="LUCENT_AUTO_APPROVE",
         value_type="boolean",
@@ -2207,6 +2284,39 @@ def project_context_enabled(*, organization_id: Any | None = None) -> bool:
             "projects.context_enabled",
             organization_id=organization_id,
         )
+    )
+
+
+def max_bytes_per_file(*, organization_id: Any | None = None) -> int:
+    """Largest single upload or revision a user file may store, in bytes."""
+    return _setting_int("files.max_bytes_per_file", organization_id=organization_id)
+
+
+def max_bytes_per_user(*, organization_id: Any | None = None) -> int:
+    """Total bytes one user may store across all retained file revisions.
+
+    Deleted files keep counting until ``file_soft_delete_retention_days``.
+    """
+    return _setting_int("files.max_bytes_per_user", organization_id=organization_id)
+
+
+def max_bytes_per_org(*, organization_id: Any | None = None) -> int:
+    """Total bytes one organization may store across all retained revisions.
+
+    Deleted files keep counting until ``file_soft_delete_retention_days``.
+    """
+    return _setting_int("files.max_bytes_per_org", organization_id=organization_id)
+
+
+def file_soft_delete_retention_days(*, organization_id: Any | None = None) -> int:
+    """Days deleted file bytes remain counted against quota.
+
+    This must match the storage provider's configured soft-delete retention
+    (the Terraform ``storage_soft_delete_retention_days`` variable defaults to
+    the same 7 days).
+    """
+    return _setting_int(
+        "files.soft_delete_retention_days", organization_id=organization_id
     )
 
 

@@ -92,3 +92,14 @@ async def test_isolated_network_mode_creates_deny_egress_policy():
     assert namespace == "test-sandboxes"
     assert policy["spec"]["policyTypes"] == ["Egress"]
     assert policy["spec"]["egress"] == []
+
+
+def test_kubernetes_stop_is_declared_as_destroying_state():
+    """``stop`` deletes the pod, so the manager must not report a resumable stop."""
+    from lucent.sandbox.backend import SandboxBackend
+    from lucent.sandbox.docker_backend import DockerBackend
+
+    assert KubernetesBackend().preserves_state is False
+    # Docker stops a container in place, so the interface default applies.
+    assert SandboxBackend.preserves_state is True
+    assert DockerBackend.preserves_state is True

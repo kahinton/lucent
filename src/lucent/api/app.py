@@ -238,6 +238,16 @@ async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL")
     started_system_schedule_runner = False
     if database_url:
+        # When the container is explicitly self-bootstrapping, the database it
+        # points at may never have been prepared — the extensions and the
+        # lucent_daemon role are prerequisites migrations cannot create without
+        # elevated rights. Ensure them first (idempotent; a no-op on a database
+        # an administrator already prepared).
+        from lucent.bootstrap import ensure_prerequisites, startup_bootstrap_enabled
+
+        if startup_bootstrap_enabled():
+            await ensure_prerequisites(database_url)
+
         await init_db(database_url)
         from lucent.db.pool import clear_tenant_scope, set_tenant_scope
         from lucent.web.live_events import live_event_broker
@@ -257,6 +267,13 @@ async def lifespan(app: FastAPI):
             from lucent.settings import load_runtime_settings_from_db
 
             await load_runtime_settings_from_db(_secret_pool)
+
+            # Env-driven first-run bootstrap (opt-in; no-op unless enabled and
+            # no human user exists). Runs after the signing secret so a
+            # self-provisioned instance has a stable cookie signer.
+            from lucent.bootstrap import run_startup_bootstrap
+
+            await run_startup_bootstrap(_secret_pool)
         finally:
             clear_tenant_scope()
 
@@ -315,6 +332,11 @@ async def lifespan(app: FastAPI):
         from lucent.web.live_events import live_event_broker
 
         await live_event_broker.stop()
+        # Close the process-wide file storage registry (and any Azure
+        # credential/client it lazily created) before the process exits.
+        from lucent.storage.providers import close_file_storage_registry
+
+        await close_file_storage_registry()
         await close_db()
         shutdown_telemetry()
 

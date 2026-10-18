@@ -39,6 +39,11 @@ def _k8s_memory(value: str) -> str:
 class KubernetesBackend(SandboxBackend):
     """Runs sandboxes as long-lived Kubernetes pods."""
 
+    # ``stop`` deletes the pod, which deletes its emptyDir workspace: there is
+    # nothing left to resume. Declaring that lets the manager record a stop as
+    # destruction rather than a resumable pause.
+    preserves_state = False
+
     def __init__(self, namespace: str = "lucent-sandboxes", kubeconfig: str | None = None):
         self._namespace = namespace
         self._kubeconfig = kubeconfig

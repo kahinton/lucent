@@ -19,8 +19,18 @@ from lucent.auth_providers import (
     is_first_run,
     validate_password_complexity,
 )
+from lucent.bootstrap import (
+    enable_initial_setup_models as _enable_initial_setup_models,
+)
+from lucent.bootstrap import (
+    list_initial_setup_models as _list_initial_setup_models,
+)
 from lucent.db import get_pool
-from lucent.db.models import ModelRepository
+
+# Re-exported so callers/tests can patch ``ModelRepository.<method>`` through
+# this module; the model-listing/enabling logic itself now lives in
+# ``lucent.bootstrap`` (shared with the non-interactive CLI).
+from lucent.db.models import ModelRepository  # noqa: F401
 
 from ._shared import (
     _check_csrf,
@@ -28,6 +38,13 @@ from ._shared import (
     _set_csrf_cookie,
     templates,
 )
+
+__all__ = [
+    "router",
+    "ModelRepository",
+    "_list_initial_setup_models",
+    "_enable_initial_setup_models",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -56,22 +73,6 @@ async def _render_login_page(
     )
     _set_csrf_cookie(response, csrf_token)
     return response
-
-
-async def _list_initial_setup_models(pool) -> list[dict]:
-    """List setup choices, retrying discovery when the catalog is empty."""
-    repo = ModelRepository(pool)
-    models = await repo.list_initial_setup_models()
-    if models:
-        return models
-
-    try:
-        from lucent.model_discovery import ModelDiscoveryService
-
-        await ModelDiscoveryService(pool).sync()
-    except Exception:
-        logger.warning("Model discovery failed while rendering initial setup", exc_info=True)
-    return await repo.list_initial_setup_models()
 
 
 async def _render_setup_page(
@@ -106,27 +107,6 @@ async def _render_setup_page(
     )
     _set_csrf_cookie(response, csrf_token)
     return response
-
-
-async def _enable_initial_setup_models(pool, selected_model_ids: list[str]) -> str | None:
-    """Validate and enable the models explicitly selected during setup."""
-    selected_ids = set(selected_model_ids)
-    if not selected_ids:
-        return "Select at least one model to continue."
-
-    repo = ModelRepository(pool)
-    available_models = await _list_initial_setup_models(pool)
-    available_ids = {model["id"] for model in available_models}
-    if not selected_ids.issubset(available_ids):
-        return "One or more selected models are no longer available. Refresh and try again."
-
-    enabled_ids = await repo.enable_models(sorted(selected_ids))
-    if not selected_ids.issubset(enabled_ids):
-        return "The selected models could not be enabled. Refresh and try again."
-    from lucent.model_registry import load_models_from_db
-
-    await load_models_from_db(pool)
-    return None
 
 
 # =============================================================================

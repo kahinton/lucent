@@ -1,12 +1,35 @@
 # Sandboxes
 
-Sandboxes are isolated execution environments for running code, installing dependencies, and performing tasks without affecting the host system. They are Docker containers managed by Lucent's sandbox API.
+Sandboxes are isolated execution environments for running code, installing dependencies, and performing tasks without affecting the host system. They run on a configurable backend — Docker containers, Kubernetes pods, or Azure Container Instances (ACI) container groups — managed by Lucent's sandbox API.
+
+## Backends
+
+`LUCENT_SANDBOX_BACKEND` selects the backend (`docker`, `kubernetes`, or
+`aci`); unknown values fail closed rather than falling back to Docker. The API
+is the same across backends, but isolation, resource enforcement, and lifecycle
+behaviour differ:
+
+- **Docker** — one container per sandbox on the local Docker daemon (plus an
+  MCP-bridge sidecar container sharing its network namespace).
+- **Kubernetes** — one pod per sandbox, with the bridge as a sidecar container.
+  Isolated/allowlisted egress needs a CNI plugin that enforces NetworkPolicy.
+- **ACI** — one container group per sandbox, with the user image and the bridge
+  sidecar sharing a network namespace. The group is deployed privately into a
+  delegated VNet subnet with no public IP. ACI support is implemented but has
+  **not been verified against a live Azure subscription**; see
+  [Azure Deployment Design](azure-deployment-design.md) §4.7 for the unverified
+  areas and residual risks.
+
+On ACI the sandbox image **must** ship a non-root `USER`: standard container
+groups reject `runAsUser`, capabilities, and seccomp, so Lucent can only set
+`privileged: false` and the image provides the rest
+(`sandbox-images/Dockerfile.base` does).
 
 ## Overview
 
 When Lucent needs to execute code — whether dispatched by a daemon task, a schedule, or a user request — it creates a sandbox. Each sandbox is:
 
-- **Isolated**: Runs in its own Docker container with configurable resource limits
+- **Isolated**: Runs in its own container, pod, or container group with configurable resource limits
 - **Ephemeral**: Created on demand and destroyed after use
 - **Configurable**: Custom images, environment variables, network access, and setup commands
 - **Devcontainer-aware**: Automatically detects and applies `.devcontainer/devcontainer.json` configs from cloned repositories
@@ -314,16 +337,32 @@ After sandbox creation, the response includes a `devcontainer` field (if one was
 |-----------|---------|-------|-------------|
 | `memory_limit` | `2g` | 1m–99999t | Container memory limit |
 | `cpu_limit` | `2.0` | 0.1–16 | CPU core limit |
-| `disk_limit` | `10g` | 1m–99999t | Disk space limit |
+| `disk_limit` | `10g` | 1m–99999t | Disk space limit (platform-dependent) |
 | `timeout_seconds` | `1800` | 60–86400 | Auto-destroy timeout |
+
+`disk_limit` is enforced only where the platform provides a quota: Docker uses
+the storage driver's quota support (the limit is skipped with a warning when the
+driver does not support it) and Kubernetes applies it as the workspace
+`emptyDir.sizeLimit`. **ACI cannot enforce `disk_limit`** — a container group's
+`emptyDir` has no size quota — so the value is accepted but best-effort only.
+ACI also clamps CPU and memory requests to the container-group maximum.
 
 ## Network Modes
 
-| Mode | Description |
-|------|-------------|
-| `none` | No network access (most secure, default) |
-| `bridge` | Full network access via Docker bridge |
-| `allowlist` | Network access restricted to `allowed_hosts` only |
+Network modes are **platform-dependent** — they are not one policy implemented
+three ways. Treat the mode name as intent and check what the active backend can
+enforce.
+
+| Mode | Docker | Kubernetes | ACI |
+|------|--------|------------|-----|
+| `none` | No network access (`--network none`) | Default-deny egress NetworkPolicy | Private group with no public endpoint, but egress is governed by the **subnet NSG**. ACI has no per-group network policy. |
+| `bridge` | Full egress through Docker's bridge network | No egress NetworkPolicy (full egress) | Same private group; egress is governed by the subnet NSG. |
+| `allowlist` | In-container iptables allows only `allowed_hosts`, DNS, and established flows. Requires `NET_ADMIN` and iptables in the image; fails closed if it cannot be applied. | Egress NetworkPolicy to `allowed_hosts`, DNS, and the Lucent API host; requires a CNI that enforces NetworkPolicy. | **Cannot be enforced per sandbox.** Creation fails closed unless `LUCENT_SANDBOX_ACI_ALLOW_SUBNET_EGRESS=1` acknowledges that the whole subnet's NSG — not this sandbox — controls egress. |
+
+On ACI, `none` and `bridge` differ only in intent: the container group is
+always private and has no public IP, but ACI cannot attach a network policy to
+a group, so actual reachability is whatever the delegated subnet's NSG permits.
+Do not rely on `none` for egress isolation on ACI.
 
 ## MCP Bridge Runtime
 
@@ -342,12 +381,15 @@ values for those environment keys are ignored.
 The sidecar shares the sandbox network namespace so the user image can reach
 the bridge on `127.0.0.1`. The bridge still requires network egress to the
 Lucent API, so use `bridge`, or an `allowlist` that includes the Lucent API
-hostname, when MCP tools must function.
+hostname, when MCP tools must function. On ACI that egress must also be
+permitted by the subnet NSG; `allowlist` is not enforced per sandbox there.
 
 ## Lifecycle
 
 1. **CREATING** — Container is being set up
 2. **READY** — Container is running and setup complete
-3. **STOPPED** — Container stopped but state preserved
+3. **STOPPED** — Backend suspended the sandbox and its state is preserved for a
+   later resume (Docker). On ACI a stop **destroys** the container group and its
+   `/workspace` data, so the sandbox is recorded as **DESTROYED** instead.
 4. **FAILED** — Creation or setup failed (check `error` field)
-5. **DESTROYED** — Container permanently removed
+5. **DESTROYED** — Container permanently removed, including its workspace

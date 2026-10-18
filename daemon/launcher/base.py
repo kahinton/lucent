@@ -30,6 +30,16 @@ BINDING_ENV_KEYS = frozenset(
     }
 )
 
+# The sandbox backend's managed identity travels under a name of its own. The
+# controller's AZURE_CLIENT_ID must stay the *controller* identity (it starts
+# worker executions), while workers run as the *app* identity that holds the
+# sandbox RBAC. Terraform therefore exports the app identity as
+# LUCENT_WORKER_AZURE_CLIENT_ID, and it is mapped onto AZURE_CLIENT_ID in the
+# worker process only. A caller-supplied AZURE_CLIENT_ID is ignored: identity,
+# like the org binding, is never task- or spec-derived.
+WORKER_IDENTITY_ENV = "LUCENT_WORKER_AZURE_CLIENT_ID"
+WORKER_IDENTITY_KEY = "AZURE_CLIENT_ID"
+
 # The only controller environment variables a worker inherits. An allowlist
 # (not a denylist) so a new variable the controller gains is never silently
 # leaked into workers.
@@ -48,9 +58,23 @@ WORKER_ENV_ALLOWLIST = (
     "LUCENT_DAEMON_WORKER_RECONCILE_SECONDS",
     "DAEMON_DATABASE_URL",
     "DATABASE_URL",
+    "LUCENT_SANDBOXES_ENABLED",
     "LUCENT_SANDBOX_BACKEND",
     "LUCENT_SANDBOX_BRIDGE_IMAGE",
+    "LUCENT_SANDBOX_BRIDGE_API_URL",
     "LUCENT_SANDBOX_K8S_NAMESPACE",
+    "LUCENT_SANDBOX_KUBECONFIG",
+    # ACI backend (LUCENT_SANDBOX_BACKEND=aci). Task sandboxes are created by
+    # the dispatcher, i.e. inside a worker, so these must reach the worker and
+    # not just the web process. AZURE_SUBSCRIPTION_ID is what the ACI SDK client
+    # requires; AZURE_TENANT_ID lets DefaultAzureCredential resolve the identity.
+    "LUCENT_SANDBOX_ACI_RESOURCE_GROUP",
+    "LUCENT_SANDBOX_ACI_SUBNET_ID",
+    "LUCENT_SANDBOX_ACI_IDENTITY_ID",
+    "LUCENT_SANDBOX_ACI_LOCATION",
+    "LUCENT_SANDBOX_ACI_ALLOW_SUBNET_EGRESS",
+    "AZURE_SUBSCRIPTION_ID",
+    "AZURE_TENANT_ID",
     "OLLAMA_HOST",
     "LUCENT_SECRET_PROVIDER",
     "VAULT_ADDR",
@@ -86,9 +110,19 @@ def build_worker_env(org_id: str, extra: dict[str, str] | None = None) -> dict[s
         env["DATABASE_URL"] = os.environ["DATABASE_URL"]
 
     for key, value in (extra or {}).items():
-        if key in BINDING_ENV_KEYS:
+        if key in BINDING_ENV_KEYS or key == WORKER_IDENTITY_KEY:
             continue
         env[key] = value
+
+    # Sandbox identity, applied last and only from the controller's own
+    # environment — never from ``extra``. When no worker identity is
+    # configured, drop any AZURE_CLIENT_ID so a worker never silently inherits
+    # (or is handed) a principal it was not granted.
+    worker_identity = os.environ.get(WORKER_IDENTITY_ENV)
+    if worker_identity:
+        env[WORKER_IDENTITY_KEY] = worker_identity
+    else:
+        env.pop(WORKER_IDENTITY_KEY, None)
 
     # Authoritative binding — applied last, never overridable.
     env["LUCENT_DAEMON_ORG"] = org_id

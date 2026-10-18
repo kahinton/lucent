@@ -12,8 +12,6 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -526,23 +524,32 @@ def _event_raw(event) -> dict[str, Any]:
     })
 
 
-@lru_cache(maxsize=1)
-def _session_experience_skill_content() -> str:
-    skill_path = (
-        Path(__file__).resolve().parents[4]
-        / ".github"
-        / "skills"
-        / "session-experience-capture"
-        / "SKILL.md"
-    )
-    try:
-        return skill_path.read_text(encoding="utf-8")
-    except OSError:
-        return (
-            "# Session Experience Capture\n\n"
-            "Write a concise experience memory with Session Summary, What Happened, "
-            "Why It Matters, and Follow-up. Return NO_EXPERIENCE_NEEDED for trivial chats."
-        )
+# Summarizer prompt for automatic session-experience capture.
+#
+# This is internal prompt content for one model call, not an agent skill. It is
+# deliberately NOT a `.github/skills/<name>/SKILL.md`: everything under that
+# directory is seeded into `skill_definitions`, granted to agents and surfaced
+# in the UI as a capability an agent *uses*, whereas this is only ever read here.
+# Placing it there would advertise a skill no agent can invoke. It previously
+# tried to load such a file, which never existed, so the disk lookup always fell
+# through to this text — the content below is what has always run.
+_SESSION_EXPERIENCE_SUMMARY_PROMPT = (
+    "# Session Experience Capture\n\n"
+    "Write a concise experience memory describing what this session did and what "
+    "a future agent should know about it. Use exactly these sections:\n\n"
+    "## Session Summary\n"
+    "One or two sentences on what the session was about.\n\n"
+    "## What Happened\n"
+    "The concrete work: what was asked for, what was done, what changed.\n\n"
+    "## Why It Matters\n"
+    "What a later session should take from it — decisions, constraints, or "
+    "pitfalls worth carrying forward.\n\n"
+    "## Follow-up\n"
+    "Any unfinished work, open questions or next steps. Write \"None\" when there "
+    "are none.\n\n"
+    "Return exactly NO_EXPERIENCE_NEEDED, and nothing else, if the session is "
+    "trivial and holds nothing worth remembering."
+)
 
 
 def _format_session_experience_context(session: dict, evaluation: dict[str, Any]) -> str:
@@ -612,13 +619,13 @@ async def _summarize_session_experience(
         engine = get_engine_for_model(model)
         system_message = (
             "You summarize meaningful Lucent sessions into durable experience memories.\n\n"
-            "Follow this skill exactly:\n\n"
-            f"{_session_experience_skill_content()}"
+            "Follow these instructions exactly:\n\n"
+            f"{_SESSION_EXPERIENCE_SUMMARY_PROMPT}"
         )
         prompt = (
-            "Summarize this session into an experience memory. Use the skill's exact "
-            "memory content structure. If it is not worth capturing, return "
-            "NO_EXPERIENCE_NEEDED.\n\n"
+            "Summarize this session into an experience memory. Use the exact memory "
+            "content structure the instructions describe. If it is not worth "
+            "capturing, return NO_EXPERIENCE_NEEDED.\n\n"
             f"{_format_session_experience_context(session, evaluation)}"
         )
         result = await engine.run_session(

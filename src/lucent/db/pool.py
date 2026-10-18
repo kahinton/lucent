@@ -89,6 +89,13 @@ def clear_tenant_scope() -> None:
     _tenant_scope.set(None)
 
 
+# Session-level advisory-lock key that serialises migration runs across every
+# process booting against the same database. Any stable 64-bit value works;
+# this literal is the ASCII bytes for "lucent" followed by 0x01, spelled out
+# so it can never drift between callers.
+MIGRATION_ADVISORY_LOCK_KEY: Final[int] = 0x6C7563656E7401
+
+
 def _runner_guc_preamble() -> str:
     """SQL preamble that binds app.role='system' to a session.
 
@@ -279,6 +286,35 @@ async def _reset_connection(conn: Connection) -> None:
         logger.debug("tenant context scrub on connection return failed", exc_info=True)
 
 
+@asynccontextmanager
+async def _migration_lock(conn: Connection) -> AsyncIterator[None]:
+    """Serialise migration runs across processes with a session advisory lock.
+
+    Two replicas booting together used to race: each read the applied set and
+    then applied the same files, and the loser hit ``DuplicateTable`` and
+    aborted startup — a TOCTOU because there was no lock and no ``ON CONFLICT``.
+    Holding ``pg_advisory_lock`` on a fixed key around the whole runner makes
+    the second boot wait for the first to finish, after which it sees the
+    applied migrations and applies nothing.
+
+    Session-level, not ``_xact``: each migration runs in its own transaction
+    (so a failing migration rolls back cleanly and the rest can proceed), and
+    the lock must span all of them. It is released explicitly in ``finally``;
+    if the process dies mid-run the backend connection drops and PostgreSQL
+    releases the lock with the session, so a crash cannot leave it held.
+
+    The connection comes from the pool, so the unlock is not optional: without
+    it a returned connection would keep the lock for the life of its backend
+    and deadlock the next boot. A single replica pays one extra round trip per
+    boot (the lock/unlock pair); it never contends.
+    """
+    await conn.fetchval("SELECT pg_advisory_lock($1)", MIGRATION_ADVISORY_LOCK_KEY)
+    try:
+        yield
+    finally:
+        await conn.fetchval("SELECT pg_advisory_unlock($1)", MIGRATION_ADVISORY_LOCK_KEY)
+
+
 async def _run_migrations(pool: Pool) -> None:
     """Run SQL migration files in order, tracking which have been applied.
 
@@ -303,51 +339,80 @@ async def _run_migrations(pool: Pool) -> None:
         # (live-verified). Cleanup is the pool reset hook's job.
         await conn.execute(_runner_guc_preamble())
 
-        # Bootstrap tracking table (handles legacy _migrations upgrade).
-        await _bootstrap_schema_migrations(conn, migration_files)
+        # Serialise the whole read-then-apply sequence across processes so two
+        # replicas booting together cannot both apply the same migration.
+        async with _migration_lock(conn):
+            # Bootstrap tracking table (handles legacy _migrations upgrade).
+            await _bootstrap_schema_migrations(conn, migration_files)
 
-        # Get already-applied migrations with checksums
-        applied: dict[str, str | None] = {}
-        rows = await conn.fetch("SELECT name, checksum FROM schema_migrations")
-        for row in rows:
-            applied[row["name"]] = row["checksum"]
+            # Get already-applied migrations with checksums
+            applied: dict[str, str | None] = {}
+            rows = await conn.fetch("SELECT name, checksum FROM schema_migrations")
+            for row in rows:
+                applied[row["name"]] = row["checksum"]
 
-        applied_count = 0
-        skipped_count = 0
+            applied_count = 0
+            skipped_count = 0
 
-        for migration_file in migration_files:
-            if migration_file.name in applied:
-                # Verify checksum to detect post-application drift.
-                current_checksum = _file_checksum(migration_file)
-                recorded = applied[migration_file.name]
-                if recorded and current_checksum != recorded:
-                    logger.warning(
-                        "Migration %s modified after application (recorded: %s, current: %s)",
+            for migration_file in migration_files:
+                if migration_file.name in applied:
+                    # Verify checksum to detect post-application drift.
+                    current_checksum = _file_checksum(migration_file)
+                    recorded = applied[migration_file.name]
+                    if recorded and current_checksum != recorded:
+                        logger.warning(
+                            "Migration %s modified after application (recorded: %s, current: %s)",
+                            migration_file.name,
+                            (recorded or "")[:12],
+                            current_checksum[:12],
+                        )
+                    skipped_count += 1
+                    continue
+
+                sql = migration_file.read_text()
+                checksum = hashlib.sha256(sql.encode()).hexdigest()
+                async with conn.transaction():
+                    await conn.execute(sql)
+                    await conn.execute(
+                        "INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)",
                         migration_file.name,
-                        (recorded or "")[:12],
-                        current_checksum[:12],
+                        checksum,
                     )
-                skipped_count += 1
-                continue
+                    applied_count += 1
+                    logger.info("Applied migration: %s", migration_file.name)
 
-            sql = migration_file.read_text()
-            checksum = hashlib.sha256(sql.encode()).hexdigest()
-            async with conn.transaction():
-                await conn.execute(sql)
-                await conn.execute(
-                    "INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)",
-                    migration_file.name,
-                    checksum,
+            if applied_count > 0 or skipped_count > 0:
+                logger.info(
+                    "Migrations complete: %d applied, %d skipped",
+                    applied_count,
+                    skipped_count,
                 )
-                applied_count += 1
-                logger.info("Applied migration: %s", migration_file.name)
 
-        if applied_count > 0 or skipped_count > 0:
-            logger.info(
-                "Migrations complete: %d applied, %d skipped",
-                applied_count,
-                skipped_count,
-            )
+
+async def run_migrations(pool: Pool) -> None:
+    """Apply pending schema migrations against ``pool`` (public runner).
+
+    The same runner the server invokes on startup, exposed for the
+    ``python -m lucent.migrate`` CLI and any other out-of-process caller.
+    Serialised across processes by a session-level advisory lock.
+    """
+    await _run_migrations(pool)
+
+
+async def rollback_migrations(
+    pool: Pool,
+    *,
+    steps: int = 1,
+    target_name: str | None = None,
+    allow_irreversible: bool = False,
+) -> int:
+    """Roll back applied migrations (public wrapper over the runner)."""
+    return await _rollback_migrations(
+        pool,
+        steps=steps,
+        target_name=target_name,
+        allow_irreversible=allow_irreversible,
+    )
 
 
 async def _rollback_migrations(
@@ -377,99 +442,123 @@ async def _rollback_migrations(
     migration_map = {path.name: path for path in migration_files}
 
     async with pool.acquire() as conn:
-        await _bootstrap_schema_migrations(conn, migration_files)
+        # Same fixed key as _run_migrations: a rollback must never interleave
+        # with a concurrent boot's forward run.
+        await conn.fetchval("SELECT pg_advisory_lock($1)", MIGRATION_ADVISORY_LOCK_KEY)
+        try:
+            return await _rollback_locked(
+                conn,
+                migration_map,
+                steps=steps,
+                target_name=target_name,
+                allow_irreversible=allow_irreversible,
+            )
+        finally:
+            await conn.fetchval("SELECT pg_advisory_unlock($1)", MIGRATION_ADVISORY_LOCK_KEY)
 
-        rows = await conn.fetch("SELECT name, checksum FROM schema_migrations ORDER BY name DESC")
-        if not rows:
-            logger.info("Rollback requested, but no applied migrations were found")
-            return 0
 
-        applied: dict[str, str | None] = {row["name"]: row["checksum"] for row in rows}
-        applied_names = [row["name"] for row in rows]
+async def _rollback_locked(
+    conn: Connection,
+    migration_map: dict[str, Path],
+    *,
+    steps: int,
+    target_name: str | None,
+    allow_irreversible: bool,
+) -> int:
+    """Rollback body, run while holding the migration advisory lock."""
+    await _bootstrap_schema_migrations(conn, list(migration_map.values()))
 
-        if target_name:
-            to_rollback = [name for name in applied_names if name > target_name]
-        else:
-            to_rollback = applied_names[: max(steps, 0)]
+    rows = await conn.fetch("SELECT name, checksum FROM schema_migrations ORDER BY name DESC")
+    if not rows:
+        logger.info("Rollback requested, but no applied migrations were found")
+        return 0
 
-        if not to_rollback:
-            logger.info("Rollback requested, but no migrations matched the request")
-            return 0
+    applied: dict[str, str | None] = {row["name"]: row["checksum"] for row in rows}
+    applied_names = [row["name"] for row in rows]
 
-        rolled_back = 0
-        for migration_name in to_rollback:
-            migration_file = migration_map.get(migration_name)
-            if migration_file is None:
-                logger.warning(
-                    "Applied migration %s is missing from disk; cannot rollback",
-                    migration_name,
+    if target_name:
+        to_rollback = [name for name in applied_names if name > target_name]
+    else:
+        to_rollback = applied_names[: max(steps, 0)]
+
+    if not to_rollback:
+        logger.info("Rollback requested, but no migrations matched the request")
+        return 0
+
+    rolled_back = 0
+    for migration_name in to_rollback:
+        migration_file = migration_map.get(migration_name)
+        if migration_file is None:
+            logger.warning(
+                "Applied migration %s is missing from disk; cannot rollback",
+                migration_name,
+            )
+            if not allow_irreversible:
+                raise RuntimeError(
+                    f"Migration {migration_name} cannot be rolled back: forward file missing"
                 )
-                if not allow_irreversible:
-                    raise RuntimeError(
-                        f"Migration {migration_name} cannot be rolled back: forward file missing"
-                    )
-                continue
+            continue
 
-            current_checksum = _file_checksum(migration_file)
-            recorded = applied.get(migration_name)
-            if recorded and current_checksum != recorded:
-                logger.warning(
-                    "Rollback for %s using modified forward migration (recorded: %s, current: %s)",
-                    migration_name,
-                    recorded[:12],
-                    current_checksum[:12],
+        current_checksum = _file_checksum(migration_file)
+        recorded = applied.get(migration_name)
+        if recorded and current_checksum != recorded:
+            logger.warning(
+                "Rollback for %s using modified forward migration (recorded: %s, current: %s)",
+                migration_name,
+                recorded[:12],
+                current_checksum[:12],
+            )
+
+        up_metadata = _parse_migration_metadata(migration_file)
+        down_file = migration_file.with_name(f"{migration_file.stem}.down.sql")
+
+        if not down_file.exists() or up_metadata.get("rollback") == "irreversible":
+            reason = (
+                "marked irreversible"
+                if up_metadata.get("rollback") == "irreversible"
+                else "missing .down.sql file"
+            )
+            logger.warning("Migration %s is irreversible (%s)", migration_name, reason)
+            if not allow_irreversible:
+                raise RuntimeError(f"Migration {migration_name} is irreversible ({reason})")
+            continue
+
+        down_metadata = _parse_migration_metadata(down_file)
+        if down_metadata.get("rollback") == "irreversible":
+            logger.warning(
+                "Migration %s rollback file marks migration as irreversible",
+                migration_name,
+            )
+            if not allow_irreversible:
+                raise RuntimeError(
+                    f"Migration {migration_name} is irreversible (rollback metadata)"
                 )
+            continue
 
-            up_metadata = _parse_migration_metadata(migration_file)
-            down_file = migration_file.with_name(f"{migration_file.stem}.down.sql")
+        warning = down_metadata.get("warning")
+        if warning:
+            logger.warning("Rollback warning for %s: %s", migration_name, warning)
 
-            if not down_file.exists() or up_metadata.get("rollback") == "irreversible":
-                reason = (
-                    "marked irreversible"
-                    if up_metadata.get("rollback") == "irreversible"
-                    else "missing .down.sql file"
+        rollback_sql = down_file.read_text()
+        if not rollback_sql.strip():
+            logger.warning("Rollback file for %s is empty", migration_name)
+            if not allow_irreversible:
+                raise RuntimeError(
+                    f"Migration {migration_name} is irreversible (empty rollback file)"
                 )
-                logger.warning("Migration %s is irreversible (%s)", migration_name, reason)
-                if not allow_irreversible:
-                    raise RuntimeError(f"Migration {migration_name} is irreversible ({reason})")
-                continue
+            continue
 
-            down_metadata = _parse_migration_metadata(down_file)
-            if down_metadata.get("rollback") == "irreversible":
-                logger.warning(
-                    "Migration %s rollback file marks migration as irreversible",
-                    migration_name,
-                )
-                if not allow_irreversible:
-                    raise RuntimeError(
-                        f"Migration {migration_name} is irreversible (rollback metadata)"
-                    )
-                continue
+        async with conn.transaction():
+            await conn.execute(rollback_sql)
+            await conn.execute(
+                "DELETE FROM schema_migrations WHERE name = $1",
+                migration_name,
+            )
+        rolled_back += 1
+        logger.info("Rolled back migration: %s", migration_name)
 
-            warning = down_metadata.get("warning")
-            if warning:
-                logger.warning("Rollback warning for %s: %s", migration_name, warning)
-
-            rollback_sql = down_file.read_text()
-            if not rollback_sql.strip():
-                logger.warning("Rollback file for %s is empty", migration_name)
-                if not allow_irreversible:
-                    raise RuntimeError(
-                        f"Migration {migration_name} is irreversible (empty rollback file)"
-                    )
-                continue
-
-            async with conn.transaction():
-                await conn.execute(rollback_sql)
-                await conn.execute(
-                    "DELETE FROM schema_migrations WHERE name = $1",
-                    migration_name,
-                )
-            rolled_back += 1
-            logger.info("Rolled back migration: %s", migration_name)
-
-        logger.info("Rollback complete: %d rolled back", rolled_back)
-        return rolled_back
+    logger.info("Rollback complete: %d rolled back", rolled_back)
+    return rolled_back
 
 
 async def _bootstrap_schema_migrations(

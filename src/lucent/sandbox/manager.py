@@ -53,7 +53,7 @@ class SandboxManager:
 
     @staticmethod
     def _default_backend() -> SandboxBackend:
-        backend_type = os.environ.get("LUCENT_SANDBOX_BACKEND", "docker")
+        backend_type = os.environ.get("LUCENT_SANDBOX_BACKEND", "docker").strip().lower()
         if backend_type == "kubernetes":
             from lucent.sandbox.k8s_backend import KubernetesBackend
 
@@ -61,10 +61,20 @@ class SandboxManager:
                 namespace=os.environ.get("LUCENT_SANDBOX_K8S_NAMESPACE", "lucent-sandboxes"),
                 kubeconfig=os.environ.get("LUCENT_SANDBOX_KUBECONFIG") or None,
             )
-        else:
-            from lucent.sandbox.docker_backend import DockerBackend
+        if backend_type == "aci":
+            from lucent.sandbox.aci_backend import AzureContainerInstancesBackend
 
-            return DockerBackend()
+            return AzureContainerInstancesBackend()
+        if backend_type != "docker":
+            # Fail closed: silently falling back to Docker would run sandboxes
+            # on the wrong host, outside the VNet the operator configured.
+            raise RuntimeError(
+                f"Unknown LUCENT_SANDBOX_BACKEND={backend_type!r}; "
+                "expected 'docker', 'kubernetes', or 'aci'"
+            )
+        from lucent.sandbox.docker_backend import DockerBackend
+
+        return DockerBackend()
 
     async def _repo(self):
         """Lazy-load the DB repository."""
@@ -86,8 +96,26 @@ class SandboxManager:
         key_id: UUID | None = None
         effective_config, key_id, bridge_org_id = await self._prepare_bridge(config)
 
-        # Create the container via backend
-        info = await self._backend.create(effective_config)
+        # Create the container via backend. Backends normally turn failures
+        # into a FAILED SandboxInfo, but cancellation (a BaseException) and
+        # exceptions raised before the backend's own try/except escape here.
+        # The freshly minted bridge key is not recorded anywhere yet, so a
+        # leaked key would stay valid for timeout_seconds + 600 with no
+        # owner able to revoke it. Always revoke it before re-raising.
+        try:
+            info = await self._backend.create(effective_config)
+        except BaseException:
+            if key_id:
+                try:
+                    await self._revoke_api_key(key_id, bridge_org_id)
+                except BaseException:
+                    # Never mask the original failure (and never swallow a
+                    # second cancellation); the key will expire on its own.
+                    logger.warning(
+                        "Failed to revoke sandbox bridge key after create failure",
+                        exc_info=True,
+                    )
+            raise
 
         if key_id and info.status != SandboxStatus.FAILED:
             self._sandbox_bridge_api_keys[info.id] = (key_id, bridge_org_id)
@@ -302,8 +330,27 @@ class SandboxManager:
         """Get live container state from backend."""
         return await self._backend.get(sandbox_id)
 
-    async def stop(self, sandbox_id: str) -> None:
-        """Stop a sandbox (preserves state)."""
+    async def stop(self, sandbox_id: str) -> str:
+        """Stop a sandbox, preserving state only where the backend can.
+
+        Returns the resulting lifecycle status. A backend that cannot preserve
+        sandbox state across a stop (the ``preserves_state = False`` capability
+        flag, as with Azure Container Instances, where stopping a container
+        group destroys its workspace) is torn down through ``destroy`` instead,
+        so the returned status is ``"destroyed"`` and the bridge key, idle
+        tracking, and database row are all cleaned up rather than left to
+        expire. Backends without the flag are assumed to preserve state, which
+        is the behaviour that existed before the capability was introduced.
+        """
+        preserves_state = bool(getattr(self._backend, "preserves_state", True))
+        if not preserves_state:
+            logger.info(
+                "Backend cannot preserve sandbox %s across a stop; destroying it",
+                sandbox_id[:12],
+            )
+            await self.destroy(sandbox_id)
+            return "destroyed"
+
         await self._backend.stop(sandbox_id)
         try:
             repo = await self._repo()
@@ -314,6 +361,7 @@ class SandboxManager:
             )
         except Exception as e:
             logger.warning("Failed to update sandbox %s status: %s", sandbox_id[:12], e)
+        return "stopped"
 
     async def destroy(self, sandbox_id: str) -> None:
         """Permanently destroy a sandbox."""

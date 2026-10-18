@@ -99,6 +99,54 @@ def test_worker_env_ignores_a_hostile_binding_override(monkeypatch):
     assert env["LUCENT_DAEMON_ORG"] == "org-123"
 
 
+def test_worker_env_carries_the_aci_sandbox_configuration(monkeypatch):
+    """Task sandboxes are created by the dispatcher, so workers need the ACI
+    settings — the web process having them is not enough."""
+    expected = {
+        "LUCENT_SANDBOX_BACKEND": "aci",
+        "LUCENT_SANDBOX_BRIDGE_API_URL": "https://lucent.example.com/api",
+        "LUCENT_SANDBOX_ACI_RESOURCE_GROUP": "lucent-sandbox-rg",
+        "LUCENT_SANDBOX_ACI_SUBNET_ID": "/subscriptions/s/resourceGroups/rg/providers/x",
+        "LUCENT_SANDBOX_ACI_IDENTITY_ID": "/subscriptions/s/identities/pull",
+        "LUCENT_SANDBOX_ACI_LOCATION": "eastus",
+        "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000000",
+        "AZURE_TENANT_ID": "11111111-1111-1111-1111-111111111111",
+    }
+    for key, value in expected.items():
+        monkeypatch.setenv(key, value)
+
+    env = build_worker_env("org-123")
+
+    for key, value in expected.items():
+        assert env[key] == value
+
+
+def test_worker_identity_is_mapped_for_the_worker_only(monkeypatch):
+    monkeypatch.setenv("AZURE_CLIENT_ID", "controller-identity")
+    monkeypatch.setenv("LUCENT_WORKER_AZURE_CLIENT_ID", "app-identity")
+
+    env = build_worker_env("org-123")
+
+    assert env["AZURE_CLIENT_ID"] == "app-identity"
+
+
+def test_worker_never_inherits_the_controller_identity(monkeypatch):
+    monkeypatch.setenv("AZURE_CLIENT_ID", "controller-identity")
+    monkeypatch.delenv("LUCENT_WORKER_AZURE_CLIENT_ID", raising=False)
+
+    env = build_worker_env("org-123")
+
+    assert "AZURE_CLIENT_ID" not in env
+
+
+def test_worker_identity_ignores_a_caller_supplied_client_id(monkeypatch):
+    monkeypatch.delenv("LUCENT_WORKER_AZURE_CLIENT_ID", raising=False)
+
+    env = build_worker_env("org-123", {"AZURE_CLIENT_ID": "org-controlled"})
+
+    assert "AZURE_CLIENT_ID" not in env
+
+
 def test_worker_env_prefers_the_restricted_database_url(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://full-privilege@db/lucent")
     monkeypatch.setenv("DAEMON_DATABASE_URL", "postgresql://lucent_daemon@db/lucent")

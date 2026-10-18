@@ -336,6 +336,51 @@ class TestRunMigrations:
         assert any("modified after application" in r.message for r in caplog.records)
 
 
+class TestMigrationAdvisoryLock:
+    """The runner serialises concurrent boots with a session advisory lock."""
+
+    def _mock_setup(self, tmp_path, sql="CREATE TABLE t (id INT);"):
+        migrations_dir = tmp_path / "migrations"
+        migrations_dir.mkdir()
+        (migrations_dir / "001_init.sql").write_text(sql)
+        mock_conn = AsyncMock()
+        mock_conn.fetch.return_value = []
+        mock_conn.fetchval.return_value = False
+        mock_tx = MagicMock()
+        mock_tx.__aenter__ = AsyncMock()
+        mock_tx.__aexit__ = AsyncMock(return_value=False)
+        mock_conn.transaction = MagicMock(return_value=mock_tx)
+        return _make_mock_pool(mock_conn), mock_conn, migrations_dir
+
+    async def test_lock_acquired_and_released(self, tmp_path):
+        mock_pool, mock_conn, migrations_dir = self._mock_setup(tmp_path)
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            await _run_migrations(mock_pool)
+
+        fetchvals = mock_conn.fetchval.call_args_list
+        lock_calls = [c for c in fetchvals if "pg_advisory_lock" in str(c)]
+        unlock_calls = [c for c in fetchvals if "pg_advisory_unlock" in str(c)]
+        assert len(lock_calls) == 1
+        assert len(unlock_calls) == 1
+        assert lock_calls[0].args[1] == pool_module.MIGRATION_ADVISORY_LOCK_KEY
+
+    async def test_lock_released_when_apply_fails(self, tmp_path):
+        mock_pool, mock_conn, migrations_dir = self._mock_setup(tmp_path)
+        # The applied-set read happens inside the lock; fail it and prove the
+        # finally still releases the lock.
+        mock_conn.fetch.side_effect = RuntimeError("boom")
+        with patch("lucent.db.pool.Path") as mock_path_cls:
+            mock_path_cls.return_value.parent.__truediv__ = MagicMock(return_value=migrations_dir)
+            with pytest.raises(RuntimeError):
+                await _run_migrations(mock_pool)
+
+        unlock_calls = [
+            c for c in mock_conn.fetchval.call_args_list if "pg_advisory_unlock" in str(c)
+        ]
+        assert len(unlock_calls) == 1
+
+
 class TestBootstrapSchemaMigrations:
     """Tests for _bootstrap_schema_migrations()."""
 

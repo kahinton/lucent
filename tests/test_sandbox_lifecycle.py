@@ -650,6 +650,68 @@ class TestDockerSandboxLifecycle:
         manager._revoke_api_key.assert_called_once_with(key_id, organization_id)
         assert sandbox_id not in manager._sandbox_bridge_api_keys
 
+    # --- Stop / preserves_state -------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_stop_preserves_state_when_backend_supports_it(self):
+        """A preserving backend is stopped and recorded as 'stopped'."""
+        backend = _make_backend_mock()
+        backend.preserves_state = True
+        manager = _make_manager(backend)
+
+        status = await manager.stop("sb-stop")
+
+        assert status == "stopped"
+        backend.stop.assert_awaited_once_with("sb-stop")
+        backend.destroy.assert_not_awaited()
+        repo = await manager._repo()
+        repo.update_status.assert_awaited_once()
+        call = repo.update_status.call_args
+        assert call.args == ("sb-stop", "stopped")
+        assert "stopped_at" in call.kwargs
+
+    @pytest.mark.asyncio
+    async def test_stop_defaults_to_preserving_when_flag_is_absent(self):
+        """Backends without the capability flag keep the historical behaviour."""
+        from lucent.sandbox.backend import SandboxBackend
+
+        backend = AsyncMock(spec=SandboxBackend)
+        manager = _make_manager(backend)
+
+        status = await manager.stop("sb-stop-legacy")
+
+        assert status == "stopped"
+        backend.stop.assert_awaited_once_with("sb-stop-legacy")
+
+    @pytest.mark.asyncio
+    async def test_stop_destroys_when_backend_cannot_preserve_state(self):
+        """A non-preserving backend (ACI) reports 'destroyed' and cleans up."""
+        backend = _make_backend_mock()
+        backend.preserves_state = False
+        manager = _make_manager(backend)
+        manager._revoke_api_key = AsyncMock()
+        key_id = uuid4()
+        organization_id = str(uuid4())
+        sandbox_id = "sb-stop-aci"
+        manager._sandbox_bridge_api_keys[sandbox_id] = (key_id, organization_id)
+        manager._last_activity[sandbox_id] = 1.0
+        manager._idle_timeout_config[sandbox_id] = 300
+
+        status = await manager.stop(sandbox_id)
+
+        assert status == "destroyed"
+        backend.stop.assert_not_awaited()
+        backend.destroy.assert_awaited_once_with(sandbox_id)
+        manager._revoke_api_key.assert_awaited_once_with(key_id, organization_id)
+        assert sandbox_id not in manager._sandbox_bridge_api_keys
+        assert sandbox_id not in manager._last_activity
+        assert sandbox_id not in manager._idle_timeout_config
+        repo = await manager._repo()
+        repo.update_status.assert_awaited_once()
+        call = repo.update_status.call_args
+        assert call.args == (sandbox_id, "destroyed")
+        assert "destroyed_at" in call.kwargs
+
     # --- Timeout / auto-destruction --------------------------------------
 
     @pytest.mark.asyncio
@@ -705,6 +767,37 @@ class TestDockerSandboxLifecycle:
         info = await manager.create(SandboxConfig(timeout_seconds=0))
 
         assert info.id not in manager._cleanup_tasks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [RuntimeError("backend exploded"), asyncio.CancelledError()],
+        ids=["exception", "cancelled"],
+    )
+    async def test_create_revokes_bridge_key_when_backend_create_raises(self, error):
+        """A key minted before backend.create must not leak if create raises.
+
+        FAILED results are handled separately; this covers exceptions that
+        escape the backend entirely (including BaseException such as task
+        cancellation).
+        """
+        backend = _make_backend_mock()
+        backend.create.side_effect = error
+        manager = _make_manager(backend)
+        key_id = uuid4()
+        organization_id = str(uuid4())
+        manager._create_task_scoped_api_key = AsyncMock(
+            return_value=(key_id, "raw-bridge-key", organization_id)
+        )
+        manager._revoke_api_key = AsyncMock()
+
+        with pytest.raises(type(error)):
+            await manager.create(
+                SandboxConfig(task_id=str(uuid4()), timeout_seconds=0)
+            )
+
+        manager._revoke_api_key.assert_awaited_once_with(key_id, organization_id)
+        assert manager._sandbox_bridge_api_keys == {}
 
     @pytest.mark.asyncio
     async def test_task_bridge_key_is_redacted_from_persisted_config(self):
@@ -1186,10 +1279,12 @@ class TestOutputModes:
     async def test_pr_mode_pushes_branch_and_logs_event(self):
         """pr mode pushes branch and logs sandbox_output_pr event."""
         handler, manager, request_api, _ = self._handler()
-        # exec calls: git diff, git rev-parse, chmod askpass, remote set-url, push
+        # exec calls: git diff, git rev-parse, mkdir .lucent, chmod askpass,
+        # remote set-url, push
         exec_responses = [
             _make_exec_ok(stdout="+added line\n"),  # git diff
             _make_exec_ok(stdout="main\n"),          # git rev-parse
+            _make_exec_ok(),                          # mkdir .lucent
             _make_exec_ok(),                          # chmod askpass
             _make_exec_ok(),                          # git remote set-url
             _make_exec_ok(),                          # git push
@@ -1216,9 +1311,12 @@ class TestOutputModes:
         event_calls = [str(c) for c in request_api.add_event.call_args_list]
         assert any("sandbox_output_pr" in c for c in event_calls)
         manager.write_file.assert_called_once()
+        assert manager.write_file.call_args[0][1] == "/workspace/.lucent/lucent-git-askpass.sh"
         assert b"LUCENT_GIT_TOKEN" in manager.write_file.call_args[0][2]
-        set_url_call = manager.exec.call_args_list[3]
-        assert set_url_call.kwargs.get("env", {}).get("GIT_ASKPASS") == "/tmp/lucent-git-askpass.sh"
+        set_url_call = manager.exec.call_args_list[4]
+        assert set_url_call.kwargs.get("env", {}).get("GIT_ASKPASS") == (
+            "/workspace/.lucent/lucent-git-askpass.sh"
+        )
         assert "ghp_token@" not in str(set_url_call)
 
     @pytest.mark.asyncio
@@ -1227,6 +1325,7 @@ class TestOutputModes:
         handler, manager, _, _ = self._handler()
         manager.exec.side_effect = [
             _make_exec_ok(stdout="+added line\n"),  # git diff
+            _make_exec_ok(),                        # mkdir .lucent
             _make_exec_ok(),                        # chmod askpass
             _make_exec_ok(),                        # git remote set-url
             _make_exec_ok(),                        # git push
@@ -1248,11 +1347,53 @@ class TestOutputModes:
 
         assert result.mode == "commit"
         manager.write_file.assert_called_once()
-        set_url_call = manager.exec.call_args_list[2]
-        push_call = manager.exec.call_args_list[3]
+        set_url_call = manager.exec.call_args_list[3]
+        push_call = manager.exec.call_args_list[4]
         assert set_url_call.kwargs.get("env", {}).get("LUCENT_GIT_TOKEN") == "token-secret"
-        assert push_call.kwargs.get("env", {}).get("GIT_ASKPASS") == "/tmp/lucent-git-askpass.sh"
+        assert push_call.kwargs.get("env", {}).get("GIT_ASKPASS") == (
+            "/workspace/.lucent/lucent-git-askpass.sh"
+        )
         assert "token-secret@" not in str(set_url_call)
+
+    @pytest.mark.asyncio
+    async def test_askpass_script_is_staged_inside_the_workspace(self):
+        """The askpass helper is created under /workspace and then used.
+
+        ACI and Docker confine write_file to /workspace, so a /tmp helper
+        would fail post-processing after the task's work was already done.
+        """
+        handler, manager, _, _ = self._handler()
+        manager.exec.side_effect = [
+            _make_exec_ok(stdout="+added line\n"),  # git diff
+            _make_exec_ok(),                        # mkdir .lucent
+            _make_exec_ok(),                        # chmod askpass
+            _make_exec_ok(),                        # git remote set-url
+            _make_exec_ok(),                        # git push
+        ]
+        config = SandboxConfig(
+            output_mode="commit",
+            git_credentials="token-secret",
+            repo_url="https://github.com/org/repo.git",
+            branch="main",
+            commit_approved=True,
+        )
+
+        await handler.process(
+            sandbox_id="sb-askpass",
+            task_id="task-askpass",
+            task_description="work",
+            config=config,
+        )
+
+        askpass_path = manager.write_file.call_args[0][1]
+        assert askpass_path == "/workspace/.lucent/lucent-git-askpass.sh"
+        # Docker applies the same confinement as ACI; the helper must satisfy it.
+        assert DockerBackend._validate_workspace_path(askpass_path) == askpass_path
+        mkdir_call = manager.exec.call_args_list[1]
+        assert mkdir_call.args[1] == "mkdir -p /workspace/.lucent"
+        assert manager.exec.call_args_list[3].kwargs.get("env", {}).get("GIT_ASKPASS") == (
+            askpass_path
+        )
 
     # --- Commit mode -----------------------------------------------------
 

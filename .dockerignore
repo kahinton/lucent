@@ -2,7 +2,14 @@
 .env.*
 !.env.example
 .git
-.github
+# .github is NOT excluded wholesale: the image ships the built-in agent/skill/
+# template definitions from .github/{skills,agents,sandbox-templates} at
+# /app/.github, which is where builtin_definitions.py looks for them. Excluding
+# it silently ships an image with no built-in skills. Only CI-only paths are
+# dropped.
+.github/workflows
+.github/plugin
+.github/copilot-instructions.md
 .venv
 __pycache__
 *.py[codz]

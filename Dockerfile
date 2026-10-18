@@ -37,12 +37,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy installed packages from builder
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin/lucent /usr/local/bin/lucent
-COPY --from=builder /usr/local/bin/lucent-daemon /usr/local/bin/lucent-daemon
+# Copy the installed console scripts. Globbing `lucent*` rather than naming each
+# one keeps a newly added entry point (lucent-migrate, lucent-bootstrap, …) from
+# silently missing from the image — `lucent` and `lucent-daemon` are the same
+# wheel's scripts, so they all belong together.
+COPY --from=builder /usr/local/bin/lucent* /usr/local/bin/
+
+# Built-in agent/skill/sandbox-template definitions. The server looks for these
+# at /app/.github (builtin_definitions.py) and the daemon resolves its cognitive
+# agent definition from the same place. Without them the image silently ships
+# with no built-in skills — it only worked in dev because Compose bind-mounts
+# the repo's .github into the container.
+COPY .github/ /app/.github/
 
 # Create non-root user
 RUN groupadd --gid 1000 lucent && \
-    useradd --uid 1000 --gid lucent --create-home --shell /bin/bash lucent
+    useradd --uid 1000 --gid lucent --create-home --shell /bin/bash lucent && \
+    # The local file-storage provider writes here (LUCENT_FILE_STORAGE_PATH).
+    # /var/lib is root-owned, so uid 1000 cannot create it — without this the
+    # documented local fallback fails with PermissionError on the first upload.
+    mkdir -p /var/lib/lucent/files && \
+    chown -R lucent:lucent /var/lib/lucent
 USER lucent
 
 # Default port

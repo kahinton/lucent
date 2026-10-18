@@ -10,6 +10,13 @@ from lucent.sandbox.models import ExecResult, SandboxConfig, SandboxInfo
 class SandboxBackend(abc.ABC):
     """Interface that all sandbox backends must implement."""
 
+    # Capability: whether ``stop()`` suspends the sandbox and keeps its data
+    # for a later resume. The default is the interface contract above; a
+    # platform whose only "stop" is a delete (Kubernetes pod deletion, ACI
+    # container-group deletion) sets this False so the manager records the
+    # operation as destruction instead of reporting a resumable stop.
+    preserves_state: bool = True
+
     @abc.abstractmethod
     async def create(self, config: SandboxConfig) -> SandboxInfo:
         """Create and start a new sandbox. Returns when ready."""

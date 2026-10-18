@@ -12,7 +12,11 @@ import httpx
 from lucent.sandbox.models import SandboxConfig
 
 OutputMode = Literal["diff", "pr", "review", "commit"]
-_GIT_ASKPASS_PATH = "/tmp/lucent-git-askpass.sh"
+# The askpass helper must live inside the workspace: the ACI and Docker
+# backends reject writes outside /workspace ("Path escapes workspace root"),
+# and post-processing would fail after the task's work was already done.
+_GIT_ASKPASS_DIR = "/workspace/.lucent"
+_GIT_ASKPASS_PATH = f"{_GIT_ASKPASS_DIR}/lucent-git-askpass.sh"
 
 
 @dataclass
@@ -68,7 +72,12 @@ class SandboxOutputHandler:
 
     async def _handle_diff(self, task_id: str, diff: str) -> OutputResult:
         detail = diff if diff.strip() else "No changes detected."
-        return OutputResult(mode="diff", diff=diff, detail=detail, metadata={"has_changes": bool(diff.strip())})
+        return OutputResult(
+            mode="diff",
+            diff=diff,
+            detail=detail,
+            metadata={"has_changes": bool(diff.strip())},
+        )
 
     async def _handle_review(self, task_id: str, task_description: str, diff: str) -> OutputResult:
         detail = diff if diff.strip() else "No changes detected."
@@ -116,7 +125,8 @@ class SandboxOutputHandler:
         )
         if branch_res.exit_code != 0:
             raise RuntimeError(
-                f"failed to resolve current branch: {branch_res.stderr.strip() or branch_res.stdout.strip()}"
+                "failed to resolve current branch: "
+                f"{branch_res.stderr.strip() or branch_res.stdout.strip()}"
             )
         head_branch = (branch_res.stdout or "").strip() or base_branch
         sanitized_repo_url = self._sanitize_repo_url(config.repo_url)
@@ -134,7 +144,9 @@ class SandboxOutputHandler:
             timeout=30,
         )
         if set_remote.exit_code != 0:
-            detail = self._sanitize_git_output(set_remote.stderr.strip() or set_remote.stdout.strip(), config)
+            detail = self._sanitize_git_output(
+                set_remote.stderr.strip() or set_remote.stdout.strip(), config
+            )
             raise RuntimeError(f"failed to set remote: {detail}")
         if head_branch == base_branch:
             head_branch = f"lucent/task-{task_id[:8]}"
@@ -170,17 +182,23 @@ class SandboxOutputHandler:
                 detail = "PR branch pushed, but PR creation failed; create PR manually."
         else:
             detail = "PR branch pushed, but repo_url is not a GitHub URL; create PR manually."
+        pr_metadata = {
+            "branch": head_branch,
+            "base": base_branch,
+            "repo_url": sanitized_repo_url,
+            "pr_url": pr_url,
+        }
         await self._request_api.add_event(
             task_id,
             "sandbox_output_pr",
             detail,
-            {"branch": head_branch, "base": base_branch, "repo_url": sanitized_repo_url, "pr_url": pr_url},
+            pr_metadata,
         )
         return OutputResult(
             mode="pr",
             diff=diff,
             detail=detail,
-            metadata={"branch": head_branch, "base": base_branch, "repo_url": sanitized_repo_url, "pr_url": pr_url},
+            metadata=pr_metadata,
         )
 
     async def _handle_commit(
@@ -220,8 +238,12 @@ class SandboxOutputHandler:
             raise RuntimeError(f"git push failed: {detail}")
 
         detail = f"Pushed commits to {branch}."
-        await self._request_api.add_event(task_id, "sandbox_output_commit", detail, {"branch": branch})
-        return OutputResult(mode="commit", diff=diff, detail=detail, metadata={"branch": branch})
+        await self._request_api.add_event(
+            task_id, "sandbox_output_commit", detail, {"branch": branch}
+        )
+        return OutputResult(
+            mode="commit", diff=diff, detail=detail, metadata={"branch": branch}
+        )
 
     @staticmethod
     def _parse_github_repo(repo_url: str | None) -> str | None:
@@ -250,8 +272,16 @@ class SandboxOutputHandler:
             '  *) printf "\\n" ;;\n'
             "esac\n"
         )
+        # Create the directory explicitly: the Kubernetes backend's
+        # write_file does not create parent directories (Docker and ACI do,
+        # but relying on that would couple this code to backend internals).
+        await self._manager.exec(
+            sandbox_id, f"mkdir -p {shlex.quote(_GIT_ASKPASS_DIR)}", timeout=10
+        )
         await self._manager.write_file(sandbox_id, _GIT_ASKPASS_PATH, script.encode("utf-8"))
-        await self._manager.exec(sandbox_id, f"chmod 700 {shlex.quote(_GIT_ASKPASS_PATH)}", timeout=10)
+        await self._manager.exec(
+            sandbox_id, f"chmod 700 {shlex.quote(_GIT_ASKPASS_PATH)}", timeout=10
+        )
 
     @staticmethod
     def _parse_git_credentials(credentials: str) -> tuple[str, str]:
@@ -323,7 +353,10 @@ class SandboxOutputHandler:
                 if resp.status_code in (200, 201):
                     data = resp.json()
                     return data.get("html_url")
-                self._log(f"GitHub PR creation failed ({resp.status_code}): {resp.text[:300]}", "WARN")
+                self._log(
+                    f"GitHub PR creation failed ({resp.status_code}): {resp.text[:300]}",
+                    "WARN",
+                )
         except Exception as e:
             self._log(f"GitHub PR creation error: {e}", "WARN")
         return None

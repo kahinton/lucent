@@ -601,7 +601,12 @@ async def _get_sandbox_for_user_web(manager, user, sandbox_id: str) -> dict:
 
 @router.post("/sandboxes/{sandbox_id}/stop")
 async def stop_sandbox_web(request: Request, sandbox_id: str):
-    """Stop a sandbox from the web UI."""
+    """Stop a sandbox from the web UI.
+
+    The manager decides whether the backend can preserve state; on a
+    backend that cannot (ACI) this destroys the sandbox and records it as
+    ``destroyed``.
+    """
     user = await get_user_context(request)
     _require_org_membership(user)
     await _check_csrf(request)

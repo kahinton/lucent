@@ -5,6 +5,7 @@ from math import ceil
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
+from lucent.api.models import safe_media_type
 from lucent.db import get_pool
 from lucent.db.projects import ProjectNotFoundError, ProjectRepository
 from lucent.storage import UserFileService
@@ -85,7 +86,8 @@ async def file_detail(request: Request, file_id: str):
         org_id=str(user.organization_id), user_id=str(user.id)
     ))["items"]
     preview = None
-    if item["mime_type"].startswith("text/") or item["mime_type"] in {
+    stored_mime_type = safe_media_type(item["mime_type"])
+    if stored_mime_type.startswith("text/") or stored_mime_type in {
         "application/json",
         "application/xml",
     }:
@@ -123,7 +125,7 @@ async def file_revision_content(request: Request, file_id: str, revision_number:
         )
     return Response(
         content=content,
-        media_type=item["mime_type"],
+        media_type=safe_media_type(item["mime_type"]),
         headers={
             "Content-Disposition": (
                 f'attachment; filename="revision-{revision_number}-{item["filename"]}"'
@@ -146,7 +148,8 @@ async def file_content(request: Request, file_id: str, download: bool = False):
     await UserFileService(await get_pool()).repository.mark_current_revision_viewed_owned(
         file_id, str(user.organization_id), str(user.id)
     )
-    active_content = item["mime_type"] in {
+    media_type = safe_media_type(item["mime_type"])
+    active_content = media_type in {
         "text/html",
         "application/xhtml+xml",
         "image/svg+xml",
@@ -154,7 +157,7 @@ async def file_content(request: Request, file_id: str, download: bool = False):
     disposition = "attachment" if download or active_content else "inline"
     return Response(
         content=content,
-        media_type=item["mime_type"],
+        media_type=media_type,
         headers={
             "Content-Disposition": f'{disposition}; filename="{item["filename"]}"',
             "Content-Security-Policy": "sandbox; default-src 'none'",

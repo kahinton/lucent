@@ -352,11 +352,18 @@ async def write_sandbox_file(
 
 @router.post("/{sandbox_id}/stop")
 async def stop_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
-    """Stop a sandbox (preserves state)."""
+    """Stop a sandbox and report what actually happened to it.
+
+    State is preserved only when the configured backend supports it. A
+    backend that cannot preserve state across a stop destroys the sandbox
+    instead (Azure Container Instances deletes the container group and its
+    workspace), in which case the returned status is ``destroyed`` rather
+    than ``stopped``.
+    """
     await _get_sandbox_for_user(sandbox_id, user)
     manager = get_sandbox_manager()
-    await manager.stop(sandbox_id)
-    return {"id": sandbox_id, "status": "stopped"}
+    status = await manager.stop(sandbox_id)
+    return {"id": sandbox_id, "status": status}
 
 
 @router.delete("/{sandbox_id}")
