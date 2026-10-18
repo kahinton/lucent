@@ -942,10 +942,13 @@ async def _run_message_memory_lookup_hook(
     """Message-phase injection layer (living-memory pipeline, design §2–§5).
 
     Takes the latest user message, extracts deterministic terms, searches the
-    memory API, filters results client-side on ``similarity_score`` and the
-    per-conversation dedup set, and injects up to ``max_memories`` memories
-    with FULL content (one batched ``get_memories`` call, ~6KB byte budget;
-    search-preview lines for anything past the budget). Pre-search failure
+    memory API, filters results client-side on ``similarity_score``, and
+    injects up to ``max_memories`` memories with FULL content (one batched
+    ``get_memories`` call, ~6KB byte budget; search-preview lines for
+    anything past the budget). The score-spread cut and cross-turn dedup set
+    apply only when the decision-model gate is off; with the gate on it
+    screens every similarity-qualified candidate and is the relevance
+    authority. Pre-search failure
     modes (no bridge, no terms, later rounds) no-op silently; once the search
     has run, a no-injection turn emits an explicit ``memory-lookup: 0
     injected`` silence line so it is distinguishable from a didn't-run turn.
@@ -1074,8 +1077,23 @@ async def _run_message_memory_lookup_hook(
         set(),
     )
 
-    # Client-side threshold + dedup filter (design §4.3, §5.3 rule 3): score
-    # gate first, then dedup before the cap so dedup never wastes a slot.
+    # Client-side threshold filter (design §4.3): the absolute similarity
+    # floor always applies. The two recall-suppressing heuristics after it —
+    # the per-window score-spread cut and the cross-turn dedup set — are
+    # gate-off rules only:
+    #
+    #   * When the decision-model gate is active it is the relevance
+    #     authority. A candidate dropped by the score-spread rule never
+    #     reaches the gate, so a relevant memory can be lost because an
+    #     unrelated top hit anchored the window (live case: a memory scoring
+    #     0.55 against a 0.78 top hit was cut before the model ever saw it).
+    #   * Hook context is transient — it is appended to one model invocation
+    #     and never persisted in llm_messages — so "injected on a previous
+    #     turn" does not mean the model still has it. Suppressing the memory
+    #     as deduped makes the model permanently forget it for the rest of
+    #     the conversation. With the gate on, the memory is re-evaluated
+    #     against the current turn and re-injected only if still relevant.
+    #
     # Skips are counted by reason so a no-injection turn can state why
     # (hook-UX silence line) instead of looking identical to a didn't-run turn.
     below_threshold = 0
@@ -1083,7 +1101,8 @@ async def _run_message_memory_lookup_hook(
     deduped = 0
     injected: list[tuple[dict[str, Any], float]] = []
     max_score_drop = max(0.0, min(_message_lookup_max_score_drop(), 1.0))
-    collect_all = decision_gate is not None
+    gate_active = decision_gate is not None
+    collect_all = gate_active
     for memory in candidates:
         try:
             score = float(memory.get("similarity_score") or 0.0)
@@ -1096,11 +1115,11 @@ async def _run_message_memory_lookup_hook(
             score_drop = float(memory.get("_injection_min_query_score_drop") or 0.0)
         except (TypeError, ValueError):
             score_drop = 0.0
-        if score_drop > max_score_drop:
+        if not gate_active and score_drop > max_score_drop:
             below_score_spread += 1
             continue
         memory_id = str(memory.get("id") or "")
-        if memory_id and memory_id in injected_memory_ids:
+        if not gate_active and memory_id and memory_id in injected_memory_ids:
             deduped += 1
             continue
         injected.append((memory, score))
@@ -1146,11 +1165,20 @@ async def _run_message_memory_lookup_hook(
                 decision_gate_failure = outcome.error
                 decision_overflow = 0
             else:
-                kept = [
-                    (memory, score)
-                    for (memory, score), (field, _memory) in zip(gated_window, gated)
-                    if field in outcome.kept_fields
-                ]
+                # The gate is the relevance authority, so survivors are
+                # ordered by its score before the inject_max_memories cap:
+                # a lower-similarity memory the model judged most relevant
+                # must not lose a slot to a higher-similarity neighbour.
+                ranked_kept = sorted(
+                    (
+                        (outcome.scores.get(field, 0.0), memory, score)
+                        for (memory, score), (field, _memory) in zip(gated_window, gated)
+                        if field in outcome.kept_fields
+                    ),
+                    key=lambda item: item[0],
+                    reverse=True,
+                )
+                kept = [(memory, score) for _gate_score, memory, score in ranked_kept]
                 decision_gated = len(gated_window) - len(kept)
                 injected = kept
         except Exception as exc:

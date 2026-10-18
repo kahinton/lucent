@@ -1,20 +1,29 @@
 """Decision-model relevance gate for the message memory injection hook.
 
 Second application of the System One decision client (
-:mod:`lucent.llm.decision`): after the heuristic filters in
-``_run_message_memory_lookup_hook`` (similarity floor, score-drop spread,
-session dedup), the surviving candidates plus a bounded conversation state
-are sent to a decision-class model in ONE ``/v1/systemone`` call — one
-``noul`` question per candidate — and only candidates the model scores at
-or above ``memory.inject_decision_gate_threshold`` are injected.
+:mod:`lucent.llm.decision`): after the absolute similarity floor in
+``_run_message_memory_lookup_hook``, the surviving candidates plus a bounded
+conversation state are sent to a decision-class model in ONE
+``/v1/systemone`` call — one ``noul`` question per candidate — and only
+candidates the model scores at or above
+``memory.inject_decision_gate_threshold`` are injected.
 
-Placement (hooks.py): the gate sits between dedup and the
-``inject_max_memories`` cap, because gating the already-capped set could
+While the gate is active it is the relevance authority, so the two
+recall-suppressing heuristics ahead of it stay gate-off only: the per-window
+score-spread cut (it can drop a relevant memory because an unrelated top hit
+anchored the window) and the cross-turn dedup set (hook context is transient,
+so a memory injected on an earlier turn is no longer in the model's context
+and must be re-evaluated rather than permanently suppressed).
+
+Placement (hooks.py): the gate sits after the similarity floor and before
+the ``inject_max_memories`` cap, because gating the already-capped set could
 only confirm what the similarity threshold picked and never sharpen
-anything. Candidate search previews (~1000 chars) are used as the memory
-state; the batched ``get_memories`` full-content fetch stays after
-selection, so the gate never moves a larger speculative call ahead of the
-model.
+anything. With the gate active the hook collects every similarity-qualified
+candidate (bypassing the gate-off score-spread and cross-turn dedup rules)
+so the model — not a prefilter — decides what is relevant. Candidate search
+previews (~1000 chars) are used as the memory state; the batched
+``get_memories`` full-content fetch stays after selection, so the gate never
+moves a larger speculative call ahead of the model.
 
 Fail-open everywhere, enforced by the CALLER (the hook wraps this module
 and must never let an exception escape — ``HookManager`` renders escaping
@@ -59,7 +68,13 @@ MEMORY_INJECT_DECISION_TIMEOUT_SECONDS = 15.0
 _MEMORY_INJECT_DECISION_KEEP_ALIVE = "30m"
 _MEMORY_INJECT_DECISION_USER_TEXT_BUDGET = 4000
 _MEMORY_INJECT_DECISION_HISTORY_BUDGET = 4000
-_MEMORY_INJECT_DECISION_HISTORY_MESSAGES = 8
+# Keep the conversation window short. The decision model is a small classifier
+# and long meta-conversations (especially ones discussing gating/injection)
+# bleed into the relevance judgment: with the previous 8-message window a
+# memory that literally contained the phrase the user asked about scored
+# 0.02-0.59 and was filtered, while the same state with the last 4 messages
+# scored 0.98-0.99. Two turns are enough to resolve pronouns; more is noise.
+_MEMORY_INJECT_DECISION_HISTORY_MESSAGES = 4
 _MEMORY_INJECT_DECISION_PROJECT_BUDGET = 300
 _MEMORY_INJECT_DECISION_MEMORY_BUDGET = 600
 _MEMORY_INJECT_DECISION_CONTENT_BUDGET = 500
@@ -192,6 +207,13 @@ def _memory_state(memory: dict[str, Any]) -> str:
         str(tag) for tag in (memory.get("tags") or [])[:8] if str(tag).strip()
     )
     parts = []
+    # The id prefix lets the decision model match an explicit user reference
+    # ("the memory ending in 4f4bd136") to the right candidate. Question names
+    # stay memory_<n>, so odd id strings can never leak into the 128-char
+    # question-name limit; the id is only ever body text.
+    memory_id = str(memory.get("id") or "")[:8]
+    if memory_id:
+        parts.append(f"Id: {memory_id}")
     if tags:
         parts.append(f"Tags: {tags}")
     memory_type = str(memory.get("type") or "").strip()

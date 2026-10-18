@@ -320,6 +320,98 @@ async def test_gate_window_caps_questions_and_counts_overflow(monkeypatch):
     assert metadata["skipped"] == 4
 
 
+# ── gate is the relevance authority (no pre-gate recall cuts) ───────────────
+
+
+@pytest.mark.asyncio
+async def test_gate_sees_candidate_outside_score_spread(monkeypatch):
+    """A relevant memory more than ``max_score_drop`` below the window's top
+    hit is still sent to the decision model; the pre-gate spread cut must not
+    hide it from the gate."""
+    _patch_gate(monkeypatch)
+    _patch_model_id(monkeypatch, "nimble")
+    recorder = _RecordingDecide({"memory_1": 0.1, "memory_2": 0.9})
+    monkeypatch.setattr(gate_module, "_decide", recorder)
+
+    top = _memory("11111111-1111-1111-1111-111111111111", 0.8, "unrelated top hit")
+    top["_injection_min_query_score_drop"] = 0.0
+    buried = _memory(
+        "22222222-2222-2222-2222-222222222222", 0.5, "the memory the user asked about"
+    )
+    buried["_injection_min_query_score_drop"] = 0.3  # beyond the 0.15 spread
+    bridge = FakeBridge([top, buried])
+    manager = HookManager(session_state={})
+    outcome = await manager.before_model_call(
+        messages=_messages("did you see the memory ending in 22222222?"),
+        memory_bridge=bridge,
+    )
+    request = recorder.requests[0]
+    assert list(request.questions) == ["memory_1", "memory_2"]
+    # The id prefix is in the state so the model can match an explicit reference.
+    assert "Id: 22222222" in request.state["memory_2"]
+    execution = outcome.injectable_executions[0]
+    assert "the memory the user asked about" in execution.text
+    assert "unrelated top hit" not in execution.text
+    metadata = execution.metadata
+    assert metadata["decision_gated"] == 1
+    assert metadata["below_score_spread"] == 0
+    assert metadata["memory_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_gate_orders_kept_memories_by_relevance_score(monkeypatch):
+    """Survivors are ordered by the gate's score, not search similarity, so a
+    lower-similarity memory judged most relevant wins a cap slot first."""
+    _patch_gate(monkeypatch)
+    _patch_model_id(monkeypatch, "nimble")
+    monkeypatch.setattr(
+        gate_module, "_decide", _RecordingDecide({"memory_1": 0.71, "memory_2": 0.95})
+    )
+    bridge = FakeBridge([
+        _memory("11111111-1111-1111-1111-111111111111", 0.8, "high similarity low relevance"),
+        _memory("22222222-2222-2222-2222-222222222222", 0.5, "lower similarity high relevance"),
+    ])
+    manager = HookManager(session_state={})
+    outcome = await manager.before_model_call(
+        messages=_messages("injection threshold question"), memory_bridge=bridge,
+    )
+    text = outcome.injectable_executions[0].text
+    assert text.index("lower similarity high relevance") < text.index(
+        "high similarity low relevance"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gate_reinjects_memory_from_previous_turn(monkeypatch):
+    """Hook-injected context is transient, so a memory seen on turn 1 is
+    re-evaluated (and re-injected when still relevant) on turn 2 instead of
+    being suppressed by the cross-turn dedup set."""
+    _patch_gate(monkeypatch)
+    _patch_model_id(monkeypatch, "nimble")
+    monkeypatch.setattr(gate_module, "_decide", _RecordingDecide({"memory_1": 0.9}))
+
+    memory_id = "44444444-4444-4444-4444-444444444444"
+    bridge = FakeBridge([_memory(memory_id, 0.6, "memory from turn one")])
+    state: dict[str, Any] = {}
+    manager = HookManager(session_state=state)
+
+    first = await manager.before_model_call(
+        messages=_messages("first question"), memory_bridge=bridge,
+    )
+    assert "memory from turn one" in first.injectable_executions[0].text
+    assert memory_id in state["injected_memory_ids"]
+
+    second = await manager.before_model_call(
+        messages=_messages("what was that memory ending in 44444444?"),
+        memory_bridge=bridge,
+    )
+    execution = second.injectable_executions[0]
+    assert "memory from turn one" in execution.text
+    assert execution.metadata["memory_count"] == 1
+    assert execution.metadata["deduped"] == 0
+    assert execution.metadata["decision_gated"] == 0
+
+
 # ── daemon-style path (no session_state / no explicit user text) ────────────
 
 
@@ -403,7 +495,32 @@ def test_build_gate_state_omits_empty_fields_and_caps_window():
         "user_message",
         *[f"memory_{n}" for n in range(1, MEMORY_INJECT_DECISION_MAX_QUESTIONS + 1)],
     ]
-    assert state["memory_1"] == "Content: mem 0"
+    assert state["memory_1"] == "Id: aaaaaaaa | Content: mem 0"
+
+
+def test_build_gate_state_limits_conversation_window():
+    """Only a short history is rendered: long meta-conversations poison the
+    small decision model's relevance judgment."""
+    from lucent.llm.memory_injection_gate import (
+        _MEMORY_INJECT_DECISION_HISTORY_MESSAGES as HISTORY_MESSAGES,
+        build_gate_state,
+    )
+
+    messages = []
+    for index in range(10):
+        messages.append({"role": "user", "content": f"older user message {index}"})
+        messages.append({"role": "assistant", "content": f"older assistant reply {index}"})
+    messages.append({"role": "user", "content": "current question"})
+    state, _gated = build_gate_state(
+        user_text="current question",
+        messages=messages,
+        session_state=None,
+        candidates=[],
+    )
+    lines = state["conversation"].split("\n")
+    assert len(lines) == HISTORY_MESSAGES
+    assert lines[-1] == "assistant: older assistant reply 9"
+    assert "older user message 6" not in state["conversation"]
 
 
 def test_build_gate_questions_share_one_template():
