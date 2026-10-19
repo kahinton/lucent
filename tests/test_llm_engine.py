@@ -1166,12 +1166,17 @@ class TestModelEngineValidation:
         with pytest.raises(ValueError, match="Invalid engine value"):
             normalize_engine("bad-engine")
 
-    def test_copilot_unsupported_provider_warns(self):
+    def test_unsupported_provider_rejected(self):
         from lucent.llm.model_engine_validation import validate_engine_override
 
-        warnings = validate_engine_override("mistral", "copilot")
-        assert warnings
-        assert "may not be supported by Copilot SDK" in warnings[0]
+        with pytest.raises(ValueError, match="No engine supports provider"):
+            validate_engine_override("mistral", "copilot")
+
+    def test_incompatible_engine_rejected(self):
+        from lucent.llm.model_engine_validation import validate_engine_override
+
+        with pytest.raises(ValueError, match="cannot run provider"):
+            validate_engine_override("google", "claude_code")
 
     def test_langchain_missing_provider_package_errors(self, monkeypatch):
         from lucent.llm import model_engine_validation as mev

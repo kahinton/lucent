@@ -38,6 +38,8 @@ Write a clear title (under 80 characters), a self-contained description, and cal
 
 When a request advances an active structured goal milestone, pass that goal and milestone to `create_request`. Otherwise link the request to the relevant goal after creation.
 
+A request may also carry `backend_id` (coding-engine backend) and `requested_model` (model). Tasks created from the request inherit both at insert time unless a task overrides them, so set them at request level when the whole request should run one way. Choose the pair from `list_available_models`' `execution_targets`: pass a row's `model` and `backend_id`. Naming a model alone uses its `default_engine`; the model is not restricted to one engine. For a local-provider backend (Ollama / LM Studio), also choose one of that backend's models — set `requested_model`, or rely on the backend's `config.model`; the request is rejected without one.
+
 ```
 create_request(
   title="Short title for the work",
@@ -58,7 +60,7 @@ After creating or linking the request, tell the user what is being tracked or qu
 Use this path only as the daemon cognitive planner after a request exists. Do not ask the chat agent to perform it.
 
 1. **Read the request and context** — Confirm the request is self-contained, inspect linked goals and memories, and identify its completion evidence.
-2. **Break into tasks** — Decompose only when multiple independently accountable steps are needed. Keep each task completable within a single 720-second session (see [Task Size](#task-size)).
+2. **Break into tasks** — Decompose only when multiple independently accountable steps are needed. Keep each task completable within a single 3600-second session (see [Task Size](#task-size)).
 3. **Verify task descriptions** — Each task description must be self-contained. An agent reading only the description should understand what to do without external context. Run every description through the [Description Checklist](#description-checklist).
 4. **Submit tasks** — Call `create_task()` for each task, setting `request_id` to the request already received. Follow the [Per-Task Authoring](#per-task-authoring) steps below.
 
@@ -68,10 +70,10 @@ For each task within a request, follow these steps:
 
 1. **Define the goal** — State the single, specific outcome this task must produce. One task = one deliverable.
 2. **Write the description** — Follow the [Description Checklist](#description-checklist). The description must be self-contained — an agent reading only this should know exactly what to do.
-3. **Choose agent_type** — Match the task to an agent using the [Agent Type Selection](#agent-type-selection) table. If it edits files → `code`. If it reads and synthesizes → `research`.
-4. **Set priority and size** — Use [Priority Calibration](#priority-calibration) for priority. Ensure the task fits within a single 720-second session (see [Task Size](#task-size)); decompose if too large.
+3. **Choose agent_type** — Pick a name returned by `list_agent_definitions(status='active')` (the [Agent Type Selection](#agent-type-selection) table gives examples). If it edits files → `code`. If it reads and synthesizes → `research`.
+4. **Set priority and size** — Use [Priority Calibration](#priority-calibration) for priority. Ensure the task fits within a single 3600-second session (see [Task Size](#task-size)); decompose if too large.
 5. **Add context** — Include specific file paths, search terms, constraints, and references to prior task results stored in memory. Omit nothing the agent would need.
-6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=..., backend_id=...)`. Set `model` per the model-selection skill (MANDATORY). Set `backend_id` too when the request's work should run on a coding engine (Copilot / Claude Code / Codex) — choose one backend via `list_engines` and apply it to every comparable task in the request (see the model-selection skill's Coding Engines section).
+6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=..., backend_id=...)`. `model` is optional: omit it and the daemon selects a default. Set it only when the task clearly needs a specialized capability (see the model-selection skill). Tasks inherit the parent request's `backend_id` and `requested_model` unless overridden, so set them at request level for consistent execution. To run work on a coding engine, choose an `execution_targets` row from `list_available_models` and set both its `model` and `backend_id`; naming the model alone uses its `default_engine` instead. Do not assume a model is pinned to one engine — the model's `engine` is its default, and any compatible engine is selectable through that engine's backend.
 
 ### Target Repository
 
@@ -99,6 +101,11 @@ The description is the sub-agent's **entire understanding of what to do** (combi
 
 ## Agent Type Selection
 
+Agent types are dynamic: available definitions depend on the deployment and the
+request owner's access. Call `list_agent_definitions(status='active')` and use a
+name it returns — it is the source of truth. The table below is examples only,
+not an exhaustive list.
+
 | Agent type | Use when | Examples |
 |-----------|----------|---------|
 | `code` | Task edits files, runs tests, builds, or lints | Fix a bug, write tests, refactor a module |
@@ -109,6 +116,7 @@ The description is the sub-agent's **entire understanding of what to do** (combi
 | `planning` | Task decomposes goals into actionable steps | Break down a feature, create a roadmap |
 | `assessment` | Task discovers and profiles an environment | New workspace analysis, tool inventory |
 | `definition-engineer` | Task creates or improves agent definitions or skills | Build a new agent for a domain, improve an existing skill, extract capability from a pattern |
+| `decision-step` | Task is a System One choice/noul/score decision; requires `decision_config` | Classify an input, route a ticket, score a candidate |
 
 **Rule of thumb:** If it edits files → `code`. If it reads and synthesizes → `research`. If it touches memories → `memory`.
 
@@ -116,6 +124,7 @@ The description is the sub-agent's **entire understanding of what to do** (combi
 
 | Priority | When to use |
 |----------|------------|
+| `urgent` | Critical and time-sensitive; dispatches ahead of `high` |
 | `high` | Blocking other work, user-requested, or a bug fix |
 | `medium` | Normal development work (default) |
 | `low` | Cleanup, exploration, nice-to-have |
@@ -124,7 +133,7 @@ The daemon dispatches up to 2 tasks per cycle, highest priority first.
 
 ## Task Size
 
-Tasks must complete within a single 720-second session. If a task is too large, decompose it:
+Tasks must complete within a single 3600-second session. If a task is too large, decompose it:
 
 ### Sequential Pattern (each builds on the last)
 ```
@@ -145,7 +154,7 @@ Task C (research, medium): "Investigate connection pool sizing best practices"
 ## Validation
 
 After completion, the daemon validates task results:
-- Result must be non-empty (>50 characters)
+- Result must be non-empty (>=100 characters)
 - Must not contain only error messages
 - Must reference the task objective
 

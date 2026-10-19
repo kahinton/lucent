@@ -13,7 +13,8 @@ hardcoding model IDs that may not be enabled in a deployment.
 
 - Creating a task via `create_task` and deciding whether to set the `model` field
 - Deciding whether a task should run on a **coding engine** (Copilot / Claude
-  Code / Codex) and, if so, which backend — see [Coding Engines](#coding-engines)
+  Code / Codex) and, if so, which backend — see [Models, Providers, and
+  Engines](#models-providers-and-engines)
 - Daemon dispatch deciding which model to assign to a sub-agent
 - Reviewing task failures that might be caused by model mismatch
 - Optimizing cost by avoiding premium models where the default is sufficient
@@ -25,34 +26,102 @@ clear reason to specialize. Model catalogs are provider- and user-specific, so
 do not hardcode model IDs in plans, prompts, or task decomposition. Ask for the
 available models and choose by capability category.
 
-## Coding Engines
+## Models, Providers, and Engines
 
-Most work runs through the general LLM layer and needs only a `model`. Separately,
-Lucent can run a task on a **coding engine** — GitHub Copilot, Claude Code, or
-OpenAI Codex — by setting the task's `backend_id`. Each engine runs either its own
-provider's models or a local model server (e.g. Ollama).
+Every model has a `provider` and a derived list of compatible `engines`. The
+`engine` stored on a model is only its **default engine** — it does not restrict
+where that model can run.
 
-Call `list_engines` to see the engines, their availability, and the backends
-available to you. Every backend lists the models it can run and may declare a
-`default_model`.
+Call `list_available_models(agent_type="<type>")` and select from its
+`execution_targets` list. Each row is a concrete model + engine + backend
+pairing:
+
+```json
+{"model": "...", "provider": "anthropic", "engine": "copilot",
+ "engine_display": "GitHub Copilot", "backend_id": "...",
+ "backend_name": "...", "available": true, "default": false}
+```
+
+The controlled provider→engine map is:
+
+| Provider | Compatible engines |
+|---|---|
+| `anthropic` | `langchain`, `copilot`, `claude_code` |
+| `copilot` | `copilot` |
+| `google` | `langchain`, `copilot` |
+| `lmstudio` | `copilot`, `codex` |
+| `ollama` | `langchain`, `copilot`, `claude_code`, `codex` |
+| `openai` | `langchain`, `copilot`, `codex` |
+| `xai` | `copilot` |
+
+`custom` has no engine yet and is omitted from the map.
+
+**Default engine.** Naming a model with no `backend_id` runs it on that model's
+`default_engine`. The default is `langchain` for Ollama; for other providers it
+is the deployment's configured default engine (`LUCENT_LLM_ENGINE`, currently
+`copilot`) when compatible, otherwise `langchain`, otherwise the first compatible
+engine. A model's own stored `engine` (when set) is its default engine. The
+`default` flag on an execution target marks the default target.
+
+**Choosing a target.**
+
+- General work: pick an `available` execution target, or omit `model` and
+  `backend_id` to use default routing.
+- Different engine: pass both `model` and that row's `backend_id` to
+  `create_task`. The backend pins the engine; naming the model alone uses its
+  default engine instead.
+- Validity: a pairing is valid only when `model.provider == backend.provider`.
+  Backend creation, task validation (`validate_backend_selection`), and engine
+  overrides (`validate_engine_override`) enforce the map.
+- Local providers need a configured backend to run on a coding engine. A local
+  model named without `backend_id` runs on its default engine (for Ollama,
+  `langchain`).
+- Decision models (`decision_model: true`) have no `execution_targets` — never
+  choose one for normal task work.
+
+Call `list_engines` for backend detail: each engine carries
+`supported_providers`; each backend carries `provider`, `provider_label`,
+`provider_supported`, `enabled`, `default_model`, and the `models` it can run.
+Only use backends whose `enabled` flag is true. If a backend declares a
+`default_model`, you may omit `model` and the backend's default is used.
+
+```text
+list_available_models(agent_type="code")   # catalog + execution_targets
+create_task(request_id=..., title=..., description=..., agent_type="code",
+            model="<target model>", backend_id="<target backend_id>")
+```
 
 Choose a coding engine when the task is genuine code work that benefits from the
 engine's own agent loop and tooling (file edits, refactors, multi-file
-implementation, sustained edit-test cycles). Otherwise leave `backend_id` unset
-and just pick a `model` as above.
-
-```text
-list_engines()                       # engines + backends (+ each backend's models)
-create_task(request_id=..., title=..., description=..., agent_type="code",
-            model="<a model that backend lists>", backend_id="<backend id>")
-```
+implementation, sustained edit-test cycles). Otherwise use the general layer.
 
 **Be consistent within a request.** Decide once whether this request's work runs
-on a coding engine, and set the same `backend_id` on *every* task that does
-comparable work. Setting it on some tasks but not others yields mixed execution —
-part of the work on the engine, part on the general layer — and is almost always a
-mistake. If a backend declares a `default_model`, you may omit `model` and the
-backend's default is used.
+on a coding engine, and use the same execution target on *every* task doing
+comparable work. Setting `backend_id` on some tasks but not others yields mixed
+execution — part of the work on the engine, part on the general layer — and is
+almost always a mistake. A request can carry `backend_id` and `requested_model`
+itself; tasks created from it inherit both unless they override them.
+
+### Local providers
+
+Coding engines reach local models through a provider backend:
+
+- **Ollama** (>= 0.14) exposes OpenAI-, Anthropic-, and Codex-OSS-compatible
+  surfaces, so it works with all three coding engines.
+- **LM Studio** exposes OpenAI- and Codex-OSS-compatible surfaces (Copilot and
+  Codex).
+
+Claude Code speaks only the Anthropic Messages API. Its backend supplies the
+gateway URL from `config.base_url`, falling back to `OLLAMA_HOST`, then the
+provider default, along with `ANTHROPIC_AUTH_TOKEN` when the gateway requires
+auth. Choose the backend from `list_engines`; do not assemble these settings in
+a task description.
+
+**Local-provider pins need a model.** When pinning an Ollama or LM Studio
+backend, also name one of that backend's `models` (as `model` on a task, or
+`requested_model` on a request) unless the backend declares `config.model`.
+Request creation is rejected otherwise: there is no safe global default, and an
+auto-selected cloud model would be handed to the local engine.
 
 ## Capability Categories
 
@@ -80,8 +149,10 @@ Classify the task into one of these tiers:
 ### Step 2: Check Available Models and Default
 
 Call `list_available_models(agent_type="<type>")` to get the enabled model list,
-the configured `default_model`, and the selector's recommendation. Use the
-default unless task requirements clearly justify a specialized category.
+the configured `default_model`, the `provider_engine_map`, each model's
+`provider`, `default_engine`, and compatible `engines`, the flat
+`execution_targets` list, and the selector's recommendation. Use the default
+unless task requirements clearly justify a specialized category.
 
 ### Step 3: Consider Cost/Speed Tradeoff
 
@@ -100,8 +171,13 @@ Pick the default model unless the task's requirements match a specialized
 category. If overriding the default, note the reason in the task description or
 planning summary.
 
+For a plain model choice, set only `model` and use its default engine. To run it
+on a different engine, choose a matching row from `execution_targets` and pass
+that row's `backend_id` alongside the model.
+
 ```text
-create_task(request_id=..., title=..., model="<selected-model only if needed>", ...)
+create_task(request_id=..., title=..., model="<selected-model>",
+            backend_id="<target backend_id only when overriding the default engine>", ...)
 ```
 
 ## Reference: Task Type → Category Mapping
@@ -171,5 +247,6 @@ baseline recommendations. Override when:
 - **Always using premium reasoning models** — Most tasks don't need them.
 - **Ignoring task failures** — If a model consistently fails on a task type, try a different one rather than retrying with the same model.
 - **Specifying a model without a reason** — Let the default selector handle standard tasks.
+- **Treating a model's engine as a restriction** — The stored `engine` is only the default. Any compatible engine is valid when you pass that target's `backend_id`.
 - **Chasing new models** — A model being newer doesn't make it better for your specific task. Stick with what works until you have evidence otherwise.
 

@@ -78,9 +78,11 @@ def get_engine_for_model(model_id: str) -> LLMEngine:
             return engine
 
         provider = model_info.provider if model_info else _resolve_model(model_id)[0]
-        forced = engine_registry.engine_default_for_provider(provider)
-        if forced:
-            return engine_registry.get_engine(forced)
+        default = engine_registry.default_engine_for_provider(
+            provider, configured_default=get_engine_name()
+        )
+        if default:
+            return engine_registry.get_engine(default)
     except ImportError:
         pass
 

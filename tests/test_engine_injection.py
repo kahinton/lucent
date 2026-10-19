@@ -96,7 +96,20 @@ def test_compatible_providers_codex():
 
 def test_compatible_providers_copilot():
     names = {o["name"] for o in ei.compatible_provider_options("copilot")}
-    assert names == {"copilot", "ollama", "lmstudio"}
+    assert names == {
+        "anthropic",
+        "copilot",
+        "google",
+        "lmstudio",
+        "ollama",
+        "openai",
+        "xai",
+    }
+
+
+def test_compatible_providers_langchain():
+    names = {o["name"] for o in ei.compatible_provider_options("langchain")}
+    assert names == {"anthropic", "google", "ollama", "openai"}
 
 
 def test_compatible_providers_are_grouped():

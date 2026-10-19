@@ -168,6 +168,21 @@ class RequestCreate(BaseModel):
             "milestone must currently be 'active'."
         ),
     )
+    backend_id: str | None = Field(
+        default=None,
+        description=(
+            "Coding-engine backend pin for the work this request produces. "
+            "The daemon inherits it for tasks that do not override it."
+        ),
+    )
+    requested_model: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Model the daemon should run for this request's tasks unless a "
+            "task names one."
+        ),
+    )
 
 
 class TaskCreate(BaseModel):
@@ -263,6 +278,18 @@ async def create_request(
 ):
     from lucent.db.requests import RequestRepository
 
+    if body.backend_id:
+        from lucent.llm.backend_selection import validate_request_execution_pin
+
+        backend_error = await validate_request_execution_pin(
+            pool,
+            body.backend_id,
+            body.requested_model,
+            org_id=str(user.organization_id),
+        )
+        if backend_error:
+            raise HTTPException(422, backend_error)
+
     repo = RequestRepository(pool)
     return await repo.create_request(
         title=body.title,
@@ -274,6 +301,8 @@ async def create_request(
         dependency_policy=body.dependency_policy,
         goal_id=body.goal_id,
         goal_milestone_index=body.goal_milestone_index,
+        backend_id=body.backend_id,
+        requested_model=body.requested_model,
     )
 
 

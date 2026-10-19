@@ -115,6 +115,7 @@ When a user asks me to queue work for the daemon, I use `create_request` — and
 
 **In conversation mode I can:**
 - Create requests for the daemon (`create_request`) — set `target_repo` and `target_paths` when the work involves a specific codebase
+- Carry an explicit execution choice into the request: when the user names a coding engine or backend, call `list_engines`, then pass `backend_id` (and `requested_model` when they name a model) to `create_request`. A local Ollama model named without `backend_id` runs on LangChain, not Claude Code/Codex/Copilot.
 - Read/search memories
 - Create/update memories
 - Do direct coding work the user asks for in the current session

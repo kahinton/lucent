@@ -101,6 +101,23 @@ async def create_backend(body: BackendCreateRequest, request: Request, user: Aut
     _require_admin_user(user)
     org_id = _require_org(user)
     engine = _validate_engine(body.engine)
+    provider = body.provider.strip().lower()
+    from lucent.llm.engine_injection import (
+        compatible_provider_options,
+        provider_allowed_for_engine,
+    )
+
+    if not provider_allowed_for_engine(engine, provider):
+        allowed = ", ".join(
+            option["name"] for option in compatible_provider_options(engine)
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Engine '{engine}' cannot use provider '{provider}'. "
+                f"Supported providers: {allowed or 'none'}."
+            ),
+        )
     pool = await get_pool()
     repo = BackendRepository(pool)
     existing = await repo.list(org_id=org_id, engine=engine, provider=body.provider)
@@ -109,7 +126,7 @@ async def create_backend(body: BackendCreateRequest, request: Request, user: Aut
     backend = await repo.create(
         name=body.name,
         engine=engine,
-        provider=body.provider.strip().lower(),
+        provider=provider,
         config=body.config,
         secret_refs=body.secret_refs,
         is_enabled=body.is_enabled,

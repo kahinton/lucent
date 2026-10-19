@@ -16,9 +16,22 @@ def build_decomposition_prompt(request: dict[str, Any]) -> str:
     priority = request.get("priority") or "medium"
     milestone_index = request.get("goal_milestone_index")
     milestone_description = (request.get("goal_milestone_description") or "").strip()
+    pinned_backend = request.get("backend_id") or ""
+    requested_model = request.get("requested_model") or ""
     target_block = f"\n- target_repo: {target_repo}" if target_repo else ""
     if target_paths:
         target_block += f"\n- target_paths: {target_paths}"
+    execution_block = ""
+    if pinned_backend:
+        execution_block += f"\nPINNED BACKEND: {pinned_backend}"
+    if requested_model:
+        execution_block += f"\nPINNED MODEL: {requested_model}"
+    if execution_block:
+        execution_block += (
+            "\nThe request author already chose this execution target. Pass "
+            "backend_id and model to create_task exactly as pinned; do not "
+            "substitute another engine or model."
+        )
     milestone_block = ""
     if milestone_index and milestone_description:
         milestone_block = (
@@ -36,21 +49,25 @@ def build_decomposition_prompt(request: dict[str, Any]) -> str:
         f"REQUEST ID: {request_id}\n"
         f"TITLE: {title}\n"
         f"PRIORITY: {priority}\n"
-        f"{target_block}\n\n"
+        f"{target_block}{execution_block}\n\n"
         f"{milestone_block}\n\n"
         f"DESCRIPTION:\n{description}\n\n"
         "Procedure:\n"
         "1. Call list_available_models() once to see enabled models and the "
         "default_model. Use default_model unless a task has a clear need for a "
-        "specialized fast, reasoning, agentic, or visual model.\n"
+        "specialized fast, reasoning, agentic, or visual model. If the request "
+        "pins a coding-engine backend, also call list_engines() and choose a "
+        "model from that backend's models list.\n"
         "2. Decide on a task breakdown — typically 1 to 5 tasks. Each task should "
         "have a clear, actionable title and a short description of what it does.\n"
         "3. Call list_agent_definitions(status='active') and choose only "
         "agent_type names from agents visible to this request owner. For each task, "
         "call create_task(request_id=..., title=..., description=..., "
-        "agent_type=..., sequence_order=..., model=<optional>). Omit model for "
-        "standard/default tasks; set model only when "
-        "the available model list gives a concrete reason to specialize. Set "
+        "agent_type=..., sequence_order=..., model=<optional>, "
+        "backend_id=<optional>). Omit model for standard/default tasks; set model "
+        "only when the available model list gives a concrete reason to specialize "
+        "(or when PINNED MODEL is set above). When PINNED BACKEND is set, pass "
+        "backend_id on every task — a model name alone routes to LangChain. Set "
         "sequence_order so dependent tasks come after their prerequisites (0 for "
         "the first batch, 1 for the next, etc.).\n"
         "   When two or more sequential tasks need the same isolated workspace, "

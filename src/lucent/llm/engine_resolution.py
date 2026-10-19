@@ -6,7 +6,7 @@ so callers get backend-aware routing without duplicating the precedence rules.
 
 Precedence:
   1. An explicitly requested backend (API override).
-  2. A backend pinned on the task/workflow (``tasks.backend_id``).
+  2. A backend pinned on the task (``tasks.backend_id``).
   3. The model's own backend binding or its pinned (engine, provider) match.
   4. Task-type auto-routing (opt-in via ``models.engine_auto_route``).
   5. The existing routing in :mod:`lucent.llm.factory` — model ``engine``
@@ -27,6 +27,15 @@ from lucent.llm.engine import LLMEngine
 from lucent.logging import get_logger
 
 logger = get_logger("llm.engine_resolution")
+
+
+class PinnedBackendUnavailable(RuntimeError):
+    """An explicitly pinned backend is missing, disabled, or unreachable.
+
+    Explicit pins are a promise: silently rerouting a task to another engine
+    would run it somewhere the author did not choose (and, for a local
+    provider, with the wrong credentials). Callers fail the task instead.
+    """
 
 
 @dataclass(frozen=True)
@@ -115,15 +124,25 @@ async def resolve_engine(
         candidates = []
 
     # 1. Explicit request override.
-    backend = _find_backend(candidates, requested_backend)
-    if backend:
+    if requested_backend:
+        backend = _find_backend(candidates, requested_backend)
+        if backend is None:
+            raise PinnedBackendUnavailable(
+                f"Requested backend '{requested_backend}' is missing, disabled, "
+                "or not visible to this organization."
+            )
         return EngineResolution(
             engine_registry.get_engine(backend["engine"]), backend, "requested_backend"
         )
 
-    # 2. Per-task / per-workflow pin.
-    backend = _find_backend(candidates, task_backend_id)
-    if backend:
+    # 2. Per-task pin.
+    if task_backend_id:
+        backend = _find_backend(candidates, task_backend_id)
+        if backend is None:
+            raise PinnedBackendUnavailable(
+                f"Pinned backend '{task_backend_id}' is missing, disabled, or "
+                "not visible to this organization."
+            )
         return EngineResolution(
             engine_registry.get_engine(backend["engine"]), backend, "task_backend"
         )

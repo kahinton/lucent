@@ -133,12 +133,37 @@ async def list_models(user: AuthenticatedUser, limit: int = 100, offset: int = 0
     # disabled, granted or not — so they can manage grants and the approval
     # toggle. *Use* is what the clearance-driven paths (picker, chat turn,
     # daemon) decide; this view stays org-scoped legacy.
-    return await ModelRepository(pool).list_models(
+    result = await ModelRepository(pool).list_models(
         org_id=str(user.organization_id),
         enabled_only=False,
         limit=limit,
         offset=offset,
     )
+    from lucent.llm.engine_registry import (
+        compatible_engines,
+        default_engine_for_provider,
+        provider_engine_map,
+        provider_label,
+    )
+    from lucent.settings import llm_engine_name
+
+    configured_default = llm_engine_name()
+    for item in result.get("items", []):
+        item["provider_label"] = provider_label(item.get("provider") or "")
+        if item.get("model_class") == "decision":
+            item["compatible_engines"] = []
+            item["default_engine"] = None
+            continue
+        item["compatible_engines"] = compatible_engines(
+            item.get("provider") or "", configured_default=configured_default
+        )
+        item["default_engine"] = item.get("engine") or default_engine_for_provider(
+            item.get("provider") or "", configured_default=configured_default
+        )
+    result["provider_engine_map"] = provider_engine_map(
+        configured_default=configured_default
+    )
+    return result
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

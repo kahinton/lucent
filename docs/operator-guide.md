@@ -154,7 +154,7 @@ An array of LLM model configurations. Each entry has:
 |---|---|---|---|
 | `id` | string | yes | Model identifier (e.g. `claude-opus-4.7`, `qwen2.5-coder-3b`). |
 | `provider` | string | yes | One of `anthropic`, `openai`, `google`, `ollama`, `copilot`. |
-| `engine` | string | yes | One of `copilot`, `langchain`. Controls which LLM backend processes requests. |
+| `engine` | string | yes | One of `copilot` or `langchain` in the operator CRD. The runtime registry also supports `claude_code` and `codex`, which can be selected through the API or UI once the model exists. |
 | `temperature` | number | no | Sampling temperature (provider-specific range). |
 | `maxTokens` | integer | no | Maximum output token limit. Minimum: 1. |
 

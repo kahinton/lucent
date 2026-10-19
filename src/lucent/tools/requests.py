@@ -506,6 +506,13 @@ goal_id/goal_milestone_index.
         for additional context memories (NOT for goals — use goal_id).
     target_repo: Optional repository this request targets (owner/repo format).
     target_paths: Optional list of specific directories or files this request targets.
+    backend_id: Optional coding-engine backend pin (from list_engines). The
+        daemon inherits it for every task it creates for this request unless a
+        task overrides it. Required to run a local Ollama model on Claude
+        Code/Codex/Copilot — a model name alone resolves to LangChain.
+    requested_model: Optional model the daemon should run for this request
+        (usually one of the backend's models). Inherited by tasks that do not
+        name a model.
 
 Returns: JSON with the created request including its ID. If the system refused,
 returns status='skipped' with reason and a note explaining what to do."""
@@ -521,10 +528,24 @@ returns status='skipped' with reason and a note explaining what to do."""
         memory_ids: list[dict] | None = None,
         target_repo: str = "",
         target_paths: list[str] | None = None,
+        backend_id: str | None = None,
+        requested_model: str | None = None,
     ) -> str:
         user_id, org_id, _, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+
+        if backend_id:
+            from lucent.llm.backend_selection import validate_request_execution_pin
+
+            backend_error = await validate_request_execution_pin(
+                await _get_pool(),
+                backend_id,
+                requested_model,
+                org_id=str(org_id),
+            )
+            if backend_error:
+                return json.dumps({"error": backend_error})
 
         repo = await _get_request_repository()
         req = await repo.create_request(
@@ -541,6 +562,8 @@ returns status='skipped' with reason and a note explaining what to do."""
             force_pending_approval=(memory_scope == "user"),
             goal_id=goal_id or None,
             goal_milestone_index=goal_milestone_index,
+            backend_id=backend_id,
+            requested_model=requested_model,
         )
 
         # Skip outcome — translate the DB-layer reason into actionable
@@ -653,8 +676,11 @@ Args:
     title: Short descriptive title for the task
     description: Full task instructions for the agent
     agent_type: Name of an approved agent definition to handle this task
-    model: LLM model to use for this task. If not set, the daemon
-        picks a default. See list_available_models for options.
+    model: LLM model to use for this task. Optional — if not set, the daemon
+        picks a default (or inherits the request's ``requested_model``). See
+        list_available_models for options. WARNING: a model name alone cannot
+        select a coding engine; Ollama models are stored on engine=langchain,
+        so they always resolve to LangChain unless ``backend_id`` is set.
     reasoning_effort: Optional reasoning/thinking level for models that expose
         selectable levels. Must be one of the chosen model's allowed values.
     priority: 'low', 'medium', 'high', or 'urgent'
@@ -689,7 +715,9 @@ Args:
     backend_id: Optional coding-engine backend to run this task on (e.g. a
         Codex or Claude Code backend, optionally against a local model server).
         Call list_engines to see the available backends and their IDs. Omit to
-        use the default routing.
+        inherit the request's ``backend_id`` (if any) or use the default
+        routing. For a local-provider backend, set ``model`` to one of that
+        backend's models unless it declares a default.
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved or the sandbox template is invalid."""
@@ -1156,6 +1184,9 @@ if the agent type is not approved or the sandbox template is invalid."""
                     str(task["sandbox_template_id"])
                     if task.get("sandbox_template_id")
                     else None
+                ),
+                "backend_id": (
+                    str(task.get("backend_id")) if task.get("backend_id") else None
                 ),
                 "sandboxes_enabled": org_sandboxes_enabled,
                 "custom_tooling_enabled": custom_tooling_enabled(organization_id=org_id),
@@ -2511,11 +2542,12 @@ Returns: JSON list of {goal_id, goal_title, next_milestone_index,
         description="""List available LLM models for task assignment.
 
 Use this to choose a model when creating tasks. Returns all available models
-with their categories, capabilities, provider info, and generic selection
-guidance. Default models should be used whenever there is no clear reason to
-pick a specialized model. Some models also expose selectable reasoning_efforts;
-use the provider default unless the task clearly benefits from lower latency or
-deeper reasoning.
+with their categories, capabilities, provider, the engines each model can run
+on, and a flat ``execution_targets`` list (model + engine + backend_id) that is
+the easiest way to assign work. Default models should be used whenever there is
+no clear reason to pick a specialized model. Some models also expose selectable
+reasoning_efforts; use the provider default unless the task clearly benefits
+from lower latency or deeper reasoning.
 
 Args:
     category: Optional filter — one of: general, fast, reasoning, agentic, visual,
@@ -2561,12 +2593,30 @@ provided, the recommended model plus a selection reason."""
         else:
             models = list_models(category=category)
         default_model = get_default_model_id(models) if models else None
+        from lucent.llm.backend_selection import model_execution_catalog
+        from lucent.settings import llm_engine_name
+
+        catalog = await model_execution_catalog(
+            await _get_pool(),
+            org_id=str(org_id) if org_id else None,
+            models=models,
+            configured_default=llm_engine_name(),
+        )
         result: dict = {
             "default_model": default_model,
             "guidance": (
                 "Use the default_model unless the task has a clear need for a "
                 "specialized category such as fast, reasoning, agentic, or visual. "
-                "daemon-dispatched tasks require tool-capable models, because "
+                "Every model carries its provider, a default_engine, and the "
+                "engines it can run on. To choose an execution target, pick a "
+                "row from execution_targets (model + engine + backend_id); pass "
+                "its model and backend_id to create_task. Omitting engine/backend "
+                "uses the model's default_engine. A local model (e.g. Ollama) "
+                "needs a configured backend to run on a coding engine — a model "
+                "name alone routes to the provider's default engine. Models "
+                "with decision_model=true have no execution_targets — never "
+                "choose them for task work. daemon-dispatched tasks require "
+                "tool-capable models, because "
                 "agents receive MCP tools for memory/request operations. Never "
                 "set a decision-class model (model_class 'decision') as a normal "
                 "task's model — it would be swapped for the default chat model at "
@@ -2579,22 +2629,9 @@ provided, the recommended model plus a selection reason."""
                 "for cheap simple work, and high/xhigh/max only for hard "
                 "analysis where extra latency and cost are justified."
             ),
-            "models": [
-                {
-                    "id": m.id,
-                    "name": m.name,
-                    "provider": m.provider,
-                    "model_class": m.model_class,
-                    "category": m.category,
-                    "supports_tools": m.supports_tools,
-                    "supports_vision": m.supports_vision,
-                    "context_window": m.context_window,
-                    "reasoning_efforts": m.reasoning_efforts,
-                    "notes": m.notes,
-                    "tags": m.tags,
-                }
-                for m in models
-            ]
+            "provider_engine_map": catalog["provider_engine_map"],
+            "models": catalog["models"],
+            "execution_targets": catalog["execution_targets"],
         }
         if agent_type and models:
             selection = select_model_for_task(
@@ -2620,14 +2657,25 @@ provided, the recommended model plus a selection reason."""
 Coding engines (GitHub Copilot, Claude Code, OpenAI Codex) run agent work with
 their own tools and models; everything else runs through the general LLM layer.
 Each engine has zero or more configured backends — pass a backend's ``id`` as
-``backend_id`` to ``create_task`` to run that task on the engine, optionally
-against a local model server (e.g. Ollama).
+``backend_id`` to ``create_request`` or ``create_task`` to run that work on the
+engine, optionally against a local model server (e.g. Ollama).
 
-Returns JSON: engines with availability, their supported model sources, and the
-configured backends (with ids)."""
+IMPORTANT: a local Ollama model has its own engine/backend binding (normally
+``engine="langchain"``). Naming that model without ``backend_id`` runs it on
+LangChain, NOT on Claude Code/Codex/Copilot. To run a local model on a coding
+engine you MUST pin the engine's backend and choose a model from that backend.
+
+Returns JSON: ``provider_engine_map`` (the controlled provider→engines map) and
+engines with availability, ``supported_providers``, and configured backends.
+Each backend carries ``id``, ``name``, ``provider``, ``provider_supported``,
+``enabled``, ``default_model`` and ``models``; each model carries its own
+``engine``/``backend_id`` binding plus ``supports_tools``. Prefer enabled
+backends with a ``default_model`` or a known model id."""
     )
     async def list_engines() -> str:
         from lucent.llm.backend_selection import engine_catalog
+        from lucent.llm.engine_registry import provider_engine_map
+        from lucent.settings import llm_engine_name
 
         _, org_id, _, _, _ = await _get_current_user_context()
         catalog = await engine_catalog(
@@ -2635,13 +2683,17 @@ configured backends (with ids)."""
         )
         return json.dumps(
             {
+                "provider_engine_map": provider_engine_map(
+                    configured_default=llm_engine_name()
+                ),
                 "engines": catalog,
                 "guidance": (
                     "Pass a backend id to create_task(backend_id=...) to run a task on that "
                     "engine. Each backend lists the models it can run (its ``models``) and an "
                     "optional ``default_model``; set the task's ``model`` to one of those. A "
                     "backend whose provider is a local server (e.g. Ollama) runs that server's "
-                    "models. Without a backend a task uses default routing."
+                    "models. Without a backend a task uses default routing. Prefer "
+                    "list_available_models' execution_targets when choosing model + engine."
                 ),
             }
         )

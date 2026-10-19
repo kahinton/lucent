@@ -523,21 +523,22 @@ MODEL_TAGS = [
     "research", "tools", "reflection", "general", "writing", "lightweight",
     "preview", "default",
 ]
-MODEL_PROVIDERS = ["anthropic", "copilot", "google", "ollama", "openai", "xai"]
+# Provider choices are derived from the engine registry's provider→engine map
+# (see ``provider_engine_map``) so the UI cannot drift from routing.
 
 
 def _engine_options() -> list[dict[str, str]]:
-    """Coding engines a model can be pinned to.
+    """All implemented engines a model's default engine can be set to.
 
-    Everything that does not run through a coding engine runs through the general
-    LangChain layer, so LangChain is not offered as an explicit engine choice —
-    the empty "Auto" option means the general LLM layer.
+    Compatibility is filtered per provider in the UI and enforced by
+    ``validate_engine_override``; the empty "Auto" option means the provider's
+    default engine.
     """
     from lucent.llm.engine_registry import engine_names, engine_spec
 
     return [
         {"name": name, "label": engine_spec(name).display_name}
-        for name in engine_names(kind="coding_agent")
+        for name in engine_names()
     ]
 
 
@@ -728,12 +729,72 @@ async def models_list(request: Request):
 
     backends = await BackendRepository(pool).list(org_id=str(user.organization_id))
     coding_engines = _coding_engines_context(backends, provider_statuses)
+
+    # Model → provider → compatible engines → configured backends. This is the
+    # same map the API/LLM surfaces use; do not special-case the UI.
+    from lucent.llm.engine_registry import (
+        compatible_engines,
+        default_engine_for_provider,
+        provider_engine_map,
+    )
+    from lucent.settings import llm_engine_name
+
+    configured_default = llm_engine_name()
+    for model in models:
+        if model.get("model_class") == "decision":
+            model["compatible_engines"] = []
+            model["default_engine"] = None
+            model["default_engine_label"] = "decision model"
+            continue
+        engines = compatible_engines(
+            str(model.get("provider") or ""), configured_default=configured_default
+        )
+        for engine in engines:
+            engine["backends"] = [
+                {
+                    "id": str(backend["id"]),
+                    "name": backend["name"],
+                    "enabled": backend.get("is_enabled", True),
+                }
+                for backend in backends
+                if backend["engine"] == engine["engine"]
+                and backend["provider"] == model.get("provider")
+            ]
+        model["compatible_engines"] = engines
+        model["default_engine"] = model.get("engine") or default_engine_for_provider(
+            str(model.get("provider") or ""), configured_default=configured_default
+        )
+        model["default_engine_label"] = next(
+            (
+                engine["display_name"]
+                for engine in engines
+                if engine["engine"] == model["default_engine"]
+            ),
+            model["default_engine"],
+        )
+    provider_map = provider_engine_map(configured_default=configured_default)
+    engine_providers: dict[str, list[str]] = {}
+    for provider_name, engine_names_for_provider in provider_map.items():
+        for engine_name in engine_names_for_provider:
+            engine_providers.setdefault(engine_name, []).append(provider_name)
+    # Only offer providers that at least one engine can run, plus any provider
+    # already present on a model (so existing rows stay visible/editable).
+    all_providers = sorted(
+        {
+            provider_name
+            for provider_name, engine_names_for_provider in provider_map.items()
+            if engine_names_for_provider
+        }
+        | set(providers)
+    )
     # The Copilot GitHub token is a coding-engine credential, not an LLM-provider
     # one — it is presented inside the Copilot engine card instead.
     llm_provider_statuses = [s for s in provider_statuses if s.get("provider") != "copilot"]
     from lucent.model_registry import list_models as _list_registry_models
 
     all_model_ids = [m.id for m in _list_registry_models(include_disabled=False)]
+    engine_options = _engine_options()
+    engine_labels = {option["name"]: option["label"] for option in engine_options}
 
     return templates.TemplateResponse(
         request,
@@ -747,8 +808,11 @@ async def models_list(request: Request):
             "all_categories": MODEL_CATEGORIES,
             "all_model_classes": MODEL_CLASSES,
             "all_tags": MODEL_TAGS,
-            "all_providers": MODEL_PROVIDERS,
-            "all_engines": _engine_options(),
+            "all_providers": all_providers,
+            "all_engines": engine_options,
+            "engine_labels": engine_labels,
+            "provider_engine_map": provider_map,
+            "engine_providers": engine_providers,
             "coding_engines": coding_engines,
             "all_model_ids": all_model_ids,
             "llm_provider_statuses": llm_provider_statuses,

@@ -65,6 +65,7 @@ async def list_engines(user: AuthenticatedUser, implemented_only: bool = False):
         for name, spec in ENGINE_REGISTRY.items()
         if spec.implemented or not implemented_only
     ]
+    from lucent.llm.engine_registry import provider_engine_map
     from lucent.llm.local_providers import LOCAL_PROVIDERS
 
     local_providers = [
@@ -78,4 +79,9 @@ async def list_engines(user: AuthenticatedUser, implemented_only: bool = False):
         }
         for spec in LOCAL_PROVIDERS.values()
     ]
-    return {"items": engines, "local_providers": local_providers, "total_count": len(engines)}
+    return {
+        "items": engines,
+        "local_providers": local_providers,
+        "provider_engine_map": provider_engine_map(),
+        "total_count": len(engines),
+    }

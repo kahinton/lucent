@@ -109,7 +109,7 @@ For a guided setup and configurations for other clients, see [Getting Started](d
 - **Autonomous daemon** — optional background planning, dispatch, scheduling, and maintenance.
 - **PostgreSQL persistence** — durable shared state, versions, access controls, and task history.
 - **Sandbox manager** — isolated Docker environments for code and tool work, with optional reuse across sequential tasks in a request.
-- **LLM engine layer** — provider flexibility through the GitHub Copilot SDK and LangChain-backed providers.
+- **LLM engine layer** — four engines: the general LangChain layer plus the GitHub Copilot, Claude Code, and OpenAI Codex coding harnesses.
 
 ## Ideas to try
 

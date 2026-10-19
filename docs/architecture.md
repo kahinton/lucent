@@ -174,22 +174,72 @@ Engines come in two **kinds**, described in a single data-driven registry
 - **`llm_access`** — `langchain`, the general LLM layer. Lucent owns the tool
   loop (`langchain_engine._run_with_tools` + `MCPToolBridge`).
 - **`coding_agent`** — product harnesses that bring their own agent loop, tools,
-  and auth: `copilot` (GitHub Copilot SDK) today; `claude_code` and `codex` are
-  declared in the registry (not yet implemented) so the taxonomy, validation,
-  and UI are already complete.
+  and auth: `copilot` (GitHub Copilot SDK), `claude_code` (Claude Agent SDK),
+  and `codex` (OpenAI Codex SDK).
 
-Each `EngineSpec` carries capability flags (`native_agent_loop`, `resume`,
-`hooks`, `managed_tools`, `expected_surface`, `injection`, `discovery`). Call
-sites branch on capabilities rather than engine-name strings, so adding an
-engine is a single spec plus its module.
+Each `EngineSpec` carries capability flags (`native_agent_loop`, `mcp`,
+`resume`, `attachments`, `hooks`, `managed_tools`, `expected_surface`,
+`reasoning_effort`, `injection`, `discovery`). Call sites branch on capabilities
+rather than engine-name strings, so adding an engine is a single spec plus its
+module.
+
+| Capability | `langchain` | `copilot` | `claude_code` | `codex` |
+|------------|-------------|-----------|---------------|---------|
+| Native agent loop | no | yes | yes | yes |
+| MCP | yes | yes | yes | yes |
+| Provider-native resume | no (replays message history) | yes | yes | yes |
+| Declarative hooks | yes | no (accepted and ignored) | no | no |
+| Managed tools | yes | no | no | no |
+| Reasoning effort | yes | yes | no | yes |
+| Catalog discovery | yes | yes | yes | no |
+
+### Model → provider → engines
+
+Every model record carries a `provider`. The `engine` stored on the model
+(`models.engine`) is only that model's **default engine** — it does not restrict
+which engines can run it. Compatibility is derived from each engine spec's
+`provider_support` and exposed as the controlled map:
+
+| Provider | Compatible engines |
+|---|---|
+| `anthropic` | `langchain`, `copilot`, `claude_code` |
+| `copilot` | `copilot` |
+| `google` | `langchain`, `copilot` |
+| `lmstudio` | `copilot`, `codex` |
+| `ollama` | `langchain`, `copilot`, `claude_code`, `codex` |
+| `openai` | `langchain`, `copilot`, `codex` |
+| `xai` | `copilot` |
+
+`custom` has no engine yet and is omitted from `provider_engine_map` (call it
+with `include_unsupported=True` to see it with an empty list).
+
+Default engine resolution: an explicit default entry (`ollama` → `langchain`),
+then the deployment's configured default engine (`LUCENT_LLM_ENGINE`, currently
+`copilot`) when compatible, then `langchain`, then the first compatible engine.
+
+`model_execution_catalog` (`lucent.llm.backend_selection`) builds the
+model-centric presentation shared by MCP and admin surfaces:
+
+- `provider_engine_map` — the map above.
+- `models[]` — each model's `provider`, `provider_label`, `default_engine`,
+  and compatible `engines[]` entries with `engine`, `display_name`, `default`,
+  `available`, `kind`, and configured `backends[]`.
+- `execution_targets[]` — flat `{model, provider, engine, engine_display,
+  backend_id, backend_name, available, default}` rows. This is the preferred
+  selection surface: callers pass a row's `model` and `backend_id` to
+  `create_task`, or omit both for default routing. Decision models have no
+  execution targets.
 
 A **backend** (`backends` table, migration 136) binds one engine to one provider
 family with non-secret `config` and secret references. `BackendRepository` and
 `resolve_backend_for_model` implement resolution; `lucent.llm.engine_resolution`
-applies it in precedence order: requested backend → task/workflow pin
+applies it in precedence order: requested backend → task pin
 (`tasks.backend_id`) → the model's own backend or `(engine, provider)` match →
-task-type auto-routing (`models.engine_auto_route`) → the existing
-factory routing (model `engine` override, provider default, configured default).
+task-type auto-routing (`models.engine_auto_route`) → default engine resolution.
+A model/backend pairing is valid only when the model's `provider` equals the
+backend's `provider`; `validate_backend_selection` and
+`validate_engine_override` enforce this, and backend creation validates the
+engine/provider pairing through the same map.
 
 Engines resolve provider credentials per call from the request organization
 (`audit_context["organization_id"]`), so per-name engine singletons stay
@@ -327,8 +377,24 @@ Approval and rejection of proposed definitions are human review actions and are 
 |------|---------|
 | `create_review` | Create a review for a request or task |
 | `list_reviews` | List reviews with filters |
-| `list_available_models` | List available LLM models for task assignment |
+| `list_available_models` | List models with providers, compatible engines, and execution targets |
 | `list_engines` | List coding engines (Copilot / Claude Code / Codex) and their backends + models |
+
+`list_available_models` returns `default_model`, `provider_engine_map`,
+`models[]` (each with `provider`, `provider_label`, `default_engine`, and
+`engines[]`), and the flat `execution_targets[]` list described above. Prefer
+`execution_targets` when assigning work: pass its `model` and `backend_id` to
+`create_task`.
+
+`list_engines` returns `provider_engine_map`, plus per coding engine its
+`available` flag, `supported_providers`, and `model_sources`, and the configured
+backends (`id`, `name`, `provider`, `provider_label`, `provider_supported`,
+`enabled`, `organization_id`, `default_model`, `models`). Each entry in a
+backend's `models` carries `id`, `name`, `engine`, `backend_id`, and
+`supports_tools` — the model's own default binding, which can differ from the
+backend listing it. Ollama models are discovered with `engine=langchain` as
+their default, so a model name alone resolves to LangChain;
+`create_task(backend_id=...)` is what selects another compatible engine.
 
 ### Export & Import Tools
 

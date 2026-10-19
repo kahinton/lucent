@@ -1243,6 +1243,8 @@ class RequestRepository:
         force_pending_approval: bool = False,
         goal_id: str | None = None,
         goal_milestone_index: int | None = None,
+        backend_id: str | None = None,
+        requested_model: str | None = None,
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
@@ -1393,9 +1395,10 @@ class RequestRepository:
                     organization_id, dependency_policy,
                     approval_status, approved_at,
                     target_repo, target_paths,
-                    goal_memory_id, goal_milestone_index)
+                    goal_memory_id, goal_milestone_index,
+                    backend_id, requested_model)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                           $12, $13)
+                           $12, $13, $14, $15)
                    RETURNING *""",
                 title,
                 description,
@@ -1410,6 +1413,8 @@ class RequestRepository:
                 target_paths,
                 UUID(goal_id) if goal_id else None,
                 goal_milestone_index,
+                UUID(backend_id) if backend_id else None,
+                requested_model,
             )
 
             # Link memories to the new request
@@ -2478,9 +2483,15 @@ class RequestRepository:
                     requesting_user_id, output_contract, decision_config,
                     fusion_config, backend_id)
                    VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                    COALESCE($14, (SELECT created_by FROM requests WHERE id = $1)),
-                    $15, $16, $17, $18
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    COALESCE($10, (SELECT requested_model FROM requests
+                                   WHERE id = $1 AND organization_id = $9)),
+                    $11, $12, $13,
+                    COALESCE($14, (SELECT created_by FROM requests
+                                   WHERE id = $1 AND organization_id = $9)),
+                    $15, $16, $17,
+                    COALESCE($18, (SELECT backend_id FROM requests
+                                   WHERE id = $1 AND organization_id = $9))
                    )
                    RETURNING *""",
                 UUID(request_id),

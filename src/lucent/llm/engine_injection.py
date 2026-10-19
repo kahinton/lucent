@@ -138,48 +138,39 @@ def backend_local_injection(
 
 
 # ── Provider compatibility (for UI + validation) ───────────────────────────
-# The provider(s) each engine can host natively; local providers are added by
-# matching the engine's required flavor. Exposed so UIs only offer combinations
-# we actually support.
-
-_ENGINE_NATIVE_PROVIDERS: dict[str, tuple[str, ...]] = {
-    "copilot": ("copilot",),
-    "claude_code": ("anthropic",),
-    "codex": ("openai",),
-}
-
-_NATIVE_PROVIDER_LABELS: dict[str, str] = {
-    "copilot": "GitHub Copilot (hosted)",
-    "anthropic": "Anthropic API",
-    "openai": "OpenAI API",
-}
+# The provider→engine map lives in the engine registry (EngineSpec.
+# provider_support). These helpers are presentation adapters only — do not add
+# per-surface compatibility exceptions here.
 
 
 def compatible_provider_options(engine: str) -> list[dict[str, str]]:
-    """Providers an engine can actually use: its native provider(s) plus every
-    local provider that exposes the API surface the engine consumes."""
-    from lucent.llm.local_providers import LOCAL_PROVIDERS
+    """Providers an engine can use, as ``{name, label, group}`` options."""
+    from lucent.llm.engine_registry import (
+        PROVIDER_LABELS,
+        UnknownEngineError,
+        engine_spec,
+        provider_group,
+        provider_label,
+    )
 
-    options: list[dict[str, str]] = []
-    for name in _ENGINE_NATIVE_PROVIDERS.get(engine, ()):
-        options.append(
-            {
-                "name": name,
-                "label": _NATIVE_PROVIDER_LABELS.get(name, name.title()),
-                "group": "native",
-            }
-        )
-    flavor = engine_local_flavor(engine)
-    if flavor is not None:
-        for spec in LOCAL_PROVIDERS.values():
-            if flavor in spec.flavors:
-                options.append(
-                    {"name": spec.name, "label": spec.display_name, "group": "local"}
-                )
-    return options
+    try:
+        spec = engine_spec(engine)
+    except UnknownEngineError:
+        return []
+    if spec.provider_support is None:
+        from lucent.llm.local_providers import local_provider_names
+
+        names = set(PROVIDER_LABELS) | set(local_provider_names())
+    else:
+        names = set(spec.provider_support)
+    return [
+        {"name": name, "label": provider_label(name), "group": provider_group(name)}
+        for name in sorted(names)
+    ]
 
 
 def provider_allowed_for_engine(engine: str, provider: str) -> bool:
     """Whether an engine+provider pairing is one we support."""
-    provider = (provider or "").strip().lower()
-    return any(option["name"] == provider for option in compatible_provider_options(engine))
+    from lucent.llm.engine_registry import engine_supports_provider
+
+    return engine_supports_provider(engine, provider)

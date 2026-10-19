@@ -60,6 +60,7 @@ admin/owner role; backend endpoints are organization-scoped.
 
 ```
 GET  /api/admin/engines                  # engine specs: kind, capabilities, config schema, availability
+GET  /api/admin/models                   # org model list with provider/engine presentation
 GET  /api/admin/backends                 # list backends (org + shared); filters: engine, provider
 POST /api/admin/backends                 # create {name, engine, provider, config, secret_refs, is_enabled}
 PATCH /api/admin/backends/{id}           # update name/config/secret_refs/is_enabled
@@ -68,17 +69,66 @@ POST /api/admin/backends/{id}/secrets    # set {field, value} — value stored i
 POST /api/admin/backends/{id}/secrets/clear  # clear {field} so an env fallback applies
 ```
 
-`GET /api/admin/engines` returns each engine's `kind` (`llm_access` or
-`coding_agent`), `implemented` flag, `capabilities`, `config_schema` (field list
-with `is_secret`), and runtime `availability` (`available`, `detail`, `missing`).
-It also returns `local_providers` — the registered local/OSS providers with the
-API `flavors` each exposes and the `codex_provider_id` Codex uses for it.
+`GET /api/admin/engines` returns `items[]` with each engine's `name`,
+`display_name`, `kind` (`llm_access` or `coding_agent`), `implemented` flag,
+`notes`, `provider_support` (sorted provider names), `capabilities`,
+`config_schema` (field list with `is_secret`), and runtime `availability`
+(`available`, `detail`, `missing`). It also returns `local_providers` — the
+registered local/OSS providers with the API `flavors` each exposes and the
+`codex_provider_id` Codex uses for it — and `provider_engine_map`, the
+controlled provider→engines map.
 
 A backend binds one engine to one provider family (e.g. `engine=codex,
 provider=ollama` for a local model). `config` holds non-secret settings (notably
 `base_url`); `secret_refs` holds only secret **key names** (values live in the
-secret provider). Model and task `engine` fields accept any engine name the
-registry knows — `copilot`, `claude_code`, `codex`, `langchain`.
+secret provider). Backend creation rejects a provider the engine does not
+support, using the same `supported_providers` answer as the catalog. A model's
+`engine` field is its **default engine**, not a compatibility restriction; any
+engine in the model provider's compatible set is valid. A task pins an engine
+backend through `tasks.backend_id`, not an engine name. A pairing is valid only
+when `model.provider == backend.provider`.
+
+The MCP `list_engines` tool returns the engine/backend catalog: top-level
+`provider_engine_map` and `engines[]`, where each coding engine has `engine`,
+`display_name`, `available`, `supported_providers`, `model_sources`, and
+`backends`. Each backend has `id`, `name`, `provider`, `provider_label`,
+`provider_supported`, `enabled`, `organization_id`, `default_model`, and
+`models`. Each model carries `id`, `name`, `engine`, `backend_id`, and
+`supports_tools` — its own default routing binding, which may differ from the
+backend listing it. Ollama models appear with `engine: "langchain"` and their
+LangChain `backend_id` even when listed under a `claude_code` (or other
+coding-engine) backend, so an explicit `backend_id` is required to select
+another compatible engine.
+
+`GET /api/admin/models` returns `items`, `total_count`, pagination fields, and
+`provider_engine_map`. Each item adds `provider_label`, `default_engine`, and
+`compatible_engines[]` (the same entry shape as `models[].engines` in
+`list_available_models`, including configured `backends[]`).
+
+### Model selection (MCP tools)
+
+`list_available_models` is the preferred LLM selection surface. It returns:
+
+- `default_model` and `guidance`
+- `provider_engine_map` — the controlled map (`custom` is omitted)
+- `models[]` — `id`, `name`, `provider`, `provider_label`, `category`,
+  `model_class`, `decision_model`, `supports_tools`, `supports_vision`,
+  `context_window`, `reasoning_efforts`, `notes`, `tags`, `default_engine`, and
+  `engines[]`
+- `execution_targets[]` — flat `{model, provider, engine, engine_display,
+  backend_id, backend_name, available, default}` rows
+- `recommended` / `recommendation` when `agent_type` is supplied
+
+Each `engines[]` entry carries `engine`, `display_name`, `default`, `available`,
+`availability_detail`, `kind`, and `backends[]` (`id`, `name`, `enabled`,
+`default_model`). The `default` flag marks the engine model-only routing would
+choose. Decision models have an empty `engines` list and no execution targets.
+
+To assign work, pick an `available` row from `execution_targets` and pass its
+`model` and `backend_id` to `create_task` (or the request-level `requested_model`
+and `backend_id`). Naming a model without `backend_id` uses its `default_engine`.
+Local providers (Ollama, LM Studio) need a configured backend to run on a coding
+engine.
 
 ---
 
@@ -430,6 +480,8 @@ POST /api/requests
 | `priority` | string | no | `low`, `medium` (default), `high`, `urgent` |
 | `source` | string | no | `user` (default), `cognitive`, `api`, `daemon`, `schedule` |
 | `dependency_policy` | string | no | `strict` (default) or `permissive` — controls whether later tasks are blocked when a predecessor fails |
+| `backend_id` | string | no | Coding-engine backend pin. Tasks created from this request inherit it unless they override it. For a local-provider backend (Ollama / LM Studio), `requested_model` is required unless the backend config carries a `model`. |
+| `requested_model` | string | no | Model the daemon should run for this request's tasks unless a task names one. Inherited by tasks. Required when `backend_id` names a local-provider backend without `config.model`; there is no safe cloud fallback for a local engine. |
 
 ### List Requests
 
@@ -527,7 +579,7 @@ POST /api/requests/{request_id}/tasks
 {
   "title": "Security review",
   "description": "Check auth.py for timing attacks",
-  "agent_type": "security",
+  "agent_type": "code",
   "priority": "high",
   "model": "enabled-model-id",
   "sandbox_template_id": "uuid-of-template",
@@ -550,14 +602,20 @@ POST /api/requests/{request_id}/tasks
 |-------|------|----------|-------------|
 | `title` | string | yes | Task name (1–256 chars) |
 | `description` | string | no | Instructions for the agent |
-| `agent_type` | string | no | Agent definition to use (default: `code`) |
-| `model` | string | no | LLM model override |
+| `agent_type` | string | no | Agent definition name. Defaults to `None` on REST (the server then applies its normal default); the MCP `create_task` tool defaults to `code`. Must resolve to an active definition accessible to the request owner. |
+| `agent_definition_id` | UUID | no | Explicit approved agent definition; takes precedence over `agent_type`. |
+| `model` | string | no | LLM model override. Omit to let the daemon select a default. |
+| `reasoning_effort` | string | no | Reasoning/thinking level. Requires `model` and must be one of that model's allowed values. |
 | `priority` | string | no | `low`, `medium`, `high`, `urgent` |
 | `sequence_order` | int | no | Execution order (0-based, lower runs first) |
 | `parent_task_id` | UUID | no | Parent task ID for sub-tasks |
 | `sandbox_template_id` | UUID | no | Sandbox template for isolated execution |
-| `sandbox_config` | object | no | Inline sandbox configuration (template takes precedence) |
+| `sandbox_config` | object | no | Inline sandbox configuration (template takes precedence). REST only — the MCP planner rejects it and requires an approved template plus `sandbox_overrides`. |
+| `sandbox_overrides` | object | no | MCP planner only. Overrides on top of the template: `repo_url`, `branch`, `timeout_seconds`, `output_mode`, `commit_approved`, `reuse_within_request`. |
 | `output_contract` | object | no | JSON Schema validation for task results (see below) |
+| `decision_config` | object | no | System One decision payload. Requires `agent_type: "decision-step"`; cannot be combined with `output_contract`. |
+| `fusion_config` | object | no | Best-of-N/synthesis payload. Requires a chat agent type; cannot be combined with `decision_config` or a decision-step task. |
+| `backend_id` | string | no | Coding-engine backend pin. Inherited from the request when omitted. |
 
 #### Output Contracts
 
@@ -660,7 +718,7 @@ artifacts. Explicit outputs win when the same URL appears in both places.
 
 **Retry with feedback** — Body: `{"feedback": "..."}`. Retries with additional context from review.
 
-**Model** — Body: `{"model": "claude-sonnet-4.5"}`. Updates the model assigned to a task.
+**Model** — Body: `{"model": "claude-sonnet-4.5", "reasoning_effort": "high"}`. Updates the model and optional reasoning effort assigned to a task.
 
 ### Task Events
 
@@ -917,8 +975,10 @@ POST /api/workflows
 | `expires_at` | datetime | schedule only | Schedule expiration time |
 
 Task action objects support `agent_type`, `agent_definition_id`, `model`,
-`reasoning_effort`, `sandbox_template_id`, `sandbox_config`,
-`output_contract`, and the compatibility alias `output_schema`.
+`reasoning_effort`, `sandbox_template_id`, `sandbox_config`, `output_contract`,
+`decision_config`, `fusion_config`, and the compatibility alias `output_schema`.
+Workflows do not support a `backend_id` pin; task actions run through the normal
+backend resolution.
 
 `user_interaction` action objects create Handoffs instead of daemon tasks. They
 support `interaction_type`, `requires_response`, `response_prompt`, `metadata`,

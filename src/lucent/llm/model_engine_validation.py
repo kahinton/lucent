@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from importlib.util import find_spec
 
-from lucent.llm.engine_registry import engine_names, engine_spec
+from lucent.llm.engine_registry import (
+    compatible_engine_names,
+    engine_names,
+    engine_supports_provider,
+)
 
-# Only engines that exist in this build are selectable. Declared-but-unimplemented
-# engines (e.g. claude_code, codex) are excluded until they ship.
+# Only engines implemented in this build are selectable.
 ALLOWED_ENGINES = set(engine_names(implemented_only=True))
-
-# Providers the Copilot harness can drive (from its registry spec).
-COPILOT_SUPPORTED_PROVIDERS = set(engine_spec("copilot").provider_support or ())
 
 # Provider → LangChain integration package. This is genuinely LangChain-specific
 # (how the general engine reaches each provider), so it stays here.
@@ -50,9 +50,19 @@ def validate_engine_override(provider: str, engine: str | None) -> list[str]:
     normalized_engine = normalize_engine(engine)
     normalized_provider = (provider or "").strip().lower()
 
-    if normalized_engine == "copilot" and normalized_provider not in COPILOT_SUPPORTED_PROVIDERS:
-        warnings.append(
-            f"Provider '{provider}' may not be supported by Copilot SDK. Model was saved anyway."
+    if not compatible_engine_names(normalized_provider):
+        raise ValueError(
+            f"No engine supports provider '{provider}' yet. Add an engine "
+            "backend for it before creating models with this provider."
+        )
+
+    if normalized_engine and not engine_supports_provider(
+        normalized_engine, normalized_provider
+    ):
+        compatible = compatible_engine_names(normalized_provider)
+        raise ValueError(
+            f"Engine '{normalized_engine}' cannot run provider '{provider}'. "
+            f"Compatible engines: {', '.join(compatible) or 'none'}."
         )
 
     if normalized_engine == "langchain":

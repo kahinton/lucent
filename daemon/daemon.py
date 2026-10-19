@@ -1224,10 +1224,16 @@ class RequestAPI(InstanceAPI, TaskAPI):
         description: str | None = None,
         source: str = "cognitive",
         priority: str = "medium",
+        backend_id: str | None = None,
+        requested_model: str | None = None,
     ) -> dict | None:
         body = {"title": title, "source": source, "priority": priority}
         if description:
             body["description"] = description
+        if backend_id:
+            body["backend_id"] = backend_id
+        if requested_model:
+            body["requested_model"] = requested_model
         try:
             async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
                 resp = await client.post(f"{API_BASE}/requests", json=body, headers=API_HEADERS)
@@ -1249,6 +1255,7 @@ class RequestAPI(InstanceAPI, TaskAPI):
         reasoning_effort: str | None = None,
         requesting_user_id: str | None = None,
         output_contract: dict | None = None,
+        backend_id: str | None = None,
     ) -> dict | None:
         body = {"title": title, "priority": priority, "sequence_order": sequence_order}
         if agent_type:
@@ -1257,6 +1264,8 @@ class RequestAPI(InstanceAPI, TaskAPI):
             body["description"] = description
         if model:
             body["model"] = model
+        if backend_id:
+            body["backend_id"] = backend_id
         if reasoning_effort:
             body["reasoning_effort"] = reasoning_effort
         if requesting_user_id:
@@ -3060,6 +3069,7 @@ class LucentDaemon(
                 description=spec["description"],
                 priority=request.get("priority") or "medium",
                 sequence_order=spec["sequence_order"],
+                backend_id=request.get("backend_id"),
             )
             if not task and spec["agent_type"] != "planning":
                 task = await RequestAPI.create_task(
@@ -3069,6 +3079,7 @@ class LucentDaemon(
                     description=spec["description"],
                     priority=request.get("priority") or "medium",
                     sequence_order=spec["sequence_order"],
+                    backend_id=request.get("backend_id"),
                 )
             if task:
                 created += 1
@@ -3849,15 +3860,40 @@ class LucentDaemon(
             try:
                 from lucent.llm.engine_resolution import resolve_engine
 
-                engine = (
-                    await resolve_engine(
-                        model,
-                        org_id=str((audit_context or {}).get("organization_id") or "") or None,
-                        agent_type=(audit_context or {}).get("agent_type"),
-                        task_backend_id=(audit_context or {}).get("backend_id"),
+                resolution = await resolve_engine(
+                    model,
+                    org_id=str((audit_context or {}).get("organization_id") or "") or None,
+                    agent_type=(audit_context or {}).get("agent_type"),
+                    task_backend_id=(audit_context or {}).get("backend_id"),
+                )
+                engine = resolution.engine
+                # The engine consumes the resolved backend row itself (local
+                # provider base URL / auth, BYOK, model provider). Passing only
+                # the engine name silently drops provider injection and sends
+                # e.g. a claude_code+ollama task at the native Anthropic API.
+                if resolution.backend is not None:
+                    audit_context = {
+                        **(audit_context or {}),
+                        "engine_backend": resolution.backend,
+                    }
+                log(
+                    "Engine resolved: "
+                    f"{getattr(engine, 'name', 'unknown')} "
+                    f"(source={resolution.source}, "
+                    f"backend={(resolution.backend or {}).get('name') or '-'})",
+                    "INFO",
+                )
+            except Exception as exc:
+                if (audit_context or {}).get("backend_id"):
+                    # An explicit pin is a promise. Falling back would run the
+                    # task on a different engine/provider than the author chose
+                    # (and, for local backends, with the wrong credentials).
+                    log(
+                        "Pinned backend resolution failed for backend "
+                        f"{(audit_context or {}).get('backend_id')}: {exc}",
+                        "ERROR",
                     )
-                ).engine
-            except Exception:
+                    raise
                 engine = get_engine_for_model(model)
         else:
             engine = get_engine()

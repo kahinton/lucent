@@ -74,6 +74,46 @@ async def test_task_backend_beats_model_backend(patch_model, patch_backends, pat
     assert res.engine.name == "langchain"
 
 
+async def test_missing_task_backend_raises(patch_model, patch_backends, patch_fallback):
+    patch_model()
+    patch_backends([_backend("b-task", "langchain", "openai")])
+    with pytest.raises(er.PinnedBackendUnavailable, match="Pinned backend 'b-gone'"):
+        await er.resolve_engine("gpt-5.1", org_id="o1", task_backend_id="b-gone")
+
+
+async def test_disabled_task_backend_raises(patch_model, patch_backends, patch_fallback):
+    patch_model()
+    patch_backends([_backend("b-task", "langchain", "openai", enabled=False)])
+    with pytest.raises(er.PinnedBackendUnavailable, match="Pinned backend 'b-task'"):
+        await er.resolve_engine("gpt-5.1", org_id="o1", task_backend_id="b-task")
+
+
+async def test_missing_requested_backend_raises(patch_model, patch_backends, patch_fallback):
+    patch_model()
+    patch_backends([_backend("b-lc", "langchain", "openai")])
+    with pytest.raises(er.PinnedBackendUnavailable, match="Requested backend 'b-gone'"):
+        await er.resolve_engine("gpt-5.1", org_id="o1", requested_backend="b-gone")
+
+
+async def test_disabled_requested_backend_raises(patch_model, patch_backends, patch_fallback):
+    patch_model()
+    patch_backends([_backend("b-cp", "copilot", "openai", enabled=False)])
+    with pytest.raises(er.PinnedBackendUnavailable, match="Requested backend 'b-cp'"):
+        await er.resolve_engine("gpt-5.1", org_id="o1", requested_backend="b-cp")
+
+
+async def test_unpinned_disabled_backend_keeps_default_behavior(
+    patch_model, patch_backends, patch_fallback
+):
+    """No pin: a disabled backend is simply not a candidate, no exception."""
+    patch_model()
+    patch_backends([_backend("b-cp", "copilot", "openai", enabled=False)])
+    res = await er.resolve_engine("gpt-5.1", org_id="o1")
+    assert res.source == "default"
+    assert res.engine is patch_fallback
+    assert res.backend is None
+
+
 async def test_model_engine_provider_match(patch_model, patch_backends, patch_fallback):
     # Model pins engine=langchain and a matching backend exists.
     patch_model(

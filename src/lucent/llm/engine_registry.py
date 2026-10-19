@@ -9,12 +9,11 @@ Two engine **kinds**:
 
 * ``llm_access`` — the general LLM layer (``langchain``): provider-agnostic chat
   where Lucent owns the tool loop.
-* ``coding_agent`` — product-specific agent harnesses (``copilot`` today;
-  ``claude_code`` and ``codex`` declared but not yet implemented) that bring
-  their own loop, tools, and auth.
+* ``coding_agent`` — product-specific agent harnesses (``copilot``,
+  ``claude_code``, ``codex``) that bring their own loop, tools, and auth.
 
-Adding a coding engine later is a single ``EngineSpec`` plus its module —
-nothing else in the codebase needs to learn a new engine name.
+Adding a coding engine is a single ``EngineSpec`` plus its module — nothing
+else in the codebase needs to learn a new engine name.
 """
 
 from __future__ import annotations
@@ -222,12 +221,14 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
         kind="llm_access",
         capabilities=_LANGCHAIN_CAPS,
         factory=_make_langchain,
-        provider_support=None,
+        # The authoritative provider→engine map. LangChain's integrations cover
+        # these four directly; everything else needs a coding-engine backend.
+        provider_support=frozenset({"anthropic", "google", "ollama", "openai"}),
         default_for_providers=frozenset({"ollama"}),
         availability=_langchain_availability,
         notes=(
-            "General text/reasoning access for Ollama, OpenAI, Anthropic, Google, "
-            "and custom endpoints."
+            "General text/reasoning access for Ollama, OpenAI, Anthropic, and "
+            "Google models."
         ),
     ),
     EngineSpec(
@@ -236,7 +237,12 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
         kind="coding_agent",
         capabilities=_COPILOT_CAPS,
         factory=_make_copilot,
-        provider_support=frozenset({"anthropic", "copilot", "google", "ollama", "openai", "xai"}),
+        # Copilot can run its own hosted catalog plus the hosted model families
+        # it proxies (Anthropic/OpenAI/Google/xAI) and local BYOK servers.
+        # Hosted families still authenticate with the Copilot token.
+        provider_support=frozenset(
+            {"anthropic", "copilot", "google", "lmstudio", "ollama", "openai", "xai"}
+        ),
         availability=_copilot_availability,
         notes="GitHub Copilot SDK harness (its own agent loop and tools).",
     ),
@@ -246,9 +252,9 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
         kind="coding_agent",
         capabilities=_CLAUDE_CODE_CAPS,
         factory=_make_claude_code,
-        provider_support=frozenset({"anthropic", "custom", "ollama"}),
+        provider_support=frozenset({"anthropic", "ollama"}),
         availability=_claude_code_availability,
-        notes="Claude Agent SDK harness; native Anthropic models or a local provider.",
+        notes="Claude Agent SDK harness; native Anthropic models or a local Ollama server.",
     ),
     EngineSpec(
         name="codex",
@@ -256,9 +262,9 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
         kind="coding_agent",
         capabilities=_CODEX_CAPS,
         factory=_make_codex,
-        provider_support=frozenset({"openai", "custom", "ollama"}),
+        provider_support=frozenset({"openai", "lmstudio", "ollama"}),
         availability=_codex_availability,
-        notes="OpenAI Codex SDK harness; native OpenAI models or a local provider.",
+        notes="OpenAI Codex SDK harness; native OpenAI models or a local OSS server.",
     ),
 )
 
@@ -369,14 +375,169 @@ def engine_availability(name: str) -> EngineAvailability:
 def engine_default_for_provider(provider: str) -> str | None:
     """Return the engine that a provider is forced onto, if any.
 
-    Replaces the old ``_LANGCHAIN_PROVIDERS`` map: ``ollama`` is always served by
-    the general LLM engine; cloud providers fall through to the configured
-    default engine.
+    This is the explicit part of the provider→engine map: ``ollama`` is always
+    served by the general LLM engine unless a caller pins a coding-engine
+    backend. Other providers fall through to
+    :func:`default_engine_for_provider`.
     """
+    provider = (provider or "").strip().lower()
     for name, spec in ENGINE_REGISTRY.items():
         if spec.implemented and provider in spec.default_for_providers:
             return name
     return None
+
+
+# Display labels for providers that are not local servers. Local provider labels
+# come from ``lucent.llm.local_providers`` so there is one label per provider.
+PROVIDER_LABELS: dict[str, str] = {
+    "anthropic": "Anthropic API",
+    "copilot": "GitHub Copilot",
+    "custom": "Custom endpoint",
+    "google": "Google Gemini",
+    "openai": "OpenAI API",
+    "xai": "xAI",
+}
+
+
+def provider_label(provider: str) -> str:
+    """Human label for a provider name."""
+    provider = (provider or "").strip().lower()
+    try:
+        from lucent.llm.local_providers import LOCAL_PROVIDERS
+
+        local = LOCAL_PROVIDERS.get(provider)
+        if local is not None:
+            return local.display_name
+    except Exception:  # pragma: no cover - registry import must not break labels
+        pass
+    return PROVIDER_LABELS.get(provider, provider.title() or provider)
+
+
+def provider_group(provider: str) -> str:
+    """``local`` for self-hosted servers, ``native`` for hosted APIs."""
+    try:
+        from lucent.llm.local_providers import LOCAL_PROVIDERS
+
+        return "local" if (provider or "").strip().lower() in LOCAL_PROVIDERS else "native"
+    except Exception:  # pragma: no cover
+        return "native"
+
+
+def _spec_supports_provider(spec: EngineSpec, provider: str) -> bool:
+    """Whether an engine can run a provider. ``provider_support=None`` = any."""
+    if spec.provider_support is None:
+        return True
+    return provider in spec.provider_support
+
+
+def engine_supports_provider(engine: str, provider: str) -> bool:
+    """Whether ``engine`` is an allowed harness for ``provider``.
+
+    This is the single provider→engine compatibility answer used by routing,
+    validation, catalogs, and UIs. Keep the engine specs' ``provider_support``
+    sets authoritative — do not add per-surface exceptions.
+    """
+    try:
+        spec = engine_spec(engine)
+    except UnknownEngineError:
+        return False
+    return spec.implemented and _spec_supports_provider(
+        spec, (provider or "").strip().lower()
+    )
+
+
+def compatible_engine_names(provider: str) -> list[str]:
+    """Implemented engine names that can run ``provider``, in registry order."""
+    provider = (provider or "").strip().lower()
+    return [
+        name
+        for name, spec in ENGINE_REGISTRY.items()
+        if spec.implemented and _spec_supports_provider(spec, provider)
+    ]
+
+
+def default_engine_for_provider(
+    provider: str, *, configured_default: str | None = None
+) -> str | None:
+    """The engine a provider uses when the caller does not pin one.
+
+    Order: an explicit ``default_for_providers`` entry (``ollama`` →
+    ``langchain``), then the deployment's configured default engine when it is
+    compatible, then LangChain as the general fallback, then the first
+    compatible engine. Returns ``None`` when no engine supports the provider.
+    """
+    provider = (provider or "").strip().lower()
+    compatible = compatible_engine_names(provider)
+    if not compatible:
+        return None
+    forced = engine_default_for_provider(provider)
+    if forced in compatible:
+        return forced
+    configured = (configured_default or "").strip().lower()
+    if configured in compatible:
+        return configured
+    if "langchain" in compatible:
+        return "langchain"
+    return compatible[0]
+
+
+def compatible_engines(
+    provider: str, *, configured_default: str | None = None
+) -> list[dict[str, object]]:
+    """The engine list for a model provider, ready for APIs/LLMs/UIs.
+
+    Each entry answers "can this provider run on this engine?" without the
+    caller having to join engine specs, backend rows, or local-provider
+    flavors. ``default`` marks the engine model-only routing would choose.
+    """
+    provider = (provider or "").strip().lower()
+    default = default_engine_for_provider(
+        provider, configured_default=configured_default
+    )
+    result: list[dict[str, object]] = []
+    for name in compatible_engine_names(provider):
+        spec = engine_spec(name)
+        availability = engine_availability(name)
+        result.append(
+            {
+                "engine": name,
+                "display_name": spec.display_name,
+                "default": name == default,
+                "available": availability.available,
+                "availability_detail": availability.detail,
+                "kind": spec.kind,
+            }
+        )
+    return result
+
+
+def provider_engine_map(
+    *,
+    configured_default: str | None = None,
+    include_unsupported: bool = False,
+) -> dict[str, list[str]]:
+    """The controlled provider→engines map, for API/LLM/UI presentation.
+
+    Unsupported providers (no implemented engine) are omitted by default so
+    callers do not present a dead choice; pass ``include_unsupported=True`` for
+    diagnostics.
+    """
+    providers: set[str] = set(PROVIDER_LABELS)
+    try:
+        from lucent.llm.local_providers import LOCAL_PROVIDERS
+
+        providers.update(LOCAL_PROVIDERS)
+    except Exception:  # pragma: no cover
+        pass
+    result = {
+        provider: compatible_engine_names(provider)
+        for provider in sorted(providers)
+    }
+    if not include_unsupported:
+        result = {
+            provider: engines for provider, engines in result.items() if engines
+        }
+    return result
 
 
 def reset_engines() -> None:

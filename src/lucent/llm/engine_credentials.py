@@ -51,9 +51,8 @@ def secret_key_for(engine: str, backend_name: str, field: str) -> str:
 
 
 # ── Per-engine schemas ─────────────────────────────────────────────────────
-# Declared in full up front (including engines not yet implemented) so the
-# taxonomy, validation, and UI are complete; the registry marks which engines
-# are buildable today.
+# Declared in full so the taxonomy, validation, and UI stay complete; the
+# registry reports each engine's runtime availability.
 
 _LANGCHAIN_FIELDS: tuple[EngineConfigField, ...] = ()
 

@@ -38,38 +38,34 @@ Check for active work that already addresses this goal. **Do not create a duplic
 Follow the **daemon-task-authoring** skill for detailed guidance on writing effective task descriptions. Key aspects:
 
 - **Descriptions** must be self-contained — written as if the executing agent has never seen the codebase. Follow the skill's Description Checklist.
-- **Agent types** must match task requirements. Follow the skill's Agent Type Selection table.
-- **Priority** follows the skill's Priority Calibration rules.
+- **Agent types** must match task requirements. Call `list_agent_definitions(status='active')`; the skill's Agent Type Selection table is examples, not exhaustive.
+- **Priority** follows the skill's Priority Calibration rules (`low`, `medium`, `high`, `urgent`).
 
-If a task requires a specific model tier (complex reasoning vs. simple lookup), follow the **model-selection** skill to assign the appropriate model.
+If a task requires a specific model tier (complex reasoning vs. simple lookup), follow the **model-selection** skill to assign the appropriate model. `model` is optional on `create_task`; omit it to let the daemon select a default. Call `list_available_models` and choose from its `execution_targets` when you need an explicit model + engine + backend pairing. Every model has a `provider` and compatible `engines`; the model's `engine` is only its **default engine**, not a restriction, and naming a model alone runs it on that default.
 
-**Coding engines.** If the request is genuine code work and a coding engine backend is configured, follow the **model-selection** skill's Coding Engines section: call `list_engines`, choose one backend for the request, and set the same `backend_id` (and one of that backend's `model`s) on **every** task doing that work. Decide once per request — do not put some coding tasks on the engine and others on the general layer.
+**Coding engines.** If the request is genuine code work and a coding engine is configured, follow the **model-selection** skill: pick an `execution_targets` row whose `engine` is the coding engine and set that row's `model` and `backend_id` on **every** task doing that work. Decide once per request — do not put some coding tasks on the engine and others on the general layer. The request may already carry `backend_id` and `requested_model`; tasks inherit both unless they override them, so propagate them explicitly when you need to select a different backend or model.
 
-### 3. Create the Request and Tasks
+### 3. Create the Tasks
+
+A request already exists for this decomposition — do not create another one. Set
+`request_id` to that request on every task.
 
 ```
-create_request(
-  title="<Clear goal statement>",
-  description="<Context for the overall goal>",
-  source="daemon",
-  priority="<high|medium|low>"
+create_task(
+  request_id="<existing request id>",
+  title="<Clear task statement>",
+  description="<Self-contained instructions>",
+  ...
 )
 ```
 
 ### Repository Targeting
 
-When a request involves work on a specific codebase, set `target_repo` (owner/repo format) and optionally `target_paths` (specific directories). This automatically injects relevant technical memories into the working agent's context at dispatch time.
-
-```
-create_request(
-    title="Add rate limiting to the search endpoint",
-    description="...",
-    target_repo="octocat/hello-world",
-    target_paths=["src/api/", "src/middleware/"]
-)
-```
-
-This eliminates the need to manually instruct agents to "search for relevant memories" — the system handles it. Always set `target_repo` when the work involves code changes.
+The existing request carries `target_repo` (owner/repo format) and optionally
+`target_paths`. This automatically injects relevant technical memories into the
+working agent's context at dispatch time. Tasks inherit that context; do not
+create a duplicate request to set it. If the request lacks `target_repo` and the
+work involves code changes, report the gap rather than silently proceeding.
 
 Then create each task with the fields specified in the **daemon-task-authoring** skill. Use `sequence_order` to express dependencies:
 
@@ -81,7 +77,7 @@ Then create each task with the fields specified in the **daemon-task-authoring**
 Follow the **daemon-task-authoring** skill's validation section:
 - Does every task have a clear success criterion?
 - Are dependencies correct in `sequence_order`?
-- Is any task too large for a 720-second session?
+- Is any task too large for a 3600-second session?
 - Are agent types appropriate?
 - Does every sandboxed task reference an **approved** `sandbox_template_id`?
   Inline `sandbox_config` is rejected — see the sandbox section below.
@@ -98,7 +94,10 @@ list_sandbox_templates()      # discover approved templates
 
 Pick the closest fit and pass its id as `sandbox_template_id` on `create_task`.
 You may set a small whitelist of overrides via `sandbox_overrides` (currently
-just `repo_url`, `branch`, `timeout_seconds`, `output_mode`, `commit_approved`).
+`repo_url`, `branch`, `timeout_seconds`, `output_mode`, `commit_approved`, and
+`reuse_within_request`). Set `reuse_within_request` only for sequential tasks in
+the same request that intentionally need the same workspace, and give those
+tasks increasing `sequence_order` values.
 
 If none of the approved templates fit:
 

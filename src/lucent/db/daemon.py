@@ -406,7 +406,8 @@ class DaemonRepository:
         rows = await self.conn.fetch(
             f"""
             SELECT id::text AS request_id, created_by::text AS created_by,
-                   title, created_at
+                   title, description, priority, target_repo, target_paths,
+                   goal_milestone_index, backend_id, requested_model, created_at
             FROM requests r
             WHERE {' AND '.join(conditions)}
             ORDER BY created_at

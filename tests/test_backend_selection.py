@@ -56,13 +56,47 @@ async def test_unknown_engine_errors(fake_backends):
     assert "not available" in (await bs.validate_backend_selection(None, "b1", org_id="o1"))
 
 
-async def test_local_backend_accepts_any_model(fake_backends, monkeypatch):
+async def test_unavailable_engine_errors(fake_backends, monkeypatch):
+    from lucent.llm.engine_registry import EngineAvailability
+
+    fake_backends["by_id"]["b1"] = _backend(engine="claude_code", provider="anthropic")
+    monkeypatch.setattr(
+        bs,
+        "engine_availability",
+        lambda _name: EngineAvailability(
+            available=False, detail="claude-agent-sdk is not installed"
+        ),
+    )
+    error = await bs.validate_backend_selection(None, "b1", org_id="o1")
+    assert error and "unavailable" in error
+    assert "claude-agent-sdk is not installed" in error
+
+
+async def test_local_backend_rejects_mismatched_model(fake_backends, monkeypatch):
+    """A local Ollama backend serves Ollama models, not cloud model ids."""
     fake_backends["by_id"]["b1"] = _backend(provider="ollama")
     monkeypatch.setattr(
         "lucent.model_registry.get_model",
         lambda _id: ModelInfo(id="gpt-5.1", provider="openai", name="GPT", category="general"),
     )
-    assert await bs.validate_backend_selection(None, "b1", org_id="o1", model_id="gpt-5.1") is None
+    error = await bs.validate_backend_selection(None, "b1", org_id="o1", model_id="gpt-5.1")
+    assert error and "cannot run on the 'ollama' backend" in error
+
+
+async def test_local_backend_accepts_matching_model(fake_backends, monkeypatch):
+    fake_backends["by_id"]["b1"] = _backend(provider="ollama")
+    monkeypatch.setattr(
+        "lucent.model_registry.get_model",
+        lambda _id: ModelInfo(
+            id="gemma4:31b-cloud", provider="ollama", name="Gemma", category="general"
+        ),
+    )
+    assert (
+        await bs.validate_backend_selection(
+            None, "b1", org_id="o1", model_id="gemma4:31b-cloud"
+        )
+        is None
+    )
 
 
 async def test_native_backend_rejects_mismatched_model(fake_backends, monkeypatch):
@@ -132,3 +166,48 @@ async def test_engine_catalog_exposes_backend_models(fake_backends, monkeypatch)
     backend = codex["backends"][0]
     assert backend["default_model"] == "qwen3-coder"
     assert [m["id"] for m in backend["models"]] == ["qwen3-coder"]
+    # The model's own binding is surfaced so agents can see the shadowing.
+    model = backend["models"][0]
+    assert model["engine"] is None
+    assert model["backend_id"] is None
+    assert model["supports_tools"] is True
+
+
+# ── request-level execution pin ────────────────────────────────────────────
+
+
+async def test_request_pin_requires_model_for_local_backend(fake_backends):
+    fake_backends["by_id"]["b1"] = _backend(
+        engine="claude_code", provider="ollama", config={}
+    )
+    error = await bs.validate_request_execution_pin(None, "b1", None, org_id="o1")
+    assert error and "requested_model" in error
+
+
+async def test_request_pin_accepts_local_backend_with_model(fake_backends):
+    fake_backends["by_id"]["b1"] = _backend(
+        engine="claude_code", provider="ollama", config={}
+    )
+    assert (
+        await bs.validate_request_execution_pin(
+            None, "b1", "gemma4:31b-cloud", org_id="o1"
+        )
+        is None
+    )
+
+
+async def test_request_pin_accepts_local_backend_with_config_model(fake_backends):
+    fake_backends["by_id"]["b1"] = _backend(
+        engine="claude_code", provider="ollama", config={"model": "qwen3-coder"}
+    )
+    assert await bs.validate_request_execution_pin(None, "b1", None, org_id="o1") is None
+
+
+async def test_request_pin_rejects_overlong_model(fake_backends):
+    fake_backends["by_id"]["b1"] = _backend(
+        engine="claude_code", provider="ollama", config={}
+    )
+    error = await bs.validate_request_execution_pin(
+        None, "b1", "x" * 65, org_id="o1"
+    )
+    assert error and "64 characters" in error

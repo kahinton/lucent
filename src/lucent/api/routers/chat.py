@@ -1690,14 +1690,23 @@ async def chat_stream(
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
 
+    engine_backend: dict[str, Any] | None = None
     try:
-        engine = (
-            await resolve_engine(
-                selected_model,
-                org_id=str(user["organization_id"]),
-                pool=pool,
-            )
-        ).engine
+        resolution = await resolve_engine(
+            selected_model,
+            org_id=str(user["organization_id"]),
+            pool=pool,
+        )
+        engine = resolution.engine
+        # Engines consume the backend row (local provider base URL/auth,
+        # BYOK). Dropping it sends e.g. claude_code+ollama at the native API.
+        engine_backend = resolution.backend
+        logger.info(
+            "Chat engine resolved: %s (source=%s, backend=%s)",
+            engine.name,
+            resolution.source,
+            (resolution.backend or {}).get("name") or "-",
+        )
     except Exception:
         engine = get_engine_for_model(selected_model)
 
@@ -1843,6 +1852,7 @@ async def chat_stream(
                 "model": selected_model,
                 "reasoning_effort": reasoning_effort,
                 "engine": engine.name,
+                **({"engine_backend": engine_backend} if engine_backend else {}),
             },
         )
         error = None if result_text else "No response received"
@@ -1910,12 +1920,20 @@ async def chat_models(request: Request):
         pool,
         {"id": str(user["id"]), "organization_id": str(user["organization_id"])},
     )
-    models = (
-        await ModelRepository(model_pool).list_models_accessible_by(
-            str(user["id"]),
-            str(user["organization_id"]),
-        )
-    )["items"]
+    models = [
+        model
+        for model in (
+            await ModelRepository(model_pool).list_models_accessible_by(
+                str(user["id"]),
+                str(user["organization_id"]),
+            )
+        )["items"]
+        # The picker is for chat turns. Decision models (System One
+        # choice/noul/score) are not chat models and must never appear here;
+        # disabled models are not selectable either.
+        if model.get("is_enabled", True)
+        and model.get("model_class") != "decision"
+    ]
     default_model = _resolve_chat_model()
     accessible_ids = {model["id"] for model in models}
     from lucent.settings import auto_selection_enabled
@@ -2062,14 +2080,21 @@ async def chat_stream_v2(
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
 
+    engine_backend: dict[str, Any] | None = None
     try:
-        engine = (
-            await resolve_engine(
-                selected_model,
-                org_id=str(user["organization_id"]),
-                pool=pool,
-            )
-        ).engine
+        resolution = await resolve_engine(
+            selected_model,
+            org_id=str(user["organization_id"]),
+            pool=pool,
+        )
+        engine = resolution.engine
+        engine_backend = resolution.backend
+        logger.info(
+            "Chat engine resolved: %s (source=%s, backend=%s)",
+            engine.name,
+            resolution.source,
+            (resolution.backend or {}).get("name") or "-",
+        )
     except Exception:
         engine = get_engine_for_model(selected_model)
 
@@ -2506,6 +2531,7 @@ async def chat_stream_v2(
                     "agent_definition_id": effective_agent_id,
                     "skill_names": agent_skill_names,
                     "user_role": str(user.get("role") or ""),
+                    **({"engine_backend": engine_backend} if engine_backend else {}),
                 },
                 enable_config_discovery=enable_agent_provider_discovery,
             )

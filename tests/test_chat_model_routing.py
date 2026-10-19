@@ -136,6 +136,57 @@ async def test_active_user_context_contains_authenticated_users_memory(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_chat_models_picker_excludes_decision_and_disabled(monkeypatch):
+    class _Repo:
+        def __init__(self, _pool):
+            pass
+
+        async def list_models_accessible_by(self, *_args, **_kwargs):
+            return {
+                "items": [
+                    {
+                        "id": "chat-ok",
+                        "name": "Chat OK",
+                        "provider": "openai",
+                        "category": "general",
+                        "is_enabled": True,
+                        "model_class": "language",
+                    },
+                    {
+                        "id": "nimble",
+                        "name": "Nimble",
+                        "provider": "ollama",
+                        "category": "decision",
+                        "is_enabled": True,
+                        "model_class": "decision",
+                    },
+                    {
+                        "id": "disabled-chat",
+                        "name": "Disabled Chat",
+                        "provider": "openai",
+                        "category": "general",
+                        "is_enabled": False,
+                        "model_class": "language",
+                    },
+                ]
+            }
+
+    async def _fake_pool(*_args, **_kwargs):
+        return object()
+
+    monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
+    monkeypatch.setattr("lucent.db.models.ModelRepository", _Repo)
+    monkeypatch.setattr("lucent.db.models.get_authorized_models_pool", _fake_pool)
+    monkeypatch.setattr(chat, "_resolve_chat_model", lambda *args, **kwargs: "chat-ok")
+    monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kwargs: False)
+
+    result = await chat.chat_models(_FakeRequest())
+
+    assert [model["id"] for model in result["models"]] == ["chat-ok"]
+    assert result["default"] == "chat-ok"
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_uses_engine_for_selected_model(monkeypatch):
     seen: dict[str, str] = {}
 

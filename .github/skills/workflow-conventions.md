@@ -74,8 +74,8 @@ Lucent uses a strict state machine for requests and tasks.
 
 ## 4. Model Selection Guidelines
 
-When creating tasks (`create_task`), prefer the enabled default model unless
-the work clearly needs a specialized capability:
+Model selection is default-first. When creating tasks (`create_task`), leave
+`model` unset unless the work clearly needs a specialized capability:
 
 | Task Type | Recommended Category | Rationale |
 |-----------|----------------------|-----------|
@@ -96,4 +96,4 @@ workflows unless explicitly requested.
 | **Forgetting to share daemon-created memories** (`shared=false`) | The daemon runs as `daemon-service`. Unshared memories are invisible to every other user in the organization, silently losing knowledge. | Always set `shared=true` on daemon and sub-agent memories. Treat sharing as the default; only omit it for rare private scratchpad entries. |
 | **Creating duplicate requests instead of extending existing ones** | Parallel requests for the same goal fragment work across task trees, cause duplicate effort, and make progress harder to track. | Search `list_active_work` before creating a request. If a matching request exists, add tasks to it or update its description. |
 | **Skipping status transitions** (e.g., jumping from `pending` to `completed` without `in_progress`) | The state machine (§2) drives the Requests UI, daemon scheduling, and progress reporting. Skipped states break dashboards and can leave dependent tasks stuck. | Always transition through each intermediate status in order: pending → in_progress → completed (or failed). |
-| **Creating tasks without explicit model assignment** | The daemon falls back to a default model that may be wrong for the task's complexity, wasting tokens on simple tasks or producing low-quality output on hard ones. | Consult the Model Selection table (§4) and set the `model` parameter on every `create_task` call. |
+| **Overriding the model on every task** | The daemon's default selection is usually correct; hardcoding a model defeats default-first routing and can pin work to the wrong engine. | Leave `model` unset and let the daemon select a default. Override only for a clear specialized need, following the Model Selection table (§4). |

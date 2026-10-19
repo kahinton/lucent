@@ -936,6 +936,9 @@ class ModelDiscoveryService:
                 notes=notes,
                 tags=sorted(set(tags)),
                 reasoning_efforts=reasoning_efforts,
+                # Default engine only — not a compatibility restriction. The
+                # model can run on every engine in compatible_engines("ollama");
+                # an explicit task/request backend pin overrides this default.
                 engine="langchain",
                 model_class=model_class,
                 discovery_metadata=metadata,

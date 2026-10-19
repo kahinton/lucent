@@ -223,6 +223,7 @@
                 <tr>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Model</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Category</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden md:table-cell">Engines</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden sm:table-cell">Context</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden lg:table-cell">Reasoning</th>
                     <th class="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3 hidden md:table-cell">Tags</th>
@@ -253,6 +254,27 @@
                             <span class="px-2 py-0.5 rounded text-xs bg-gray-900 text-white">decision</span>
                             {% endif %}
                         </div>
+                    </td>
+                    <td class="px-4 py-3 hidden md:table-cell">
+                        {% if model.model_class == 'decision' %}
+                        <span class="text-xs text-gray-400">System One decision model</span>
+                        {% elif model.compatible_engines %}
+                        <div class="flex flex-wrap gap-1 max-w-56">
+                            {% for engine in model.compatible_engines %}
+                            <span class="inline-block px-1.5 py-0.5 rounded text-xs {% if engine.default %}bg-primary-100 text-primary-700 font-medium{% else %}bg-gray-100 text-gray-600{% endif %}"
+                                  title="{{ engine.display_name }}{% if not engine.available %} (unavailable){% endif %}">
+                                {{ engine.display_name }}{% if engine.default %} · default{% endif %}
+                            </span>
+                            {% endfor %}
+                        </div>
+                        {% if model.compatible_engines|selectattr('backends')|list %}
+                        <div class="mt-1 text-[10px] text-gray-400">
+                            {% for engine in model.compatible_engines %}{% if engine.backends %}{{ engine.display_name }}: {{ engine.backends|map(attribute='name')|join(', ') }}{% if not loop.last %}; {% endif %}{% endif %}{% endfor %}
+                        </div>
+                        {% endif %}
+                        {% else %}
+                        <span class="text-xs text-amber-600">no compatible engine</span>
+                        {% endif %}
                     </td>
                     <td class="px-4 py-3 hidden sm:table-cell">
                         {% if model.context_window > 0 %}
@@ -422,7 +444,7 @@
             <div class="grid grid-cols-4 gap-4">
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Provider</label>
-                    <select name="provider" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <select name="provider" id="add-provider" class="w-full px-3 py-2 border rounded-lg text-sm">
                         {% for p in all_providers %}<option value="{{ p }}">{{ p|capitalize }}</option>{% endfor %}
                     </select>
                 </div>
@@ -449,14 +471,17 @@
                 <input name="api_model_id" placeholder="e.g. gpt-6-turbo-20260401" class="w-full px-3 py-2 border rounded-lg text-sm">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Engine</label>
-                <select name="engine" class="w-full px-3 py-2 border rounded-lg text-sm">
-                    <option value="">Auto — general LLM (LangChain)</option>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Default engine <span class="text-gray-400 font-normal">(optional)</span></label>
+                <select name="engine" id="add-engine" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="">Auto — use the provider's default engine</option>
                     {% for e in all_engines %}
-                    <option value="{{ e.name }}">{{ e.label }}</option>
+                    <option value="{{ e.name }}" data-providers="{{ engine_providers.get(e.name, [])|join(' ') }}">{{ e.label }}</option>
                     {% endfor %}
                 </select>
-                <p class="mt-1 text-xs text-gray-500">Models run through the general LLM layer by default. Pin a coding engine only to force this model through Copilot / Claude Code / Codex.</p>
+                <p class="mt-1 text-xs text-gray-500">Only compatible engines are selectable. If left on Auto, routing uses the provider→engine map below.</p>
+                <p class="mt-1 text-[11px] text-gray-400">
+                    {% for provider, engines in provider_engine_map.items() if engines %}{{ provider|capitalize }} → {% for engine in engines %}{{ engine_labels.get(engine, engine) }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not loop.last %} · {% endif %}{% endfor %}
+                </p>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
@@ -533,14 +558,17 @@
                 <input name="api_model_id" id="edit-api-model-id" class="w-full px-3 py-2 border rounded-lg text-sm">
             </div>
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Engine</label>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Default engine <span class="text-gray-400 font-normal">(optional)</span></label>
                 <select name="engine" id="edit-engine" class="w-full px-3 py-2 border rounded-lg text-sm">
-                    <option value="">Auto — general LLM (LangChain)</option>
+                    <option value="">Auto — use the provider's default engine</option>
                     {% for e in all_engines %}
-                    <option value="{{ e.name }}">{{ e.label }}</option>
+                    <option value="{{ e.name }}" data-providers="{{ engine_providers.get(e.name, [])|join(' ') }}">{{ e.label }}</option>
                     {% endfor %}
                 </select>
-                <p class="mt-1 text-xs text-gray-500">Models run through the general LLM layer by default. Pin a coding engine only to force this model through Copilot / Claude Code / Codex.</p>
+                <p class="mt-1 text-xs text-gray-500">Only compatible engines are selectable. If left on Auto, routing uses the provider→engine map below.</p>
+                <p class="mt-1 text-[11px] text-gray-400">
+                    {% for provider, engines in provider_engine_map.items() if engines %}{{ provider|capitalize }} → {% for engine in engines %}{{ engine_labels.get(engine, engine) }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not loop.last %} · {% endif %}{% endfor %}
+                </p>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
@@ -571,6 +599,19 @@
 </div>
 
 <script nonce="{{ request.state.csp_nonce }}">
+function filterEngineOptions(providerSelect, engineSelect) {
+    if (!providerSelect || !engineSelect) return;
+    const provider = providerSelect.value;
+    for (const opt of engineSelect.options) {
+        const providers = (opt.dataset.providers || '').split(/\s+/).filter(Boolean);
+        if (!providers.length) continue; // Auto / legacy value
+        const allowed = providers.includes(provider);
+        opt.hidden = !allowed;
+        opt.disabled = !allowed;
+    }
+    const selected = engineSelect.selectedOptions[0];
+    if (selected && selected.disabled) engineSelect.value = '';
+}
 function openEditModal(btn) {
     const d = btn.dataset;
     document.getElementById('edit-model-id').value = d.id;
@@ -586,8 +627,9 @@ function openEditModal(btn) {
     document.getElementById('edit-supports-vision').checked = d.supportsVision === 'true';
     const engineSelect = document.getElementById('edit-engine');
     engineSelect.value = d.engine || '';
-    // Preserve a legacy/engine value that isn't in the (coding-engines-only) list
-    // so editing a model never silently drops an existing override.
+    filterEngineOptions(document.getElementById('edit-provider'), engineSelect);
+    // Preserve a legacy/engine value that isn't in the compatible list so
+    // editing a model never silently drops an existing override.
     if ((d.engine || '') && engineSelect.value !== d.engine) {
         const opt = document.createElement('option');
         opt.value = d.engine;
@@ -614,6 +656,21 @@ document.addEventListener('DOMContentLoaded', function() {
     if (openAdd && addModal) {
         openAdd.addEventListener('click', function() {
             addModal.classList.remove('hidden');
+        });
+    }
+
+    const addProvider = document.getElementById('add-provider');
+    const addEngine = document.getElementById('add-engine');
+    if (addProvider && addEngine) {
+        addProvider.addEventListener('change', function() {
+            filterEngineOptions(addProvider, addEngine);
+        });
+    }
+    const editProvider = document.getElementById('edit-provider');
+    const editEngine = document.getElementById('edit-engine');
+    if (editProvider && editEngine) {
+        editProvider.addEventListener('change', function() {
+            filterEngineOptions(editProvider, editEngine);
         });
     }
 

@@ -226,21 +226,18 @@ async def test_langchain_missing_provider_package_returns_clear_error(
 
 
 @pytest.mark.asyncio
-async def test_copilot_unsupported_provider_warns_not_errors(models_client, mdl_prefix):
+async def test_unsupported_provider_rejected(models_client, mdl_prefix):
     resp = await models_client.post(
         "/api/admin/models",
         json={
             "model_id": f"{mdl_prefix}warn",
             "provider": "mistral",
-            "name": "WarnOnly",
+            "name": "Unsupported",
             "engine": "copilot",
         },
     )
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["engine"] == "copilot"
-    assert "warnings" in data
-    assert "may not be supported by Copilot SDK" in data["warnings"][0]
+    assert resp.status_code == 400
+    assert "No engine supports provider" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
