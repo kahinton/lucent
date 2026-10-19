@@ -510,7 +510,15 @@ def _default_model_chain(
     """
     from lucent.model_registry import select_model_for_task
 
-    if MODEL and any(model.id == MODEL for model in accessible_models):
+    # An explicit task/request model always wins. The configured daemon model
+    # is only a default for tasks that did not name one; otherwise a pinned
+    # model (e.g. a request-level gemma pin) would be silently replaced by the
+    # daemon's own chat model.
+    if (
+        not explicit_model
+        and MODEL
+        and any(model.id == MODEL for model in accessible_models)
+    ):
         return MODEL, "configured daemon model is available to the task owner"
     selection = select_model_for_task(
         agent_type=agent_type,

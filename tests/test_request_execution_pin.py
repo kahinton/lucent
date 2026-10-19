@@ -58,11 +58,13 @@ async def test_create_task_inherits_request_pin(repo, test_organization, pin_bac
     assert task["model"] == "qwen3-coder"
 
 
-async def test_explicit_task_values_override_request_pin(
+async def test_request_pin_is_authoritative_over_task_values(
     repo, test_organization, pin_backends
 ):
+    """A request-level pin means "run this request on X"; a planner-supplied
+    default must not quietly substitute another model or backend."""
     request = await repo.create_request(
-        title="Overridden pin",
+        title="Authoritative pin",
         org_id=str(test_organization["id"]),
         backend_id=pin_backends["pin-primary"],
         requested_model="qwen3-coder",
@@ -70,14 +72,14 @@ async def test_explicit_task_values_override_request_pin(
 
     task = await repo.create_task(
         request_id=str(request["id"]),
-        title="Overrides the pin",
+        title="Planner tried to substitute",
         org_id=str(test_organization["id"]),
         model="claude-opus-4.7",
         backend_id=pin_backends["pin-secondary"],
     )
 
-    assert str(task["backend_id"]) == pin_backends["pin-secondary"]
-    assert task["model"] == "claude-opus-4.7"
+    assert str(task["backend_id"]) == pin_backends["pin-primary"]
+    assert task["model"] == "qwen3-coder"
 
 
 async def test_task_under_unpinned_request_stays_null(repo, test_organization):

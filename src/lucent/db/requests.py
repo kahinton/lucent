@@ -2524,19 +2524,27 @@ class RequestRepository:
                     fusion_config, backend_id, task_kind, execution_config)
                    VALUES (
                     $1, $2, $3, $4, $5::varchar, $6, $7, $8, $9,
-                    -- Decision steps run on a decision-class model resolved
-                    -- by the dispatcher; they must not inherit a request's
-                    -- chat model/backend pin.
-                    COALESCE($10, CASE WHEN $5::text = 'decision-step' THEN NULL
-                                  ELSE (SELECT requested_model FROM requests
-                                        WHERE id = $1 AND organization_id = $9) END),
+                    -- A request-level execution pin is authoritative: every
+                    -- normal task uses the request's requested_model/backend_id
+                    -- even when the planner supplied a different default.
+                    -- Decision steps run on a decision-class model resolved by
+                    -- the dispatcher and must not inherit either pin.
+                    CASE WHEN $5::text = 'decision-step' THEN $10
+                         ELSE COALESCE(
+                             (SELECT requested_model FROM requests
+                              WHERE id = $1 AND organization_id = $9),
+                             $10
+                         ) END,
                     $11, $12, $13,
                     COALESCE($14, (SELECT created_by FROM requests
                                    WHERE id = $1 AND organization_id = $9)),
                     $15, $16, $17,
-                    COALESCE($18, CASE WHEN $5::text = 'decision-step' THEN NULL
-                                  ELSE (SELECT backend_id FROM requests
-                                        WHERE id = $1 AND organization_id = $9) END),
+                    CASE WHEN $5::text = 'decision-step' THEN $18
+                         ELSE COALESCE(
+                             (SELECT backend_id FROM requests
+                              WHERE id = $1 AND organization_id = $9),
+                             $18
+                         ) END,
                     $19::varchar,
                     $20
                    )

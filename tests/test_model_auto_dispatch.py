@@ -364,6 +364,26 @@ async def test_explicit_model_never_consults_the_arbiter(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_explicit_model_wins_over_an_accessible_daemon_model(monkeypatch):
+    """The daemon's configured model is a default, not an override.
+
+    Regression: a request/task pinned to gemma was silently dispatched on the
+    daemon's configured glm because the daemon-model short-circuit ran before
+    the explicit model.
+    """
+    harness = await _harness(
+        monkeypatch,
+        _task(model="chat-b"),
+        auto_enabled=False,
+        daemon_model="chat-a",
+    )
+    await harness["daemon"]._dispatch_tracked_tasks(max_tasks=1)
+
+    assert harness["calls"]["sessions"][0] == ("code-11111111", "chat-b")
+    assert harness["calls"]["update_model"][0][1]["model"] == "chat-b"
+
+
+@pytest.mark.asyncio
 async def test_no_accessible_models_still_denies(monkeypatch):
     harness = await _harness(monkeypatch, _task(model="auto"), auto_enabled=True)
 

@@ -498,8 +498,8 @@ POST /api/requests
 | `priority` | string | no | `low`, `medium` (default), `high`, `urgent` |
 | `source` | string | no | `user` (default), `cognitive`, `api`, `daemon`, `schedule` |
 | `dependency_policy` | string | no | `strict` (default) or `permissive` — controls whether later tasks are blocked when a predecessor fails |
-| `backend_id` | string | no | Coding-engine backend pin. Tasks created from this request inherit it unless they override it. For a local-provider backend (Ollama / LM Studio), `requested_model` is required unless the backend config carries a `model`. |
-| `requested_model` | string | no | Model the daemon should run for this request's tasks unless a task names one. Inherited by tasks. Required when `backend_id` names a local-provider backend without `config.model`; there is no safe cloud fallback for a local engine. |
+| `backend_id` | string | no | Coding-engine backend pin for every normal task created from this request. Request-level pins are authoritative over a task's `backend_id`; decision-step tasks ignore them. For a local-provider backend (Ollama / LM Studio), `requested_model` is required unless the backend config carries a `model`. |
+| `requested_model` | string | no | Model every normal task created from this request runs. Authoritative over a task's `model` field; decision-step tasks ignore it. Required when `backend_id` names a local-provider backend without `config.model`; there is no safe cloud fallback for a local engine. |
 
 ### List Requests
 
