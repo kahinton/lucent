@@ -665,6 +665,13 @@ Tasks with unrecognized or inaccessible agent types will be rejected. Use
 list_agent_definitions(status='active') or check /definitions to see which
 agents are available to the request owner.
 
+TASK KINDS: Call list_task_kinds() before creating non-standard work.
+``agent_type`` is *who* does the work; ``task_kind`` + ``execution_config`` is
+*how* it executes. The default kind is ``agent``; ``decision`` and ``fusion``
+currently accept their legacy config fields. For a new kind use its catalog
+entry's config schema and pass ``task_kind`` + ``execution_config`` rather than
+inventing a new agent type.
+
 SANDBOX POLICY: Tasks that need a sandbox MUST reference an approved sandbox
 template via ``sandbox_template_id``. Inline ``sandbox_config`` is no longer
 accepted from planners — first call ``list_sandbox_templates`` to see what's
@@ -698,11 +705,23 @@ Args:
         tasks increasing ``sequence_order`` values.
     output_contract: Optional structured output contract dict:
         {json_schema: {...}, on_failure: fail|fallback|retry_then_fallback, max_retries: int}
+    task_kind: Optional executor kind from list_task_kinds(). Defaults to
+        inference from the legacy fields: decision_config (or
+        agent_type='decision-step') → 'decision'; fusion_config → 'fusion';
+        otherwise 'agent'. New kinds should use task_kind + execution_config.
+    execution_config: Generic per-kind config payload. For decision/fusion it is
+        equivalent to decision_config/fusion_config; using both forms together
+        is rejected. See list_task_kinds() for each kind's schema and examples.
     decision_config: Optional decision-step payload — requires agent_type
         'decision-step': {questions: [{name, type: noul|choice|score, instructions,
         criteria?}], state?: {...}, model?: <decision model id>,
         threshold_policy?: {questions: {name: {min}}, on_fail: fail_task|needs_review}}.
         Dispatched to a System One decision model without an agent session.
+        Choose the model from list_available_models(category='decision')
+        ``decision_models``; if omitted here and in ``model``, the daemon
+        selects an available decision model. ``backend_id``, ``output_contract``,
+        ``fusion_config``, and model "auto" do not apply. Prefer
+        task_kind='decision' + execution_config for new callers.
     fusion_config: Optional fusion payload — requires a chat agent_type (never
         decision-step): {mode: best_of_n|synthesize, candidates: {models: [ids]} |
         {count: n}, arbiter: {model?, questions: [<decision questions>],
@@ -735,6 +754,8 @@ if the agent type is not approved or the sandbox template is invalid."""
         sandbox_template_id: str | None = None,
         sandbox_overrides: dict | None = None,
         output_contract: dict | None = None,
+        task_kind: str | None = None,
+        execution_config: dict | None = None,
         decision_config: dict | None = None,
         fusion_config: dict | None = None,
         backend_id: str | None = None,
@@ -744,6 +765,61 @@ if the agent type is not approved or the sandbox template is invalid."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+
+        from lucent.task_kinds import (
+            UnknownTaskKindError,
+            resolve_task_kind,
+            validate_task_kind_payload,
+        )
+
+        try:
+            resolved_kind = resolve_task_kind(
+                kind=task_kind,
+                agent_type=agent_type,
+                decision_config=decision_config,
+                fusion_config=fusion_config,
+            )
+        except UnknownTaskKindError as exc:
+            return json.dumps({"error": str(exc)})
+        if execution_config is not None and (
+            decision_config is not None or fusion_config is not None
+        ):
+            return json.dumps(
+                {
+                    "error": (
+                        "Provide execution_config or the legacy "
+                        "decision_config/fusion_config, not both"
+                    )
+                }
+            )
+        if resolved_kind == "agent" and (
+            decision_config is not None or fusion_config is not None
+        ):
+            return json.dumps(
+                {
+                    "error": (
+                        "decision_config/fusion_config require their matching "
+                        "task kind"
+                    )
+                }
+            )
+        effective_config = execution_config
+        if effective_config is None:
+            if resolved_kind == "decision":
+                effective_config = decision_config
+            elif resolved_kind == "fusion":
+                effective_config = fusion_config
+        try:
+            validate_task_kind_payload(resolved_kind, effective_config)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        # Mirror the generic config onto the legacy fields so existing
+        # validation and dispatch paths keep working.
+        if execution_config is not None:
+            if resolved_kind == "decision" and decision_config is None:
+                decision_config = execution_config
+            elif resolved_kind == "fusion" and fusion_config is None:
+                fusion_config = execution_config
 
         from lucent.settings import custom_tooling_enabled, sandboxes_enabled
 
@@ -768,7 +844,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         # mirror the REST surface: a decision task needs an accessible
         # decision-class model, and normal tool-capable model validation
         # does not apply to it.
-        if decision_config or agent_type == "decision-step":
+        if resolved_kind == "decision":
             from lucent.db.models import (
                 ModelRepository,
                 decision_models_available_for_user,
@@ -797,6 +873,15 @@ if the agent type is not approved or the sandbox template is invalid."""
                             "A decision-step task carries its own question "
                             "schema — output_contract cannot be combined with "
                             "decision_config"
+                        )
+                    }
+                )
+            if backend_id:
+                return json.dumps(
+                    {
+                        "error": (
+                            "decision-step tasks run on the decision API and do "
+                            "not use backend_id"
                         )
                     }
                 )
@@ -850,7 +935,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         # REST surface: candidate / synthesis / refine models are
         # chat-class and the arbiter is decision-class; the fusion.* mode
         # flags gate each mode at authoring time.
-        if fusion_config:
+        if resolved_kind == "fusion":
             from lucent.db.requests import validate_fusion_config
             from lucent.model_registry import (
                 validate_decision_model,
@@ -1166,9 +1251,17 @@ if the agent type is not approved or the sandbox template is invalid."""
                 sandbox_config=sandbox_config,
                 requesting_user_id=str(requesting_user_id) if requesting_user_id else None,
                 output_contract=output_contract,
-                decision_config=decision_config,
-                fusion_config=fusion_config,
+                # When the generic field was used, let the repository mirror it
+                # into the legacy columns; passing both would be ambiguous.
+                decision_config=(
+                    None if execution_config is not None else decision_config
+                ),
+                fusion_config=(
+                    None if execution_config is not None else fusion_config
+                ),
                 backend_id=backend_id,
+                task_kind=resolved_kind,
+                execution_config=execution_config,
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
@@ -1178,6 +1271,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 "title": task["title"],
                 "status": task["status"],
                 "agent_type": task["agent_type"],
+                "task_kind": task.get("task_kind"),
                 "model": task.get("model"),
                 "reasoning_effort": task.get("reasoning_effort"),
                 "sandbox_template_id": (
@@ -2543,9 +2637,10 @@ Returns: JSON list of {goal_id, goal_title, next_milestone_index,
 
 Use this to choose a model when creating tasks. Returns all available models
 with their categories, capabilities, provider, the engines each model can run
-on, and a flat ``execution_targets`` list (model + engine + backend_id) that is
-the easiest way to assign work. Default models should be used whenever there is
-no clear reason to pick a specialized model. Some models also expose selectable
+on, a flat ``execution_targets`` list (model + engine + backend_id) that is the
+easiest way to assign work, and a ``decision_models`` list for decision-step
+tasks. Default models should be used whenever there is no clear reason to pick
+a specialized model. Some models also expose selectable
 reasoning_efforts; use the provider default unless the task clearly benefits
 from lower latency or deeper reasoning.
 
@@ -2615,15 +2710,15 @@ provided, the recommended model plus a selection reason."""
                 "needs a configured backend to run on a coding engine — a model "
                 "name alone routes to the provider's default engine. Models "
                 "with decision_model=true have no execution_targets — never "
-                "choose them for task work. daemon-dispatched tasks require "
-                "tool-capable models, because "
-                "agents receive MCP tools for memory/request operations. Never "
-                "set a decision-class model (model_class 'decision') as a normal "
-                "task's model — it would be swapped for the default chat model at "
-                "dispatch. To run System One checks (choice/noul/score) as part of "
-                "a request, create a decision step instead: agent_type "
-                "'decision-step' with decision_config carrying named questions "
-                "and an optional threshold_policy. Only choose from enabled "
+                "choose them for normal task work. For a decision step, choose "
+                "an id from decision_models (or omit the model and the daemon "
+                "selects an available decision model), set agent_type "
+                "'decision-step', and pass decision_config with the named "
+                "choice/noul/score questions and an optional threshold_policy. "
+                "Decision models never appear in execution_targets. "
+                "daemon-dispatched tasks require tool-capable models, because "
+                "agents receive MCP tools for memory/request operations. Only "
+                "choose from enabled "
                 "models in this list. If a model includes reasoning_efforts, "
                 "omit reasoning_effort for provider default, choose low/minimal "
                 "for cheap simple work, and high/xhigh/max only for hard "
@@ -2632,6 +2727,7 @@ provided, the recommended model plus a selection reason."""
             "provider_engine_map": catalog["provider_engine_map"],
             "models": catalog["models"],
             "execution_targets": catalog["execution_targets"],
+            "decision_models": catalog["decision_models"],
         }
         if agent_type and models:
             selection = select_model_for_task(
@@ -2694,6 +2790,52 @@ backends with a ``default_model`` or a known model id."""
                     "backend whose provider is a local server (e.g. Ollama) runs that server's "
                     "models. Without a backend a task uses default routing. Prefer "
                     "list_available_models' execution_targets when choosing model + engine."
+                ),
+            }
+        )
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List the task execution kinds and their config contracts.
+
+Call this before creating a non-standard task. Each entry describes one kind's
+config field/schema, examples, model/agent/backend requirements, and
+capabilities (sandbox, output contract). ``agent_type`` is *who* does the work
+and only applies to the ``agent``/``decision``/``fusion`` kinds; ``task_kind`` +
+``execution_config`` are *how* it executes and are the forward-compatible form.
+
+Returns JSON with ``kinds`` (schemas + examples + availability) and guidance."""
+    )
+    async def list_task_kinds() -> str:
+        from lucent.db.models import decision_models_available_for_user
+        from lucent.task_kinds import task_kind_catalog
+
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        kinds = task_kind_catalog()
+        if user_id and org_id:
+            available_decision_models = await decision_models_available_for_user(
+                await _get_pool(),
+                user_id=str(user_id),
+                org_id=str(org_id),
+                requester_role=user_role,
+            )
+            for kind in kinds:
+                if kind["kind"] == "decision":
+                    kind["availability"] = {
+                        "available": bool(available_decision_models),
+                        "decision_models": available_decision_models,
+                    }
+        return json.dumps(
+            {
+                "version": 1,
+                "kinds": kinds,
+                "guidance": (
+                    "Choose a kind first, then its config. Pass task_kind and "
+                    "execution_config to create_task for non-agent kinds. For "
+                    "agent tasks use agent_type from list_agent_definitions plus "
+                    "model/backend_id from list_available_models. decision_config/"
+                    "fusion_config remain accepted aliases for the decision/"
+                    "fusion kinds. Do not send fields belonging to another kind."
                 ),
             }
         )

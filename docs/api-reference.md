@@ -130,6 +130,24 @@ and `backend_id`). Naming a model without `backend_id` uses its `default_engine`
 Local providers (Ollama, LM Studio) need a configured backend to run on a coding
 engine.
 
+### Task kinds (MCP tool)
+
+`list_task_kinds` is the machine-readable contract for task executors. It
+returns `{version, kinds[], guidance}`. Each kind carries:
+
+- `kind`, `display_name`, `description`, `aliases`
+- `config_field`, `config_required`, `config_schema`
+- `requirements` — agent definition, agent-type constant, model class/tools/auto,
+  backend allowance, output-contract allowance, sandbox policy
+- `examples`
+- `availability` for `decision` (whether a decision-class model is available to
+  the caller, and which ids)
+
+Use it before creating a non-standard task, then pass `task_kind` and
+`execution_config` to `create_task`. `agent` is the default kind;
+`decision_config`/`fusion_config` remain accepted aliases. See
+`docs/task-kinds-design.md` for the full lifecycle and how to add a kind.
+
 ---
 
 ## Health Check
@@ -613,9 +631,50 @@ POST /api/requests/{request_id}/tasks
 | `sandbox_config` | object | no | Inline sandbox configuration (template takes precedence). REST only — the MCP planner rejects it and requires an approved template plus `sandbox_overrides`. |
 | `sandbox_overrides` | object | no | MCP planner only. Overrides on top of the template: `repo_url`, `branch`, `timeout_seconds`, `output_mode`, `commit_approved`, `reuse_within_request`. |
 | `output_contract` | object | no | JSON Schema validation for task results (see below) |
-| `decision_config` | object | no | System One decision payload. Requires `agent_type: "decision-step"`; cannot be combined with `output_contract`. |
-| `fusion_config` | object | no | Best-of-N/synthesis payload. Requires a chat agent type; cannot be combined with `decision_config` or a decision-step task. |
+| `task_kind` | string | no | Registered executor kind from `list_task_kinds()`: `agent` (default), `decision`, `fusion`. Inferred from the legacy config fields when omitted. |
+| `execution_config` | object | no | Generic per-kind config. For `decision`/`fusion` it is equivalent to `decision_config`/`fusion_config`; using both forms together is rejected. See `docs/task-kinds-design.md`. |
+| `decision_config` | object | no | System One decision payload (legacy alias for `task_kind: "decision"` + `execution_config`). Requires `agent_type: "decision-step"`; cannot be combined with `output_contract`. |
+| `fusion_config` | object | no | Best-of-N/synthesis payload (legacy alias for `task_kind: "fusion"` + `execution_config`). Requires a chat agent type; cannot be combined with `decision_config` or a decision-step task. |
 | `backend_id` | string | no | Coding-engine backend pin. Inherited from the request when omitted. |
+
+#### Decision Steps
+
+A task with `agent_type: "decision-step"` runs exactly one System One decision
+call — no chat session, engine, sandbox, or backend. Discover decision-class
+models with `list_available_models(category="decision")` and choose an entry
+from its `decision_models` list.
+
+- Name the model once: either `model` or `decision_config.model`. If both are
+  omitted, the daemon selects an available decision-class model at dispatch.
+  `model: "auto"` is not valid for decision steps.
+- `decision_config.questions` is required (1–64 entries). Each question has
+  `name`, `type` (`noul`, `choice`, or `score`), `instructions`, and, for
+  choice/score, `criteria`.
+- Optional `state` supplies named text fields; the executor also includes the
+  parent request and completed sibling task results.
+- Optional `threshold_policy`:
+  `{"questions": {"<name>": {"min": 0.0-1.0}}, "on_fail": "fail_task" | "needs_review"}`.
+- `backend_id`, `output_contract`, and `fusion_config` are not valid with a
+  decision step.
+
+```json
+{
+  "title": "Decide whether the release is ready",
+  "agent_type": "decision-step",
+  "model": "nimble:latest",
+  "decision_config": {
+    "questions": [
+      {"name": "ready", "type": "noul",
+       "instructions": "The release evidence shows every blocking check passes."}
+    ],
+    "state": {"release": "2026.10"},
+    "threshold_policy": {
+      "questions": {"ready": {"min": 0.8}},
+      "on_fail": "needs_review"
+    }
+  }
+}
+```
 
 #### Output Contracts
 

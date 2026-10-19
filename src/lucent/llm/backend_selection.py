@@ -227,6 +227,7 @@ async def model_execution_catalog(
 
     described: list[dict[str, Any]] = []
     targets: list[dict[str, Any]] = []
+    decision_models: list[dict[str, Any]] = []
     for model in models:
         provider = (model.provider or "").strip().lower()
         is_local = provider in LOCAL_PROVIDERS
@@ -266,6 +267,16 @@ async def model_execution_catalog(
                 "engines": engines,
             }
         )
+        if is_decision:
+            decision_models.append(
+                {
+                    "id": model.id,
+                    "name": model.name,
+                    "provider": provider,
+                    "provider_label": provider_label(provider),
+                    "supports_tools": model.supports_tools,
+                }
+            )
         for engine in engines:
             name = str(engine["engine"])
             engine_backends = engine["backends"]
@@ -330,6 +341,7 @@ async def model_execution_catalog(
         ),
         "models": described,
         "execution_targets": targets,
+        "decision_models": decision_models,
     }
 
 

@@ -2435,7 +2435,47 @@ class RequestRepository:
         decision_config: dict | None = None,
         fusion_config: dict | None = None,
         backend_id: str | None = None,
+        task_kind: str | None = None,
+        execution_config: dict | None = None,
     ) -> dict:
+        # Normalize the explicit kind + generic config onto the legacy
+        # decision_config/fusion_config fields so every existing reader keeps
+        # working during the compatibility window.
+        from lucent.task_kinds import (
+            resolve_task_kind,
+            validate_task_kind_payload,
+        )
+
+        resolved_kind = resolve_task_kind(
+            kind=task_kind,
+            agent_type=agent_type,
+            decision_config=decision_config,
+            fusion_config=fusion_config,
+        )
+        if execution_config is not None and (
+            decision_config is not None or fusion_config is not None
+        ):
+            raise ValueError(
+                "Provide execution_config or the legacy decision_config/"
+                "fusion_config, not both"
+            )
+        if execution_config is None:
+            if resolved_kind == "decision":
+                execution_config = decision_config
+            elif resolved_kind == "fusion":
+                execution_config = fusion_config
+        if resolved_kind == "decision":
+            decision_config = execution_config
+        elif resolved_kind == "fusion":
+            fusion_config = execution_config
+        elif resolved_kind == "agent" and (
+            decision_config is not None or fusion_config is not None
+        ):
+            raise ValueError(
+                "decision_config/fusion_config require their matching task kind"
+            )
+        validate_task_kind_payload(resolved_kind, execution_config)
+
         _validate_output_contract(output_contract)
         validate_decision_config(decision_config)
         # Structural validation only — authoring surfaces enforce the
@@ -2481,17 +2521,24 @@ class RequestRepository:
                     agent_definition_id, priority, sequence_order, organization_id,
                     model, reasoning_effort, sandbox_template_id, sandbox_config,
                     requesting_user_id, output_contract, decision_config,
-                    fusion_config, backend_id)
+                    fusion_config, backend_id, task_kind, execution_config)
                    VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                    COALESCE($10, (SELECT requested_model FROM requests
-                                   WHERE id = $1 AND organization_id = $9)),
+                    $1, $2, $3, $4, $5::varchar, $6, $7, $8, $9,
+                    -- Decision steps run on a decision-class model resolved
+                    -- by the dispatcher; they must not inherit a request's
+                    -- chat model/backend pin.
+                    COALESCE($10, CASE WHEN $5::text = 'decision-step' THEN NULL
+                                  ELSE (SELECT requested_model FROM requests
+                                        WHERE id = $1 AND organization_id = $9) END),
                     $11, $12, $13,
                     COALESCE($14, (SELECT created_by FROM requests
                                    WHERE id = $1 AND organization_id = $9)),
                     $15, $16, $17,
-                    COALESCE($18, (SELECT backend_id FROM requests
-                                   WHERE id = $1 AND organization_id = $9))
+                    COALESCE($18, CASE WHEN $5::text = 'decision-step' THEN NULL
+                                  ELSE (SELECT backend_id FROM requests
+                                        WHERE id = $1 AND organization_id = $9) END),
+                    $19::varchar,
+                    $20
                    )
                    RETURNING *""",
                 UUID(request_id),
@@ -2514,6 +2561,8 @@ class RequestRepository:
                 json.dumps(decision_config) if decision_config else None,
                 json.dumps(fusion_config) if fusion_config else None,
                 UUID(backend_id) if backend_id else None,
+                resolved_kind,
+                json.dumps(execution_config) if execution_config else None,
             )
         task = dict(row)
         # Log creation event

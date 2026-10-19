@@ -355,6 +355,91 @@ async def test_create_task_round_trips_decision_config(db_pool):
         )
 
 
+@pytest.mark.asyncio
+async def test_decision_step_does_not_inherit_request_execution_pin(db_pool):
+    """A request's chat model/backend pin must not leak into a decision step.
+
+    The dispatcher resolves the decision model itself; inheriting a language
+    model or a coding-engine backend would make the step fail at dispatch.
+    """
+    from lucent.db import OrganizationRepository
+    from lucent.db.requests import RequestRepository
+
+    prefix = f"dec_pin_{str(uuid4())[:8]}"
+    org = await OrganizationRepository(db_pool).create(name=f"{prefix}org")
+    repo = RequestRepository(db_pool)
+    req = await repo.create_request(
+        title=f"{prefix} request",
+        org_id=str(org["id"]),
+        created_by=None,
+        requested_model="gemma4:31b-cloud",
+    )
+    decision = await repo.create_task(
+        request_id=str(req["id"]),
+        title="Decision step",
+        org_id=str(org["id"]),
+        agent_type="decision-step",
+        decision_config={"questions": [_noul()]},
+    )
+    assert decision["model"] is None
+    assert decision["backend_id"] is None
+
+    # The same request still supplies the default model to normal tasks.
+    normal = await repo.create_task(
+        request_id=str(req["id"]),
+        title="Normal task",
+        org_id=str(org["id"]),
+        agent_type="code",
+    )
+    assert normal["model"] == "gemma4:31b-cloud"
+
+
+@pytest.mark.asyncio
+async def test_generic_task_kind_and_execution_config(db_pool):
+    """The forward-compatible kind/execution_config path stores and mirrors."""
+    from lucent.db import OrganizationRepository
+    from lucent.db.requests import RequestRepository
+    from lucent.task_kinds import UnknownTaskKindError
+
+    prefix = f"dec_kind_{str(uuid4())[:8]}"
+    org = await OrganizationRepository(db_pool).create(name=f"{prefix}org")
+    repo = RequestRepository(db_pool)
+    req = await repo.create_request(
+        title=f"{prefix} request",
+        org_id=str(org["id"]),
+        created_by=None,
+    )
+    config = {"questions": [_noul()]}
+    task = await repo.create_task(
+        request_id=str(req["id"]),
+        title="Generic decision",
+        org_id=str(org["id"]),
+        agent_type="decision-step",
+        task_kind="decision",
+        execution_config=config,
+    )
+    assert task["task_kind"] == "decision"
+    assert json.loads(task["execution_config"]) == config
+    assert json.loads(task["decision_config"]) == config
+
+    normal = await repo.create_task(
+        request_id=str(req["id"]),
+        title="Normal task",
+        org_id=str(org["id"]),
+        agent_type="code",
+    )
+    assert normal["task_kind"] == "agent"
+    assert normal["execution_config"] is None
+
+    with pytest.raises(UnknownTaskKindError):
+        await repo.create_task(
+            request_id=str(req["id"]),
+            title="Unknown kind",
+            org_id=str(org["id"]),
+            task_kind="run_code",
+        )
+
+
 # ── dispatch branch ─────────────────────────────────────────────────────
 
 TASK_ID = "11111111-1111-1111-1111-111111111111"
@@ -770,6 +855,19 @@ async def test_rest_create_task_decision_pairing_422s(db_pool, monkeypatch):
         )
         assert resp.status_code == 422
         assert "not both" in resp.json()["detail"]
+
+        # backend pins do not apply to decision steps
+        resp = await client.post(
+            base,
+            json={
+                "title": "step",
+                "agent_type": "decision-step",
+                "decision_config": config,
+                "backend_id": str(uuid4()),
+            },
+        )
+        assert resp.status_code == 422
+        assert "backend_id" in resp.json()["detail"]
 
         # no decision model available to the user → 422
         resp = await client.post(

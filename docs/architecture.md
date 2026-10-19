@@ -590,6 +590,15 @@ The daemon uses a two-level work hierarchy:
 
 Each task flows through: `pending` → `claimed` → `running` → `completed`/`failed`, with full event tracking visible on the Activity page.
 
+Tasks carry an explicit **execution kind** (`task_kind`) plus a generic
+`execution_config` payload. The registered kinds are `agent` (default),
+`decision`, and `fusion`; the registry lives in `src/lucent/task_kinds.py` and
+`list_task_kinds` exposes each kind's config schema, requirements, and examples
+to agents. `agent_type` describes *who* does the work; `task_kind` describes
+*how* it executes. Future deterministic executors (run-code, webhook, shell)
+register there without a new task column. See
+[Task Kinds](task-kinds-design.md).
+
 Tasks can include **output contracts** — JSON Schema definitions that the daemon validates against before completing the task. Three failure modes are available: `fail`, `fallback`, or `retry_then_fallback`.
 
 Tasks can also produce first-class **outputs** stored in `task_outputs` and

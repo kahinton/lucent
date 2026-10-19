@@ -4469,18 +4469,49 @@ class LucentDaemon(
                 continue
             requesting_user_id = str(requesting_user_id)
 
-            # Decision-step branch: a task carrying decision_config is
-            # executed by a System One decision model without a chat session.
-            # Sits before chat model selection deliberately — decision models
-            # are never routed through _select_model_for_user / the engine
-            # factory, and this branch must never fall through to the
-            # generic path.
-            decision_cfg = task.get("decision_config") or {}
+            # Explicit task kind (migration 141) with legacy inference. The
+            # kind is what selects the executor; decision_config/fusion_config
+            # are compatibility aliases during the migration window.
+            task_kind = str(task.get("task_kind") or "").strip().lower()
+            if not task_kind:
+                task_kind = (
+                    "decision"
+                    if task.get("decision_config")
+                    else "fusion"
+                    if task.get("fusion_config")
+                    else "agent"
+                )
+            if task_kind not in {"agent", "decision", "fusion"}:
+                reason = (
+                    f"Unknown task kind '{task_kind}' — no executor is "
+                    "registered for it"
+                )
+                await _fail_owned(task_id, reason)
+                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                continue
+
+            # Decision-step branch: a task of kind 'decision' is executed by a
+            # System One decision model without a chat session. Sits before
+            # chat model selection deliberately — decision models are never
+            # routed through _select_model_for_user / the engine factory, and
+            # this branch must never fall through to the generic path.
+            decision_cfg = (
+                task.get("execution_config") or task.get("decision_config")
+                if task_kind == "decision"
+                else task.get("decision_config")
+            ) or {}
             if isinstance(decision_cfg, str):
                 try:
                     decision_cfg = json.loads(decision_cfg) or {}
                 except (TypeError, ValueError):
                     decision_cfg = {}
+            if task_kind == "decision" and not decision_cfg:
+                reason = (
+                    "Decision task is missing execution_config/decision_config"
+                )
+                await _fail_owned(task_id, reason)
+                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                continue
             if decision_cfg:
                 if self.draining:
                     log("Dispatch is draining for source reload; leaving remaining tasks pending")
@@ -5071,12 +5102,22 @@ class LucentDaemon(
             # A disabled or unsupported fusion task falls through to the
             # normal single-model path below so an admin flipping a flag
             # mid-flight never strands a queued task.
-            fusion_config = task.get("fusion_config")
+            fusion_config = (
+                task.get("execution_config") or task.get("fusion_config")
+                if task_kind == "fusion"
+                else task.get("fusion_config")
+            )
             if isinstance(fusion_config, str) and fusion_config.strip():
                 try:
                     fusion_config = json.loads(fusion_config)
                 except (TypeError, ValueError):
                     fusion_config = None
+            if task_kind == "fusion" and not fusion_config:
+                reason = "Fusion task is missing execution_config/fusion_config"
+                await _fail_owned(task_id, reason)
+                await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                dispatched += 1
+                continue
             if fusion_config:
                 fusion_mode = str(fusion_config.get("mode") or "")
                 if fusion_mode not in ("best_of_n", "synthesize"):

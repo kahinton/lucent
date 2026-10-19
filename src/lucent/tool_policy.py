@@ -15,7 +15,7 @@ BASE_TASK_MEMORY_SERVER_TOOLS = frozenset({
     "search_memories_full", "update_memory", "delete_memory", "create_review",
     "get_memory_versions", "get_request_details", "link_request_memory", "link_task_memory",
     "list_handoffs", "get_handoff", "resolve_handoff", "list_available_models",
-    "log_task_event", "exec_sandbox_command", "send_handoff",
+    "list_task_kinds", "log_task_event", "exec_sandbox_command", "send_handoff",
     "analyze_tool_failure_patterns", "propose_definition_improvement",
 })
 DEFINITION_ACTIVATION_TOOLS = frozenset({
@@ -26,7 +26,8 @@ DEFINITION_ACTIVATION_TOOLS = frozenset({
     "get_hook_definition", "list_mcp_server_definitions", "create_mcp_server_definition",
 })
 WORK_ACTIVATION_TOOLS = frozenset({
-    "create_request", "create_task", "list_sandbox_templates", "propose_sandbox_template",
+    "create_request", "create_task", "list_task_kinds", "list_sandbox_templates",
+    "propose_sandbox_template",
 })
 CAPABILITY_ACTIVATION_AGENT_TYPES = frozenset(
     {"assessment", "definition-engineer", "lucent", "planning", "reflection"}

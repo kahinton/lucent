@@ -171,3 +171,5 @@ async def test_model_execution_catalog_decision_model_has_no_targets(fake_backen
     assert model["engines"] == []
     assert model["default_engine"] is None
     assert [target for target in catalog["execution_targets"] if target["model"] == decision.id] == []
+    assert [entry["id"] for entry in catalog["decision_models"]] == [decision.id]
+    assert catalog["decision_models"][0]["provider"] == "ollama"

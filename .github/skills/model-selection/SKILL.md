@@ -77,7 +77,10 @@ engine. A model's own stored `engine` (when set) is its default engine. The
   model named without `backend_id` runs on its default engine (for Ollama,
   `langchain`).
 - Decision models (`decision_model: true`) have no `execution_targets` — never
-  choose one for normal task work.
+  choose one for normal task work. They are only for `agent_type="decision-step"`
+  tasks; select one from the separate `decision_models` list (or omit the model
+  and the daemon picks an available decision model). See the
+  `daemon-task-authoring` skill for the `decision_config` shape.
 
 Call `list_engines` for backend detail: each engine carries
 `supported_providers`; each backend carries `provider`, `provider_label`,

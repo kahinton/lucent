@@ -99,6 +99,22 @@ The description is the sub-agent's **entire understanding of what to do** (combi
 - [ ] Includes constraints (don't modify X, only look at Y)
 - [ ] Self-contained — no references to "the thing we discussed"
 
+## Task Kinds
+
+Task execution is described by two separate things:
+
+- `agent_type` / `agent_definition_id` — **who** does the work (persona, skills,
+  tools). Only used by agent-family kinds.
+- `task_kind` + `execution_config` — **how** it executes (agent session,
+  decision call, fusion, and future command/webhook kinds).
+
+Call `list_task_kinds()` before creating a non-standard task. It returns each
+kind's config schema, examples, model/agent/backend requirements, and capability
+flags. Pass `task_kind` and `execution_config` to `create_task`; `decision_config`
+and `fusion_config` remain accepted aliases for the `decision` and `fusion` kinds.
+`agent` is the default kind. Do not send fields from one kind in another kind's
+payload.
+
 ## Agent Type Selection
 
 Agent types are dynamic: available definitions depend on the deployment and the
@@ -119,6 +135,49 @@ not an exhaustive list.
 | `decision-step` | Task is a System One choice/noul/score decision; requires `decision_config` | Classify an input, route a ticket, score a candidate |
 
 **Rule of thumb:** If it edits files → `code`. If it reads and synthesizes → `research`. If it touches memories → `memory`.
+
+### Decision Steps
+
+Use `agent_type="decision-step"` when the deliverable is a typed answer from a
+System One decision model, not prose or code. One task = one decision call.
+
+- Call `list_available_models(category="decision")` and choose an id from its
+  `decision_models` list. You may omit the model entirely and the daemon will
+  select an available decision model at dispatch.
+- `decision_config` requires a non-empty `questions` list (1–64). Each question
+  has `name`, `type` (`noul`, `choice`, or `score`), `instructions`, and
+  `criteria` for choice/score questions.
+- `state` is optional named text fields. The executor also provides the parent
+  request and completed sibling task results, so a step can score upstream work.
+- `threshold_policy` is optional:
+  `{questions: {name: {min: 0.0–1.0}}, on_fail: "fail_task" | "needs_review"}`.
+- Name the decision model once — via `model=<decision id>` or
+  `decision_config.model`, never both. `model="auto"`, `backend_id`,
+  `output_contract`, and `fusion_config` do not apply to decision steps.
+
+```json
+create_task(
+  request_id="<request-id>",
+  title="Decide whether the release is ready",
+  agent_type="decision-step",
+  model="nimble:latest",
+  decision_config={
+    "questions": [
+      {"name": "ready", "type": "noul",
+       "instructions": "The release evidence shows every blocking check passes."}
+    ],
+    "state": {"release": "2026.10"},
+    "threshold_policy": {
+      "questions": {"ready": {"min": 0.8}},
+      "on_fail": "needs_review"
+    }
+  }
+)
+```
+
+Decision models are never valid for chat or normal code/research tasks. They
+also do not appear in `execution_targets`; `decision_models` is their dedicated
+selection list.
 
 ## Priority Calibration
 

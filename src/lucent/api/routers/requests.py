@@ -202,6 +202,8 @@ class TaskCreate(BaseModel):
     output_schema: dict | None = None  # Backwards-compatible alias for output_contract.json_schema
     decision_config: dict | None = None  # Decision-step payload (System One questions)
     fusion_config: dict | None = None  # Fusion payload (chat candidates + decision arbiter)
+    task_kind: str | None = None  # Registered task kind (list_task_kinds); inferred when omitted
+    execution_config: dict | None = None  # Generic per-kind config (forward-compatible form)
     backend_id: str | None = None  # Pin a coding-engine backend (e.g. Codex via Ollama)
 
 
@@ -700,14 +702,61 @@ async def create_task(
             raise HTTPException(422, "requesting_user_id must be an active user in this org")
         requesting_user_id = body.requesting_user_id
 
+    from lucent.task_kinds import (
+        UnknownTaskKindError,
+        resolve_task_kind,
+        validate_task_kind_payload,
+    )
+
+    try:
+        resolved_kind = resolve_task_kind(
+            kind=body.task_kind,
+            agent_type=body.agent_type,
+            decision_config=body.decision_config,
+            fusion_config=body.fusion_config,
+        )
+    except UnknownTaskKindError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if body.execution_config is not None and (
+        body.decision_config is not None or body.fusion_config is not None
+    ):
+        raise HTTPException(
+            422,
+            "Provide execution_config or the legacy decision_config/fusion_config, "
+            "not both",
+        )
+    if resolved_kind == "agent" and (
+        body.decision_config is not None or body.fusion_config is not None
+    ):
+        raise HTTPException(
+            422,
+            "decision_config/fusion_config require their matching task kind",
+        )
+    effective_config = body.execution_config
+    if effective_config is None:
+        if resolved_kind == "decision":
+            effective_config = body.decision_config
+        elif resolved_kind == "fusion":
+            effective_config = body.fusion_config
+    try:
+        validate_task_kind_payload(resolved_kind, effective_config)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    decision_config = body.decision_config or (
+        body.execution_config if resolved_kind == "decision" else None
+    )
+    fusion_config = body.fusion_config or (
+        body.execution_config if resolved_kind == "fusion" else None
+    )
+
     # Validate model against registry (matches MCP create_task behavior)
-    if body.decision_config:
+    if resolved_kind == "decision":
         from lucent.db.models import decision_models_available_for_user
         from lucent.db.requests import validate_decision_config
         from lucent.model_registry import validate_decision_model
 
         try:
-            validate_decision_config(body.decision_config)
+            validate_decision_config(decision_config)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if body.output_contract or body.output_schema:
@@ -721,14 +770,19 @@ async def create_task(
                 422,
                 "decision_config requires agent_type 'decision-step'",
             )
-        if body.decision_config.get("model") and body.model:
+        if body.backend_id:
+            raise HTTPException(
+                422,
+                "decision-step tasks run on the decision API and do not use backend_id",
+            )
+        if decision_config.get("model") and body.model:
             raise HTTPException(
                 422,
                 "Set the decision model either via decision_config.model or "
                 "the task's model field, not both",
             )
         decision_model = (
-            body.model or body.decision_config.get("model") or ""
+            body.model or decision_config.get("model") or ""
         )
         if decision_model:
             error = validate_decision_model(decision_model)
@@ -752,7 +806,7 @@ async def create_task(
             "agent_type 'decision-step' requires decision_config carrying "
             "the questions to answer",
         )
-    if body.fusion_config:
+    if resolved_kind == "fusion":
         from lucent.db.requests import validate_fusion_config
         from lucent.model_registry import (
             validate_decision_model,
@@ -761,7 +815,7 @@ async def create_task(
 
         try:
             validate_fusion_config(
-                body.fusion_config,
+                fusion_config,
                 max_candidates=fusion_max_candidates(organization_id=org_id),
                 best_of_n_enabled=fusion_best_of_n_enabled(organization_id=org_id),
                 synthesis_enabled=fusion_synthesis_enabled(organization_id=org_id),
@@ -774,7 +828,7 @@ async def create_task(
                 "fusion_config requires a chat agent — decision-step tasks "
                 "are executed by the decision model directly",
             )
-        if body.decision_config:
+        if decision_config:
             raise HTTPException(
                 422,
                 "Provide either fusion_config or decision_config, not both",
@@ -786,16 +840,16 @@ async def create_task(
                 raise HTTPException(422, error)
             await _require_model_access(pool, model_id, user)
 
-        candidates = body.fusion_config.get("candidates") or {}
+        candidates = fusion_config.get("candidates") or {}
         for candidate_model in candidates.get("models") or []:
             await _require_chat_model(candidate_model)
-        synthesis = body.fusion_config.get("synthesis") or {}
+        synthesis = fusion_config.get("synthesis") or {}
         if synthesis.get("model"):
             await _require_chat_model(synthesis["model"])
-        refine = body.fusion_config.get("refine")
+        refine = fusion_config.get("refine")
         if isinstance(refine, dict) and refine.get("model"):
             await _require_chat_model(refine["model"])
-        arbiter = body.fusion_config.get("arbiter")
+        arbiter = fusion_config.get("arbiter")
         arbiter_model = (
             arbiter.get("model") if isinstance(arbiter, dict) else None
         ) or None
@@ -814,7 +868,7 @@ async def create_task(
         )
         if auto_error:
             raise HTTPException(422, auto_error)
-        if is_auto and (body.decision_config or body.agent_type == "decision-step"):
+        if is_auto and (resolved_kind == "decision" or body.agent_type == "decision-step"):
             raise HTTPException(
                 422,
                 'Model "auto" applies to chat tasks — decision-step tasks '
@@ -826,12 +880,12 @@ async def create_task(
                 validate_reasoning_effort,
             )
 
-            if not body.decision_config:
+            if resolved_kind != "decision":
                 error = validate_model(body.model, require_tools=True)
                 if error:
                     raise HTTPException(422, error)
             await _require_model_access(pool, body.model, user)
-            if body.reasoning_effort and not body.decision_config:
+            if body.reasoning_effort and resolved_kind != "decision":
                 effort_error = validate_reasoning_effort(
                     body.model, body.reasoning_effort
                 )
@@ -910,9 +964,17 @@ async def create_task(
             sandbox_config=body.sandbox_config,
             requesting_user_id=requesting_user_id,
             output_contract=output_contract,
-            decision_config=body.decision_config,
-            fusion_config=body.fusion_config,
+            # When execution_config was used, let the repository mirror it
+            # into the legacy columns; passing both is ambiguous.
+            decision_config=(
+                None if body.execution_config is not None else decision_config
+            ),
+            fusion_config=(
+                None if body.execution_config is not None else fusion_config
+            ),
             backend_id=body.backend_id,
+            task_kind=resolved_kind,
+            execution_config=body.execution_config,
         )
         task["sandboxes_enabled"] = org_sandboxes_enabled
         task["custom_tooling_enabled"] = custom_tooling_enabled(organization_id=org_id)

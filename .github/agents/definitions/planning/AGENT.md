@@ -45,6 +45,8 @@ If a task requires a specific model tier (complex reasoning vs. simple lookup), 
 
 **Coding engines.** If the request is genuine code work and a coding engine is configured, follow the **model-selection** skill: pick an `execution_targets` row whose `engine` is the coding engine and set that row's `model` and `backend_id` on **every** task doing that work. Decide once per request — do not put some coding tasks on the engine and others on the general layer. The request may already carry `backend_id` and `requested_model`; tasks inherit both unless they override them, so propagate them explicitly when you need to select a different backend or model.
 
+**Task kinds.** Call `list_task_kinds()` before choosing a non-standard executor. `agent_type` is *who* does the work; `task_kind` + `execution_config` is *how* it executes. `agent` is the default; `decision` and `fusion` currently accept their legacy `decision_config`/`fusion_config` aliases. New kinds appear in the catalog with their own schema, so use the generic fields rather than inventing new agent types.
+
 ### 3. Create the Tasks
 
 A request already exists for this decomposition — do not create another one. Set
