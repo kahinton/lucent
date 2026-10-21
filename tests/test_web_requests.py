@@ -718,6 +718,38 @@ class TestRequestCancellation:
         assert resp.status_code == 303
         assert (await repo.get_task(str(task["id"]), str(org["id"])))["status"] == "cancelled"
 
+    async def test_failed_request_detail_stops_live_refresh_and_keeps_cancel_forms(
+        self, client, db_pool, web_user
+    ):
+        """A terminal request page must not swap its action forms under a click.
+
+        The detail page refreshes every 10s via data-live-refresh; a swap while
+        the cancel form is being clicked can detach the form and lose the POST
+        with no visible error.
+        """
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Failed cancel target",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Still pending",
+            org_id=str(org["id"]),
+        )
+        await repo.update_request_status(str(req["id"]), "failed", str(org["id"]))
+
+        resp = await client.get(f"/requests/{req['id']}")
+
+        assert resp.status_code == 200
+        assert 'id="request-live-content" data-live-refresh' not in resp.text
+        assert 'id="request-cancel-form"' in resp.text
+        assert 'hx-preserve="true"' in resp.text
+        assert f'id="task-cancel-form-{task["id"]}"' in resp.text
+        assert f'action="/requests/{req["id"]}/cancel"' in resp.text
+
     async def test_cannot_cancel_peer_task(self, client, db_pool, web_user, web_prefix):
         user, org, _token = web_user
         peer = await UserRepository(db_pool).create(

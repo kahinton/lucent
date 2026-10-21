@@ -201,10 +201,12 @@ async def execute_stale_task_reaper_schedule(
         return {"schedule": sched, "already_fired": True}
 
     try:
-        if not await req_repo.stale_task_reaper_has_work(
+        has_stale = await req_repo.stale_task_reaper_has_work(
             stale_minutes=STALE_TASK_REAPER_STALE_MINUTES,
             org_id=org_id,
-        ):
+        )
+        has_orphans = await req_repo.has_orphaned_tasks(org_id=org_id)
+        if not has_stale and not has_orphans:
             skip_event = {
                 "event_type": "schedule.skipped",
                 "schedule_id": schedule_id,
@@ -220,13 +222,14 @@ async def execute_stale_task_reaper_schedule(
             logger.info(json.dumps(skip_event, sort_keys=True))
             return {"schedule": sched, "run": run, "skipped": True, "event": skip_event}
 
+        cancelled = await req_repo.cancel_orphaned_tasks(org_id=org_id)
         released = await req_repo.release_stale_tasks(
             stale_minutes=STALE_TASK_REAPER_STALE_MINUTES,
             org_id=org_id,
         )
         await sched_repo.complete_run(
             str(run["id"]),
-            result=f"released={released}",
+            result=f"released={released} cancelled={cancelled}",
             org_id=org_id,
         )
         if released:
@@ -235,7 +238,13 @@ async def execute_stale_task_reaper_schedule(
                 released,
                 org_id[:8],
             )
-        return {"schedule": sched, "run": run, "released": released}
+        if cancelled:
+            logger.info(
+                "Server stale-task reaper cancelled %d orphaned task(s) for org=%s",
+                cancelled,
+                org_id[:8],
+            )
+        return {"schedule": sched, "run": run, "released": released, "cancelled": cancelled}
     except Exception as exc:
         await sched_repo.fail_run(str(run["id"]), error=str(exc)[:1000], org_id=org_id)
         logger.exception("Server stale-task reaper failed for schedule %s", schedule_id)

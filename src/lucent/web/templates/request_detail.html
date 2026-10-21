@@ -28,7 +28,7 @@
 {% endblock %}
 
 {% block content %}
-<div id="request-live-content" data-live-refresh data-live-revision="{{ live_revision }}"
+<div id="request-live-content"{% if req.status not in ('completed', 'failed', 'cancelled') %} data-live-refresh{% endif %} data-live-revision="{{ live_revision }}"
     hx-get="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}"
     hx-trigger="lucent:live-refresh"
     hx-headers='{"X-Live-Refresh": "true"}'
@@ -229,7 +229,7 @@
 
 {% if can_review_request and req.status not in ('completed', 'cancelled') %}
 <div class="mb-6 flex justify-end">
-    <form method="post" action="/requests/{{ req.id }}/cancel" data-confirm="Cancel this request? Its work history will remain available.">
+    <form id="request-cancel-form" hx-preserve="true" method="post" action="/requests/{{ req.id }}/cancel" data-confirm="Cancel this request? Its work history will remain available.">
         <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
         <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 transition-colors">
             Cancel request
@@ -508,7 +508,7 @@
                     </form>
                 </details>
                 {% if task.status != 'cancelled' %}
-                <form method="POST" action="/requests/tasks/{{ task.id }}/cancel" class="flex justify-end" data-confirm="Cancel this task? Its activity history will remain available.">
+                <form id="task-cancel-form-{{ task.id }}" hx-preserve="true" method="POST" action="/requests/tasks/{{ task.id }}/cancel" class="flex justify-end" data-confirm="Cancel this task? Its activity history will remain available.">
                     <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                     <button type="submit" class="px-3 py-1 text-xs font-medium rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50 transition-colors">
                         Cancel task

@@ -662,6 +662,16 @@
     document.addEventListener('DOMContentLoaded', function() {
         let refreshing = false;
         let liveEvents = null;
+        // A live refresh that swaps a region while the user is clicking a
+        // submit button can detach the form mid-click, losing the POST with no
+        // visible error. Pause swaps briefly after any pointer interaction in
+        // a live region so action forms stay put long enough to submit.
+        let liveRefreshPausedUntil = 0;
+        document.addEventListener('pointerdown', function(event) {
+            if (event.target && event.target.closest && event.target.closest('[data-live-refresh]')) {
+                liveRefreshPausedUntil = Date.now() + 5000;
+            }
+        }, true);
 
         function updateBadge(name, value) {
             const badge = document.querySelector('[data-live-badge="' + name + '"]');
@@ -683,6 +693,7 @@
 
         function refreshOperationalRegions() {
             if (!window.htmx) return;
+            if (Date.now() < liveRefreshPausedUntil) return;
             document.querySelectorAll('[data-live-refresh]').forEach(function(region) {
                 if (!hasFocusedEditor(region)) window.htmx.trigger(region, 'lucent:live-refresh');
             });

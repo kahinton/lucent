@@ -225,6 +225,43 @@ class TestUpdateRequestStatus:
         assert result is None
 
 
+class TestOrphanedTaskCleanup:
+    @pytest.mark.asyncio
+    async def test_cancel_orphaned_tasks(
+        self, repo, req, task, test_organization, db_pool
+    ):
+        """A historical orphan (terminal parent, still-pending task) is swept."""
+        org_id = str(test_organization["id"])
+        # Simulate a row that predates the transition-time cancellation path:
+        # make the parent terminal without touching its tasks.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE requests SET status = 'cancelled' WHERE id = $1::uuid",
+                str(req["id"]),
+            )
+
+        assert await repo.has_orphaned_tasks(org_id=org_id) is True
+        assert await repo.cancel_orphaned_tasks(org_id=org_id) == 1
+
+        updated = await repo.get_task(str(task["id"]), org_id=org_id)
+        assert updated["status"] == "cancelled"
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
+        assert any(event["event_type"] == "cancelled" for event in events["items"])
+        assert await repo.has_orphaned_tasks(org_id=org_id) is False
+        # Idempotent: nothing left to cancel.
+        assert await repo.cancel_orphaned_tasks(org_id=org_id) == 0
+
+    @pytest.mark.asyncio
+    async def test_orphan_sweep_leaves_active_request_tasks(
+        self, repo, req, task, test_organization
+    ):
+        org_id = str(test_organization["id"])
+        assert await repo.has_orphaned_tasks(org_id=org_id) is False
+        assert await repo.cancel_orphaned_tasks(org_id=org_id) == 0
+        still_pending = await repo.get_task(str(task["id"]), org_id=org_id)
+        assert still_pending["status"] == "pending"
+
+
 class TestCreateTask:
     @pytest.mark.asyncio
     async def test_create_basic(self, repo, req, test_organization):
@@ -255,6 +292,36 @@ class TestCreateTask:
         assert t["priority"] == "high"
         assert t["sequence_order"] == 2
         assert t["model"] == "claude-sonnet-4"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["cancelled", "completed"])
+    async def test_cannot_create_task_under_terminal_request(
+        self, repo, req, test_organization, status
+    ):
+        await repo.update_request_status(
+            str(req["id"]), status, org_id=str(test_organization["id"])
+        )
+        with pytest.raises(ValueError, match=f"under a {status} request"):
+            await repo.create_task(
+                request_id=str(req["id"]),
+                title="Too late",
+                org_id=str(test_organization["id"]),
+            )
+
+    @pytest.mark.asyncio
+    async def test_can_create_task_under_failed_request_for_retry(
+        self, repo, req, test_organization
+    ):
+        """Failed is retryable, so it is not treated as hard-terminal here."""
+        await repo.update_request_status(
+            str(req["id"]), "failed", org_id=str(test_organization["id"])
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Retry path",
+            org_id=str(test_organization["id"]),
+        )
+        assert task["status"] == "pending"
 
     @pytest.mark.asyncio
     async def test_create_logs_event(self, repo, req, test_organization):

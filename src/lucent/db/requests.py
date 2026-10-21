@@ -2515,6 +2515,18 @@ class RequestRepository:
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
         ) as conn:
+            parent_request = await conn.fetchrow(
+                "SELECT status FROM requests WHERE id = $1 AND organization_id = $2",
+                UUID(request_id),
+                UUID(org_id),
+            )
+            if parent_request is None:
+                raise ValueError(f"Request {request_id} not found in this organization")
+            if parent_request["status"] in ("cancelled", "completed"):
+                raise ValueError(
+                    f"Cannot create a task under a {parent_request['status']} "
+                    "request — the request will not run this work"
+                )
             row = await conn.fetchrow(
                 """INSERT INTO tasks
                    (request_id, parent_task_id, title, description, agent_type,
@@ -4047,6 +4059,85 @@ class RequestRepository:
             org_id=org_id,
         )
         return await self.get_task(task_id, org_id=org_id)
+
+    async def has_orphaned_tasks(self, *, org_id: str | None = None) -> bool:
+        """True when a pending/planned task belongs to a terminal request.
+
+        Such a task can never be dispatched (the queue excludes terminal
+        parents), so it should be cancelled rather than left in the queued
+        backlog. ``completed`` and ``cancelled`` are hard terminal; ``failed``
+        is retryable and is intentionally left alone.
+        """
+        where = """
+            t.status IN ('pending', 'planned')
+              AND r.status IN ('cancelled', 'completed')
+        """
+        params: list[Any] = []
+        if org_id:
+            where += " AND t.organization_id = $1"
+            params.append(UUID(org_id))
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            return bool(
+                await conn.fetchval(
+                    f"""SELECT EXISTS (
+                            SELECT 1 FROM tasks t
+                            JOIN requests r ON r.id = t.request_id
+                            WHERE {where}
+                        )""",
+                    *params,
+                )
+            )
+
+    async def cancel_orphaned_tasks(self, *, org_id: str | None = None) -> int:
+        """Cancel pending/planned tasks whose parent request is terminal.
+
+        Cancellation at request-transition time is the primary path; this is
+        the self-healing sweep for rows that predate that path or were created
+        before the parent reached a terminal state. Returns the number of tasks
+        cancelled.
+        """
+        now = datetime.now(timezone.utc)
+        where = """
+            t.status IN ('pending', 'planned')
+              AND r.status IN ('cancelled', 'completed')
+        """
+        params: list[Any] = [now]
+        if org_id:
+            where += " AND t.organization_id = $2"
+            params.append(UUID(org_id))
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    f"""UPDATE tasks t
+                        SET status = 'cancelled',
+                            completed_at = $1,
+                            updated_at = $1
+                        FROM requests r
+                        WHERE r.id = t.request_id
+                          AND {where}
+                        RETURNING t.id, r.status AS request_status""",
+                    *params,
+                )
+                if rows:
+                    await conn.executemany(
+                        """INSERT INTO task_events
+                               (task_id, event_type, detail, metadata)
+                           VALUES ($1, 'cancelled', $2, $3)""",
+                        [
+                            (
+                                row["id"],
+                                "Task cancelled because parent request was "
+                                f"{row['request_status']}",
+                                {"request_status": row["request_status"]},
+                            )
+                            for row in rows
+                        ],
+                    )
+        return len(rows)
 
     async def release_stale_tasks(
         self,
