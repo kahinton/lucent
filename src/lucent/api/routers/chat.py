@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from typing import Any
@@ -59,6 +60,37 @@ from lucent.tool_policy import (
 logger = get_logger("chat")
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+# Sessions with a user turn currently streaming. Background report turns consult
+# this so they never interleave with (or truncate) a reply the person is
+# watching. Process-local by design: the cross-replica case is covered by the
+# advisory lock in lucent.services.subagent_reports.
+_active_chat_turns: dict[str, int] = {}
+
+
+def active_chat_turn_count(session_id: str | None) -> int:
+    """How many user turns are currently streaming for this session."""
+    if not session_id:
+        return 0
+    return _active_chat_turns.get(str(session_id), 0)
+
+
+@contextmanager
+def _track_active_chat_turn(session_id: str | None):
+    """Mark a session as having an in-flight user turn."""
+    if not session_id:
+        yield
+        return
+    key = str(session_id)
+    _active_chat_turns[key] = _active_chat_turns.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        remaining = _active_chat_turns.get(key, 1) - 1
+        if remaining > 0:
+            _active_chat_turns[key] = remaining
+        else:
+            _active_chat_turns.pop(key, None)
 
 COPILOT_BUILTIN_GITHUB_SERVER_TYPES = frozenset({
     "copilot_github",
@@ -1617,6 +1649,34 @@ async def update_chat_session(
     return session
 
 
+@router.get("/sessions/{session_id}/activity")
+async def get_chat_session_activity(request: Request, session_id: str):
+    """Delegated work for this conversation, with its live task state.
+
+    Backs the chat's "delegated work" panel. Deliberately a small, cheap payload:
+    the page polls it while anything is running and otherwise relies on the
+    report events already in the transcript.
+    """
+    user, pool = await _get_session_user(request)
+    from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.db.requests import RequestRepository
+    from lucent.services.delegated_work import load_delegated_work
+
+    org_id = str(user["organization_id"])
+    session = await LLMSessionRepository(pool).get_session(
+        session_id, org_id, user_id=str(user["id"])
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    data = await load_delegated_work(pool, session_id=session_id, org_id=org_id)
+    return {
+        "session_id": session_id,
+        "revision": data.get("revision"),
+        "active_task_count": data.get("active_task_count") or 0,
+        "requests": data.get("requests") or [],
+    }
+
+
 @router.get("/sessions/{session_id}/usage")
 async def get_chat_session_usage(request: Request, session_id: str):
     """Per-session token usage for the context-window usage indicator.
@@ -2240,6 +2300,25 @@ async def chat_stream_v2(
         last_message=last_message,
         attachments=attachments,
     )
+    # Delegated work belongs in the model's own context: the conversation is the
+    # supervisor of every request it created, so it must never answer "I have no
+    # way to know" about work it started. Loaded after the session resolves so the
+    # digest covers requests created earlier in this same session.
+    if chat_session.session_id:
+        try:
+            from lucent.services.delegated_work import (
+                build_delegated_work_digest_for_session,
+            )
+
+            digest = await build_delegated_work_digest_for_session(
+                pool,
+                session_id=chat_session.session_id,
+                org_id=str(user["organization_id"]),
+            )
+            if digest:
+                system_prompt = f"{system_prompt}\n\n{digest}"
+        except Exception:
+            logger.debug("Could not build delegated-work digest", exc_info=True)
     if auto_choice is not None:
         await _stash_auto_selection_metadata(
             chat_session=chat_session,
@@ -2259,6 +2338,21 @@ async def chat_stream_v2(
         and chat_session.provider_session_id
         and chat_session.provider_initialized
     )
+    if resume_provider and chat_session.repo and chat_session.session_id:
+        # Background report turns write assistant messages straight to the
+        # transcript. The provider session has never seen them, so resuming
+        # would silently drop them from the model's context. Replay history
+        # instead whenever that has happened.
+        try:
+            has_report_reply = await chat_session.repo.has_messages_with_kind(
+                chat_session.session_id,
+                str(user["organization_id"]),
+                kind="subagent_report_reply",
+            )
+        except Exception:
+            has_report_reply = False
+        if has_report_reply:
+            resume_provider = False
     prompt = last_message if resume_provider else _history_prompt(persisted_history, last_message)
     message_history = (
         _message_history_for_engine(chat_session.previous_messages)
@@ -2493,6 +2587,12 @@ async def chat_stream_v2(
 
     # Run the streaming session in a background task
     async def run_llm():
+        # Registered for the whole turn so a background report turn can tell
+        # this conversation is mid-reply and wait rather than interleave.
+        with _track_active_chat_turn(chat_session.session_id):
+            await _run_llm_session()
+
+    async def _run_llm_session():
         event_persist_bridge.start()
         try:
             result = await engine.run_session_streaming(

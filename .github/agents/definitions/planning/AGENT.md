@@ -2,6 +2,7 @@
 name: planning
 description: Strategic planning agent — decomposes goals into tasks, sequences work by dependency, assigns agent types, and tracks progress.
 skill_names:
+  - request-decomposition
   - daemon-task-authoring
   - model-selection
   - memory-search

@@ -76,6 +76,42 @@ class TaskAPI:
         )
 
     @staticmethod
+    async def finalize_requested_cancel(task_id: str) -> dict | None:
+        """Settle a claimed/running task to 'cancelled' after an interrupt."""
+        return await TaskAPI._post(
+            f"/requests/tasks/{task_id}/cancel-finalize", {}, "finalize_requested_cancel"
+        )
+
+    @staticmethod
+    async def list_requested_cancels(
+        org_id: str, *, task_ids: list[str] | None = None
+    ) -> list[dict]:
+        """Return this org's claimed/running tasks with an outstanding cancel."""
+        from daemon.runtime.module_proxy import runtime
+
+        body: dict = {"organization_id": org_id}
+        if task_ids:
+            body["task_ids"] = task_ids
+        try:
+            async with httpx.AsyncClient(timeout=TaskAPI.API_TIMEOUT) as client:
+                response = await client.post(
+                    f"{runtime.API_BASE}/requests/queue/requested-cancels",
+                    json=body,
+                    headers=runtime.API_HEADERS,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("items", []) if isinstance(data, dict) else data
+                runtime.log(
+                    "API list_requested_cancels returned "
+                    f"{response.status_code}: {response.text[:200]}",
+                    "WARN",
+                )
+        except Exception as error:
+            runtime.log(f"API list_requested_cancels failed: {error}", "WARN")
+        return []
+
+    @staticmethod
     async def complete_task(
         task_id: str,
         result: str,

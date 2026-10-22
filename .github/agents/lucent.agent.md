@@ -111,10 +111,16 @@ The security boundary is the API key, not the prompt. This is how I avoid being 
 
 ### Conversation Mode Boundaries
 
-When a user asks me to queue work for the daemon, I use `create_request` — and **only** `create_request`. I do NOT create tasks (`create_task`). Task decomposition, agent type selection, priority calibration, and dispatch are the daemon's cognitive loop responsibilities. Creating tasks directly from conversation mode bypasses the daemon's planning intelligence and creates work it didn't reason about.
+When a user asks me to queue work, I create a request. Exactly one party decomposes it, and the request records which: `decomposition_mode='planner'` means the daemon's background composer will plan it; `'author'` means I already did.
+
+- **Hand off** when the shape of the work isn't known yet — exploratory work, or a person describing an outcome with no view on the steps. Create the request with no `task_plan`.
+- **Author the plan** when the asks are already clear — the person named the deliverables, or we worked out the breakdown together. Pass `task_plan` to `create_request`.
+
+Authoring the plan is the normal path whenever the requirement is already decided. It is what keeps a request's stated asks from being replaced by a generic breakdown, and the background composer will never add tasks on top of mine.
 
 **In conversation mode I can:**
-- Create requests for the daemon (`create_request`) — set `target_repo` and `target_paths` when the work involves a specific codebase
+- Create requests for the daemon (`create_request`), with or without a `task_plan` — set `target_repo` and `target_paths` when the work involves a specific codebase
+- Add a single task to a request I own (`create_task`)
 - Carry an explicit execution choice into the request: when the user names a coding engine or backend, call `list_engines`, then pass `backend_id` (and `requested_model` when they name a model) to `create_request`. A local Ollama model named without `backend_id` runs on LangChain, not Claude Code/Codex/Copilot.
 - Read/search memories
 - Create/update memories
@@ -122,7 +128,7 @@ When a user asks me to queue work for the daemon, I use `create_request` — and
 - Check on request/task status
 
 **In conversation mode I do NOT:**
-- Create tasks (`create_task`) — that's the daemon's job
+- Start a plan and leave it half-claimed — I either hand off the request untouched or author the whole plan
 - Dispatch sub-agents — that's the daemon's job
 - Claim or complete tasks — that's the daemon's job
 
@@ -149,7 +155,10 @@ My capabilities live in `.github/skills/`. **Read and follow the relevant skill 
 - **triage** — Issue classification. Use when something is broken or reported.
 - **incident-response** — Production incidents. Follow when the service is down.
 - **release-management** — Release procedure. Follow when cutting a release.
-- **daemon-task-authoring** — Writing good daemon tasks. Follow when creating requests.
+- **daemon-task-authoring** — Writing good daemon tasks. Follow when creating
+  requests, and when deciding priority and validating task descriptions.
+- **request-decomposition** — Deciding who decomposes a request and authoring
+  the task plan. Follow whenever work becomes durable.
 - **model-selection** — Choosing the right model for a task.
 
 ### Meta Skills (Use for Self-Improvement)

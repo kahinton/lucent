@@ -69,7 +69,11 @@ class RuntimeLoopsMixin:
                 self._listen_conn = await connect_scoped(runtime.DATABASE_URL)  # rls: plumbing-only LISTEN (no row reads)
                 await self._listen_conn.add_listener("task_ready", self._on_task_ready)
                 await self._listen_conn.add_listener("request_ready", self._on_request_ready)
-                runtime.log("PG LISTEN established on 'task_ready' and 'request_ready' channels")
+                await self._listen_conn.add_listener("task_cancel", self._on_task_cancel)
+                runtime.log(
+                    "PG LISTEN established on 'task_ready', 'request_ready' "
+                    "and 'task_cancel' channels"
+                )
                 return True
             except Exception as error:
                 runtime.log(
@@ -94,6 +98,41 @@ class RuntimeLoopsMixin:
         if request_id:
             self._decomposition_request_ids.add(str(request_id))
         self._decomposition_ready.set()
+
+    def _on_task_cancel(self, conn, pid, channel, payload):
+        """Interrupt the session running a task the user asked to stop.
+
+        The payload only carries the task id: everything else is re-read from
+        the database by the session that acts on it. If this instance is not
+        running that task, nothing happens here — the owning instance (or the
+        reaper, once the claim goes stale) finalizes it.
+        """
+        from daemon.runtime.module_proxy import runtime
+
+        try:
+            decoded = json.loads(payload)
+            task_id = decoded.get("task_id") if isinstance(decoded, dict) else decoded
+        except (json.JSONDecodeError, TypeError):
+            task_id = payload
+        if not task_id:
+            return
+        task_id = str(task_id)
+        runtime._cancel_requested_task_ids.add(task_id)
+        runtime._task_cancel_ready.set()
+        session_name = runtime._active_task_sessions.get(task_id)
+        if not session_name:
+            # Not ours (or not dispatched yet). The dispatch predicate now
+            # refuses tasks with an outstanding cancel, so it will never start
+            # here; the reaper finalizes it once the claim is stale.
+            return
+        provider_task = runtime._active_session_tasks.get(session_name)
+        if provider_task and not provider_task.done():
+            runtime._cancelled_sessions.add(session_name)
+            provider_task.cancel()
+            runtime.log(
+                f"Cancel requested for task {task_id[:8]}: interrupting session '{session_name}'",
+                "INFO",
+            )
 
     def _take_decomposition_request_ids(self) -> set[str]:
         """Atomically drain request IDs queued by synchronous PG callbacks."""
@@ -169,11 +208,51 @@ class RuntimeLoopsMixin:
             try:
                 if not await self._heartbeat_once():
                     runtime.log("Heartbeat update failed after recovery retry", "WARN")
+                await self._sweep_requested_cancels()
             except asyncio.CancelledError:
                 break
             except Exception as error:
                 runtime.log(f"Heartbeat loop error: {error}", "WARN")
             await asyncio.sleep(heartbeat_seconds)
+
+    async def _sweep_requested_cancels(self) -> None:
+        """Interrupt this instance's tasks that carry a cancel request.
+
+        The ``task_cancel`` notification is the low-latency path, but LISTEN
+        connections do drop and a cancel that arrives while the loop is
+        reconnecting would otherwise sit unhandled until the claim went stale.
+        Reading the column back is the durability guarantee: a cancel is only
+        ever *requested* through the database.
+        """
+        from daemon.runtime.module_proxy import runtime
+
+        active = runtime._active_task_sessions
+        if not active:
+            return
+        org_id = await self._get_daemon_org_id()
+        if not org_id:
+            return
+        try:
+            outstanding = await runtime.RequestAPI.list_requested_cancels(
+                org_id, task_ids=sorted(active)
+            )
+        except Exception as error:
+            runtime.log(f"Cancel sweep failed: {error}", "WARN")
+            return
+        for row in outstanding or []:
+            task_id = str(row.get("id") or "")
+            session_name = active.get(task_id)
+            if not task_id or not session_name:
+                continue
+            provider_task = runtime._active_session_tasks.get(session_name)
+            if provider_task and not provider_task.done():
+                runtime._cancelled_sessions.add(session_name)
+                provider_task.cancel()
+                runtime.log(
+                    f"Cancel sweep: interrupting session '{session_name}' "
+                    f"for task {task_id[:8]}",
+                    "INFO",
+                )
 
     async def _cognitive_loop(self):
         """Run long-horizon planning periodically or when requests arrive."""

@@ -359,6 +359,84 @@
         return wrapper;
     }
 
+    // ---------------------------------------------------------------------
+    // Delegated-work report cards
+    // ---------------------------------------------------------------------
+    // A background task/request result is rendered as a self-contained card in
+    // the conversation, not as a tool chip: it is a report from a sub-agent, and
+    // it reads as one. The card is driven entirely by the `subagent_report`
+    // event payload, so streaming and history replay render identically.
+    const REPORT_ACCENTS = {
+        success: { bar: 'bg-emerald-500', chip: 'bg-emerald-50 text-emerald-700 border-emerald-200', label: 'Completed' },
+        attention: { bar: 'bg-red-500', chip: 'bg-red-50 text-red-700 border-red-200', label: 'Needs attention' },
+        review: { bar: 'bg-amber-500', chip: 'bg-amber-50 text-amber-700 border-amber-200', label: 'Ready for review' },
+        muted: { bar: 'bg-gray-400', chip: 'bg-gray-100 text-gray-600 border-gray-200', label: 'Stopped' },
+        info: { bar: 'bg-primary-500', chip: 'bg-primary-50 text-primary-700 border-primary-200', label: 'Update' },
+    };
+
+    function reportAccent(severity) {
+        return REPORT_ACCENTS[severity] || REPORT_ACCENTS.info;
+    }
+
+    /**
+     * Render a delegated-work report card.
+     *
+     * @param {HTMLElement} container - per-assistant tools container
+     * @param {object} payload - subagent_report event (`raw` body or flattened)
+     */
+    function appendSubagentReport(container, payload) {
+        const data = payload && payload.raw ? payload.raw : (payload || {});
+        const kind = String(data.report_kind || data.kind || '');
+        const status = kind.includes('.') ? kind.split('.').slice(1).join('.') : '';
+        const severity = data.severity || (
+            status === 'completed' ? 'success'
+                : status === 'failed' || status === 'needs_rework' ? 'attention'
+                    : status === 'review' || status === 'needs_review' ? 'review'
+                        : status === 'cancelled' ? 'muted'
+                            : 'info'
+        );
+        const accent = reportAccent(severity);
+
+        const request = data.request || {};
+        const task = data.task || null;
+        const headline = data.headline || payload.detail || 'Delegated work update';
+        const body = data.body || '';
+        const url = data.url || (request.id ? `/activity/${request.id}` : '');
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'subagent-report';
+        wrapper.dataset.reportKind = kind;
+        wrapper.dataset.severity = severity;
+
+        const metaBits = [];
+        if (task && task.status_label) metaBits.push(`Task: ${task.status_label}`);
+        if (request.status_label) metaBits.push(`Request: ${request.status_label}`);
+
+        wrapper.innerHTML = `
+            <div class="subagent-report-card">
+                <span class="subagent-report-accent ${accent.bar}"></span>
+                <div class="subagent-report-body">
+                    <div class="subagent-report-header">
+                        <span class="subagent-report-chip ${accent.chip}">
+                            <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+                            </svg>
+                            ${escapeHtml(accent.label)}
+                        </span>
+                        ${request.title ? `<span class="subagent-report-request" title="${escapeHtml(request.title)}">${escapeHtml(request.title)}</span>` : ''}
+                    </div>
+                    <p class="subagent-report-headline">${escapeHtml(headline)}</p>
+                    ${body ? `<p class="subagent-report-text">${escapeHtml(body)}</p>` : ''}
+                    <div class="subagent-report-footer">
+                        <span class="subagent-report-meta">${escapeHtml(metaBits.join(' · '))}</span>
+                        ${url ? `<a href="${escapeHtml(url)}" class="subagent-report-link">Open request</a>` : ''}
+                    </div>
+                </div>
+            </div>`;
+        container.appendChild(wrapper);
+        return wrapper;
+    }
+
     function toggleToolDetails(toolId) {
         const details = document.getElementById(`details-${toolId}`);
         if (!details) return;
@@ -371,6 +449,7 @@
 
     window.LucentChatMessageUI = {
         appendHookCall,
+        appendSubagentReport,
         appendToolCall,
         displayToolName,
         escapeHtml,

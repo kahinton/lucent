@@ -196,6 +196,24 @@ class AuthFailureDetectedError(Exception):
     """Raised when MCP auth failure is detected in a running session."""
 
 
+class TaskCancelledByUserError(Exception):
+    """Raised when a running session was interrupted by an explicit user cancel.
+
+    Deliberately distinct from a provider/CancelledError: the dispatch loop must
+    keep running after a user cancels one task, so this is caught at the task
+    call site and converted into a normal ``cancelled`` outcome. Anything that
+    was *not* an explicit user cancel keeps propagating as a real error.
+    """
+
+    def __init__(self, task_id: str | None = None) -> None:
+        self.task_id = task_id
+        super().__init__(
+            f"Task {task_id} was cancelled by user request"
+            if task_id
+            else "Task was cancelled by user request"
+        )
+
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -1931,6 +1949,18 @@ class LucentDaemon(
         self._decomposition_ready = asyncio.Event()
         self._decomposition_request_ids: set[str] = set()
 
+        # Hard-cancel coordination. A user cancel arrives as a 'task_cancel'
+        # notification; it must stop exactly one provider session and must never
+        # escape into the dispatch loop. These maps let a cancel target the
+        # right asyncio task, and _cancelled_sessions records *why* a session
+        # ended so run_session can distinguish a requested interrupt from a
+        # genuine provider failure.
+        self._task_cancel_ready = asyncio.Event()
+        self._cancel_requested_task_ids: set[str] = set()
+        self._active_task_sessions: dict[str, str] = {}
+        self._active_session_tasks: dict[str, asyncio.Task] = {}
+        self._cancelled_sessions: set[str] = set()
+
         # Live runtime-settings refresh: re-read DB-backed settings so admin
         # changes take effect without a daemon restart. Throttled to avoid
         # hammering the DB on every dispatch poll.
@@ -3654,15 +3684,28 @@ class LucentDaemon(
                         inner_kwargs["expected_surface"] = expected_surface
                     if reasoning_effort:
                         inner_kwargs["reasoning_effort"] = reasoning_effort
-                    result = await asyncio.wait_for(
+                    # Run the provider call as its own asyncio task so a user
+                    # cancel can interrupt exactly this session. Without the
+                    # indirection there is no handle to cancel, and the only
+                    # way to stop work would be cancelling the dispatch loop
+                    # itself — which would also kill every sibling task.
+                    provider_task = asyncio.create_task(
                         self._run_session_inner(
                             name,
                             system_message,
                             prompt,
                             **inner_kwargs,
                         ),
-                        timeout=SESSION_TOTAL_TIMEOUT,
+                        name=f"provider-session-{name}",
                     )
+                    self._active_session_tasks[name] = provider_task
+                    try:
+                        result = await asyncio.wait_for(
+                            provider_task,
+                            timeout=SESSION_TOTAL_TIMEOUT,
+                        )
+                    finally:
+                        self._active_session_tasks.pop(name, None)
                     terminal_outcome = self._session_terminal_outcomes.get(name)
                     if result and not (terminal_outcome or {}).get("completed"):
                         status = "error"
@@ -3769,6 +3812,27 @@ class LucentDaemon(
                 except ModelNotAvailableError:
                     status = "error"
                     raise  # Let the caller handle model-not-available specifically
+                except asyncio.CancelledError:
+                    # A cancel that *we* initiated for a user lands here as
+                    # CancelledError on the provider task. Convert it into a
+                    # typed outcome so the dispatch loop records a clean
+                    # 'cancelled' and keeps working. Anything else (shutdown,
+                    # source reload) must keep propagating: those
+                    # cancellations are meant to unwind this whole loop.
+                    if name in self._cancelled_sessions:
+                        self._cancelled_sessions.discard(name)
+                        status = "cancelled"
+                        record_terminal_outcome(
+                            completed=False, error="Cancelled by user request"
+                        )
+                        log(f"Session '{name}' cancelled by user request", "INFO")
+                        if span:
+                            span.set_attribute(
+                                "daemon.session.error", "cancelled_by_user"
+                            )
+                        raise TaskCancelledByUserError() from None
+                    status = "error"
+                    raise
                 except Exception as e:
                     status = "error"
                     record_terminal_outcome(completed=False, error=f"Session failed: {e}")
@@ -5368,6 +5432,7 @@ class LucentDaemon(
                 )
 
             session_name = f"{agent_type}-{task_id[:8]}"
+            self._active_task_sessions[task_id] = session_name
             try:
                 result = await self.run_session(
                     session_name,
@@ -5393,6 +5458,39 @@ class LucentDaemon(
                         "reasoning_effort": task_reasoning_effort,
                     },
                 )
+            except TaskCancelledByUserError:
+                # A user asked for this task to stop. Only this task is
+                # affected: siblings keep running, the dispatch loop keeps
+                # processing the next task, and no error is recorded against
+                # the request beyond the cancel itself.
+                self._active_task_sessions.pop(task_id, None)
+                self._cancelled_sessions.discard(session_name)
+                self._cancel_requested_task_ids.discard(task_id)
+                if sandbox_keepalive_task:
+                    sandbox_keepalive_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await sandbox_keepalive_task
+                if sandbox_id:
+                    try:
+                        await self._destroy_task_sandbox(sandbox_id)
+                    except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+                        log(
+                            f"Sandbox cleanup after cancel failed for {sandbox_id[:12]}: {exc}",
+                            "WARN",
+                        )
+                cancelled = await RequestAPI.finalize_requested_cancel(task_id)
+                await RequestAPI.add_event(
+                    task_id,
+                    "cancelled_by_user",
+                    "Running session interrupted by a user cancellation request",
+                    {"interrupted": True},
+                )
+                log(
+                    f"Tracked task {task_id[:8]} cancelled by user "
+                    f"({'finalized' if cancelled else 'already settled'})"
+                )
+                dispatched += 1
+                continue
             except ModelNotAvailableError as exc:
                 self._session_terminal_outcomes.pop(session_name, None)
                 if sandbox_keepalive_task:
@@ -5416,6 +5514,8 @@ class LucentDaemon(
                 dispatched += 1
                 continue
             dispatched += 1
+            self._active_task_sessions.pop(task_id, None)
+            self._cancelled_sessions.discard(session_name)
 
             # Log MCP memory-tool usage summary as a queryable task event
             mcp_tracker = self._session_mcp_trackers.pop(session_name, [])

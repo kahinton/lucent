@@ -772,7 +772,13 @@ async def retry_task(request: Request, task_id: str):
 
 @router.post("/requests/tasks/{task_id}/cancel", response_class=HTMLResponse)
 async def cancel_task(request: Request, task_id: str):
-    """Cancel an inactive task while retaining it in the request audit trail."""
+    """Cancel a task, retaining it in the request audit trail.
+
+    Inactive tasks are cancelled immediately. A claimed/running task receives a
+    durable cancel request instead: the daemon interrupts the owning session and
+    settles the task to ``cancelled`` moments later, so the redirect lands on a
+    task that is still stopping rather than one that silently ignored the click.
+    """
     await _check_csrf(request)
     user = await get_user_context(request)
     pool = await get_pool()
@@ -780,7 +786,50 @@ async def cancel_task(request: Request, task_id: str):
 
     repo = RequestRepository(pool)
     _existing, parent_request = await _get_mutable_task_request(repo, task_id, user)
-    task = await repo.cancel_task(task_id, org_id=str(user.organization_id))
+    task = await repo.cancel_task(
+        task_id,
+        org_id=str(user.organization_id),
+        requested_by=str(user.id),
+    )
     if not task:
-        raise HTTPException(409, "Task is running, completed, or already cancelled")
+        raise HTTPException(
+            409, "Task is completed, already cancelled, or already stopping"
+        )
     return RedirectResponse(f"/requests/{parent_request['id']}#task-{task_id}", status_code=303)
+
+
+@router.post("/requests/tasks/{task_id}/stop")
+async def stop_task(request: Request, task_id: str):
+    """Stop a task from a session-authenticated page, returning JSON.
+
+    The chat's delegated-work panel is a browser page, not an API client, so it
+    cannot use the bearer-key REST routes. This mirrors the form-based cancel
+    route but answers with JSON so the panel can update in place instead of
+    navigating away from the conversation.
+
+    CSRF comes from the ``X-CSRF-Token`` header (the convention other
+    session-cookie JSON routes use), not a form field.
+    """
+    token = request.headers.get("X-CSRF-Token") or request.headers.get("X-CSRFToken") or ""
+    await _check_csrf(request, form_token=token)
+    user = await get_user_context(request)
+    pool = await get_pool()
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    _existing, parent_request = await _get_mutable_task_request(repo, task_id, user)
+    task = await repo.cancel_task(
+        task_id,
+        org_id=str(user.organization_id),
+        requested_by=str(user.id),
+    )
+    if not task:
+        raise HTTPException(
+            409, "Task is completed, already cancelled, or already stopping"
+        )
+    return {
+        "task_id": task_id,
+        "request_id": str(parent_request["id"]),
+        "status": task.get("status"),
+        "cancel_requested": bool(task.get("cancel_requested_at")),
+    }

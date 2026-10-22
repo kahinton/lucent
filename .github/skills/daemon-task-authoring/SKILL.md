@@ -1,16 +1,22 @@
 ---
 name: daemon-task-authoring
-description: 'Turn a user's durable-work intent into a complete request in chat, or decompose approved requests into tasks when running as the daemon planner. Use for queued work, goal-linked work, task authoring, priority calibration, or task validation failures.'
+description: 'Turn a user's durable-work intent into a complete request, then either hand decomposition to the daemon or author the task breakdown yourself. Use for queued work, goal-linked work, task authoring, priority calibration, or task validation failures.'
 ---
 
 # Durable Work and Daemon Task Authoring
 
-This skill has two operating paths. Choose the path from the runtime context before using any work-creation tool.
+This skill covers two jobs: creating a complete request, and authoring the tasks
+inside it. Choosing **who decomposes** is the decision that matters, and it is
+recorded on the request so the answer cannot drift later.
 
 | Runtime context | Responsibility | Allowed work creation |
 |---|---|---|
-| Direct conversation | Recognize intent, track goals, and hand complete work to the daemon | `create_request` only |
-| Daemon cognitive planner | Turn a request into executable, validated tasks | `create_task` only after receiving a request |
+| Direct conversation | Recognize intent, create the request, and either hand off or author the plan | `create_request` (with or without `task_plan`), `create_task` |
+| Daemon cognitive planner | Turn a request into executable, validated tasks | `create_task` on the request it received |
+
+For the full authoring procedure — plan shape, entry fields, sequencing rules,
+and description standards — follow the **request-decomposition** skill. This
+skill covers intent classification, priority, and validation failures.
 
 ## Conversation Path: Activate Durable Work
 
@@ -51,13 +57,30 @@ create_request(
 )
 ```
 
-### 4. Hand Off to the Daemon
+### 4. Decide Who Decomposes
 
-After creating or linking the request, tell the user what is being tracked or queued and its expected next state. **Stop there. Do not call `create_task`, choose an agent type, choose a model, or decompose the work in conversation mode.** The daemon picks up the request, creates tasks, and dispatches them.
+Two paths, and exactly one owns the request:
+
+- **Hand off to the daemon** when you cannot honestly write the steps yet — the
+  work is exploratory, or the person is describing an outcome without a view on
+  how to get there. Create the request with no `task_plan`. The daemon plans it.
+- **Author the plan** when the asks are already known: the person named the
+  deliverables, you worked out the shape together, or a specific sequence was
+  requested. Pass `task_plan` to `create_request`.
+
+Authoring is the normal path whenever the requirement is already clear, and it is
+what prevents a request's stated asks from being replaced by a generic breakdown.
+See **request-decomposition** for plan shape and the hard rule: more than one task
+means `create_request(task_plan=[...])`; a single task added later means
+`create_task`.
+
+After either path, tell the user what is being tracked or queued and its expected
+next state.
 
 ## Daemon Path: Decompose an Accepted Request
 
-Use this path only as the daemon cognitive planner after a request exists. Do not ask the chat agent to perform it.
+Use this path only as the daemon cognitive planner after a request exists and is
+still `decomposition_mode='planner'`. Do not ask the chat agent to perform it.
 
 1. **Read the request and context** — Confirm the request is self-contained, inspect linked goals and memories, and identify its completion evidence.
 2. **Break into tasks** — Decompose only when multiple independently accountable steps are needed. Keep each task completable within a single 3600-second session (see [Task Size](#task-size)).
@@ -228,7 +251,8 @@ After completion, the daemon validates task results:
 ## Anti-Patterns
 
 - **Demanding internal vocabulary:** Waiting for a user to say "create a request" or "make a goal" → classify the outcome and take the appropriate conversation-path action.
-- **Chat-side decomposition:** Creating a request and immediately calling `create_task()` from direct chat → stop at the request handoff; the daemon owns decomposition.
+- **Split authorship:** Creating a request with no plan and then bolting on tasks yourself → the composer may already own it. Pick one decomposition path in step 4 and stay on it.
+- **Task-per-sentence:** Mirroring every clause of the request into its own task → group into accountable deliverables.
 - **Goal inflation:** Creating a goal for every task → use a goal only for an enduring outcome with meaningful progress to track.
 - **Circular tasks:** "Review the last task's output and create a new task" → infinite loop
 - **Approval-dependent chains:** Task B needs Task A approved, but approval is async → B stalls

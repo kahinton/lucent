@@ -9,6 +9,11 @@ from uuid import UUID
 import httpx
 from mcp.server import MCPServer as FastMCP
 
+from lucent.constants import (
+    DECOMPOSITION_MODE_AUTHOR,
+    DECOMPOSITION_MODE_PLANNER,
+    VALID_DECOMPOSITION_MODES,
+)
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import get_llm_context
 from lucent.tools.annotations import CREATE_ONLY, MUTATING, READ_ONLY
@@ -462,6 +467,362 @@ async def _get_accessible_memory(
     return memory
 
 
+async def _load_task_authoring_context(*, org_id: str, user_id: str) -> dict:
+    """Load the shared lookups a batch of task specs needs.
+
+    A chat-authored plan can carry several tasks, so the expensive
+    clearance-scoped lookups (agents, models, sandbox templates) are resolved
+    once instead of once per task.
+    """
+    from lucent.db import get_pool
+    from lucent.db.definitions import (
+        DefinitionRepository,
+        get_authorized_definitions_pool,
+    )
+    from lucent.settings import sandboxes_enabled
+
+    pool = await get_pool()
+    agent_pool = await get_authorized_definitions_pool(
+        pool, {"id": str(user_id), "organization_id": str(org_id)}
+    )
+    agents = (
+        await DefinitionRepository(agent_pool).list_agents_accessible_by(
+            str(user_id), str(org_id), status="active", limit=200
+        )
+    )["items"]
+    return {
+        "pool": pool,
+        "agent_names": {a["name"] for a in agents},
+        "user_id": str(user_id),
+        "org_id": str(org_id),
+        "sandboxes_enabled": sandboxes_enabled(organization_id=org_id),
+        "_model_repo": None,
+        "_template_repo": None,
+    }
+
+
+async def _authoring_models(ctx: dict):
+    """Return ``(model_repo, decision_capable)`` for this authoring context."""
+    if ctx.get("_model_repo") is None:
+        from lucent.db.models import ModelRepository, get_authorized_models_pool
+
+        model_pool = await get_authorized_models_pool(
+            ctx["pool"],
+            {"id": ctx["user_id"], "organization_id": ctx["org_id"]},
+        )
+        ctx["_model_repo"] = ModelRepository(model_pool)
+    return ctx["_model_repo"]
+
+
+async def _authoring_templates(ctx: dict):
+    """Return the clearance-scoped sandbox template repository."""
+    if ctx.get("_template_repo") is None:
+        from lucent.db.sandbox_template import (
+            SandboxTemplateRepository,
+            get_authorized_templates_pool,
+        )
+
+        tpl_pool = await get_authorized_templates_pool(
+            ctx["pool"],
+            {"id": ctx["user_id"], "organization_id": ctx["org_id"]},
+        )
+        ctx["_template_repo"] = SandboxTemplateRepository(tpl_pool)
+    return ctx["_template_repo"]
+
+
+async def _prepare_task_spec(
+    spec: Any,
+    *,
+    index: int,
+    ctx: dict,
+    request_model: str | None = None,
+    request_backend_id: str | None = None,
+) -> tuple[dict | None, str | None]:
+    """Validate one task-plan entry and normalize it for insertion.
+
+    Returns ``(prepared_spec, error)``. A non-None error means nothing was
+    written — the caller refuses the whole request. The field set mirrors
+    ``create_task`` so a plan entry and a standalone task are the same thing.
+    """
+    if not isinstance(spec, dict):
+        return None, "must be an object"
+
+    from lucent.db.requests import validate_decision_config, validate_fusion_config
+    from lucent.llm.model_auto import is_auto_model, split_auto_sentinel
+    from lucent.model_registry import (
+        validate_decision_model,
+        validate_model,
+        validate_reasoning_effort,
+    )
+    from lucent.settings import (
+        auto_selection_enabled,
+        fusion_best_of_n_enabled,
+        fusion_max_candidates,
+        fusion_synthesis_enabled,
+    )
+    from lucent.task_kinds import (
+        UnknownTaskKindError,
+        resolve_task_kind,
+        validate_task_kind_payload,
+    )
+
+    title = str(spec.get("title") or "").strip()
+    if not title:
+        return None, "title is required"
+
+    agent_type = str(spec.get("agent_type") or "code")
+    model = spec.get("model") or None
+    reasoning_effort = spec.get("reasoning_effort") or None
+    priority = str(spec.get("priority") or "medium")
+    sequence_order = int(spec.get("sequence_order") or 0)
+    task_kind = spec.get("task_kind") or None
+    execution_config = spec.get("execution_config")
+    decision_config = spec.get("decision_config")
+    fusion_config = spec.get("fusion_config")
+    output_contract = spec.get("output_contract")
+    sandbox_template_id = spec.get("sandbox_template_id") or None
+    sandbox_overrides = spec.get("sandbox_overrides")
+    backend_id = spec.get("backend_id") or None
+
+    if sequence_order < 0:
+        return None, "sequence_order must be >= 0"
+    if priority not in ("low", "medium", "high", "urgent"):
+        return None, "priority must be 'low', 'medium', 'high', or 'urgent'"
+
+    try:
+        resolved_kind = resolve_task_kind(
+            kind=task_kind,
+            agent_type=agent_type,
+            decision_config=decision_config,
+            fusion_config=fusion_config,
+        )
+    except UnknownTaskKindError as exc:
+        return None, str(exc)
+
+    if execution_config is not None and (
+        decision_config is not None or fusion_config is not None
+    ):
+        return None, "Provide execution_config or the legacy decision_config/fusion_config, not both"
+    if resolved_kind == "agent" and (
+        decision_config is not None or fusion_config is not None
+    ):
+        return None, "decision_config/fusion_config require their matching task kind"
+    effective_config = execution_config
+    if effective_config is None:
+        if resolved_kind == "decision":
+            effective_config = decision_config
+        elif resolved_kind == "fusion":
+            effective_config = fusion_config
+    try:
+        validate_task_kind_payload(resolved_kind, effective_config)
+    except ValueError as exc:
+        return None, str(exc)
+    if execution_config is not None:
+        if resolved_kind == "decision" and decision_config is None:
+            decision_config = execution_config
+        elif resolved_kind == "fusion" and fusion_config is None:
+            fusion_config = execution_config
+
+    if (sandbox_template_id or sandbox_overrides) and not ctx["sandboxes_enabled"]:
+        return None, "Sandboxes are disabled for this organization by the features.sandboxes_enabled setting"
+
+    # --- Decision steps -------------------------------------------------
+    if resolved_kind == "decision":
+        try:
+            validate_decision_config(decision_config)
+        except ValueError as exc:
+            return None, str(exc)
+        if not decision_config:
+            return None, "agent_type 'decision-step' requires decision_config"
+        if agent_type != "decision-step":
+            return None, "decision_config requires agent_type 'decision-step'"
+        if output_contract:
+            return None, (
+                "A decision-step task carries its own question schema — "
+                "output_contract cannot be combined with decision_config"
+            )
+        if backend_id:
+            return None, "decision-step tasks run on the decision API and do not use backend_id"
+        if decision_config.get("model") and model:
+            return None, (
+                "Set the decision model either via decision_config.model or the "
+                "task's model field, not both"
+            )
+        decision_model = model or decision_config.get("model") or ""
+        if is_auto_model(decision_model):
+            return None, 'Model "auto" applies to chat tasks — decision-step tasks name a decision model directly'
+        if decision_model:
+            error = validate_decision_model(decision_model)
+            if error:
+                return None, error
+            if not await (await _authoring_models(ctx)).get_usable_model(decision_model):
+                return None, "decision model is not available to this user"
+        else:
+            from lucent.db.models import decision_models_available_for_user
+
+            available = await decision_models_available_for_user(
+                ctx["pool"], user_id=ctx["user_id"], org_id=ctx["org_id"]
+            )
+            if not available:
+                return None, (
+                    "No enabled decision-class model is available to this user. "
+                    "Add and grant a decision model before creating decision steps."
+                )
+
+    # --- Fusion ---------------------------------------------------------
+    if resolved_kind == "fusion":
+        if decision_config:
+            return None, "Provide either fusion_config or decision_config, not both"
+        try:
+            validate_fusion_config(
+                fusion_config,
+                max_candidates=fusion_max_candidates(organization_id=ctx["org_id"]),
+                best_of_n_enabled=fusion_best_of_n_enabled(organization_id=ctx["org_id"]),
+                synthesis_enabled=fusion_synthesis_enabled(organization_id=ctx["org_id"]),
+            )
+        except ValueError as exc:
+            return None, str(exc)
+        if agent_type == "decision-step":
+            return None, (
+                "fusion_config requires a chat agent — decision-step tasks are "
+                "executed by the decision model directly"
+            )
+        model_repo = await _authoring_models(ctx)
+        chat_specs: list[tuple[str, str]] = []
+        for candidate_model in (fusion_config.get("candidates") or {}).get("models") or []:
+            chat_specs.append((f"fusion candidate '{candidate_model}'", candidate_model))
+        synthesis_model = (fusion_config.get("synthesis") or {}).get("model")
+        if synthesis_model:
+            chat_specs.append(("fusion synthesis", synthesis_model))
+        refine_model = (fusion_config.get("refine") or {}).get("model")
+        if refine_model:
+            chat_specs.append(("fusion refine", refine_model))
+        for label, fusion_chat_model in chat_specs:
+            error = validate_model(fusion_chat_model, require_tools=True)
+            if error:
+                return None, f"{label}: {error}"
+            if not await model_repo.get_usable_model(fusion_chat_model):
+                return None, f"{label} model is not available to this user"
+        arbiter_model = (fusion_config.get("arbiter") or {}).get("model") or None
+        if arbiter_model:
+            arbiter_error = validate_decision_model(arbiter_model)
+            if arbiter_error:
+                return None, f"fusion arbiter: {arbiter_error}"
+            if not await model_repo.get_usable_model(arbiter_model):
+                return None, "fusion arbiter model is not available to this user"
+
+    # --- Chat model -----------------------------------------------------
+    if model and not decision_config:
+        is_auto, auto_error = split_auto_sentinel(
+            model,
+            enabled=auto_selection_enabled(organization_id=ctx["org_id"]),
+        )
+        if auto_error:
+            return None, auto_error
+        if is_auto and agent_type == "decision-step":
+            return None, 'Model "auto" applies to chat tasks — decision-step tasks name a decision model directly'
+        if not is_auto:
+            error = validate_model(model, require_tools=True)
+            if error:
+                return None, error
+            if not await (await _authoring_models(ctx)).get_usable_model(model):
+                return None, "Model is not available to this user"
+            effort_error = validate_reasoning_effort(model, reasoning_effort)
+            if effort_error:
+                return None, effort_error
+    elif reasoning_effort:
+        return None, "reasoning_effort requires model"
+
+    # --- Agent definition ----------------------------------------------
+    if agent_type not in ctx["agent_names"]:
+        available = sorted(ctx["agent_names"]) if ctx["agent_names"] else "none — approve definitions first"
+        return None, (
+            f"No approved agent definition for '{agent_type}'. Create and approve "
+            f"one at /definitions before assigning tasks. Available agents: {available}"
+        )
+
+    # --- Sandbox template -----------------------------------------------
+    sandbox_config: dict | None = None
+    if sandbox_template_id:
+        tpl_repo = await _authoring_templates(ctx)
+        try:
+            tpl = await tpl_repo.get_usable_template(sandbox_template_id)
+        except Exception as exc:  # noqa: BLE001 — surfaced to the model verbatim
+            return None, f"Invalid sandbox_template_id: {exc}"
+        if not tpl:
+            return None, (
+                f"Sandbox template {sandbox_template_id} not found or not "
+                "cleared for this user. Call list_sandbox_templates to discover IDs."
+            )
+        if tpl.get("status") != "approved":
+            return None, (
+                f"Sandbox template '{tpl.get('name')}' has status "
+                f"{tpl.get('status')!r} — only 'approved' templates may be "
+                "referenced by tasks."
+            )
+        sandbox_config = tpl_repo.to_sandbox_config(tpl)
+        allowed_overrides = {
+            "repo_url",
+            "branch",
+            "timeout_seconds",
+            "output_mode",
+            "commit_approved",
+            "reuse_within_request",
+        }
+        if sandbox_overrides:
+            bad = set(sandbox_overrides) - allowed_overrides
+            if bad:
+                return None, (
+                    f"sandbox_overrides may only set {sorted(allowed_overrides)}; "
+                    f"rejected keys: {sorted(bad)}"
+                )
+            for key, value in sandbox_overrides.items():
+                sandbox_config[key] = value
+            sandbox_config["_template_overrides"] = dict(sandbox_overrides)
+    elif sandbox_overrides:
+        return None, "sandbox_overrides requires sandbox_template_id"
+
+    # --- Backend pin ----------------------------------------------------
+    effective_backend = backend_id or request_backend_id
+    if backend_id:
+        from lucent.llm.backend_selection import validate_backend_selection
+
+        backend_error = await validate_backend_selection(
+            ctx["pool"],
+            backend_id,
+            org_id=ctx["org_id"],
+            model_id=model or request_model,
+        )
+        if backend_error:
+            return None, backend_error
+
+    prepared = {
+        "title": title,
+        "description": str(spec.get("description") or ""),
+        "agent_type": agent_type,
+        "agent_definition_id": spec.get("agent_definition_id") or None,
+        "priority": priority,
+        "sequence_order": sequence_order,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "sandbox_template_id": sandbox_template_id,
+        "sandbox_config": sandbox_config,
+        "requesting_user_id": spec.get("requesting_user_id") or None,
+        "output_contract": output_contract,
+        "task_kind": resolved_kind,
+        # The repository mirrors the generic payload onto the legacy columns;
+        # pass only the generic form so the two can never disagree.
+        "execution_config": effective_config,
+        "decision_config": None,
+        "fusion_config": None,
+        "backend_id": effective_backend,
+        "remote_target_id": spec.get("remote_target_id") or None,
+    }
+    if "parent_task_index" in spec:
+        prepared["parent_task_index"] = spec.get("parent_task_index")
+    return prepared, None
+
+
 def register_request_tools(mcp: FastMCP) -> None:
     """Register request tracking tools with the MCP server."""
 
@@ -491,6 +852,31 @@ the request needs context but isn't advancing a goal milestone. Goals can
 also be passed via memory_ids for back-compat, but new code should use
 goal_id/goal_milestone_index.
 
+DECOMPOSITION OWNERSHIP — read this before choosing the breakdown path:
+A request is decomposed by exactly one authority. `decomposition_mode`
+records which one:
+  - 'planner' (default) — the daemon's background composer turns the request
+    into tasks. Use this when you are handing off work whose shape you do not
+    know, or when the request should be planned from the request text alone.
+  - 'author' — YOU own the breakdown. The background composer will never add
+    tasks to this request, so the plan you write is the plan that runs.
+
+Two ways to author tasks, and which to use is a hard rule:
+  - More than one task → pass `task_plan` here. The request and every task are
+    created in one transaction: either the whole plan lands or nothing does.
+    This also guarantees the composer never races you to a second breakdown.
+  - Exactly one task, added to an existing request later → call `create_task`.
+
+Writing a task_plan for work a person asked for in this conversation is the
+normal path. It is what keeps the request's stated asks from drifting away
+from what actually gets scheduled. Each entry accepts the same fields as
+`create_task` (`title`, `description`, `agent_type`, `sequence_order`,
+`priority`, `model`, `reasoning_effort`, `sandbox_template_id`,
+`sandbox_overrides`, `output_contract`, `task_kind`, `execution_config`,
+`decision_config`, `fusion_config`, `backend_id`) plus `parent_task_index`
+(0-based position of the parent inside this same plan) for sub-tasks. Every
+entry is validated before the request is written.
+
     Args:
     title: Short descriptive title (e.g. "Improve search performance")
     description: Detailed description of what needs to be done
@@ -513,9 +899,16 @@ goal_id/goal_milestone_index.
     requested_model: Optional model the daemon should run for this request
         (usually one of the backend's models). Inherited by tasks that do not
         name a model.
+    decomposition_mode: 'planner' (daemon decomposes) or 'author' (you
+        decompose). Omit to let `task_plan` decide: a non-empty task_plan
+        makes this request author-owned automatically.
+    task_plan: Optional list of task objects created atomically with the
+        request. Passing this sets decomposition_mode='author'.
 
-Returns: JSON with the created request including its ID. If the system refused,
-returns status='skipped' with reason and a note explaining what to do."""
+Returns: JSON with the created request including its ID. When a task_plan was
+given the result also carries `task_ids` and `tasks_created`. If the system
+refused, returns status='skipped' with reason and a note explaining what to
+do."""
     )
     async def create_request(
         title: str,
@@ -530,10 +923,43 @@ returns status='skipped' with reason and a note explaining what to do."""
         target_paths: list[str] | None = None,
         backend_id: str | None = None,
         requested_model: str | None = None,
+        decomposition_mode: str = "",
+        task_plan: list[dict] | None = None,
     ) -> str:
         user_id, org_id, _, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+
+        if decomposition_mode and decomposition_mode not in VALID_DECOMPOSITION_MODES:
+            valid = ", ".join(sorted(VALID_DECOMPOSITION_MODES))
+            return json.dumps(
+                {
+                    "error": (
+                        f"Invalid decomposition_mode '{decomposition_mode}'. "
+                        f"Must be one of: {valid}."
+                    )
+                }
+            )
+        if task_plan and decomposition_mode == DECOMPOSITION_MODE_PLANNER:
+            return json.dumps(
+                {
+                    "error": (
+                        "task_plan always makes this request author-owned. "
+                        "Drop decomposition_mode='planner' or drop task_plan."
+                    )
+                }
+            )
+        if decomposition_mode == DECOMPOSITION_MODE_AUTHOR and not task_plan:
+            return json.dumps(
+                {
+                    "error": (
+                        "decomposition_mode='author' means you own the "
+                        "breakdown, so it requires task_plan with at least "
+                        "one task. Use decomposition_mode='planner' to leave "
+                        "decomposition to the daemon."
+                    )
+                }
+            )
 
         if backend_id:
             from lucent.llm.backend_selection import validate_request_execution_pin
@@ -547,24 +973,75 @@ returns status='skipped' with reason and a note explaining what to do."""
             if backend_error:
                 return json.dumps({"error": backend_error})
 
+        # Every task in the plan is validated before anything is written, so a
+        # bad spec can never leave a half-authored request behind.
+        prepared_specs: list[dict] = []
+        if task_plan:
+            if not isinstance(task_plan, list):
+                return json.dumps({"error": "task_plan must be a list of task objects"})
+            authoring_ctx = await _load_task_authoring_context(
+                org_id=str(org_id), user_id=str(user_id)
+            )
+            for index, spec in enumerate(task_plan):
+                prepared, error = await _prepare_task_spec(
+                    spec,
+                    index=index,
+                    ctx=authoring_ctx,
+                    request_model=requested_model,
+                    request_backend_id=backend_id,
+                )
+                if error:
+                    return json.dumps({"error": f"task_plan[{index}]: {error}"})
+                prepared_specs.append(prepared)
+
         repo = await _get_request_repository()
-        req = await repo.create_request(
-            title=title,
-            description=description,
-            source=source,
-            priority=priority,
-            created_by=str(user_id) if user_id else None,
-            org_id=str(org_id),
-            dependency_policy=dependency_policy,
-            memory_ids=memory_ids,
-            target_repo=target_repo or None,
-            target_paths=target_paths,
-            force_pending_approval=(memory_scope == "user"),
-            goal_id=goal_id or None,
-            goal_milestone_index=goal_milestone_index,
-            backend_id=backend_id,
-            requested_model=requested_model,
-        )
+        llm_context = get_llm_context()
+        authored_session_id = llm_context.get("session_id")
+
+        if prepared_specs:
+            try:
+                req = await repo.create_request_with_tasks(
+                    org_id=str(org_id),
+                    title=title,
+                    task_specs=prepared_specs,
+                    description=description,
+                    source=source,
+                    priority=priority,
+                    created_by=str(user_id) if user_id else None,
+                    dependency_policy=dependency_policy,
+                    memory_ids=memory_ids,
+                    target_repo=target_repo or None,
+                    target_paths=target_paths,
+                    force_pending_approval=(memory_scope == "user"),
+                    goal_id=goal_id or None,
+                    goal_milestone_index=goal_milestone_index,
+                    backend_id=backend_id,
+                    requested_model=requested_model,
+                    authored_by_llm_session_id=authored_session_id,
+                )
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+        else:
+            req = await repo.create_request(
+                title=title,
+                description=description,
+                source=source,
+                priority=priority,
+                created_by=str(user_id) if user_id else None,
+                org_id=str(org_id),
+                dependency_policy=dependency_policy,
+                memory_ids=memory_ids,
+                target_repo=target_repo or None,
+                target_paths=target_paths,
+                force_pending_approval=(memory_scope == "user"),
+                goal_id=goal_id or None,
+                goal_milestone_index=goal_milestone_index,
+                backend_id=backend_id,
+                requested_model=requested_model,
+                decomposition_mode=(
+                    decomposition_mode or DECOMPOSITION_MODE_PLANNER
+                ),
+            )
 
         # Skip outcome — translate the DB-layer reason into actionable
         # guidance for the planner. Every branch must emit STOP-level
@@ -643,13 +1120,31 @@ returns status='skipped' with reason and a note explaining what to do."""
             "id": str(req["id"]),
             "title": req["title"],
             "status": req["status"],
+            "decomposition_mode": req.get("decomposition_mode")
+            or DECOMPOSITION_MODE_PLANNER,
         }
+        # Planning outcome. Reporting it is not cosmetic: without these the
+        # caller cannot tell whether its plan actually landed, and will be
+        # tempted to "verify" by adding the tasks again — the exact duplication
+        # this path exists to prevent.
+        if prepared_specs:
+            task_ids = req.get("task_ids") or []
+            result["tasks_created"] = int(req.get("tasks_created") or len(task_ids))
+            result["task_ids"] = task_ids
         # If the returned title doesn't match what we asked for, this was a dedup hit
         if req["title"] != title:
             result["deduplicated"] = True
             result["note"] = (
                 "An active request already exists for this goal memory. "
                 "Do NOT create new tasks — work is already in progress."
+            )
+        elif prepared_specs and result.get("tasks_created") == 0:
+            # Dedup or refusal handed back an existing request instead of
+            # writing this plan; say so explicitly so nobody assumes the tasks
+            # are queued.
+            result["note"] = (
+                "An existing request was returned instead of creating this plan. "
+                "Its current tasks are the ones that will run."
             )
         return json.dumps(result)
 
@@ -1262,6 +1757,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 backend_id=backend_id,
                 task_kind=resolved_kind,
                 execution_config=execution_config,
+                authored_by_llm_session_id=get_llm_context().get("session_id"),
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
@@ -2411,6 +2907,84 @@ daemon execution may also update visible system work."""
 
     @mcp.tool(
         annotations=MUTATING,
+        description="""Change who owns decomposition of a request.
+
+'planner' (default) — the daemon's background composer turns the request into
+tasks. Use this only while the request still has no tasks.
+
+'author' — decomposition is owned by whoever wrote the task list. The composer
+will never add tasks. Use this after you have planned the work yourself, when
+you plan to add tasks incrementally with create_task, or to protect a partial
+plan from being overwritten by a competing breakdown.
+
+Changing a request that already has tasks to 'planner' is refused: the composer
+would add a second, conflicting plan on top of the existing one.
+
+Args:
+    request_id: ID of the request.
+    decomposition_mode: 'planner' or 'author'.
+
+Returns: JSON with the request's id, decomposition_mode, and task count."""
+    )
+    async def update_request_decomposition(
+        request_id: str,
+        decomposition_mode: str,
+    ) -> str:
+        user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if decomposition_mode not in VALID_DECOMPOSITION_MODES:
+            valid = ", ".join(sorted(VALID_DECOMPOSITION_MODES))
+            return json.dumps(
+                {
+                    "error": (
+                        f"Invalid decomposition_mode '{decomposition_mode}'. "
+                        f"Must be one of: {valid}."
+                    )
+                }
+            )
+        repo = await _get_request_repository()
+        request = await _get_mutable_request(
+            repo,
+            request_id,
+            user_id=user_id,
+            org_id=org_id,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if not request:
+            return json.dumps({"error": "Request not found or not editable"})
+        tasks = await repo.list_tasks(request_id, org_id=str(org_id), limit=1)
+        task_count = int(tasks.get("total_count") or 0) if isinstance(tasks, dict) else 0
+        if decomposition_mode == DECOMPOSITION_MODE_PLANNER and task_count > 0:
+            return json.dumps(
+                {
+                    "error": (
+                        f"Request already has {task_count} task(s). Switching it "
+                        "to 'planner' would let the background composer add a "
+                        "second, conflicting breakdown. Keep it 'author' and add "
+                        "tasks yourself."
+                    )
+                }
+            )
+        try:
+            updated = await repo.update_request_decomposition_mode(
+                request_id, decomposition_mode, org_id=str(org_id)
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        if not updated:
+            return json.dumps({"error": "Request not found"})
+        return json.dumps(
+            {
+                "id": str(updated["id"]),
+                "decomposition_mode": updated.get("decomposition_mode"),
+                "task_count": task_count,
+            }
+        )
+
+    @mcp.tool(
+        annotations=MUTATING,
         description="""Update the title, description, or engine backend of an inactive task.
 
 Tasks that are claimed, running, or completed cannot be edited. You may edit
@@ -2500,7 +3074,21 @@ Args:
 
     @mcp.tool(
         annotations=MUTATING,
-        description="""Cancel an inactive task while preserving its request history."""
+        description="""Cancel a task and stop it if it is already running.
+
+An inactive task (pending, planned, failed, needs_review) is cancelled
+immediately and stays in the request's audit history.
+
+A task that is already claimed or running cannot be cancelled by a single
+database write — the daemon session executing it owns the claim. Instead this
+records a cancel request, wakes that daemon instance, and the session is
+interrupted; the response carries `cancel_requested: true` and the task moves
+to 'cancelled' moments later. Report that as "stopping" rather than "stopped".
+
+Cancelling a task never touches sibling tasks or other requests. To stop all
+work in a request, cancel the request instead (update_request_status with
+'cancelled'), which interrupts every running task in it.
+"""
     )
     async def cancel_task(task_id: str) -> str:
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
@@ -2517,10 +3105,26 @@ Args:
         )
         if not pair:
             return json.dumps({"error": "Task not found or not editable"})
-        updated = await repo.cancel_task(task_id, org_id=str(org_id))
+        updated = await repo.cancel_task(
+            task_id, org_id=str(org_id), requested_by=str(user_id) if user_id else None
+        )
         if not updated:
-            return json.dumps({"error": "Task is running, completed, or already cancelled"})
-        return json.dumps(updated, default=str)
+            return json.dumps({"error": "Task is already completed, cancelled, or stopping"})
+        cancel_requested = bool(updated.get("cancel_requested_at"))
+        return json.dumps(
+            {
+                **{k: (str(v) if isinstance(v, UUID) else v) for k, v in updated.items()},
+                "cancel_requested": cancel_requested,
+                "status": updated.get("status"),
+                "note": (
+                    "Cancellation requested. The running session is being "
+                    "interrupted and the task will settle as 'cancelled'."
+                    if cancel_requested
+                    else "Task cancelled."
+                ),
+            },
+            default=str,
+        )
 
     @mcp.tool(
         description="""List pending requests \u2014 top-level work items

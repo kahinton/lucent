@@ -257,6 +257,12 @@ async def lifespan(app: FastAPI):
         set_tenant_scope(role="system")
         try:
             await live_event_broker.start(database_url)
+            # Delegated-work reports: background task/request results are pushed
+            # into the conversation that delegated them (card + reply), not just
+            # polled for. Independent LISTEN connection on its own channel.
+            from lucent.services.subagent_reports import subagent_report_service
+
+            await subagent_report_service.start(database_url)
             from lucent.db import get_pool as _get_pool_for_secrets
 
             _secret_pool = await _get_pool_for_secrets()
@@ -332,6 +338,9 @@ async def lifespan(app: FastAPI):
         from lucent.web.live_events import live_event_broker
 
         await live_event_broker.stop()
+        from lucent.services.subagent_reports import subagent_report_service
+
+        await subagent_report_service.stop()
         # Close the process-wide file storage registry (and any Azure
         # credential/client it lazily created) before the process exits.
         from lucent.storage.providers import close_file_storage_registry

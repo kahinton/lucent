@@ -1503,14 +1503,41 @@ async def retry_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_po
 
 @router.post("/tasks/{task_id}/cancel")
 async def cancel_task(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
-    """Cancel a pending, planned, failed, or otherwise inactive task."""
+    """Cancel a task, interrupting it when it is already running."""
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
     await _require_task_mutation(repo, str(task_id), str(user.organization_id), user)
-    task = await repo.cancel_task(str(task_id), org_id=str(user.organization_id))
+    task = await repo.cancel_task(
+        str(task_id),
+        org_id=str(user.organization_id),
+        requested_by=str(user.effective_memory_user_id or user.id),
+    )
     if not task:
-        raise HTTPException(409, "Task is running, completed, already cancelled, or not found")
+        raise HTTPException(
+            409, "Task is completed, already cancelled, or already stopping"
+        )
+    return {**task, "cancel_requested": bool(task.get("cancel_requested_at"))}
+
+
+@router.post("/tasks/{task_id}/cancel-finalize")
+async def finalize_requested_cancel(
+    task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)
+):
+    """Settle a task to 'cancelled' after its running session was interrupted.
+
+    Called by the daemon that owned the claim once it has stopped the provider
+    session. Only acts when a cancel was actually requested, so a normal
+    completion race can never be mislabeled as cancelled.
+    """
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    task = await repo.finalize_requested_cancel(
+        str(task_id), org_id=str(user.organization_id)
+    )
+    if not task:
+        raise HTTPException(409, "Task has no outstanding cancellation request")
     return task
 
 
@@ -1634,6 +1661,38 @@ async def pending_queue(user: AuthenticatedUser, pool=Depends(get_pool)):
     return await repo.list_pending_tasks(
         str(user.organization_id), **_request_visibility_args(user)
     )
+
+
+class RequestedCancelsBody(BaseModel):
+    """Filter for the daemon's cancel sweep."""
+
+    organization_id: str | None = None
+    task_ids: list[UUID] | None = None
+
+
+@router.post("/queue/requested-cancels")
+async def requested_cancels(
+    body: RequestedCancelsBody,
+    user: AuthenticatedUser,
+    pool=Depends(get_pool),
+):
+    """Claimed/running tasks carrying an outstanding cancel request.
+
+    This is the daemon's durability backstop for a dropped ``task_cancel``
+    notification: the columns are the source of truth, so re-reading them can
+    never lose a cancel.
+    """
+    from lucent.db.requests import RequestRepository
+
+    org_id = str(body.organization_id or user.organization_id)
+    if org_id != str(user.organization_id) and user.role < Role.ADMIN:
+        raise HTTPException(403, "Cannot read another organization's task queue")
+    repo = RequestRepository(pool)
+    items = await repo.list_requested_cancels(
+        org_id,
+        task_ids=[str(task_id) for task_id in body.task_ids] if body.task_ids else None,
+    )
+    return {"items": items, "total_count": len(items)}
 
 
 @router.post("/queue/release-stale")

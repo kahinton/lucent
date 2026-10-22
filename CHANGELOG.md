@@ -8,6 +8,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+#### Delegated work as a sub-agent
+- **`requests.decomposition_mode`** (`planner` | `author`, migration 143).
+  Previously the background composer decided purely on "this request has no
+  tasks", so a chat agent that authored a *partial* plan was invisible to it and
+  got a second, divergent breakdown appended. Ownership is now explicit, and any
+  task authored from the request's originating conversation flips the request to
+  `author` permanently. Migration backfilled 98 already-chat-planned requests.
+- **`create_request(task_plan=[...])`** — author a request and its full task list
+  in one transaction. Every spec is validated before anything is written, and
+  sub-tasks reference their parent by position (`parent_task_index`). The rule is
+  one call for the whole plan: more than one task goes through `task_plan`; a
+  single task added later goes through `create_task`.
+- **`update_request_decomposition`** — change ownership explicitly. Switching a
+  request that already has tasks back to `planner` is refused.
+- **Delegated-work panel in chat** — a live view of every request this
+  conversation created, with per-task status, result excerpts, and a per-task
+  Stop action. It polls tightly only while work is running and collapses to a
+  slow idle poll otherwise.
+- **Report pipeline** — task and request outcomes are pushed into the
+  conversation that caused them (migration 145). A visible `subagent_report`
+  card lands in the thread and Lucent answers it as a real turn, without the
+  person having to ask. Bursts are coalesced (a task finishing usually moves its
+  request in the same instant), de-duplicated by outcome, and rate-limited per
+  session. The reply turn runs with **no tools** and never resumes a provider
+  session, because an unattended turn must not be able to act and the reply is
+  not part of the provider's history.
+- **Delegated-work digest** — the next user turn's system prompt carries a
+  bounded summary of what the conversation's delegated work is doing, so Lucent
+  never answers "I have no way to know" about work it started.
+- **`request-decomposition` skill** — the chat-side procedure for choosing
+  between handing a request off and authoring its plan, plus plan shape,
+  sequencing rules, and description standards.
+
+### Changed
+
+- **Chat agents may now decompose their own requests.** The previous rule
+  ("conversation mode creates requests only") existed to prevent the doubling
+  described above; with ownership recorded on the request, a chat agent can
+  author the plan it promised. `daemon-task-authoring` and the built-in `lucent`
+  identity are updated accordingly.
+- **Cancelling a task now actually stops it.** Cancelling a claimed/running task
+  used to be a silent no-op: the repository refused the transition because the
+  owning daemon still held the claim, and nothing told that session to stop.
+  Migration 144 adds `tasks.cancel_requested_at`/`cancel_requested_by` and a
+  `task_cancel` notification. The daemon interrupts exactly the session that
+  owns the task; siblings and other requests are untouched. A cancel whose
+  notification is lost is recovered by the heartbeat sweep, and one whose owner
+  died is finalized by the reaper. Cancelling a request now stops every running
+  task in it.
+- **Static assets are content-hash versioned.** `chat-message-ui.js`/`.css` are
+  loaded by every page and define the shared render API; a browser-cached stale
+  copy made newly added UI silently missing rather than visibly broken.
+
 #### Remotes (Agent Control Protocol)
 - **Remote instances** — register a non-local executor (another Lucent
   deployment, a laptop, a build box, or any peer running the shipped client)

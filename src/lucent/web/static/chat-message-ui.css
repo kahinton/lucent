@@ -146,3 +146,120 @@
 .chat-message-enter {
     animation: chat-message-fade-up 0.25s ease-out;
 }
+
+/* -------------------------------------------------------------------------
+   Delegated-work report cards
+   -------------------------------------------------------------------------
+   A report from a background sub-agent is a piece of the conversation, not a
+   tool chip. It reads as a quiet inline card: a severity accent on the leading
+   edge, a short headline, the result excerpt, and one link to the full request.
+   Deliberately border-light and shadow-free so a long thread does not fill up
+   with competing boxes. */
+.subagent-report {
+    margin: 0.75rem 0;
+}
+
+.subagent-report-card {
+    position: relative;
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.75rem 0.875rem 0.75rem 1rem;
+    border: 1px solid var(--lucent-line);
+    border-radius: 0.75rem;
+    background: var(--lucent-paper);
+    overflow: hidden;
+}
+
+.subagent-report-accent {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+}
+
+.subagent-report-body {
+    min-width: 0;
+    flex: 1;
+}
+
+.subagent-report-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.subagent-report-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+    padding: 0.125rem 0.4rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.subagent-report-request {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--lucent-muted);
+}
+
+.subagent-report-headline {
+    margin: 0.4rem 0 0;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--lucent-ink);
+}
+
+.subagent-report-text {
+    margin: 0.3rem 0 0;
+    font-size: 0.75rem;
+    line-height: 1.55;
+    color: var(--lucent-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 5;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.subagent-report-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+}
+
+.subagent-report-meta {
+    font-size: 10px;
+    color: var(--lucent-muted);
+}
+
+.subagent-report-link {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--lucent-teal);
+    text-decoration: none;
+}
+
+.subagent-report-link:hover {
+    text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .subagent-report-card {
+        transition: none;
+    }
+}
+

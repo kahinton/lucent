@@ -396,6 +396,10 @@ class DaemonRepository:
             "r.organization_id = $1::uuid",
             "r.approval_status IN ('pending_approval', 'auto_approved', 'approved')",
             "r.status IN ('pending', 'in_progress')",
+            # Only planner-owned requests may be decomposed by the composer.
+            # An 'author' request was deliberately decomposed by the caller that
+            # created it; re-decomposing would double the plan (migration 143).
+            "r.decomposition_mode = 'planner'",
             "NOT EXISTS (SELECT 1 FROM tasks t WHERE t.request_id = r.id)",
             "r.created_at <= now() - make_interval(secs => $2)",
         ]
@@ -434,6 +438,7 @@ class DaemonRepository:
                 WHERE r.id = $1::uuid
                   AND r.approval_status IN ('pending_approval', 'auto_approved', 'approved')
                   AND r.status IN ('pending', 'in_progress')
+                  AND r.decomposition_mode = 'planner'
                   AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.request_id = r.id)
                 """,
                 request_id,

@@ -396,6 +396,12 @@ class TestShippedBuiltins:
                        WHERE organization_id = $1 AND name = 'capability-reference'""",
                     sync_org,
                 )
+                decomposition_skill = await conn.fetchrow(
+                    """SELECT content, status, scope
+                       FROM skill_definitions
+                       WHERE organization_id = $1 AND name = 'request-decomposition'""",
+                    sync_org,
+                )
                 granted_skills = await conn.fetch(
                     """SELECT s.name
                        FROM agent_skills agent_skill
@@ -410,13 +416,12 @@ class TestShippedBuiltins:
             assert agent["scope"] == "built-in"
             assert "durable memory, or daemon-owned work" in agent["description"]
             assert "## Conversation Operations" in agent["content"]
-            assert "Do not create, edit, assign, or sequence tasks." in agent["content"]
             assert "### Individual Profile Enrichment" in agent["content"]
             assert "do not turn the chat into an intake form." in agent["content"]
             assert request_skill["status"] == "active"
             assert request_skill["scope"] == "built-in"
             assert "## Conversation Path: Activate Durable Work" in request_skill["content"]
-            assert "Stop there. Do not call `create_task`" in request_skill["content"]
+            assert "### 4. Decide Who Decomposes" in request_skill["content"]
             assert profile_skill["status"] == "active"
             assert profile_skill["scope"] == "built-in"
             assert "### Individual Profile Enrichment" in profile_skill["content"]
@@ -432,9 +437,14 @@ class TestShippedBuiltins:
             assert capability_reference_skill["scope"] == "built-in"
             assert "### Handoffs" in capability_reference_skill["content"]
             assert "### Durable Files" in capability_reference_skill["content"]
+            assert decomposition_skill["status"] == "active"
+            assert decomposition_skill["scope"] == "built-in"
+            assert "## Step 2: Choose the Decomposition Path" in decomposition_skill["content"]
+            assert "## Step 3: Author the Plan" in decomposition_skill["content"]
             assert "almost any useful outcome" in agent["content"]
             granted_skill_names = [row["name"] for row in granted_skills]
             assert "daemon-task-authoring" in granted_skill_names
+            assert "request-decomposition" in granted_skill_names
             assert "capability-orientation" in granted_skill_names
             assert "capability-reference" in granted_skill_names
             assert "definition-engineering" in granted_skill_names

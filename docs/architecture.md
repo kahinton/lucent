@@ -316,8 +316,9 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 
 | Tool | Purpose |
 |------|---------|
-| `create_request` | Create a tracked work request |
-| `create_task` | Create a task under a request (agent type, model, sandbox) |
+| `create_request` | Create a tracked work request; pass `task_plan` to author its whole task list atomically |
+| `create_task` | Add one task to an existing request (agent type, model, sandbox) |
+| `update_request_decomposition` | Change whether the daemon's composer or the caller owns decomposition |
 | `get_request_details` | Get request with tasks and events |
 | `list_pending_requests` | List requests awaiting work |
 | `list_active_work` | List all active requests with task status summaries |
@@ -325,6 +326,7 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `log_task_event` | Record an event in a task's timeline |
 | `link_task_memory` | Link a memory to a task (created/read/updated) |
 | `link_request_memory` | Link a memory to a request (goal/context/reference) |
+| `cancel_task` | Cancel a task, interrupting the running session when there is one |
 | `send_handoff` | Create a visible Handoff message, clarification, decision request, or workflow output for a user |
 | `list_handoffs` | List open/responded/resolved Handoffs visible to the current/effective user |
 | `get_handoff` | Retrieve one Handoff with its message thread and references |
@@ -613,6 +615,72 @@ plain text results, and post-completion request review checks that any remaining
 deliverables are represented before approval.
 
 Requests support a **review workflow**: when `LUCENT_REQUIRE_APPROVAL=true`, completed requests transition to `review` status for human approval. Reviewers can approve (→ `completed`) or reject with feedback (→ `needs_rework`).
+
+#### Decomposition Ownership
+
+A request is decomposed by exactly one authority. `requests.decomposition_mode`
+records which, so the two can never race:
+
+| Mode | Who writes tasks |
+|---|---|
+| `planner` (default) | The daemon's background composer, from the request text alone |
+| `author` | The caller that created the request (typically a chat agent) |
+
+The composer's candidate query requires `decomposition_mode = 'planner'` in
+addition to "no tasks yet". Without that second condition, a chat agent that
+authored a *partial* plan was invisible to the composer, which then appended a
+second, divergent breakdown. The mode is sticky: any task authored from the
+request's own originating session flips it to `author` permanently, so later
+single-task additions cannot hand the request back to the composer.
+`create_request(task_plan=[...])` writes the request and its whole plan in one
+transaction and is the normal path when the steps are already known;
+`create_task` remains for adding one task to an existing request.
+
+#### Cancelling Running Work
+
+Cancelling a claimed/running task cannot be a plain status write — the daemon
+that claimed it still owns the row, and writing `cancelled` underneath it would
+race that session's own completion. Instead `cancel_task` stamps
+`tasks.cancel_requested_at` / `cancel_requested_by`, which fires
+`pg_notify('task_cancel', ...)`. The owning daemon converts that into a
+cancellation of exactly one provider session and then finalizes the task through
+`finalize_requested_cancel`. Three properties make this safe:
+
+- **Contained.** The cancel travels as a `TaskCancelledByUserError` raised only
+  for sessions this instance deliberately cancelled; every other cancellation
+  (shutdown, source reload) still unwinds the loop. Siblings and other requests
+  are untouched.
+- **Durable.** The columns are the source of truth. If the notification is
+  dropped, the heartbeat sweep re-reads them; if the owning instance died, the
+  stale-task reaper finalizes them once the claim expires.
+- **Never resurrected.** `DISPATCHABLE_TASK_PREDICATE` excludes tasks with an
+  outstanding cancel request, so a requeued-then-reaped cancel cannot start.
+
+Cancelling a *request* stamps the same fields on every running child.
+
+#### Reporting Back to the Conversation
+
+A chat session that delegated work stays its supervisor. Two mechanisms carry
+results back:
+
+- **Push (migration 145).** Triggers on `tasks` and `requests` publish a
+  content-free `lucent_subagent_report` notification when a task settles or a
+  request reaches a state a person must act on. `lucent.services.subagent_reports`
+  consumes it, writes a visible `subagent_report` event (the card, which survives
+  reload), and generates a reply turn. The reply runs with **no tools** — an
+  unattended turn must not be able to act — and with `resume=False`, because the
+  reply is not part of the provider's session history. `chat_stream_v2` therefore
+  stops resuming a provider session once such a reply exists.
+- **Pull.** `build_delegated_work_digest` injects a bounded summary of the
+  session's non-terminal delegated requests into the next user turn's system
+  prompt, so the model never answers "I have no way to know" about work it
+  started. The chat's delegated-work panel polls
+  `GET /api/chat/sessions/{id}/activity`, tightly only while something is
+  running.
+
+Reports are deliberately limited to **results**, not per-step progress:
+task completion/failure/cancellation, and request review/completed/failed/
+cancelled. Intermediate transitions stay in the task timeline.
 
 ### Agent Definitions
 

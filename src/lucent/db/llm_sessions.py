@@ -738,6 +738,40 @@ class LLMSessionRepository:
                     )
         return dict(row) if row else None
 
+    async def has_messages_with_kind(
+        self,
+        session_id: str | UUID,
+        org_id: str | UUID,
+        *,
+        kind: str,
+        after_sequence: int | None = None,
+    ) -> bool:
+        """Whether an assistant message of this ``metadata.kind`` exists.
+
+        Used by chat to detect transcript rows the provider has never seen.
+        Background report replies are written straight to the transcript, so a
+        resumed provider session would be missing them; the caller must fall
+        back to replaying history instead of resuming.
+        """
+        params: list[Any] = [_uuid(session_id), _uuid(org_id), kind]
+        clause = ""
+        if after_sequence is not None:
+            params.append(after_sequence)
+            clause = f" AND m.sequence > ${len(params)}"
+        async with scoped_acquire(organization_id=org_id) as conn:
+            row = await conn.fetchval(
+                """SELECT 1
+                   FROM llm_messages m
+                   JOIN llm_sessions s ON s.id = m.session_id
+                   WHERE m.session_id = $1 AND s.organization_id = $2::uuid
+                     AND m.role = 'assistant'
+                     AND m.metadata->>'kind' = $3"""
+                + clause
+                + " LIMIT 1",
+                *params,
+            )
+        return bool(row)
+
     async def get_session_detail(
         self,
         session_id: str | UUID,

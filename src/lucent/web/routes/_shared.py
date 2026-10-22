@@ -1,5 +1,7 @@
 """Shared helpers for web routes — templates, CSRF, user context, form utilities."""
 
+import functools
+import hashlib
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,7 @@ _csrf_logger = logging.getLogger(f"{__name__}.csrf")
 
 # Set up templates
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+STATIC_DIR = Path(__file__).parent.parent / "static"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
@@ -58,9 +61,29 @@ def truncate(value: str, length: int = 100) -> str:
 templates.env.filters["datetime"] = format_datetime
 templates.env.filters["truncate"] = truncate
 
+
+@functools.lru_cache(maxsize=64)
+def _static_asset_version(relative_path: str) -> str:
+    """Content hash of a static asset, for cache-busting query strings.
+
+    Static files are served with ETag/Last-Modified but no explicit
+    Cache-Control, so a browser may keep an old copy of a shared script across a
+    deploy. Because ``chat-message-ui.js`` is loaded by every page and defines
+    the render API, a stale copy makes newly added UI silently missing rather
+    than visibly broken. Hashing the file contents means the URL changes exactly
+    when the bytes do.
+    """
+    path = STATIC_DIR / relative_path
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "0"
+
+
 # Make deployment mode and CSRF available to all templates
 templates.env.globals["team_mode"] = is_team_mode
 templates.env.globals["csrf_field_name"] = CSRF_FIELD_NAME
+templates.env.globals["static_version"] = _static_asset_version
 
 
 def _get_csrf_for_request(request: Request) -> str:

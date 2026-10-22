@@ -1,0 +1,212 @@
+"""Delegated-work context for chat turns.
+
+When a conversation hands work to a request, the daemon owns execution but the
+conversation stays the place the person talks. Two things are needed to make
+that feel like a sub-agent rather than a fire-and-forget queue:
+
+1. The next turn's system prompt must already know what the delegated work is
+   doing, so the model never answers "no idea, let me check" about work it
+   started itself.
+2. Background results must arrive as a readable report, not as a number the
+   browser happens to poll.
+
+This module owns the shared, deterministic text for both. Nothing here calls a
+model — the phrasing must be predictable so a report never drifts from the
+database state it describes.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from lucent.db.requests import RequestRepository
+
+# Bounded so a session that delegated a lot of work can never crowd out the
+# conversation itself. Five requests covers realistic delegation; the panel in
+# the UI is the unbounded view.
+MAX_DIGEST_REQUESTS = 5
+MAX_DIGEST_TASKS_PER_REQUEST = 3
+MAX_RESULT_CHARS = 240
+
+_ACTIVE_TASK_STATUSES = ("claimed", "running")
+_OPEN_REQUEST_STATUSES = (
+    "pending",
+    "planned",
+    "in_progress",
+    "review",
+    "needs_rework",
+    "rejection_processing",
+)
+
+_REQUEST_STATUS_LABELS = {
+    "pending": "waiting to be planned",
+    "planned": "planned",
+    "in_progress": "running",
+    "review": "in review",
+    "needs_rework": "sent back for rework",
+    "rejection_processing": "closing out after rejection",
+    "completed": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+_TASK_STATUS_LABELS = {
+    "pending": "queued",
+    "planned": "queued",
+    "claimed": "starting",
+    "running": "running",
+    "completed": "done",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "needs_review": "needs review",
+}
+
+
+def request_status_label(status: str | None) -> str:
+    return _REQUEST_STATUS_LABELS.get(str(status or ""), str(status or "unknown"))
+
+
+def task_status_label(status: str | None) -> str:
+    return _TASK_STATUS_LABELS.get(str(status or ""), str(status or "unknown"))
+
+
+def _clip(text: str | None, limit: int = MAX_RESULT_CHARS) -> str:
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _task_line(task: dict[str, Any]) -> str:
+    status = task_status_label(task.get("status"))
+    title = _clip(task.get("title"), 90)
+    if task.get("cancel_requested_at") and task.get("status") in _ACTIVE_TASK_STATUSES:
+        status = "stopping"
+    detail = _clip(task.get("result_summary") or task.get("error"))
+    line = f"    - {title} [{status}]"
+    return f"{line}\n      {detail}" if detail else line
+
+
+async def load_delegated_work(
+    pool,
+    *,
+    session_id: str | None,
+    org_id: str,
+) -> dict[str, Any]:
+    """Read the delegated-work tree for a chat session (never raises)."""
+    if not session_id:
+        return {"requests": [], "active_task_count": 0, "revision": "empty"}
+    try:
+        return await RequestRepository(pool).list_delegated_work_for_session(
+            session_id, org_id
+        )
+    except Exception:  # noqa: BLE001 — context enrichment must never break a turn
+        return {"requests": [], "active_task_count": 0, "revision": "error"}
+
+
+def build_delegated_work_digest(data: dict[str, Any]) -> str:
+    """Render the compact "work I delegated" block for a system prompt.
+
+    Returns an empty string when the session delegated nothing, so prompts
+    without delegation are byte-identical to what they were before.
+    """
+    requests = data.get("requests") or []
+    if not requests:
+        return ""
+
+    open_requests = [r for r in requests if str(r.get("status")) in _OPEN_REQUEST_STATUSES]
+    finished = [r for r in requests if str(r.get("status")) not in _OPEN_REQUEST_STATUSES]
+    # Open work first — it is what the person is most likely asking about.
+    ordered = (open_requests + finished)[:MAX_DIGEST_REQUESTS]
+
+    lines = [
+        "--- DELEGATED WORK ---",
+        "Work this conversation handed to the daemon. The daemon runs it; you "
+        "supervise it and answer for it. Treat this as your own current knowledge "
+        "— do not tell the person you have no way to know, and do not call tools "
+        "just to restate it. Use list_active_work or get_request_details only "
+        "when you need more detail than this summary.",
+        "",
+    ]
+    for req in ordered:
+        counts = req.get("task_counts") or {}
+        total = int(req.get("task_total") or 0)
+        running = int(counts.get("claimed", 0)) + int(counts.get("running", 0))
+        done = int(counts.get("completed", 0))
+        bits = [request_status_label(req.get("status"))]
+        if total:
+            bits.append(f"{done}/{total} tasks done")
+        if running:
+            bits.append(f"{running} running")
+        lines.append(
+            f"- \"{_clip(req.get('title'), 120)}\" — {', '.join(bits)} "
+            f"(request {req.get('id')})"
+        )
+        for task in (req.get("tasks") or [])[:MAX_DIGEST_TASKS_PER_REQUEST]:
+            lines.append(_task_line(task))
+        remaining = total - min(total, MAX_DIGEST_TASKS_PER_REQUEST)
+        if remaining > 0:
+            lines.append(f"    … and {remaining} more task(s)")
+
+    if len(requests) > len(ordered):
+        lines.append(
+            f"- …and {len(requests) - len(ordered)} older delegated request(s) "
+            "not shown here."
+        )
+    if len(open_requests) == 0:
+        lines.append("")
+        lines.append(
+            "All delegated work has finished. Report results when asked; do not "
+            "claim anything is still running."
+        )
+    return "\n".join(lines)
+
+
+async def build_delegated_work_digest_for_session(
+    pool,
+    *,
+    session_id: str | None,
+    org_id: str,
+) -> str:
+    """Convenience wrapper: load then render, returning '' when there is none."""
+    data = await load_delegated_work(pool, session_id=session_id, org_id=org_id)
+    return build_delegated_work_digest(data)
+
+
+def summarize_report_event(
+    *,
+    kind: str,
+    request: dict[str, Any] | None,
+    task: dict[str, Any] | None,
+) -> str:
+    """One-line headline for a report event.
+
+    The request title is rendered separately on the card, so it is deliberately
+    not repeated here — a headline that restates it reads as noise.
+    """
+    if kind.startswith("request."):
+        status = kind.split(".", 1)[1]
+        if status == "review":
+            return "The work is ready for your review."
+        if status == "needs_rework":
+            return "Review sent the work back for another pass."
+        if status == "completed":
+            return "This request is complete."
+        if status == "failed":
+            return "This request stopped on a failed task."
+        if status == "cancelled":
+            return "This request was cancelled."
+        return f"Request is now {request_status_label(status)}."
+    if kind.startswith("task."):
+        status = kind.split(".", 1)[1]
+        task_title = _clip((task or {}).get("title"), 120)
+        if status == "completed":
+            return f"Finished: {task_title}"
+        if status == "failed":
+            return f"Failed: {task_title}"
+        if status == "cancelled":
+            return f"Stopped: {task_title}"
+        if status == "needs_review":
+            return f"Needs your review: {task_title}"
+        return f"{task_title} — {task_status_label(status)}"
+    return "Delegated work reported an update."

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -17,12 +18,16 @@ from jsonschema import SchemaError
 from jsonschema.validators import validator_for
 
 from lucent.constants import (
+    DECOMPOSITION_MODE_AUTHOR,
+    DECOMPOSITION_MODE_PLANNER,
+    INTERRUPTIBLE_TASK_STATUSES,
     REQUEST_STATUS_CANCELLED,
     REQUEST_STATUS_COMPLETED,
     REQUEST_STATUS_FAILED,
     REQUEST_STATUS_IN_PROGRESS,
     REQUEST_STATUS_NEEDS_REWORK,
     REQUEST_STATUS_REVIEW,
+    VALID_DECOMPOSITION_MODES,
     VALID_REQUEST_SOURCES,
     VALID_REQUEST_STATUSES,
 )
@@ -1001,6 +1006,7 @@ DISPATCHABLE_TASKS_FROM = "FROM tasks t JOIN requests r ON t.request_id = r.id"
 DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                      AND t.status IN ('pending', 'planned')
                      AND t.remote_target_id IS NULL
+                     AND t.cancel_requested_at IS NULL
                      AND r.approval_status IN ('auto_approved', 'approved')
                      AND r.status NOT IN ('cancelled', 'completed', 'failed')
                                          AND NOT EXISTS (
@@ -1039,6 +1045,7 @@ DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
 REMOTE_DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                      AND t.remote_target_id = $2
                      AND t.status IN ('pending', 'planned')
+                     AND t.cancel_requested_at IS NULL
                      AND r.approval_status IN ('auto_approved', 'approved')
                      AND r.status NOT IN ('cancelled', 'completed', 'failed')
                      AND NOT EXISTS (
@@ -1067,6 +1074,192 @@ REMOTE_DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                                  END
                        )
                      )"""
+
+
+def _normalize_task_payload(
+    *,
+    agent_type: str | None,
+    output_contract: dict | None,
+    decision_config: dict | None,
+    fusion_config: dict | None,
+    task_kind: str | None,
+    execution_config: dict | None,
+    sandbox_config: dict | None,
+) -> tuple[str, dict[str, Any]]:
+    """Validate one task payload and normalize it for insertion.
+
+    Shared by :meth:`RequestRepository.create_task` and
+    :meth:`RequestRepository.create_request_with_tasks` so the two authoring
+    paths can never accept different shapes.
+
+    Returns ``(resolved_kind, {"decision_config": ..., "fusion_config": ...,
+    "execution_config": ...})`` with the generic kind/config mirrored onto the
+    legacy columns every existing reader still uses.
+    """
+    from lucent.task_kinds import resolve_task_kind, validate_task_kind_payload
+
+    resolved_kind = resolve_task_kind(
+        kind=task_kind,
+        agent_type=agent_type,
+        decision_config=decision_config,
+        fusion_config=fusion_config,
+    )
+    if execution_config is not None and (
+        decision_config is not None or fusion_config is not None
+    ):
+        raise ValueError(
+            "Provide execution_config or the legacy decision_config/"
+            "fusion_config, not both"
+        )
+    if execution_config is None:
+        if resolved_kind == "decision":
+            execution_config = decision_config
+        elif resolved_kind == "fusion":
+            execution_config = fusion_config
+    if resolved_kind == "decision":
+        decision_config = execution_config
+    elif resolved_kind == "fusion":
+        fusion_config = execution_config
+    elif resolved_kind == "agent" and (
+        decision_config is not None or fusion_config is not None
+    ):
+        raise ValueError(
+            "decision_config/fusion_config require their matching task kind"
+        )
+    validate_task_kind_payload(resolved_kind, execution_config)
+
+    _validate_output_contract(output_contract)
+    validate_decision_config(decision_config)
+    # Structural validation only — authoring surfaces enforce the
+    # fusion.* mode flags before this call.
+    validate_fusion_config(fusion_config)
+    if output_contract and decision_config:
+        raise ValueError(
+            "A decision-step task carries its own question schema — "
+            "output_contract cannot be combined with decision_config"
+        )
+    if decision_config and agent_type != "decision-step":
+        raise ValueError("decision_config requires agent_type 'decision-step'")
+    if agent_type == "decision-step" and not decision_config:
+        raise ValueError(
+            "agent_type 'decision-step' requires decision_config "
+            "carrying the questions to answer"
+        )
+    # Unlike decision_config, output_contract IS allowed with
+    # fusion_config: the winner / synthesis result still goes through
+    # the normal output-contract validation and repair tail.
+    if fusion_config and decision_config:
+        raise ValueError(
+            "A task cannot carry both fusion_config and decision_config "
+            "— they configure different executor kinds"
+        )
+    if fusion_config and agent_type == "decision-step":
+        raise ValueError(
+            "fusion_config requires a chat agent — decision-step tasks "
+            "are executed by the decision model directly"
+        )
+    from lucent.secrets.utils import validate_sandbox_config_references
+
+    validate_sandbox_config_references(sandbox_config)
+
+    return resolved_kind, {
+        "decision_config": decision_config,
+        "fusion_config": fusion_config,
+        "execution_config": execution_config,
+    }
+
+
+async def _insert_task_row(
+    conn,
+    *,
+    request_id: str,
+    org_id: str,
+    title: str,
+    description: str | None,
+    agent_type: str | None,
+    agent_definition_id: str | None,
+    parent_task_id: str | None,
+    priority: str,
+    sequence_order: int,
+    model: str | None,
+    reasoning_effort: str | None,
+    sandbox_template_id: str | None,
+    sandbox_config: dict | None,
+    requesting_user_id: str | None,
+    output_contract: dict | None,
+    decision_config: dict | None,
+    fusion_config: dict | None,
+    backend_id: str | None,
+    task_kind: str,
+    execution_config: dict | None,
+    remote_target_id: str | None,
+):
+    """Insert one task row on an existing connection.
+
+    A request-level execution pin is authoritative: every normal task uses the
+    request's ``requested_model``/``backend_id`` even when the caller supplied a
+    different default. Decision steps run on a decision-class model resolved by
+    the dispatcher and must not inherit either pin.
+    """
+    return await conn.fetchrow(
+        """INSERT INTO tasks
+           (request_id, parent_task_id, title, description, agent_type,
+            agent_definition_id, priority, sequence_order, organization_id,
+            model, reasoning_effort, sandbox_template_id, sandbox_config,
+            requesting_user_id, output_contract, decision_config,
+            fusion_config, backend_id, task_kind, execution_config,
+            remote_target_id)
+           VALUES (
+            $1, $2, $3, $4, $5::varchar, $6, $7, $8, $9,
+            CASE WHEN $5::text = 'decision-step' THEN $10
+                 ELSE COALESCE(
+                     (SELECT requested_model FROM requests
+                      WHERE id = $1 AND organization_id = $9),
+                     $10
+                 ) END,
+            $11, $12, $13,
+            COALESCE($14, (SELECT created_by FROM requests
+                           WHERE id = $1 AND organization_id = $9)),
+            $15, $16, $17,
+            CASE WHEN $5::text = 'decision-step' THEN $18
+                 ELSE COALESCE(
+                     (SELECT backend_id FROM requests
+                      WHERE id = $1 AND organization_id = $9),
+                     $18
+                 ) END,
+            $19::varchar,
+            $20,
+            $21
+           )
+           RETURNING *""",
+        UUID(request_id),
+        UUID(parent_task_id) if parent_task_id else None,
+        title,
+        description,
+        agent_type,
+        UUID(agent_definition_id) if agent_definition_id else None,
+        priority,
+        sequence_order,
+        UUID(org_id),
+        model,
+        reasoning_effort,
+        UUID(sandbox_template_id) if sandbox_template_id else None,
+        (
+            json.dumps(sandbox_config)
+            if isinstance(sandbox_config, dict)
+            else sandbox_config
+            if isinstance(sandbox_config, str) and sandbox_config
+            else None
+        ),
+        UUID(requesting_user_id) if requesting_user_id else None,
+        json.dumps(output_contract) if output_contract else None,
+        json.dumps(decision_config) if decision_config else None,
+        json.dumps(fusion_config) if fusion_config else None,
+        UUID(backend_id) if backend_id else None,
+        task_kind,
+        json.dumps(execution_config) if execution_config else None,
+        UUID(remote_target_id) if remote_target_id else None,
+    )
 
 
 class RequestRepository:
@@ -1284,6 +1477,7 @@ class RequestRepository:
         goal_milestone_index: int | None = None,
         backend_id: str | None = None,
         requested_model: str | None = None,
+        decomposition_mode: str = DECOMPOSITION_MODE_PLANNER,
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
@@ -1294,6 +1488,12 @@ class RequestRepository:
             raise ValueError(
                 "Invalid dependency_policy "
                 f"'{dependency_policy}'. Must be 'strict' or 'permissive'."
+            )
+        if decomposition_mode not in VALID_DECOMPOSITION_MODES:
+            valid = ", ".join(sorted(VALID_DECOMPOSITION_MODES))
+            raise ValueError(
+                f"Invalid decomposition_mode '{decomposition_mode}'. "
+                f"Must be one of: {valid}."
             )
         if goal_milestone_index is not None and goal_id is None:
             raise ValueError(
@@ -1308,187 +1508,246 @@ class RequestRepository:
             if force_pending_approval or _requires_approval(source, organization_id=org_id)
             else APPROVAL_AUTO
         )
-        now = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
+        approved_at = datetime.now(timezone.utc) if approval == APPROVAL_AUTO else None
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
         ) as conn:
-            # === STRUCTURED GOAL/MILESTONE VALIDATION ===
-            # When the caller passes goal_id (the new structured path),
-            # validate the goal and milestone here in one shot. This is the
-            # canonical way to advance a goal — no title parsing, no
-            # late-link, no inference. If the goal isn't active or the
-            # named milestone isn't active (or hasn't reached start_after),
-            # refuse with a clear reason.
-            if goal_id:
-                goal_row = await conn.fetchrow(
+            row, _created = await self._create_request_in_conn(
+                conn,
+                title=title,
+                org_id=org_id,
+                description=description,
+                source=source,
+                priority=priority,
+                created_by=created_by,
+                dependency_policy=dependency_policy,
+                memory_ids=memory_ids,
+                target_repo=target_repo,
+                target_paths=target_paths,
+                approval=approval,
+                approved_at=approved_at,
+                goal_id=goal_id,
+                goal_milestone_index=goal_milestone_index,
+                backend_id=backend_id,
+                requested_model=requested_model,
+                decomposition_mode=decomposition_mode,
+            )
+        return row
+
+    async def _create_request_in_conn(
+        self,
+        conn,
+        *,
+        title: str,
+        org_id: str,
+        description: str | None,
+        source: str,
+        priority: str,
+        created_by: str | None,
+        dependency_policy: str,
+        memory_ids: list[dict] | None,
+        target_repo: str | None,
+        target_paths: list[str] | None,
+        approval: str,
+        approved_at: datetime | None,
+        goal_id: str | None,
+        goal_milestone_index: int | None,
+        backend_id: str | None,
+        requested_model: str | None,
+        decomposition_mode: str,
+    ) -> tuple[dict, bool]:
+        """Insert one request on an existing connection.
+
+        Split out of :meth:`create_request` so chat-authored task plans can
+        create the request and every task inside a single transaction — either
+        the whole plan lands or none of it does.
+
+        Returns ``(request_row, created)``. ``created`` is False for a dedup or
+        refusal outcome, which carries an existing request (or a ``skipped``
+        marker) rather than a freshly inserted row.
+        """
+        # === STRUCTURED GOAL/MILESTONE VALIDATION ===
+        # When the caller passes goal_id (the new structured path),
+        # validate the goal and milestone here in one shot. This is the
+        # canonical way to advance a goal — no title parsing, no
+        # late-link, no inference. If the goal isn't active or the
+        # named milestone isn't active (or hasn't reached start_after),
+        # refuse with a clear reason.
+        if goal_id:
+            goal_row = await conn.fetchrow(
+                """SELECT id, content, metadata
+                   FROM memories
+                   WHERE id = $1::uuid AND type = 'goal'
+                     AND deleted_at IS NULL""",
+                goal_id,
+            )
+            if goal_row is None:
+                return {
+                    "id": goal_id,
+                    "title": title,
+                    "status": "skipped",
+                    "reason": "goal_not_found",
+                    "detail": (
+                        f"goal_id {goal_id} does not refer to an active "
+                        "goal memory in this org."
+                    ),
+                }, False
+            refusal = _validate_structured_goal_milestone(
+                str(goal_row["id"]),
+                _coerce_metadata(goal_row["metadata"]),
+                goal_milestone_index,
+            )
+            if refusal:
+                return refusal, False
+
+            # Dedup against the structured fields. If another open
+            # request already targets this exact (goal, milestone),
+            # return it instead of inserting a duplicate. This is
+            # robust against parallel cycles and across descriptions.
+            dedup_row = await conn.fetchrow(
+                """SELECT * FROM requests
+                   WHERE organization_id = $1::uuid
+                     AND goal_memory_id = $2::uuid
+                     AND goal_milestone_index IS NOT DISTINCT FROM $3
+                     AND status NOT IN ('completed', 'cancelled')
+                   ORDER BY created_at DESC
+                   LIMIT 1""",
+                UUID(org_id),
+                str(goal_row["id"]),
+                goal_milestone_index,
+            )
+            if dedup_row:
+                existing = dict(dedup_row)
+                existing["_preexisting"] = True
+                return existing, False
+
+        # === LEGACY MEMORY_IDS CONTEXT-LINKING PATH ===
+        # memory_ids is the general-purpose context attachment
+        # mechanism (technical/experience/etc memories that the
+        # request should be aware of). Goals SHOULD be passed via
+        # the goal_id structured field instead, but for back-compat
+        # we still accept relation='goal' here and run the same
+        # checks the structured path runs. Anything that arrives
+        # here that the structured path didn't already handle is
+        # treated as pure context.
+        if memory_ids:
+            mem_ids = [UUID(m["id"]) for m in memory_ids]
+            if mem_ids:
+                # Goal-state guard for memory_ids legacy path. Only
+                # checks the goal-level status (completed/abandoned)
+                # and the all-milestones-done condition. Per-milestone
+                # selection is the structured path's job; if the
+                # caller wants to advance a specific milestone they
+                # should use goal_id.
+                goal_rows = await conn.fetch(
                     """SELECT id, content, metadata
                        FROM memories
-                       WHERE id = $1::uuid AND type = 'goal'
+                       WHERE id = ANY($1)
+                         AND type = 'goal'
                          AND deleted_at IS NULL""",
-                    goal_id,
+                    mem_ids,
                 )
-                if goal_row is None:
-                    return {
-                        "id": goal_id,
-                        "title": title,
-                        "status": "skipped",
-                        "reason": "goal_not_found",
-                        "detail": (
-                            f"goal_id {goal_id} does not refer to an active "
-                            "goal memory in this org."
-                        ),
-                    }
-                refusal = _validate_structured_goal_milestone(
-                    str(goal_row["id"]),
-                    _coerce_metadata(goal_row["metadata"]),
-                    goal_milestone_index,
-                )
-                if refusal:
-                    return refusal
+                for goal_row in goal_rows:
+                    # Skip the goal we already validated via goal_id.
+                    if goal_id and str(goal_row["id"]) == str(goal_id):
+                        continue
+                    meta = _coerce_metadata(goal_row["metadata"])
+                    if meta is None:
+                        continue
+                    gstatus = meta.get("status")
+                    if gstatus in ("completed", "abandoned"):
+                        return {
+                            "id": str(goal_row["id"]),
+                            "title": title,
+                            "status": "skipped",
+                            "reason": "goal_completed",
+                            "detail": (
+                                f"Goal {goal_row['id']} has "
+                                f"metadata.status={gstatus!r} and must "
+                                "not spawn new work."
+                            ),
+                        }, False
 
-                # Dedup against the structured fields. If another open
-                # request already targets this exact (goal, milestone),
-                # return it instead of inserting a duplicate. This is
-                # robust against parallel cycles and across descriptions.
-                dedup_row = await conn.fetchrow(
-                    """SELECT * FROM requests
-                       WHERE organization_id = $1::uuid
-                         AND goal_memory_id = $2::uuid
-                         AND goal_milestone_index IS NOT DISTINCT FROM $3
-                         AND status NOT IN ('completed', 'cancelled')
-                       ORDER BY created_at DESC
-                       LIMIT 1""",
+                # Dedup against any other open request linked to the
+                # same memory(ies). 'failed' counts as active because
+                # the user/operator may want to retry.
+                existing = await conn.fetchrow(
+                    """SELECT r.* FROM requests r
+                       JOIN request_memories rm ON r.id = rm.request_id
+                       WHERE r.organization_id = $1
+                         AND rm.memory_id = ANY($2)
+                         AND r.status NOT IN ('completed', 'cancelled')
+                       ORDER BY r.created_at DESC LIMIT 1""",
                     UUID(org_id),
-                    str(goal_row["id"]),
-                    goal_milestone_index,
+                    mem_ids,
                 )
-                if dedup_row:
-                    return dict(dedup_row)
+                if existing:
+                    existing_row = dict(existing)
+                    existing_row["_preexisting"] = True
+                    return existing_row, False
 
-            # === LEGACY MEMORY_IDS CONTEXT-LINKING PATH ===
-            # memory_ids is the general-purpose context attachment
-            # mechanism (technical/experience/etc memories that the
-            # request should be aware of). Goals SHOULD be passed via
-            # the goal_id structured field instead, but for back-compat
-            # we still accept relation='goal' here and run the same
-            # checks the structured path runs. Anything that arrives
-            # here that the structured path didn't already handle is
-            # treated as pure context.
-            if memory_ids:
-                mem_ids = [UUID(m["id"]) for m in memory_ids]
-                if mem_ids:
-                    # Goal-state guard for memory_ids legacy path. Only
-                    # checks the goal-level status (completed/abandoned)
-                    # and the all-milestones-done condition. Per-milestone
-                    # selection is the structured path's job; if the
-                    # caller wants to advance a specific milestone they
-                    # should use goal_id.
-                    goal_rows = await conn.fetch(
-                        """SELECT id, content, metadata
-                           FROM memories
-                           WHERE id = ANY($1)
-                             AND type = 'goal'
-                             AND deleted_at IS NULL""",
-                        mem_ids,
-                    )
-                    for goal_row in goal_rows:
-                        # Skip the goal we already validated via goal_id.
-                        if goal_id and str(goal_row["id"]) == str(goal_id):
-                            continue
-                        meta = _coerce_metadata(goal_row["metadata"])
-                        if meta is None:
-                            continue
-                        gstatus = meta.get("status")
-                        if gstatus in ("completed", "abandoned"):
-                            return {
-                                "id": str(goal_row["id"]),
-                                "title": title,
-                                "status": "skipped",
-                                "reason": "goal_completed",
-                                "detail": (
-                                    f"Goal {goal_row['id']} has "
-                                    f"metadata.status={gstatus!r} and must "
-                                    "not spawn new work."
-                                ),
-                            }
+        row = await conn.fetchrow(
+            """INSERT INTO requests
+               (title, description, source, priority, created_by,
+                organization_id, dependency_policy,
+                approval_status, approved_at,
+                target_repo, target_paths,
+                goal_memory_id, goal_milestone_index,
+                backend_id, requested_model, decomposition_mode)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                       $12, $13, $14, $15, $16)
+               RETURNING *""",
+            title,
+            description,
+            source,
+            priority,
+            UUID(created_by) if created_by else None,
+            UUID(org_id),
+            dependency_policy,
+            approval,
+            approved_at,
+            target_repo,
+            target_paths,
+            UUID(goal_id) if goal_id else None,
+            goal_milestone_index,
+            UUID(backend_id) if backend_id else None,
+            requested_model,
+            decomposition_mode,
+        )
 
-                    # Dedup against any other open request linked to the
-                    # same memory(ies). 'failed' counts as active because
-                    # the user/operator may want to retry.
-                    existing = await conn.fetchrow(
-                        """SELECT r.* FROM requests r
-                           JOIN request_memories rm ON r.id = rm.request_id
-                           WHERE r.organization_id = $1
-                             AND rm.memory_id = ANY($2)
-                             AND r.status NOT IN ('completed', 'cancelled')
-                           ORDER BY r.created_at DESC LIMIT 1""",
-                        UUID(org_id),
-                        mem_ids,
-                    )
-                    if existing:
-                        return dict(existing)
-
-            row = await conn.fetchrow(
-                """INSERT INTO requests
-                   (title, description, source, priority, created_by,
-                    organization_id, dependency_policy,
-                    approval_status, approved_at,
-                    target_repo, target_paths,
-                    goal_memory_id, goal_milestone_index,
-                    backend_id, requested_model)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                           $12, $13, $14, $15)
-                   RETURNING *""",
-                title,
-                description,
-                source,
-                priority,
-                UUID(created_by) if created_by else None,
-                UUID(org_id),
-                dependency_policy,
-                approval,
-                now,
-                target_repo,
-                target_paths,
-                UUID(goal_id) if goal_id else None,
-                goal_milestone_index,
-                UUID(backend_id) if backend_id else None,
-                requested_model,
-            )
-
-            # Link memories to the new request
-            if memory_ids and row:
-                for m in memory_ids:
-                    try:
-                        await conn.execute(
-                            """INSERT INTO request_memories (request_id, memory_id, relation)
-                               VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
-                            row["id"],
-                            UUID(m["id"]),
-                            m.get("relation", "goal"),
-                        )
-                    except Exception:
-                        pass  # Best-effort — don't fail request creation on link errors
-
-            # If the request advances a goal via the structured field, also
-            # mirror that into request_memories(relation='goal') so the
-            # existing UI panel and link-following queries continue to
-            # surface the goal alongside the structured fields. Idempotent
-            # via ON CONFLICT.
-            if goal_id and row:
+        # Link memories to the new request
+        if memory_ids and row:
+            for m in memory_ids:
                 try:
                     await conn.execute(
-                        """INSERT INTO request_memories
-                                (request_id, memory_id, relation)
-                           VALUES ($1, $2::uuid, 'goal')
-                           ON CONFLICT DO NOTHING""",
+                        """INSERT INTO request_memories (request_id, memory_id, relation)
+                           VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
                         row["id"],
-                        goal_id,
+                        UUID(m["id"]),
+                        m.get("relation", "goal"),
                     )
                 except Exception:
-                    pass
+                    pass  # Best-effort — don't fail request creation on link errors
 
-        return dict(row)
+        # If the request advances a goal via the structured field, also
+        # mirror that into request_memories(relation='goal') so the
+        # existing UI panel and link-following queries continue to
+        # surface the goal alongside the structured fields. Idempotent
+        # via ON CONFLICT.
+        if goal_id and row:
+            try:
+                await conn.execute(
+                    """INSERT INTO request_memories
+                            (request_id, memory_id, relation)
+                       VALUES ($1, $2::uuid, 'goal')
+                       ON CONFLICT DO NOTHING""",
+                    row["id"],
+                    goal_id,
+                )
+            except Exception:
+                pass
+
+        return dict(row), True
 
     async def get_request(
         self,
@@ -1704,6 +1963,51 @@ class RequestRepository:
             "has_more": offset + len(rows) < total_count,
         }
 
+    async def update_request_decomposition_mode(
+        self,
+        request_id: str,
+        decomposition_mode: str,
+        org_id: str | None = None,
+    ) -> dict | None:
+        """Change who owns decomposition of a request.
+
+        Switching to ``planner`` while tasks already exist is refused — the
+        composer would author a second breakdown on top of them. ``author`` is
+        always allowed: taking ownership away from the composer is safe.
+        """
+        if decomposition_mode not in VALID_DECOMPOSITION_MODES:
+            valid = ", ".join(sorted(VALID_DECOMPOSITION_MODES))
+            raise ValueError(
+                f"Invalid decomposition_mode '{decomposition_mode}'. "
+                f"Must be one of: {valid}."
+            )
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            org_clause = " AND organization_id = $3" if org_id else ""
+            params: list[Any] = [UUID(request_id), decomposition_mode]
+            if org_id:
+                params.append(UUID(org_id))
+            if decomposition_mode == DECOMPOSITION_MODE_PLANNER:
+                existing = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE request_id = $1"
+                    + (" AND organization_id = $2" if org_id else ""),
+                    *([UUID(request_id), UUID(org_id)] if org_id else [UUID(request_id)]),
+                )
+                if existing:
+                    raise ValueError(
+                        f"Request already has {existing} task(s); the planner "
+                        "would add a second breakdown"
+                    )
+            row = await conn.fetchrow(
+                "UPDATE requests SET decomposition_mode = $2, updated_at = NOW()"
+                " WHERE id = $1"
+                + org_clause
+                + " RETURNING *",
+                *params,
+            )
+        return dict(row) if row else None
+
     async def update_request_status(
         self, request_id: str, status: str, org_id: str | None = None
     ) -> dict | None:
@@ -1773,6 +2077,23 @@ class RequestRepository:
                                 )
                                 for task in cancelled_tasks
                             ],
+                        )
+                    if status == REQUEST_STATUS_CANCELLED:
+                        # Cancelling a request is a hard stop for everything in
+                        # it. Tasks that are already claimed/running cannot be
+                        # transitioned here (their owning session still holds
+                        # the claim), so signal them instead: the daemon
+                        # interrupts the matching session and finalizes the task
+                        # through finalize_requested_cancel().
+                        await conn.execute(
+                            """UPDATE tasks
+                               SET cancel_requested_at = COALESCE(cancel_requested_at, $2),
+                                   updated_at = $2
+                               WHERE request_id = $1
+                                 AND status IN ('claimed', 'running')
+                                 AND cancel_requested_at IS NULL""",
+                            UUID(request_id),
+                            now,
                         )
 
         # When a request reaches a terminal state, close any linked schedule run.
@@ -2477,86 +2798,34 @@ class RequestRepository:
         task_kind: str | None = None,
         execution_config: dict | None = None,
         remote_target_id: str | None = None,
+        authored_by_llm_session_id: str | None = None,
     ) -> dict:
-        # Normalize the explicit kind + generic config onto the legacy
-        # decision_config/fusion_config fields so every existing reader keeps
-        # working during the compatibility window.
-        from lucent.task_kinds import (
-            resolve_task_kind,
-            validate_task_kind_payload,
-        )
+        """Create one task under an existing request.
 
-        resolved_kind = resolve_task_kind(
-            kind=task_kind,
+        ``authored_by_llm_session_id`` is the trusted, header-derived LLM
+        session that caused this insert. When it matches the request's
+        ``origin_session_id`` and the caller owns the request, the request is
+        flipped to ``decomposition_mode='author'`` in the same transaction so
+        the background composer can never author a competing breakdown.
+        Daemon planner sessions have no LLM session id and therefore can never
+        flip ownership.
+        """
+        resolved_kind, resolved = _normalize_task_payload(
             agent_type=agent_type,
+            output_contract=output_contract,
             decision_config=decision_config,
             fusion_config=fusion_config,
+            task_kind=task_kind,
+            execution_config=execution_config,
+            sandbox_config=sandbox_config,
         )
-        if execution_config is not None and (
-            decision_config is not None or fusion_config is not None
-        ):
-            raise ValueError(
-                "Provide execution_config or the legacy decision_config/"
-                "fusion_config, not both"
-            )
-        if execution_config is None:
-            if resolved_kind == "decision":
-                execution_config = decision_config
-            elif resolved_kind == "fusion":
-                execution_config = fusion_config
-        if resolved_kind == "decision":
-            decision_config = execution_config
-        elif resolved_kind == "fusion":
-            fusion_config = execution_config
-        elif resolved_kind == "agent" and (
-            decision_config is not None or fusion_config is not None
-        ):
-            raise ValueError(
-                "decision_config/fusion_config require their matching task kind"
-            )
-        validate_task_kind_payload(resolved_kind, execution_config)
-
-        _validate_output_contract(output_contract)
-        validate_decision_config(decision_config)
-        # Structural validation only — authoring surfaces enforce the
-        # fusion.* mode flags before this call.
-        validate_fusion_config(fusion_config)
-        if output_contract and decision_config:
-            raise ValueError(
-                "A decision-step task carries its own question schema — "
-                "output_contract cannot be combined with decision_config"
-            )
-        if decision_config and agent_type != "decision-step":
-            raise ValueError(
-                "decision_config requires agent_type 'decision-step'"
-            )
-        if agent_type == "decision-step" and not decision_config:
-            raise ValueError(
-                "agent_type 'decision-step' requires decision_config "
-                "carrying the questions to answer"
-            )
-        # Unlike decision_config, output_contract IS allowed with
-        # fusion_config: the winner / synthesis result still goes through
-        # the normal output-contract validation and repair tail.
-        if fusion_config and decision_config:
-            raise ValueError(
-                "A task cannot carry both fusion_config and decision_config "
-                "— they configure different executor kinds"
-            )
-        if fusion_config and agent_type == "decision-step":
-            raise ValueError(
-                "fusion_config requires a chat agent — decision-step tasks "
-                "are executed by the decision model directly"
-            )
-        from lucent.secrets.utils import validate_sandbox_config_references
-
-        validate_sandbox_config_references(sandbox_config)
 
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
         ) as conn:
             parent_request = await conn.fetchrow(
-                "SELECT status FROM requests WHERE id = $1 AND organization_id = $2",
+                "SELECT status, created_by, origin_session_id FROM requests "
+                "WHERE id = $1 AND organization_id = $2",
                 UUID(request_id),
                 UUID(org_id),
             )
@@ -2567,65 +2836,36 @@ class RequestRepository:
                     f"Cannot create a task under a {parent_request['status']} "
                     "request — the request will not run this work"
                 )
-            row = await conn.fetchrow(
-                """INSERT INTO tasks
-                   (request_id, parent_task_id, title, description, agent_type,
-                    agent_definition_id, priority, sequence_order, organization_id,
-                    model, reasoning_effort, sandbox_template_id, sandbox_config,
-                    requesting_user_id, output_contract, decision_config,
-                    fusion_config, backend_id, task_kind, execution_config,
-                    remote_target_id)
-                   VALUES (
-                    $1, $2, $3, $4, $5::varchar, $6, $7, $8, $9,
-                    -- A request-level execution pin is authoritative: every
-                    -- normal task uses the request's requested_model/backend_id
-                    -- even when the planner supplied a different default.
-                    -- Decision steps run on a decision-class model resolved by
-                    -- the dispatcher and must not inherit either pin.
-                    CASE WHEN $5::text = 'decision-step' THEN $10
-                         ELSE COALESCE(
-                             (SELECT requested_model FROM requests
-                              WHERE id = $1 AND organization_id = $9),
-                             $10
-                         ) END,
-                    $11, $12, $13,
-                    COALESCE($14, (SELECT created_by FROM requests
-                                   WHERE id = $1 AND organization_id = $9)),
-                    $15, $16, $17,
-                    CASE WHEN $5::text = 'decision-step' THEN $18
-                         ELSE COALESCE(
-                             (SELECT backend_id FROM requests
-                              WHERE id = $1 AND organization_id = $9),
-                             $18
-                         ) END,
-                    $19::varchar,
-                    $20,
-                    $21
-                   )
-                   RETURNING *""",
-                UUID(request_id),
-                UUID(parent_task_id) if parent_task_id else None,
-                title,
-                description,
-                agent_type,
-                UUID(agent_definition_id) if agent_definition_id else None,
-                priority,
-                sequence_order,
-                UUID(org_id),
-                model,
-                reasoning_effort,
-                UUID(sandbox_template_id) if sandbox_template_id else None,
-                (json.dumps(sandbox_config) if isinstance(sandbox_config, dict)
-                 else sandbox_config if isinstance(sandbox_config, str) and sandbox_config
-                 else None),
-                UUID(requesting_user_id) if requesting_user_id else None,
-                json.dumps(output_contract) if output_contract else None,
-                json.dumps(decision_config) if decision_config else None,
-                json.dumps(fusion_config) if fusion_config else None,
-                UUID(backend_id) if backend_id else None,
-                resolved_kind,
-                json.dumps(execution_config) if execution_config else None,
-                UUID(remote_target_id) if remote_target_id else None,
+            row = await _insert_task_row(
+                conn,
+                request_id=request_id,
+                org_id=org_id,
+                title=title,
+                description=description,
+                agent_type=agent_type,
+                agent_definition_id=agent_definition_id,
+                parent_task_id=parent_task_id,
+                priority=priority,
+                sequence_order=sequence_order,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                sandbox_template_id=sandbox_template_id,
+                sandbox_config=sandbox_config,
+                requesting_user_id=requesting_user_id,
+                output_contract=output_contract,
+                decision_config=resolved["decision_config"],
+                fusion_config=resolved["fusion_config"],
+                backend_id=backend_id,
+                task_kind=resolved_kind,
+                execution_config=resolved["execution_config"],
+                remote_target_id=remote_target_id,
+            )
+            await self._claim_decomposition_authorship(
+                conn,
+                request_id=request_id,
+                org_id=org_id,
+                parent_request=parent_request,
+                llm_session_id=authored_by_llm_session_id,
             )
         task = dict(row)
         # Log creation event
@@ -2633,6 +2873,209 @@ class RequestRepository:
             str(task["id"]), "created", f"Task created: {title}", org_id=org_id
         )
         return task
+
+    async def _claim_decomposition_authorship(
+        self,
+        conn,
+        *,
+        request_id: str,
+        org_id: str,
+        parent_request,
+        llm_session_id: str | None,
+    ) -> bool:
+        """Flip a request to ``author`` when a chat session authored a task.
+
+        Only a caller whose trusted LLM session is the request's originating
+        session may claim authorship — that is exactly the situation where
+        the composer and the chat agent would otherwise both produce a plan.
+        Daemon planner sessions carry no LLM session id, so this is a no-op
+        for them.
+        """
+        if not llm_session_id:
+            return False
+        origin_session_id = parent_request.get("origin_session_id")
+        if not origin_session_id or str(origin_session_id) != str(llm_session_id):
+            return False
+        updated = await conn.execute(
+            """UPDATE requests
+               SET decomposition_mode = $3, updated_at = NOW()
+               WHERE id = $1 AND organization_id = $2
+                 AND decomposition_mode <> $3""",
+            UUID(request_id),
+            UUID(org_id),
+            DECOMPOSITION_MODE_AUTHOR,
+        )
+        return updated.endswith("1")
+
+    async def create_request_with_tasks(
+        self,
+        *,
+        org_id: str,
+        title: str,
+        task_specs: list[dict],
+        description: str | None = None,
+        source: str = "user",
+        priority: str = "medium",
+        created_by: str | None = None,
+        dependency_policy: str = "strict",
+        memory_ids: list[dict] | None = None,
+        target_repo: str | None = None,
+        target_paths: list[str] | None = None,
+        force_pending_approval: bool = False,
+        goal_id: str | None = None,
+        goal_milestone_index: int | None = None,
+        backend_id: str | None = None,
+        requested_model: str | None = None,
+        authored_by_llm_session_id: str | None = None,
+    ) -> dict:
+        """Create a request and its full task plan atomically.
+
+        Either the request and every task land, or nothing does. A request
+        created this way is always ``decomposition_mode='author'`` so the
+        background composer never adds a competing breakdown.
+
+        Each entry in ``task_specs`` accepts the same keys as
+        :meth:`create_task`, except that subtasks reference their parent by
+        position with ``parent_task_index`` (0-based) instead of
+        ``parent_task_id``.
+
+        ``llm_session_id`` is passed by the MCP tool layer from trusted headers
+        and is only used to stamp ``requests.origin_session_id``-backed lineage
+        on the created tasks; authorship is explicit here regardless.
+        """
+        if not task_specs:
+            raise ValueError("task_specs must contain at least one task")
+
+        # Normalize and validate every spec BEFORE writing anything. A bad
+        # spec must never leave a half-authored request behind.
+        normalized: list[tuple[int, str, dict, dict]] = []
+        for index, spec in enumerate(task_specs):
+            if not isinstance(spec, dict):
+                raise ValueError(f"task_specs[{index}] must be an object")
+            parent_index = spec.get("parent_task_index")
+            if parent_index is not None:
+                if not isinstance(parent_index, int):
+                    raise ValueError(
+                        f"task_specs[{index}].parent_task_index must be an integer"
+                    )
+                if parent_index < 0 or parent_index >= len(task_specs):
+                    raise ValueError(
+                        f"task_specs[{index}].parent_task_index is out of range"
+                    )
+                if parent_index == index:
+                    raise ValueError(
+                        f"task_specs[{index}] cannot be its own parent"
+                    )
+                if parent_index > index:
+                    raise ValueError(
+                        f"task_specs[{index}] references a later task as parent; "
+                        "parents must appear earlier in the plan"
+                    )
+            kind, resolved = _normalize_task_payload(
+                agent_type=spec.get("agent_type"),
+                output_contract=spec.get("output_contract"),
+                decision_config=spec.get("decision_config"),
+                fusion_config=spec.get("fusion_config"),
+                task_kind=spec.get("task_kind"),
+                execution_config=spec.get("execution_config"),
+                sandbox_config=spec.get("sandbox_config"),
+            )
+            if not str(spec.get("title") or "").strip():
+                raise ValueError(f"task_specs[{index}].title is required")
+            normalized.append((index, kind, resolved, spec))
+
+        created_tasks: list[dict] = []
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            req, created = await self._create_request_in_conn(
+                conn,
+                title=title,
+                org_id=org_id,
+                description=description,
+                source=source,
+                priority=priority,
+                created_by=created_by,
+                dependency_policy=dependency_policy,
+                memory_ids=memory_ids,
+                target_repo=target_repo,
+                target_paths=target_paths,
+                approval=(
+                    APPROVAL_PENDING
+                    if force_pending_approval
+                    or _requires_approval(source, organization_id=org_id)
+                    else APPROVAL_AUTO
+                ),
+                approved_at=(
+                    None
+                    if force_pending_approval
+                    or _requires_approval(source, organization_id=org_id)
+                    else datetime.now(timezone.utc)
+                ),
+                goal_id=goal_id,
+                goal_milestone_index=goal_milestone_index,
+                backend_id=backend_id,
+                requested_model=requested_model,
+                decomposition_mode=DECOMPOSITION_MODE_AUTHOR,
+            )
+
+            # A dedup hit or a refusal hands back an existing request (or a
+            # skipped marker). Never append a fresh plan onto existing work — the
+            # caller is told it already exists.
+            if not created:
+                existing = dict(req)
+                existing.pop("_preexisting", None)
+                return existing
+            request_id = str(req["id"])
+
+            created_ids: dict[int, str] = {}
+            for index, kind, resolved, spec in normalized:
+                parent_index = spec.get("parent_task_index")
+                parent_task_id = (
+                    created_ids.get(parent_index) if parent_index is not None else None
+                )
+                row = await _insert_task_row(
+                    conn,
+                    request_id=request_id,
+                    org_id=org_id,
+                    title=spec["title"],
+                    description=spec.get("description"),
+                    agent_type=spec.get("agent_type"),
+                    agent_definition_id=spec.get("agent_definition_id"),
+                    parent_task_id=parent_task_id,
+                    priority=spec.get("priority") or "medium",
+                    sequence_order=int(spec.get("sequence_order") or 0),
+                    model=spec.get("model"),
+                    reasoning_effort=spec.get("reasoning_effort"),
+                    sandbox_template_id=spec.get("sandbox_template_id"),
+                    sandbox_config=spec.get("sandbox_config"),
+                    requesting_user_id=spec.get("requesting_user_id"),
+                    output_contract=spec.get("output_contract"),
+                    decision_config=resolved["decision_config"],
+                    fusion_config=resolved["fusion_config"],
+                    backend_id=spec.get("backend_id"),
+                    task_kind=kind,
+                    execution_config=resolved["execution_config"],
+                    remote_target_id=spec.get("remote_target_id"),
+                )
+                task = dict(row)
+                created_ids[index] = str(task["id"])
+                created_tasks.append(task)
+
+        # Emit creation events after commit so a rollback cannot leave events
+        # for rows that never existed.
+        for task in created_tasks:
+            await self.add_task_event(
+                str(task["id"]),
+                "created",
+                f"Task created: {task['title']}",
+                org_id=org_id,
+            )
+
+        result = dict(req)
+        result["task_ids"] = [str(t["id"]) for t in created_tasks]
+        result["tasks_created"] = len(created_tasks)
+        result["decomposition_mode"] = DECOMPOSITION_MODE_AUTHOR
+        return result
+
 
     async def get_task(self, task_id: str, org_id: str | None = None) -> dict | None:
         if org_id:
@@ -3098,6 +3541,126 @@ class RequestRepository:
             "offset": offset,
             "limit": limit,
             "has_more": offset + len(rows) < total_count,
+        }
+
+    async def list_delegated_work_for_session(
+        self,
+        session_id: str,
+        org_id: str,
+        *,
+        max_requests: int = 10,
+        max_tasks_per_request: int = 12,
+    ) -> dict:
+        """Requests a chat session delegated, with their task rows.
+
+        This is the read model behind both the chat's delegated-work panel and
+        the "what is my sub-agent doing" digest injected into the next turn.
+        Lineage comes from either path the system actually writes:
+        ``requests.origin_session_id`` (set by create_request from trusted
+        headers) or ``llm_session_requests`` (the explicit edge). Both are
+        resolved so a session never loses sight of work it caused.
+
+        Returns ``{"requests": [...], "active_task_count": n,
+        "revision": "<token>"}``. The revision changes whenever any status or
+        result in the tree changes, so a poller can cheaply detect "nothing
+        new" without diffing the payload.
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            request_rows = await conn.fetch(
+                """SELECT DISTINCT r.id::text AS id, r.title, r.status,
+                          r.priority, r.decomposition_mode,
+                          r.created_at, r.updated_at
+                   FROM requests r
+                   WHERE r.organization_id = $1
+                     AND (
+                         r.origin_session_id = $2
+                         OR r.id IN (
+                             SELECT lsr.request_id
+                             FROM llm_session_requests lsr
+                             JOIN llm_sessions s ON s.id = lsr.session_id
+                             WHERE lsr.session_id = $2
+                               AND lsr.relation = 'created'
+                               AND s.organization_id = $1
+                         )
+                     )
+                   ORDER BY r.created_at DESC
+                   LIMIT $3""",
+                UUID(org_id),
+                UUID(session_id),
+                max_requests,
+            )
+            if not request_rows:
+                return {"requests": [], "active_task_count": 0, "revision": "empty"}
+
+            request_ids = [row["id"] for row in request_rows]
+            task_rows = await conn.fetch(
+                """SELECT id::text AS id, request_id::text AS request_id,
+                          title, status, agent_type, sequence_order,
+                          result_summary, error, cancel_requested_at,
+                          completed_at, updated_at,
+                          left(COALESCE(result_summary, result, ''), 600) AS result_excerpt
+                   FROM (
+                       SELECT t.*,
+                              row_number() OVER (
+                                  PARTITION BY t.request_id
+                                  ORDER BY t.sequence_order, t.created_at
+                              ) AS rn
+                       FROM tasks t
+                       WHERE t.request_id = ANY($1::uuid[])
+                         AND t.title <> 'Post-completion review'
+                   ) t
+                   WHERE t.rn <= $2
+                   ORDER BY t.request_id, t.sequence_order, t.created_at""",
+                [UUID(rid) for rid in request_ids],
+                max_tasks_per_request,
+            )
+
+        tasks_by_request: dict[str, list[dict]] = {rid: [] for rid in request_ids}
+        for row in task_rows:
+            tasks_by_request.setdefault(row["request_id"], []).append(dict(row))
+
+        active_statuses = {"claimed", "running"}
+        items: list[dict] = []
+        active_task_count = 0
+        revision_parts: list[str] = []
+        for row in request_rows:
+            req = dict(row)
+            tasks = tasks_by_request.get(req["id"], [])
+            counts = {
+                "pending": 0,
+                "planned": 0,
+                "claimed": 0,
+                "running": 0,
+                "completed": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "needs_review": 0,
+            }
+            for task in tasks:
+                status = str(task.get("status") or "")
+                if status in counts:
+                    counts[status] += 1
+                if status in active_statuses:
+                    active_task_count += 1
+            req["tasks"] = tasks
+            req["task_counts"] = counts
+            req["task_total"] = len(tasks)
+            items.append(req)
+            revision_parts.append(
+                f"{req['id']}:{req['status']}:{req.get('updated_at')}"
+            )
+            for task in tasks:
+                revision_parts.append(
+                    f"{task['id']}:{task.get('status')}:{task.get('updated_at')}"
+                )
+
+        revision = sha256("\x1f".join(revision_parts).encode()).hexdigest()[:16]
+        return {
+            "requests": items,
+            "active_task_count": active_task_count,
+            "revision": revision,
         }
 
     async def list_recently_completed(
@@ -4071,26 +4634,115 @@ class RequestRepository:
             return task
         return None
 
-    async def cancel_task(self, task_id: str, org_id: str | None = None) -> dict | None:
-        """Cancel a task that is not currently executing or completed."""
+    async def cancel_task(
+        self,
+        task_id: str,
+        org_id: str | None = None,
+        requested_by: str | None = None,
+    ) -> dict | None:
+        """Cancel a task, interrupting it if it is already executing.
+
+        Non-started tasks (``pending``/``planned``/``failed``/``needs_review``)
+        transition to ``cancelled`` immediately and return the row.
+
+        An executing task (``claimed``/``running``) cannot be transitioned here
+        — the owning daemon session still holds the claim, and writing
+        ``cancelled`` from underneath it would race that session's own
+        completion write. Instead this stamps ``cancel_requested_at``, which
+        fires the ``task_cancel`` notification, and returns the row with the
+        request marker set. The daemon interrupts the session and calls
+        :meth:`finalize_requested_cancel`; the reaper does the same if the
+        owning instance has gone away. Callers can distinguish the two
+        outcomes with ``row["status"]`` vs ``row["cancel_requested_at"]``.
+
+        Returns ``None`` when the task is already terminal.
+        """
         now = datetime.now(timezone.utc)
-        query = """UPDATE tasks
-                   SET status = 'cancelled',
-                       completed_at = COALESCE(completed_at, $2),
-                       updated_at = $2
-                   WHERE id = $1
-                     AND status NOT IN ('claimed', 'running', 'completed', 'cancelled')"""
-        params: list[Any] = [UUID(task_id), now]
-        if org_id:
-            query += " AND organization_id = $3"
-            params.append(UUID(org_id))
-        query += " RETURNING *"
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
         ) as conn:
-            row = await conn.fetchrow(query, *params)
-        if not row:
-            return None
+            # Two statements with different parameter sets on purpose: the
+            # direct transition never references requested_by, and passing an
+            # unused parameter leaves asyncpg unable to infer its type.
+            if org_id:
+                row = await conn.fetchrow(
+                    """UPDATE tasks
+                       SET status = 'cancelled',
+                           completed_at = COALESCE(completed_at, $2),
+                           updated_at = $2
+                       WHERE id = $1
+                         AND status NOT IN ('claimed', 'running', 'completed', 'cancelled')
+                         AND organization_id = $3
+                       RETURNING *""",
+                    UUID(task_id),
+                    now,
+                    UUID(org_id),
+                )
+            else:
+                row = await conn.fetchrow(
+                    """UPDATE tasks
+                       SET status = 'cancelled',
+                           completed_at = COALESCE(completed_at, $2),
+                           updated_at = $2
+                       WHERE id = $1
+                         AND status NOT IN ('claimed', 'running', 'completed', 'cancelled')
+                       RETURNING *""",
+                    UUID(task_id),
+                    now,
+                )
+            if row is None:
+                # Either already terminal, or executing. Ask for an interrupt
+                # in the latter case; a terminal row stays a no-op because the
+                # WHERE clause below requires a non-terminal status.
+                requested_by_uuid = UUID(requested_by) if requested_by else None
+                if org_id:
+                    row = await conn.fetchrow(
+                        """UPDATE tasks
+                           SET cancel_requested_at = COALESCE(cancel_requested_at, $2),
+                               cancel_requested_by = COALESCE(
+                                   cancel_requested_by, $3::uuid
+                               ),
+                               updated_at = $2
+                           WHERE id = $1
+                             AND status IN ('claimed', 'running')
+                             AND cancel_requested_at IS NULL
+                             AND organization_id = $4
+                           RETURNING *""",
+                        UUID(task_id),
+                        now,
+                        requested_by_uuid,
+                        UUID(org_id),
+                    )
+                else:
+                    row = await conn.fetchrow(
+                        """UPDATE tasks
+                           SET cancel_requested_at = COALESCE(cancel_requested_at, $2),
+                               cancel_requested_by = COALESCE(
+                                   cancel_requested_by, $3::uuid
+                               ),
+                               updated_at = $2
+                           WHERE id = $1
+                             AND status IN ('claimed', 'running')
+                             AND cancel_requested_at IS NULL
+                           RETURNING *""",
+                        UUID(task_id),
+                        now,
+                        requested_by_uuid,
+                    )
+                if row is None:
+                    return None
+                task = dict(row)
+                await self.add_task_event(
+                    task_id,
+                    "cancel_requested",
+                    "Cancellation requested; interrupting the running session",
+                    {
+                        "requested_by": requested_by,
+                        "status": task.get("status"),
+                    },
+                    org_id=str(task["organization_id"]),
+                )
+                return task
         task = dict(row)
         await self.add_task_event(
             task_id,
@@ -4099,6 +4751,95 @@ class RequestRepository:
             org_id=str(task["organization_id"]),
         )
         return task
+
+    async def finalize_requested_cancel(
+        self,
+        task_id: str,
+        org_id: str | None = None,
+        *,
+        reason: str = "Cancelled by user",
+    ) -> dict | None:
+        """Move a claimed/running task to ``cancelled`` after an interrupt.
+
+        Called by the daemon session that owned the claim (after it stopped the
+        provider session) and by the stale-task reaper when the owning instance
+        died mid-cancel. Only acts when a cancel was actually requested, so a
+        normal completion/failure race can never be mislabeled as cancelled.
+        """
+        now = datetime.now(timezone.utc)
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            org_clause = " AND organization_id = $3" if org_id else ""
+            params: list[Any] = [UUID(task_id), now]
+            if org_id:
+                params.append(UUID(org_id))
+            row = await conn.fetchrow(
+                f"""UPDATE tasks
+                    SET status = 'cancelled',
+                        completed_at = COALESCE(completed_at, $2),
+                        updated_at = $2,
+                        claimed_by = NULL,
+                        claim_expires_at = NULL
+                    WHERE id = $1
+                      AND status IN ('claimed', 'running')
+                      AND cancel_requested_at IS NOT NULL"""
+                + org_clause
+                + " RETURNING *",
+                *params,
+            )
+        if not row:
+            return None
+        task = dict(row)
+        await self.add_task_event(
+            task_id,
+            "cancelled",
+            reason,
+            {"interrupted": True},
+            org_id=str(task["organization_id"]),
+        )
+        await self._check_request_completion(
+            str(task["request_id"]), org_id=str(task["organization_id"])
+        )
+        return task
+
+    async def list_requested_cancels(
+        self,
+        org_id: str,
+        *,
+        task_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """Return claimed/running tasks carrying an outstanding cancel request.
+
+        Used by the daemon heartbeat sweep as the durability backstop for a
+        dropped ``task_cancel`` notification.
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            if task_ids:
+                rows = await conn.fetch(
+                    """SELECT id::text AS id, request_id::text AS request_id,
+                              claimed_by
+                       FROM tasks
+                       WHERE organization_id = $1
+                         AND id = ANY($2::uuid[])
+                         AND status IN ('claimed', 'running')
+                         AND cancel_requested_at IS NOT NULL""",
+                    UUID(org_id),
+                    [UUID(t) for t in task_ids],
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT id::text AS id, request_id::text AS request_id,
+                              claimed_by
+                       FROM tasks
+                       WHERE organization_id = $1
+                         AND status IN ('claimed', 'running')
+                         AND cancel_requested_at IS NOT NULL""",
+                    UUID(org_id),
+                )
+        return [dict(r) for r in rows]
 
     async def retry_task_with_feedback(
         self, task_id: str, feedback: str, org_id: str | None = None
@@ -4326,7 +5067,14 @@ class RequestRepository:
           reaped at the threshold.
         """
         stale_seconds = max(60, int(stale_minutes * 60))
+        # A cancel request whose owning session died (or whose notification was
+        # lost) must still complete. Finalize those before the release pass so
+        # the reaper below never resurrects them as pending work.
         if org_id:
+            await self.finalize_stale_cancels(
+                org_id=org_id,
+                instance_stale_seconds=instance_stale_seconds,
+            )
             async with scoped_acquire_on(
                 self.pool, organization_id=org_id
             ) as conn:
@@ -4455,6 +5203,68 @@ AND (
                 "reaper",
                 f"Claim expired (was claimed by {claimed_by}), task requeued to pending",
                 org_id=org_id,
+            )
+        return len(rows)
+
+    async def finalize_stale_cancels(
+        self,
+        *,
+        org_id: str,
+        instance_stale_seconds: int = DEFAULT_INSTANCE_STALE_SECONDS,
+    ) -> int:
+        """Finalize cancel requests whose owning session will never act on them.
+
+        The daemon holding a claim normally interrupts the session itself. This
+        covers the remaining cases: the owning instance died, the claim lease
+        expired, or the ``task_cancel`` notification was dropped. Only
+        claimed/running tasks whose owner is provably gone (or whose lease
+        expired) are finalized, so a healthy in-flight cancel is left to the
+        session that can actually stop the provider call.
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            rows = await conn.fetch(
+                """UPDATE tasks t
+                   SET status = 'cancelled',
+                       completed_at = NOW(),
+                       updated_at = NOW(),
+                       claimed_by = NULL,
+                       claim_expires_at = NULL
+                   WHERE t.organization_id = $1
+                     AND t.status IN ('claimed', 'running')
+                     AND t.cancel_requested_at IS NOT NULL
+                     AND (
+                         (t.claim_expires_at IS NOT NULL
+                          AND t.claim_expires_at < NOW())
+                         OR (
+                             t.claimed_by IS NOT NULL
+                             AND EXISTS (
+                                 SELECT 1 FROM daemon_instances di
+                                 WHERE di.organization_id = t.organization_id
+                                   AND di.instance_id = t.claimed_by
+                                   AND (
+                                       di.status <> 'active'
+                                       OR di.last_seen_at
+                                           < NOW() - make_interval(secs := $2)
+                                   )
+                             )
+                         )
+                     )
+                   RETURNING t.id, t.request_id""",
+                UUID(org_id),
+                instance_stale_seconds,
+            )
+        for row in rows:
+            await self.add_task_event(
+                str(row["id"]),
+                "cancelled",
+                "Cancellation finalized after the owning claim expired",
+                {"interrupted": False, "finalized_by": "reaper"},
+                org_id=org_id,
+            )
+            await self._check_request_completion(
+                str(row["request_id"]), org_id=org_id
             )
         return len(rows)
 
