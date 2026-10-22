@@ -26,9 +26,139 @@
     <div class="flex gap-1 border-b border-gray-200">
         <a href="/sandboxes" class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors {% if tab == 'templates' %}-mb-px border-primary-600 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Templates</a>
         <a href="/sandboxes?tab=instances" class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors {% if tab == 'instances' %}-mb-px border-primary-600 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Instances</a>
+        {% if user.role in ('admin', 'owner') or user.role.value in ('admin', 'owner') %}
+        <a href="/sandboxes?tab=remotes" class="px-4 py-2.5 text-sm font-medium border-b-2 transition-colors {% if tab == 'remotes' %}-mb-px border-primary-600 text-primary-600{% else %}border-transparent text-gray-500 hover:text-gray-700{% endif %}">Remotes</a>
+        {% endif %}
     </div>
 
     {% from "partials/pagination.html" import pagination_controls %}
+    {% if tab == 'remotes' %}
+    <!-- ═══════════════ REMOTES VIEW (Agent Control Protocol) ═══════════════ -->
+    <div class="space-y-4">
+        {% if remote_token %}
+        <div class="border border-amber-300 bg-amber-50 px-4 py-3 rounded-lg" role="alert">
+            <p class="text-sm font-semibold text-amber-900">Copy this token now — it will not be shown again.</p>
+            <p class="text-xs text-amber-800 mt-1">Give it to the remote agent as <code class="font-mono">LUCENT_REMOTE_TOKEN</code>.</p>
+            <pre class="mt-2 p-3 bg-white border border-amber-200 rounded font-mono text-xs overflow-x-auto select-all">{{ remote_token }}</pre>
+        </div>
+        {% endif %}
+
+        <div class="bg-white rounded-lg border border-gray-200 p-5">
+            <h3 class="font-semibold text-gray-900">Register a remote</h3>
+            <p class="text-sm text-gray-500 mt-1">
+                A remote is a non-local executor that polls this instance and runs the tasks you pin to it.
+                It opens no inbound ports. Owner permission required.
+            </p>
+            <form method="post" action="/sandboxes/remotes/create" class="mt-4 flex flex-wrap items-end gap-3">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="flex-1 min-w-[12rem]">
+                    <label for="remote-name" class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+                    <input id="remote-name" name="name" required maxlength="128" placeholder="build-box-01"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                </div>
+                <div class="flex-1 min-w-[16rem]">
+                    <label for="remote-description" class="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                    <input id="remote-description" name="description" maxlength="2000" placeholder="Optional"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                </div>
+                <button type="submit" class="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700">
+                    Register remote
+                </button>
+            </form>
+        </div>
+
+        {% if remotes %}
+        <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Remote</th>
+                        <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last seen</th>
+                        <th class="px-5 py-3 text-left text-xs font-medium text-gray-500 uppercase">Token</th>
+                        <th class="px-5 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                    {% for remote in remotes %}
+                    <tr>
+                        <td class="px-5 py-4">
+                            <p class="font-medium text-gray-900">{{ remote.name }}</p>
+                            {% if remote.description %}
+                            <p class="text-xs text-gray-500">{{ remote.description }}</p>
+                            {% endif %}
+                            <p class="text-xs text-gray-400 font-mono">{{ remote.id }}</p>
+                        </td>
+                        <td class="px-5 py-4">
+                            {% if remote.status == 'active' %}
+                            <span class="inline-block px-2 py-0.5 rounded text-xs bg-green-100 text-green-800">active</span>
+                            {% elif remote.status == 'disabled' %}
+                            <span class="inline-block px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700">disabled</span>
+                            {% else %}
+                            <span class="inline-block px-2 py-0.5 rounded text-xs bg-red-100 text-red-800">revoked</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-5 py-4 text-sm text-gray-600">
+                            {% if remote.last_seen_at %}{{ remote.last_seen_at }}{% else %}<span class="text-gray-400">never</span>{% endif %}
+                        </td>
+                        <td class="px-5 py-4 text-xs text-gray-500">
+                            {% if remote.token_info %}
+                                {% if remote.token_info.expires_at %}
+                                expires {{ remote.token_info.expires_at }}
+                                {% else %}no expiry{% endif %}
+                            {% else %}
+                            <span class="text-gray-400">no active token</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-5 py-4 text-right">
+                            <div class="inline-flex flex-wrap gap-2 justify-end">
+                                <form method="post" action="/sandboxes/remotes/{{ remote.id }}/rotate"
+                                      data-confirm="Rotate token for {{ remote.name }}? The current token stops working immediately.">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50">Rotate token</button>
+                                </form>
+                                {% if remote.status == 'active' %}
+                                <form method="post" action="/sandboxes/remotes/{{ remote.id }}/status">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <input type="hidden" name="status" value="disabled">
+                                    <button type="submit" class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50">Disable</button>
+                                </form>
+                                {% else %}
+                                <form method="post" action="/sandboxes/remotes/{{ remote.id }}/status">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <input type="hidden" name="status" value="active">
+                                    <button type="submit" class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50">Enable</button>
+                                </form>
+                                {% endif %}
+                                <form method="post" action="/sandboxes/remotes/{{ remote.id }}/requeue"
+                                      data-confirm="Unpin pending tasks from {{ remote.name }} and return them to local dispatch?">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="px-2 py-1 text-xs border border-gray-300 rounded hover:bg-gray-50">Requeue tasks</button>
+                                </form>
+                                {% if remote.status != 'revoked' %}
+                                <form method="post" action="/sandboxes/remotes/{{ remote.id }}/status"
+                                      data-confirm="Revoke {{ remote.name }} permanently? Its token is invalidated.">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <input type="hidden" name="status" value="revoked">
+                                    <button type="submit" class="px-2 py-1 text-xs border border-red-300 text-red-700 rounded hover:bg-red-50">Revoke</button>
+                                </form>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="bg-white rounded-lg border border-gray-200 p-12 text-center">
+            <p class="text-gray-500">No remotes registered</p>
+            <p class="text-sm text-gray-400 mt-1">Register one above, then run the remote agent on that machine</p>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
     {% if tab == 'templates' %}
     <!-- ═══════════════ TEMPLATES VIEW ═══════════════ -->
     {{ pagination_controls(base_url="/sandboxes", page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params={"tab": "templates"}, entity_name="templates") }}
@@ -125,7 +255,7 @@
     </div>
     {% endif %}
 
-    {% else %}
+    {% elif tab == 'instances' %}
     <!-- ═══════════════ INSTANCES VIEW ═══════════════ -->
     <div class="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
         <a href="/sandboxes?tab=instances&per_page={{ per_page }}" class="px-3 py-1.5 text-sm rounded-md font-medium transition-colors {% if show_filter == 'all' %}bg-white text-gray-900 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">All</a>

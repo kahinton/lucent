@@ -44,6 +44,12 @@ async def _require_model_access(pool, model_id: str, user: AuthenticatedUser) ->
 
 
 def _can_mutate_request(req: dict, user: AuthenticatedUser) -> bool:
+    # Remote-agent keys run as role ``daemon`` (service identity), which would
+    # otherwise make them privileged request actors for the whole organization.
+    # They are NOT: a remote may only transition the tasks it personally
+    # claimed, which is enforced task-by-task in ``_require_task_mutation``.
+    if _is_remote_agent_key(user):
+        return False
     if _is_privileged_request_actor(user):
         return True
     created_by = req.get("created_by")
@@ -65,6 +71,32 @@ def _is_matching_sandbox_task_actor(task_id: str, user: AuthenticatedUser) -> bo
     )
 
 
+def _is_remote_agent_key(user: AuthenticatedUser) -> bool:
+    """True for any API key carrying the ``remote-agent`` scope.
+
+    Deliberately scope-based rather than role-based: the remote identity user's
+    role (``daemon``) is shared with real daemons, so role alone cannot
+    distinguish a trusted in-process daemon from an external remote peer.
+    """
+    return bool(
+        user.auth_method == "api_key"
+        and "remote-agent" in (user.api_key_scopes or [])
+    )
+
+
+def _is_remote_task_actor(task: dict, user: AuthenticatedUser) -> bool:
+    """True when a remote-agent key is reporting on a task it holds a claim on.
+
+    A remote may only transition work it claimed for itself.
+    """
+    if not _is_remote_agent_key(user):
+        return False
+    remote_agent_id = getattr(user, "remote_agent_id", None)
+    if not remote_agent_id:
+        return False
+    return str(task.get("claimed_by") or "") == f"remote:{remote_agent_id}"
+
+
 async def _get_task_and_request(
     repo, task_id: str, org_id: str, user: AuthenticatedUser
 ) -> tuple[dict, dict]:
@@ -80,6 +112,8 @@ async def _get_task_and_request(
 async def _require_task_mutation(repo, task_id: str, org_id: str, user: AuthenticatedUser) -> dict:
     task, req = await _get_task_and_request(repo, task_id, org_id, user)
     if _is_matching_sandbox_task_actor(task_id, user):
+        return task
+    if _is_remote_task_actor(task, user):
         return task
     _require_request_mutation(req, user)
     return task
@@ -205,6 +239,11 @@ class TaskCreate(BaseModel):
     task_kind: str | None = None  # Registered task kind (list_task_kinds); inferred when omitted
     execution_config: dict | None = None  # Generic per-kind config (forward-compatible form)
     backend_id: str | None = None  # Pin a coding-engine backend (e.g. Codex via Ollama)
+    # Pin execution to a registered remote instance (Agent Control Protocol).
+    # Mutually exclusive with sandbox execution: a remote runs the task in its
+    # own environment, so a sandbox template/config on a remote-targeted task
+    # would be silently ignored — reject it instead of pretending.
+    remote_target_id: str | None = None
 
 
 class TaskEventCreate(BaseModel):
@@ -749,6 +788,36 @@ async def create_task(
         body.execution_config if resolved_kind == "fusion" else None
     )
 
+    # ── Remote targeting (Agent Control Protocol) ─────────────────────
+    # A remote executes the task in its own environment. Validate the pin
+    # here so a bad remote id fails at authoring time rather than silently
+    # leaving the task unpinned (which would let a local daemon claim it).
+    remote_target_id = body.remote_target_id
+    if remote_target_id:
+        from lucent.db.remotes import RemoteRepository
+
+        if body.sandbox_template_id or body.sandbox_config:
+            raise HTTPException(
+                422,
+                "remote_target_id cannot be combined with sandbox_template_id "
+                "or sandbox_config — a remote runs the task in its own "
+                "environment",
+            )
+        remote_target = await RemoteRepository(pool).require_active(
+            str(remote_target_id), org_id
+        )
+        if not remote_target:
+            raise HTTPException(
+                422,
+                "remote_target_id must reference an active remote instance "
+                "in this organization",
+            )
+        if user.role < Role.ADMIN and not _is_daemon_user(user):
+            raise HTTPException(
+                403,
+                "Only admins, owners, or the daemon can target a remote",
+            )
+
     # Validate model against registry (matches MCP create_task behavior)
     if resolved_kind == "decision":
         from lucent.db.models import decision_models_available_for_user
@@ -833,6 +902,7 @@ async def create_task(
                 422,
                 "Provide either fusion_config or decision_config, not both",
             )
+
 
         async def _require_chat_model(model_id: str) -> None:
             error = validate_model(model_id, require_tools=True)
@@ -975,6 +1045,7 @@ async def create_task(
             backend_id=body.backend_id,
             task_kind=resolved_kind,
             execution_config=body.execution_config,
+            remote_target_id=str(remote_target_id) if remote_target_id else None,
         )
         task["sandboxes_enabled"] = org_sandboxes_enabled
         task["custom_tooling_enabled"] = custom_tooling_enabled(organization_id=org_id)

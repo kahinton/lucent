@@ -8,6 +8,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+#### Remotes (Agent Control Protocol)
+- **Remote instances** — register a non-local executor (another Lucent
+  deployment, a laptop, a build box, or any peer running the shipped client)
+  and pin whole tasks to it via `tasks.remote_target_id`. Migration 142 adds
+  `remote_instances` and the targeting column.
+- **Pull-based, outbound-only protocol.** The remote claims work by polling
+  `POST /api/remotes/{id}/claim`, reports progress to the existing task-event
+  endpoints, and posts results with `complete`/`fail`. It never opens an
+  inbound port, so hosts behind NAT work identically to public ones.
+- **Coordination reuses the daemon model.** Each remote registers as a
+  `daemon_instances` row (`remote:{uuid}`), so lease renewal, staleness
+  detection, and the Stale Task Reaper apply with no remote-specific logic.
+  A dead remote's tasks requeue **with their pin intact**.
+- **`scripts/lucent_remote_agent.py`** — a single-file, standard-library-only
+  agent, mirroring the sandbox MCP bridge's zero-install constraint. Ships
+  `noop` (connectivity smoke) and `command` (fixed argv, task text on stdin)
+  executors, with a documented hook for a future in-sandbox `lucent` executor.
+- **Owner-only governance.** Owners register/rotate/disable/revoke/requeue;
+  admins read; members cannot see the tab. Plaintext tokens are shown once;
+  only a bcrypt hash is stored. The **Remotes** tab lives under Sandboxes.
+
+#### Remote security controls (each independently tested)
+- A dedicated `lr_` API key prefix and a `remote-agent` scope allowlisted to
+  exactly five routes in `api/deps.py`.
+- Two-layer identity binding: the remote id in the URL must match the id
+  embedded in the key name, enforced in `deps` **and** re-checked in the route
+  handler so neither is a single point of failure.
+- Task-level ownership: a remote may only transition a task whose
+  `claimed_by` is its own instance id.
+- **Fixed a privilege-escalation path.** Remote identity users carry role
+  `daemon`, and `_can_mutate_request` granted every daemon-role user blanket
+  request mutation across the organization. `_can_mutate_request` now denies
+  any `remote-agent` key before the role check, keyed on scope rather than
+  role because the `daemon` role is shared with genuinely trusted in-process
+  daemons.
+- Client refuses plain `http://` to non-loopback controllers unless
+  `--insecure`; claim payloads strip `sandbox_config`; events cap at 64 KiB and
+  results at 1 MiB; task text reaches the executor on stdin, never argv.
+- `docs/remotes.md` — the design, the threat/control table, setup, executors,
+  and recovery.
+
 - `GET /api/auth/verify` — a lightweight authenticated endpoint that reports only whether the caller's key is valid (`{"valid": true}`), with no user data. It runs the normal auth dependency: one indexed key lookup plus bcrypt, 401 for a missing/invalid/expired/revoked key and 403 for a suspended organization. It exists so the daemon can check its own key cheaply instead of probing a search endpoint. Registered for all deployment modes, unlike the team-only `/api/users/me`.
 
 #### Provisioning without a browser

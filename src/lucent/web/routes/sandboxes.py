@@ -142,6 +142,17 @@ def _require_admin_or_owner(user) -> None:
         raise HTTPException(status_code=403, detail="Permission denied")
 
 
+def _require_owner(user) -> None:
+    """Raise 403 if user is not an organization owner.
+
+    Remote registration is an owner-level trust decision: a remote executes
+    arbitrary work descriptions on infrastructure Lucent does not control.
+    """
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    if role_value != "owner":
+        raise HTTPException(status_code=403, detail="Owner permission required")
+
+
 def _require_org_membership(user) -> None:
     """Raise 403 if user has no organization membership."""
     if not user.organization_id:
@@ -267,6 +278,27 @@ async def sandboxes_page(
     total_pages = ceil(total_count / per_page) if total_count > 0 else 1
     page = min(page, total_pages)
 
+    # Remotes tab (Agent Control Protocol): owner/admin only. A remote can run
+    # arbitrary work, so the list is not exposed to members.
+    remote_list: list[dict] = []
+    remote_token: str | None = None
+    if active_tab == "remotes" and org_id and role_value in ("admin", "owner"):
+        from lucent.db.remotes import RemoteRepository
+
+        try:
+            remote_repo = RemoteRepository(pool)
+            remote_list = await remote_repo.list(org_id)
+            for item in remote_list:
+                item["token_info"] = await remote_repo.get_key_expiry_info(
+                    str(item["id"]), org_id
+                )
+        except Exception:
+            logger.debug("Failed to load remotes", exc_info=True)
+            remote_list = []
+        # A freshly issued token is handed back exactly once, via the create
+        # POST redirect, never on a plain GET.
+        remote_token = request.query_params.get("new_token")
+
     return templates.TemplateResponse(
         request,
         "sandboxes.html",
@@ -274,6 +306,9 @@ async def sandboxes_page(
             "tab": active_tab,
             "templates": template_list,
             "sandboxes": sandbox_list,
+            "remotes": remote_list,
+            "remote_token": remote_token,
+            "remote_count": len(remote_list),
             "show_filter": show or "all",
             "user": user,
             "owner_groups": owner_groups,
@@ -523,6 +558,100 @@ async def reject_template_web(request: Request, template_id: str):
         f"/sandboxes/templates/{template_id}/edit?success={quote('Template rejected.')}",
         status_code=303,
     )
+
+
+@router.post("/sandboxes/remotes/create")
+async def create_remote_web(
+    request: Request,
+    name: str = Form(...),
+    description: str = Form(default=""),
+    csrf_token: str = Form(default=""),
+):
+    """Register a remote instance and issue its agent token (owner-only).
+
+    The plaintext token is surfaced once via a redirect query param so the
+    operator can copy it; it is never retrievable again.
+    """
+    user = await get_user_context(request)
+    _require_owner(user)
+    await _check_csrf(request, form_token=csrf_token)
+    pool = await get_pool()
+    from lucent.db.remotes import RemoteRepository
+
+    repo = RemoteRepository(pool)
+    try:
+        _remote, plain_key = await repo.create(
+            org_id=str(user.organization_id),
+            name=name.strip(),
+            created_by=str(user.id),
+            description=description.strip() or None,
+        )
+    except Exception as exc:
+        logger.info("Remote creation failed: %s", exc)
+        return RedirectResponse(
+            f"/sandboxes?tab=remotes&error={quote(str(exc))}", status_code=303
+        )
+    return RedirectResponse(
+        f"/sandboxes?tab=remotes&new_token={quote(plain_key)}", status_code=303
+    )
+
+
+@router.post("/sandboxes/remotes/{remote_id}/rotate")
+async def rotate_remote_token_web(request: Request, remote_id: str):
+    """Rotate a remote's agent token; the previous token stops working."""
+    user = await get_user_context(request)
+    _require_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.remotes import RemoteRepository
+
+    repo = RemoteRepository(pool)
+    plain_key = await repo.rotate_token(remote_id, str(user.organization_id))
+    if plain_key is None:
+        raise HTTPException(404, "Remote not found or revoked")
+    return RedirectResponse(
+        f"/sandboxes?tab=remotes&new_token={quote(plain_key)}", status_code=303
+    )
+
+
+@router.post("/sandboxes/remotes/{remote_id}/status")
+async def set_remote_status_web(
+    request: Request,
+    remote_id: str,
+    status: str = Form(...),
+    csrf_token: str = Form(default=""),
+):
+    """Enable/disable/revoke a remote. Revoking invalidates its token."""
+    user = await get_user_context(request)
+    _require_owner(user)
+    await _check_csrf(request, form_token=csrf_token)
+    pool = await get_pool()
+    from lucent.db.remotes import RemoteRepository
+
+    repo = RemoteRepository(pool)
+    remote = await repo.update(remote_id, str(user.organization_id), status=status)
+    if not remote:
+        raise HTTPException(404, "Remote not found")
+    return RedirectResponse("/sandboxes?tab=remotes", status_code=303)
+
+
+@router.post("/sandboxes/remotes/{remote_id}/requeue")
+async def requeue_remote_tasks_web(request: Request, remote_id: str):
+    """Unpin pending tasks from a remote so local dispatch can pick them up."""
+    user = await get_user_context(request)
+    _require_owner(user)
+    await _check_csrf(request)
+    pool = await get_pool()
+    from lucent.db.remotes import RemoteRepository
+    from lucent.db.requests import RequestRepository
+
+    remote = await RemoteRepository(pool).get(remote_id, str(user.organization_id))
+    if not remote:
+        raise HTTPException(404, "Remote not found")
+    await RequestRepository(pool).clear_remote_targeting(
+        remote_id, str(user.organization_id)
+    )
+    return RedirectResponse("/sandboxes?tab=remotes", status_code=303)
 
 
 @router.post("/sandboxes/launch")

@@ -24,6 +24,14 @@ from lucent.logging import get_logger
 logger = get_logger(__name__)
 
 
+# All accepted API key prefixes. ``hs_`` is the interactive/service key family;
+# ``lr_`` is the remote-agent family (Agent Control Protocol). The prefix is
+# cosmetic for hashing but load-bearing for routing: it lets ``deps`` apply the
+# remote-agent endpoint allowlist without a DB round trip on the scope, and it
+# makes a leaked key obvious in logs and audit trails.
+API_KEY_PREFIXES = ("hs_", "lr_")
+
+
 class ApiKeyRepository:
     """Repository for API key CRUD operations."""
 
@@ -159,7 +167,7 @@ class ApiKeyRepository:
         Returns:
             The API key record with user info if valid, None otherwise.
         """
-        if not plain_key.startswith("hs_"):
+        if not plain_key.startswith(API_KEY_PREFIXES):
             return None
 
         key_prefix = plain_key[:11]

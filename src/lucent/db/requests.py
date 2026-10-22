@@ -1000,6 +1000,7 @@ DISPATCHABLE_TASKS_FROM = "FROM tasks t JOIN requests r ON t.request_id = r.id"
 
 DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                      AND t.status IN ('pending', 'planned')
+                     AND t.remote_target_id IS NULL
                      AND r.approval_status IN ('auto_approved', 'approved')
                      AND r.status NOT IN ('cancelled', 'completed', 'failed')
                                          AND NOT EXISTS (
@@ -1010,6 +1011,44 @@ DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                                                      'completed', 'failed', 'cancelled'
                                                  )
                                          )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM (
+                           SELECT DISTINCT sequence_order AS seq
+                           FROM tasks
+                           WHERE request_id = t.request_id
+                             AND sequence_order < t.sequence_order
+                       ) earlier_seqs
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM tasks t2
+                           WHERE t2.request_id = t.request_id
+                             AND t2.sequence_order = earlier_seqs.seq
+                             AND CASE COALESCE(r.dependency_policy, 'strict')
+                                 WHEN 'permissive'
+                                   THEN t2.status IN ('completed', 'failed', 'cancelled')
+                                 ELSE t2.status = 'completed'
+                                 END
+                       )
+                     )"""
+
+
+# Remote claims ask the same dispatch questions as local dispatch, with two
+# deliberate differences: the task must be pinned to *this* remote
+# (``$2``), and the "not pinned elsewhere" clause inverts. Keep this in sync
+# with DISPATCHABLE_TASK_PREDICATE — a change to one is a change to the rules
+# of "can this task run yet" for both.
+REMOTE_DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
+                     AND t.remote_target_id = $2
+                     AND t.status IN ('pending', 'planned')
+                     AND r.approval_status IN ('auto_approved', 'approved')
+                     AND r.status NOT IN ('cancelled', 'completed', 'failed')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM tasks unfinished
+                         WHERE unfinished.request_id = t.request_id
+                             AND unfinished.sequence_order < t.sequence_order
+                             AND unfinished.status NOT IN (
+                                 'completed', 'failed', 'cancelled'
+                             )
+                     )
                      AND NOT EXISTS (
                        SELECT 1 FROM (
                            SELECT DISTINCT sequence_order AS seq
@@ -2437,6 +2476,7 @@ class RequestRepository:
         backend_id: str | None = None,
         task_kind: str | None = None,
         execution_config: dict | None = None,
+        remote_target_id: str | None = None,
     ) -> dict:
         # Normalize the explicit kind + generic config onto the legacy
         # decision_config/fusion_config fields so every existing reader keeps
@@ -2533,7 +2573,8 @@ class RequestRepository:
                     agent_definition_id, priority, sequence_order, organization_id,
                     model, reasoning_effort, sandbox_template_id, sandbox_config,
                     requesting_user_id, output_contract, decision_config,
-                    fusion_config, backend_id, task_kind, execution_config)
+                    fusion_config, backend_id, task_kind, execution_config,
+                    remote_target_id)
                    VALUES (
                     $1, $2, $3, $4, $5::varchar, $6, $7, $8, $9,
                     -- A request-level execution pin is authoritative: every
@@ -2558,7 +2599,8 @@ class RequestRepository:
                              $18
                          ) END,
                     $19::varchar,
-                    $20
+                    $20,
+                    $21
                    )
                    RETURNING *""",
                 UUID(request_id),
@@ -2583,6 +2625,7 @@ class RequestRepository:
                 UUID(backend_id) if backend_id else None,
                 resolved_kind,
                 json.dumps(execution_config) if execution_config else None,
+                UUID(remote_target_id) if remote_target_id else None,
             )
         task = dict(row)
         # Log creation event
@@ -3287,6 +3330,131 @@ class RequestRepository:
             )
             return task
         return None
+
+    async def claim_remote_task(
+        self,
+        *,
+        remote_id: str,
+        org_id: str,
+        limit: int = 1,
+        lease_seconds: int = DEFAULT_TASK_LEASE_SECONDS,
+    ) -> dict | None:
+        """Atomically claim the next dispatchable task pinned to a remote.
+
+        This is the remote half of the claim protocol. It uses the same
+        single-statement compare-and-swap discipline as :meth:`claim_task`
+        (so two remote agents racing for the same task cannot both win) and
+        the same stage gates via REMOTE_DISPATCHABLE_TASK_PREDICATE.
+
+        The claim is recorded under ``remote:{remote_id}`` so that
+        ``heartbeat_instance`` renews its lease and ``release_stale_tasks``
+        reaps it exactly like a local daemon claim.
+        """
+        now = datetime.now(timezone.utc)
+        claim_expires_at = now + timedelta(seconds=lease_seconds)
+        instance_id = f"remote:{remote_id}"
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            row = await conn.fetchrow(
+                f"""WITH candidate AS (
+                        SELECT t.id
+                        {DISPATCHABLE_TASKS_FROM}
+                        WHERE {REMOTE_DISPATCHABLE_TASK_PREDICATE}
+                        ORDER BY
+                          CASE t.priority WHEN 'urgent' THEN 0
+                                          WHEN 'high' THEN 1
+                                          WHEN 'medium' THEN 2
+                                          ELSE 3 END,
+                          t.sequence_order,
+                          t.created_at
+                        LIMIT $3
+                        FOR UPDATE OF t SKIP LOCKED
+                    )
+                    UPDATE tasks t
+                    SET status = 'claimed',
+                        claimed_by = $4,
+                        claimed_at = $5,
+                        last_heartbeat_at = $5,
+                        claim_expires_at = $6,
+                        claim_version = claim_version + 1,
+                        updated_at = $5
+                    FROM candidate c
+                    WHERE t.id = c.id
+                    RETURNING t.*, (
+                        SELECT r.title FROM requests r WHERE r.id = t.request_id
+                    ) AS request_title""",
+                UUID(org_id),
+                UUID(remote_id),
+                limit,
+                instance_id,
+                now,
+                claim_expires_at,
+            )
+        if not row:
+            return None
+        task = dict(row)
+        await self.add_task_event(
+            str(task["id"]),
+            "claimed",
+            f"Claimed by remote agent {instance_id}",
+            metadata={"instance_id": instance_id, "remote_id": str(remote_id)},
+            org_id=org_id,
+        )
+        await self._ensure_request_in_progress(
+            str(task["request_id"]), org_id=org_id
+        )
+        return task
+
+    async def count_active_remote_tasks(self, *, remote_id: str, org_id: str) -> int:
+        """Count tasks currently claimed by a remote's agent instance."""
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            value = await conn.fetchval(
+                """SELECT COUNT(*) FROM tasks
+                   WHERE organization_id = $1
+                     AND remote_target_id = $2
+                     AND status IN ('claimed', 'running')""",
+                UUID(org_id),
+                UUID(remote_id),
+            )
+        return int(value or 0)
+
+    async def clear_remote_targeting(self, remote_id: str, org_id: str) -> int:
+        """Unpin not-yet-claimed tasks from a remote (winding one down).
+
+        Only ``pending``/``planned`` rows are touched: claimed or running work
+        is left to the reaper so we never rip a task out from under an agent
+        that is actively reporting progress.
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            rows = await conn.fetch(
+                """UPDATE tasks
+                   SET remote_target_id = NULL, updated_at = NOW()
+                   WHERE organization_id = $1
+                     AND remote_target_id = $2
+                     AND status IN ('pending', 'planned')
+                   RETURNING id""",
+                UUID(org_id),
+                UUID(remote_id),
+            )
+        return len(rows)
+
+    async def get_daemon_instance(self, instance_id: str, *, org_id: str) -> dict | None:
+        """Fetch a daemon_instances row (used for remote claim attribution)."""
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            row = await conn.fetchrow(
+                """SELECT * FROM daemon_instances
+                   WHERE organization_id = $1 AND instance_id = $2""",
+                UUID(org_id),
+                instance_id,
+            )
+        return dict(row) if row else None
 
     async def update_task_model(
         self, task_id: str, model: str, org_id: str | None = None

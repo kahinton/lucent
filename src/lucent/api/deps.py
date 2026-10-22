@@ -12,6 +12,7 @@ from lucent.auth import (
 )
 from lucent.auth_providers import organization_allows_access
 from lucent.db import ApiKeyRepository, UserRepository, get_pool
+from lucent.db.api_key import API_KEY_PREFIXES
 from lucent.log_context import set_user_id
 from lucent.rbac import Permission, Role, has_permission
 
@@ -36,6 +37,7 @@ class CurrentUser:
         memory_scope: str | None = None,  # 'user' or 'org_shared_only'
         api_key_name: str | None = None,
         sandbox_task_id: str | None = None,
+        remote_agent_id: str | None = None,
     ):
         self.id = id
         self.organization_id = organization_id
@@ -52,6 +54,7 @@ class CurrentUser:
         self.memory_scope = memory_scope
         self.api_key_name = api_key_name
         self.sandbox_task_id = sandbox_task_id
+        self.remote_agent_id = remote_agent_id
 
     @property
     def effective_memory_user_id(self) -> UUID:
@@ -137,7 +140,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
     if api_key.startswith("Bearer "):
         api_key = api_key[7:]
 
-    if not api_key.startswith("hs_"):
+    if not api_key.startswith(API_KEY_PREFIXES):
         return None
 
     pool = await get_pool()
@@ -175,6 +178,16 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         if match:
             sandbox_task_id = match.group(1)
 
+    # Remote agent keys are named ``remote-agent-{remote_id}``. Parsing the
+    # name (rather than trusting a request parameter) binds the key to exactly
+    # one remote: the path ``/api/remotes/{remote_id}/...`` must match it.
+    remote_agent_id = None
+    if isinstance(key_name, str):
+        remote_match = re.match(
+            r"^remote-agent-([0-9a-fA-F-]{36})$", key_name
+        )
+        if remote_match:
+            remote_agent_id = remote_match.group(1)
     return CurrentUser(
         id=user["id"],
         organization_id=user.get("organization_id"),
@@ -189,7 +202,76 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         memory_scope=key_info.get("memory_scope"),
         api_key_name=key_name,
         sandbox_task_id=sandbox_task_id,
+        remote_agent_id=remote_agent_id,
     )
+
+
+# ── Remote agent (Agent Control Protocol) authorization ──────────────────
+#
+# A remote agent key may only touch its own remote's protocol endpoints and
+# the task transitions of tasks it holds a claim on. The allowlist is
+# deliberately an allowlist (not a denylist) and lives here, next to the
+# sandbox equivalent, so both narrow-scope key families are auditable in one
+# place.
+
+REMOTE_AGENT_ALLOWED_ROUTES: tuple[tuple[str, str], ...] = (
+    ("POST", r"^/api/remotes/[^/]+/claim$"),
+    ("POST", r"^/api/remotes/[^/]+/heartbeat$"),
+    ("POST", r"^/api/requests/tasks/[^/]+/events$"),
+    ("POST", r"^/api/requests/tasks/[^/]+/complete$"),
+    ("POST", r"^/api/requests/tasks/[^/]+/fail$"),
+)
+
+_REMOTE_PATH_RE = re.compile(r"^/api/remotes/([^/]+)/")
+_REMOTE_TASK_PATH_RE = re.compile(r"^/api/requests/tasks/([^/]+)/")
+_UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+
+
+def _enforce_remote_agent_allowlist(request: Request, user: CurrentUser) -> None:
+    """Enforce the remote-agent scope allowlist and identity bindings.
+
+    Raises:
+        HTTPException: 403 for a disallowed route, a path/identity mismatch,
+            or a key that cannot be bound to a remote instance.
+    """
+    method = request.method.upper()
+    path = request.url.path
+
+    if user.remote_agent_id is None:
+        # A remote-agent-scoped key that is not named for a remote cannot be
+        # safely bound to anything — fail closed rather than guess.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Remote agent key is not bound to a remote instance",
+        )
+
+    if not any(
+        method == allowed_method and re.match(pattern, path)
+        for allowed_method, pattern in REMOTE_AGENT_ALLOWED_ROUTES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key scope does not allow this endpoint",
+        )
+
+    # Binding 1: the remote id in the URL must be the key's own remote.
+    remote_match = _REMOTE_PATH_RE.match(path)
+    if remote_match and remote_match.group(1) != user.remote_agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Remote agent key is scoped to a different remote instance",
+        )
+
+    # Binding 2: task transitions must name a well-formed task id. Ownership of
+    # that specific task is verified transactionally by the transition
+    # repository call; validating shape here prevents path-traversal-style
+    # attempts before we ever hit the database.
+    task_match = _REMOTE_TASK_PATH_RE.match(path)
+    if task_match and not _UUID_RE.match(task_match.group(1)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Malformed task id",
+        )
 
 
 async def get_current_user(
@@ -208,7 +290,9 @@ async def get_current_user(
         user = await _authenticate_with_api_key(authorization)
         if user:
             # Sandbox bridge scoped keys are restricted to specific API endpoints.
-            has_sandbox_scope = any(scope.startswith("sandbox-") for scope in user.api_key_scopes)
+            has_sandbox_scope = any(
+                scope.startswith("sandbox-") for scope in user.api_key_scopes
+            )
             if user.auth_method == "api_key" and has_sandbox_scope:
                 allowed_method_path_patterns = (
                     ("POST", r"^/api/memories$"),
@@ -238,6 +322,23 @@ async def get_current_user(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Sandbox API key is scoped to a different task",
                     )
+
+            # Remote-agent keys (Agent Control Protocol) are the narrowest
+            # scope in the system: one remote may only claim/heartbeat for
+            # *itself* and report on tasks *it* claimed. Two independent
+            # bindings are enforced here rather than in the route handlers, so
+            # a future route added to this router cannot accidentally inherit
+            # remote access:
+            #   1. path → key identity (remote_id in the URL must equal the id
+            #      embedded in the key name);
+            #   2. task → claim identity (task transitions must target a task
+            #      whose claimed_by is this remote's instance id).
+            if (
+                user.auth_method == "api_key"
+                and "remote-agent" in user.api_key_scopes
+            ):
+                _enforce_remote_agent_allowlist(request, user)
+
             set_user_id(str(user.id))
             return user
 

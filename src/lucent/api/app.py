@@ -747,6 +747,18 @@ def create_app() -> FastAPI:
 
     app.include_router(sandboxes_router.router, prefix="/api/sandboxes", tags=["Sandboxes"])
 
+    # Include remote instance management + Agent Control Protocol router.
+    # ``router`` carries owner-facing CRUD; ``remote_protocol_router`` carries
+    # the outbound-only claim/heartbeat endpoints the remote agent client
+    # calls. Both live under /api so remote-agent keys are routed through the
+    # deps allowlist.
+    from lucent.api.routers import remotes as remotes_router
+
+    app.include_router(remotes_router.router, prefix="/api/remotes", tags=["Remotes"])
+    app.include_router(
+        remotes_router.remote_protocol_router, prefix="/api", tags=["Remotes"]
+    )
+
     # Include secret storage router
     from lucent.api.routers import secrets as secrets_router
 
