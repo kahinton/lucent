@@ -2,6 +2,7 @@
 
 import json
 from math import ceil
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -488,6 +489,25 @@ async def agent_detail_page(request: Request, agent_id: str):
     assigned_hook_ids = {str(h["id"]) for h in assigned_hooks}
     assigned_tool_ids = {str(t["id"]) for t in assigned_tools}
 
+    # Per-user consent state. Pending items are attached to this agent but this
+    # user has not approved them, so they are NOT active for their runs yet;
+    # declined items stay visible so the decision can be reversed.
+    pending_capabilities: list[dict] = []
+    declined_capabilities: list[dict] = []
+    try:
+        all_pending = await repo.list_pending_capability_consents(org_id, str(user.id))
+        pending_capabilities = [
+            item for item in all_pending if str(item["agent_id"]) == str(agent_id)
+        ]
+        all_declined = await repo.list_declined_capability_consents(
+            org_id, str(user.id)
+        )
+        declined_capabilities = [
+            item for item in all_declined if str(item["agent_id"]) == str(agent_id)
+        ]
+    except Exception:
+        logger.debug("Could not load capability consent state", exc_info=True)
+
     return templates.TemplateResponse(
         request,
         "definition_detail.html",
@@ -510,6 +530,8 @@ async def agent_detail_page(request: Request, agent_id: str):
             "granted_mcp_ids": assigned_mcp_ids,
             "granted_hook_ids": assigned_hook_ids,
             "granted_tool_ids": assigned_tool_ids,
+            "pending_capabilities": pending_capabilities,
+            "declined_capabilities": declined_capabilities,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
@@ -1417,159 +1439,240 @@ async def delete_managed_tool_web(request: Request, tool_id: str):
     return RedirectResponse(url="/definitions?tab=tools", status_code=303)
 
 
-@router.post("/definitions/agents/{agent_id}/grant-skill")
-async def grant_skill_web(request: Request, agent_id: str):
-    """Grant a skill to an agent."""
+async def _agent_capability_attach(
+    request: Request,
+    *,
+    agent_id: str,
+    capability_type: str,
+    capability_id: str,
+) -> RedirectResponse:
+    """Shared attach handler for the four capability panels.
+
+    Authorization lives in the repository (read clearance on both endpoints), so
+    a member who can see the agent and the capability may attach it. There is no
+    role check here on purpose: attaching no longer grants anyone else anything,
+    because every other user must still approve it for themselves.
+    """
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
-    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.audit import AuditRepository
+    from lucent.db.definitions import DefinitionRepository, GrantOutcome
+
+    destination = f"/definitions/agents/{agent_id}"
+    if not capability_id:
+        return RedirectResponse(url=destination, status_code=303)
+
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    outcome = await repo.grant_capability(
+        agent_id=agent_id,
+        capability_type=capability_type,
+        capability_id=capability_id,
+        org_id=str(user.organization_id),
+        actor_user_id=str(user.id),
+    )
+    if outcome is GrantOutcome.ALREADY_ATTACHED:
+        message = (
+            "That capability is already attached to this agent. Approve it for "
+            "yourself to use it — it cannot be attached twice."
+        )
+        return RedirectResponse(url=f"{destination}?warning={quote(message)}", status_code=303)
+    if outcome is GrantOutcome.DENIED:
+        message = "You can only attach capabilities you can see to agents you can see."
+        return RedirectResponse(url=f"{destination}?error={quote(message)}", status_code=303)
+    if outcome is GrantOutcome.FAILED:
+        message = "Could not attach that capability. Please try again."
+        return RedirectResponse(url=f"{destination}?error={quote(message)}", status_code=303)
+    return RedirectResponse(url=destination, status_code=303)
+
+
+async def _agent_capability_detach(
+    request: Request,
+    *,
+    agent_id: str,
+    capability_type: str,
+    capability_id: str,
+) -> RedirectResponse:
+    """Shared detach handler. Restricted to the agent owner, capability owner,
+    or an org admin/owner — declining is how a user removes it for themselves."""
+    user = await get_user_context(request)
+    await _check_csrf(request)
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
+    destination = f"/definitions/agents/{agent_id}"
+    role_value = user.role if isinstance(user.role, str) else user.role.value
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    skill_id = str(form.get("skill_id", ""))
-    await repo.grant_skill(
-        agent_id, skill_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+    revoked = await repo.revoke_capability(
+        agent_id=agent_id,
+        capability_type=capability_type,
+        capability_id=capability_id,
+        org_id=str(user.organization_id),
+        user_id=str(user.id),
+        user_role=role_value,
     )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+    if not revoked:
+        message = (
+            "Only the agent owner, the capability owner, or an organization "
+            "admin can detach it. You can decline it for yourself instead."
+        )
+        return RedirectResponse(url=f"{destination}?error={quote(message)}", status_code=303)
+    return RedirectResponse(url=destination, status_code=303)
+
+
+@router.post("/definitions/agents/{agent_id}/grant-skill")
+async def grant_skill_web(request: Request, agent_id: str):
+    """Grant a skill to an agent."""
+    form = await request.form()
+    return await _agent_capability_attach(
+        request,
+        agent_id=agent_id,
+        capability_type="skill",
+        capability_id=str(form.get("skill_id", "")),
+    )
 
 
 @router.post("/definitions/agents/{agent_id}/revoke-skill/{skill_id}")
 async def revoke_skill_web(request: Request, agent_id: str, skill_id: str):
     """Revoke a skill from an agent."""
-    user = await get_user_context(request)
-    _require_admin_or_owner(user)
-    await _check_csrf(request)
-    pool = await get_pool()
-    from lucent.db.audit import AuditRepository
-    from lucent.db.definitions import DefinitionRepository
-
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    await repo.revoke_skill(
-        agent_id, skill_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+    return await _agent_capability_detach(
+        request, agent_id=agent_id, capability_type="skill", capability_id=skill_id,
     )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
 @router.post("/definitions/agents/{agent_id}/grant-mcp")
 async def grant_mcp_web(request: Request, agent_id: str):
     """Grant an MCP server to an agent."""
-    user = await get_user_context(request)
-    _require_admin_or_owner(user)
-    await _check_csrf(request)
     form = await request.form()
-    pool = await get_pool()
-    from lucent.db.audit import AuditRepository
-    from lucent.db.definitions import DefinitionRepository
-
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    server_id = str(form.get("mcp_server_id", "") or form.get("server_id", ""))
-    if server_id:
-        await repo.grant_mcp_server(
-            agent_id, server_id,
-            org_id=str(user.organization_id), user_id=str(user.id),
-        )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+    return await _agent_capability_attach(
+        request,
+        agent_id=agent_id,
+        capability_type="mcp_server",
+        capability_id=str(form.get("mcp_server_id", "") or form.get("server_id", "")),
+    )
 
 
 @router.post("/definitions/agents/{agent_id}/revoke-mcp/{server_id}")
 async def revoke_mcp_web(request: Request, agent_id: str, server_id: str):
     """Revoke an MCP server from an agent."""
-    user = await get_user_context(request)
-    _require_admin_or_owner(user)
-    await _check_csrf(request)
-    pool = await get_pool()
-    from lucent.db.audit import AuditRepository
-    from lucent.db.definitions import DefinitionRepository
-
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    await repo.revoke_mcp_server(
-        agent_id, server_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+    return await _agent_capability_detach(
+        request, agent_id=agent_id, capability_type="mcp_server", capability_id=server_id,
     )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
 @router.post("/definitions/agents/{agent_id}/grant-hook")
 async def grant_hook_web(request: Request, agent_id: str):
     """Grant a hook to an agent."""
-    user = await get_user_context(request)
-    _require_admin_or_owner(user)
-    await _check_csrf(request)
     form = await request.form()
-    pool = await get_pool()
-    from lucent.db.audit import AuditRepository
-    from lucent.db.definitions import DefinitionRepository
-
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    hook_id = str(form.get("hook_id", ""))
-    if hook_id:
-        await repo.grant_hook(
-            agent_id, hook_id,
-            org_id=str(user.organization_id), user_id=str(user.id),
-        )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+    return await _agent_capability_attach(
+        request,
+        agent_id=agent_id,
+        capability_type="hook",
+        capability_id=str(form.get("hook_id", "")),
+    )
 
 
 @router.post("/definitions/agents/{agent_id}/grant-tool")
 async def grant_managed_tool_web(request: Request, agent_id: str):
     """Grant a managed tool to an agent."""
-    user = await get_user_context(request)
-    _require_admin_or_owner(user)
-    await _check_csrf(request)
     form = await request.form()
-    pool = await get_pool()
-    from lucent.db.audit import AuditRepository
-    from lucent.db.definitions import DefinitionRepository
-
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    tool_id = str(form.get("tool_id", ""))
-    if tool_id:
-        await repo.grant_managed_tool(
-            agent_id, tool_id,
-            org_id=str(user.organization_id), user_id=str(user.id),
-        )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+    return await _agent_capability_attach(
+        request,
+        agent_id=agent_id,
+        capability_type="managed_tool",
+        capability_id=str(form.get("tool_id", "")),
+    )
 
 
 @router.post("/definitions/agents/{agent_id}/revoke-hook/{hook_id}")
 async def revoke_hook_web(request: Request, agent_id: str, hook_id: str):
     """Revoke a hook from an agent."""
-    user = await get_user_context(request)
-    _require_admin_or_owner(user)
-    await _check_csrf(request)
-    pool = await get_pool()
-    from lucent.db.audit import AuditRepository
-    from lucent.db.definitions import DefinitionRepository
-
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    await repo.revoke_hook(
-        agent_id, hook_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+    return await _agent_capability_detach(
+        request, agent_id=agent_id, capability_type="hook", capability_id=hook_id,
     )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
 
 
 @router.post("/definitions/agents/{agent_id}/revoke-tool/{tool_id}")
 async def revoke_managed_tool_web(request: Request, agent_id: str, tool_id: str):
     """Revoke a managed tool from an agent."""
+    return await _agent_capability_detach(
+        request, agent_id=agent_id, capability_type="managed_tool", capability_id=tool_id,
+    )
+
+
+@router.post("/definitions/agents/{agent_id}/consent")
+async def decide_capability_consent_web(request: Request, agent_id: str):
+    """Approve or decline one capability for the current user."""
     user = await get_user_context(request)
-    _require_admin_or_owner(user)
     await _check_csrf(request)
+    form = await request.form()
     pool = await get_pool()
-    from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
 
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    await repo.revoke_managed_tool(
-        agent_id, tool_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+    destination = f"/definitions/agents/{agent_id}"
+    capability_type = str(form.get("capability_type", ""))
+    capability_id = str(form.get("capability_id", ""))
+    decision = str(form.get("decision", ""))
+    if not capability_type or not capability_id or decision not in (
+        "approved",
+        "declined",
+    ):
+        message = "That approval request was incomplete."
+        return RedirectResponse(url=f"{destination}?error={quote(message)}", status_code=303)
+
+    repo = DefinitionRepository(pool)
+    recorded = await repo.upsert_capability_consent(
+        org_id=str(user.organization_id),
+        agent_id=agent_id,
+        user_id=str(user.id),
+        capability_type=capability_type,
+        capability_id=capability_id,
+        state=decision,
     )
-    return RedirectResponse(url=f"/definitions/agents/{agent_id}", status_code=303)
+    if not recorded:
+        message = "That capability is no longer attached to this agent."
+        return RedirectResponse(url=f"{destination}?error={quote(message)}", status_code=303)
+    return RedirectResponse(url=destination, status_code=303)
+
+
+@router.post("/definitions/agents/{agent_id}/consent/bulk")
+async def bulk_capability_consent_web(request: Request, agent_id: str):
+    """Approve or decline every pending capability on one agent.
+
+    Bulk is safe because the operation is strictly per-user: it cannot grant
+    anyone else anything.
+    """
+    user = await get_user_context(request)
+    await _check_csrf(request)
+    form = await request.form()
+    pool = await get_pool()
+    from lucent.db.definitions import DefinitionRepository
+
+    destination = f"/definitions/agents/{agent_id}"
+    decision = str(form.get("decision", ""))
+    if decision not in ("approved", "declined"):
+        message = "Choose approve or decline."
+        return RedirectResponse(url=f"{destination}?error={quote(message)}", status_code=303)
+
+    repo = DefinitionRepository(pool)
+    pending = await repo.list_pending_capability_consents(
+        str(user.organization_id), str(user.id)
+    )
+    applied = 0
+    for item in pending:
+        if str(item["agent_id"]) != str(agent_id):
+            continue
+        if await repo.upsert_capability_consent(
+            org_id=str(user.organization_id),
+            agent_id=agent_id,
+            user_id=str(user.id),
+            capability_type=str(item["capability_type"]),
+            capability_id=str(item["capability_id"]),
+            state=decision,
+        ):
+            applied += 1
+    return RedirectResponse(url=destination, status_code=303)
 
 
 @router.post("/definitions/agents/{agent_id}/mcp-tools/{server_id}")

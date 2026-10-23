@@ -649,6 +649,7 @@ class TestAuditFailureIsolation:
             ok = await repo.grant_mcp_server(
                 str(agent["id"]), str(mcp["id"]),
                 org_id=str(da_org["id"]),
+                actor_user_id=str(da_user["id"]),
             )
 
         assert ok is True
@@ -728,11 +729,13 @@ class TestNoAuditBackwardCompat:
         ok = await def_repo_no_audit.grant_skill(
             str(agent["id"]), str(skill["id"]),
             org_id=str(da_org["id"]),
+            actor_user_id=str(da_user["id"]),
         )
         assert ok is True
         revoked = await def_repo_no_audit.revoke_skill(
             str(agent["id"]), str(skill["id"]),
             org_id=str(da_org["id"]),
+            actor_user_id=str(da_user["id"]),
         )
         assert revoked is True
 

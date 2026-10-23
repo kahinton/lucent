@@ -92,7 +92,21 @@ async def load_accessible_agent(
 async def _load_accessible_assets(
     *, org_id: str, requester_user_id: str, agent_id: str, asset_type: str
 ) -> list[dict]:
-    """Load active assets granted to an agent and visible to the requester."""
+    """Load the agent's capabilities that this requester may actually use.
+
+    Delegates to the shared resolver so a daemon task and an interactive chat
+    resolve an agent's capability chain identically: attached, readable by the
+    requester, and consented (or exempt). Previously this method intersected
+    attachments with the legacy flat-OR ``AccessControlService`` predicate,
+    which bypassed the ``auth_clearances`` model entirely and had no notion of
+    consent.
+
+    Fail-closed: if resolution cannot run, the agent carries no capabilities for
+    this dispatch rather than all of them.
+    """
+    from lucent.agent_capabilities import resolve_agent_capabilities
+    from lucent.db.definitions import normalize_capability_type
+
     try:
         from lucent.db import get_pool
 
@@ -100,21 +114,29 @@ async def _load_accessible_assets(
     except Exception:
         return []
 
-    from lucent.access_control import AccessControlService
-    from lucent.db.definitions import DefinitionRepository
+    try:
+        capability_type = normalize_capability_type(asset_type)
+    except ValueError:
+        from daemon.runtime.module_proxy import runtime
 
-    repository = DefinitionRepository(pool)
-    method = getattr(repository, f"get_agent_{asset_type}s")
-    assets = await method(agent_id)
-    access_control = AccessControlService(pool)
-    accessible_ids = set(
-        await access_control.list_accessible(requester_user_id, asset_type, org_id)
-    )
-    return [
-        asset
-        for asset in assets
-        if str(asset["id"]) in accessible_ids and asset.get("status") == "active"
-    ]
+        runtime.log(f"Unknown capability type '{asset_type}'", "WARN")
+        return []
+
+    try:
+        resolved = await resolve_agent_capabilities(
+            pool=pool,
+            user={"id": requester_user_id, "organization_id": org_id},
+            agent_id=agent_id,
+            org_id=org_id,
+        )
+    except Exception as error:
+        from daemon.runtime.module_proxy import runtime
+
+        runtime.log(
+            f"Capability resolution failed for agent {agent_id}: {error}", "WARN"
+        )
+        return []
+    return resolved.as_loader_map()[capability_type]
 
 
 async def load_accessible_skills_for_agent(

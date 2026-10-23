@@ -623,7 +623,8 @@ class TestWebRoutesAndUx:
         )
         await mcpd_repo.approve_mcp_server(str(mcpd_http_server["id"]), str(org["id"]), str(user["id"]))
         await mcpd_repo.grant_mcp_server(
-            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+            str(agent["id"]), str(mcpd_http_server["id"]),
+            org_id=str(org["id"]), actor_user_id=str(user["id"]),
         )
         await mcpd_repo.save_discovered_tools(
             str(mcpd_http_server["id"]),
@@ -651,7 +652,8 @@ class TestWebRoutesAndUx:
             owner_user_id=str(user["id"]),
         )
         await mcpd_repo.grant_mcp_server(
-            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+            str(agent["id"]), str(mcpd_http_server["id"]),
+            org_id=str(org["id"]), actor_user_id=str(user["id"]),
         )
 
         resp = await web_client.post(
@@ -683,7 +685,8 @@ class TestWebRoutesAndUx:
             owner_user_id=str(user["id"]),
         )
         await mcpd_repo.grant_mcp_server(
-            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+            str(agent["id"]), str(mcpd_http_server["id"]),
+            org_id=str(org["id"]), actor_user_id=str(user["id"]),
         )
 
         resp = await web_client.post(
@@ -715,7 +718,8 @@ class TestWebRoutesAndUx:
             owner_user_id=str(user["id"]),
         )
         await mcpd_repo.grant_mcp_server(
-            str(agent["id"]), str(mcpd_http_server["id"]), org_id=str(org["id"])
+            str(agent["id"]), str(mcpd_http_server["id"]),
+            org_id=str(org["id"]), actor_user_id=str(user["id"]),
         )
 
         resp = await web_client.post(

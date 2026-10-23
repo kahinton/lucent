@@ -142,6 +142,116 @@ async def _usage_get_definition_by_id(
     return await getattr(repo, _USAGE_GETTERS[kind])(resource_id)
 
 
+async def _capability_gate_error(
+    *,
+    kind: str,
+    resource_id: str,
+    org_id: str,
+    user_id: str | None,
+    role: str | None,
+    memory_scope: str | None,
+) -> str | None:
+    """Return an error message when an agent context may not use this capability.
+
+    The consent model has to hold on the *on-demand* path too. When a model runs
+    inside an agent it can name a capability by id — ``get_skill_definition``,
+    ``get_hook_definition``, ``run_managed_tool`` — even for a capability that
+    was never rendered into its prompt because the user declined it or had not
+    approved it yet. Without this gate, per-user consent would be decorative: a
+    model holding a leaked or remembered id could read a body it was never
+    granted.
+
+    Returns ``None`` when there is no agent context (bare chat / unscoped
+    daemon), where the clearance and managed-tool grant checks still apply and
+    behavior is unchanged.
+    """
+    agent_id = (get_llm_context() or {}).get("agent_definition_id")
+    if not agent_id or not user_id:
+        return None
+    capability_type = _CAPABILITY_KIND_MAP.get(kind)
+    if not capability_type:
+        return None
+
+    from lucent.agent_capabilities import assert_capability_permitted
+
+    pool = await get_pool()
+    permitted = await assert_capability_permitted(
+        pool=pool,
+        user={"id": str(user_id), "organization_id": str(org_id)},
+        agent_id=str(agent_id),
+        org_id=str(org_id),
+        capability_type=capability_type,
+        capability_id=str(resource_id),
+    )
+    if permitted:
+        return None
+    return (
+        f"This {capability_type.replace('_', ' ')} is not available in the "
+        "current agent: it is not approved for this user. Approve it on the "
+        "agent's page under Definitions, then retry."
+    )
+
+
+_CAPABILITY_KIND_MAP = {
+    "skills": "skill",
+    "managed_tools": "managed_tool",
+    "hooks": "hook",
+    "mcp_servers": "mcp_server",
+}
+
+
+async def _capability_write_denied(
+    role: str | None, memory_scope: str | None,
+) -> str | None:
+    """Shared guard for attach/detach tools.
+
+    A scoped agent context may never change an agent's composition — that is a
+    human decision (`_requires_unscoped_human`). There is no role gate any more:
+    attaching is authorized by read clearance on both endpoints inside
+    ``DefinitionRepository``, and detaching by agent-or-capability ownership, so
+    a member who can see both ends may attach to an agent they can see.
+    """
+    if scoped_error := _requires_unscoped_human(memory_scope):
+        return json.dumps({"error": scoped_error, "code": 403})
+    return None
+
+
+def _attach_response(
+    outcome, *, agent_id: str, id_field: str, capability_id: str,
+) -> str:
+    """Render a GrantOutcome for an MCP caller."""
+    from lucent.db.definitions import GrantOutcome
+
+    if outcome is GrantOutcome.ALREADY_ATTACHED:
+        return json.dumps(
+            {
+                "status": "already_attached",
+                "warning": (
+                    "This capability is already attached to this agent by another "
+                    "user. Approve it for yourself to use it; it cannot be "
+                    "attached twice."
+                ),
+                "agent_id": agent_id,
+                id_field: capability_id,
+            }
+        )
+    if outcome is GrantOutcome.DENIED:
+        return json.dumps(
+            {
+                "error": (
+                    "Not permitted: you must be able to see both the agent and "
+                    "the capability to attach it."
+                ),
+                "code": 403,
+            }
+        )
+    if outcome is GrantOutcome.FAILED:
+        return json.dumps({"error": "Failed to attach capability", "code": 500})
+    return json.dumps(
+        {"status": "granted", "agent_id": agent_id, id_field: capability_id}
+    )
+
+
 async def _usage_get_managed_tool_by_name(
     name: str,
     *,
@@ -393,6 +503,17 @@ Returns: JSON with the skill details, or an error if not found."""
         user_id, org_id, role, memory_scope, _ = await _get_current_user_context()
         if not org_id:
             return json.dumps({"error": "No organization context"})
+
+        gate_error = await _capability_gate_error(
+            kind="skills",
+            resource_id=skill_id,
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if gate_error:
+            return json.dumps({"error": gate_error, "code": 403})
 
         skill = await _usage_get_definition_by_id(
             "skills",
@@ -767,43 +888,20 @@ Returns: JSON with status 'granted', or an error if either is not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-
-        # Verify agent exists and is accessible
-        agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
-        )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        # Verify skill exists and is accessible
-        skill = await repo.get_skill(
-            skill_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
-        )
-        if not skill:
-            return json.dumps({"error": "Skill not found"})
-
-        success = await repo.grant_skill(
-            agent_id, skill_id,
+        outcome = await repo.grant_capability(
+            agent_id=agent_id,
+            capability_type="skill",
+            capability_id=skill_id,
             org_id=str(org_id),
-            user_id=str(user_id),
+            actor_user_id=str(user_id),
         )
-        if not success:
-            return json.dumps({"error": "Failed to grant skill"})
-        return json.dumps({"status": "granted", "agent_id": agent_id, "skill_id": skill_id})
+        return _attach_response(
+            outcome, agent_id=agent_id, id_field="skill_id", capability_id=skill_id,
+        )
 
     @mcp.tool(
         description="""Update an agent definition's name, description, or content.
@@ -955,23 +1053,26 @@ Returns: JSON with status 'revoked', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-        agent = await repo.get_agent(
-            agent_id, str(org_id),
-            requester_user_id=str(user_id),
+        revoked = await repo.revoke_skill(
+            agent_id, skill_id,
+            org_id=str(org_id),
+            actor_user_id=str(user_id),
             requester_role=role,
         )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        await repo.revoke_skill(agent_id, skill_id, org_id=str(org_id), user_id=str(user_id))
+        if not revoked:
+            return json.dumps(
+                {
+                    "error": (
+                        "Not permitted: only the agent owner, the skill owner, "
+                        "or an organization admin can detach it."
+                    ),
+                    "code": 403,
+                }
+            )
         return json.dumps({"status": "revoked", "agent_id": agent_id, "skill_id": skill_id})
 
     @mcp.tool(
@@ -989,28 +1090,23 @@ Returns: JSON with status 'granted', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-        agent = await repo.get_agent(
-            agent_id, str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+        outcome = await repo.grant_capability(
+            agent_id=agent_id,
+            capability_type="mcp_server",
+            capability_id=definition_id,
+            org_id=str(org_id),
+            actor_user_id=str(user_id),
         )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        success = await repo.grant_mcp_server(
-            agent_id, definition_id, org_id=str(org_id), user_id=str(user_id)
+        return _attach_response(
+            outcome,
+            agent_id=agent_id,
+            id_field="server_id",
+            capability_id=definition_id,
         )
-        if not success:
-            return json.dumps({"error": "Failed to grant MCP server"})
-        return json.dumps({"status": "granted", "agent_id": agent_id, "server_id": definition_id})
 
     @mcp.tool(
         description="""Grant a hook to an agent definition.
@@ -1031,38 +1127,20 @@ Returns: JSON with status 'granted', or an error if either is not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-        agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+        outcome = await repo.grant_capability(
+            agent_id=agent_id,
+            capability_type="hook",
+            capability_id=hook_id,
+            org_id=str(org_id),
+            actor_user_id=str(user_id),
         )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        hook = await repo.get_hook(
-            hook_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+        return _attach_response(
+            outcome, agent_id=agent_id, id_field="hook_id", capability_id=hook_id,
         )
-        if not hook or hook.get("status") != "active":
-            return json.dumps({"error": "Active hook not found"})
-
-        success = await repo.grant_hook(
-            agent_id, hook_id, org_id=str(org_id), user_id=str(user_id)
-        )
-        if not success:
-            return json.dumps({"error": "Failed to grant hook"})
-        return json.dumps({"status": "granted", "agent_id": agent_id, "hook_id": hook_id})
 
     @mcp.tool(
         description="""Grant a managed tool to an agent definition.
@@ -1083,38 +1161,20 @@ Returns: JSON with status 'granted', or an error if either is not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-        agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+        outcome = await repo.grant_capability(
+            agent_id=agent_id,
+            capability_type="managed_tool",
+            capability_id=tool_id,
+            org_id=str(org_id),
+            actor_user_id=str(user_id),
         )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        tool = await repo.get_managed_tool(
-            tool_id,
-            str(org_id),
-            requester_user_id=str(user_id),
-            requester_role=role,
+        return _attach_response(
+            outcome, agent_id=agent_id, id_field="tool_id", capability_id=tool_id,
         )
-        if not tool or tool.get("status") != "active":
-            return json.dumps({"error": "Active managed tool not found"})
-
-        success = await repo.grant_managed_tool(
-            agent_id, tool_id, org_id=str(org_id), user_id=str(user_id)
-        )
-        if not success:
-            return json.dumps({"error": "Failed to grant managed tool"})
-        return json.dumps({"status": "granted", "agent_id": agent_id, "tool_id": tool_id})
 
     @mcp.tool(
         description="""Revoke an MCP server from an agent definition.
@@ -1131,23 +1191,26 @@ Returns: JSON with status 'revoked', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-        agent = await repo.get_agent(
-            agent_id, str(org_id),
-            requester_user_id=str(user_id),
+        revoked = await repo.revoke_mcp_server(
+            agent_id, server_id,
+            org_id=str(org_id),
+            actor_user_id=str(user_id),
             requester_role=role,
         )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        await repo.revoke_mcp_server(agent_id, server_id, org_id=str(org_id), user_id=str(user_id))
+        if not revoked:
+            return json.dumps(
+                {
+                    "error": (
+                        "Not permitted: only the agent owner, the provider owner, "
+                        "or an organization admin can detach it."
+                    ),
+                    "code": 403,
+                }
+            )
         return json.dumps({"status": "revoked", "agent_id": agent_id, "server_id": server_id})
 
     @mcp.tool(
@@ -1165,24 +1228,26 @@ Returns: JSON with status 'revoked', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-        agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
+        revoked = await repo.revoke_hook(
+            agent_id, hook_id,
+            org_id=str(org_id),
+            actor_user_id=str(user_id),
             requester_role=role,
         )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        await repo.revoke_hook(agent_id, hook_id, org_id=str(org_id), user_id=str(user_id))
+        if not revoked:
+            return json.dumps(
+                {
+                    "error": (
+                        "Not permitted: only the agent owner, the hook owner, "
+                        "or an organization admin can detach it."
+                    ),
+                    "code": 403,
+                }
+            )
         return json.dumps({"status": "revoked", "agent_id": agent_id, "hook_id": hook_id})
 
     @mcp.tool(
@@ -1200,26 +1265,26 @@ Returns: JSON with status 'revoked', or an error if not found."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
-        if scoped_error := _requires_unscoped_human(memory_scope):
-            return json.dumps({"error": scoped_error, "code": 403})
-        if role not in ("admin", "owner"):
-            return json.dumps(
-                {"error": "Forbidden: admin or owner role required", "code": 403}
-            )
+        if denied := await _capability_write_denied(role, memory_scope):
+            return denied
 
         repo = await _get_definition_repository()
-        agent = await repo.get_agent(
-            agent_id,
-            str(org_id),
-            requester_user_id=str(user_id),
+        revoked = await repo.revoke_managed_tool(
+            agent_id, tool_id,
+            org_id=str(org_id),
+            actor_user_id=str(user_id),
             requester_role=role,
         )
-        if not agent:
-            return json.dumps({"error": "Agent not found"})
-
-        await repo.revoke_managed_tool(
-            agent_id, tool_id, org_id=str(org_id), user_id=str(user_id)
-        )
+        if not revoked:
+            return json.dumps(
+                {
+                    "error": (
+                        "Not permitted: only the agent owner, the tool owner, "
+                        "or an organization admin can detach it."
+                    ),
+                    "code": 403,
+                }
+            )
         return json.dumps({"status": "revoked", "agent_id": agent_id, "tool_id": tool_id})
 
     # ── Skill write tools ─────────────────────────────────────────────────
@@ -1403,6 +1468,17 @@ Returns: JSON with the hook details, or an error if not found."""
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
+        gate_error = await _capability_gate_error(
+            kind="hooks",
+            resource_id=hook_id,
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if gate_error:
+            return json.dumps({"error": gate_error, "code": 403})
+
         hook = await _usage_get_definition_by_id(
             "hooks",
             hook_id,
@@ -1532,6 +1608,20 @@ Returns: JSON with ok/result/stdout/stderr/run_id metadata, or an error."""
             return json.dumps({"error": "Managed tool not found", "code": 404})
         if found.get("status") != "active":
             return json.dumps({"error": "Managed tool is not active", "code": 409})
+
+        # Consent gate: an agent context may only run a managed tool that this
+        # user approved for that agent. The grant check further below only
+        # proves the tool is *attached*; attachment is not consent.
+        gate_error = await _capability_gate_error(
+            kind="managed_tools",
+            resource_id=str(found["id"]),
+            org_id=str(org_id),
+            user_id=str(user_id) if user_id else None,
+            role=role,
+            memory_scope=memory_scope,
+        )
+        if gate_error:
+            return json.dumps({"error": gate_error, "code": 403})
 
         if _is_unscoped_daemon_role(role, memory_scope):
             # Legacy resolution above is org-shared for system actors — keep
@@ -1716,3 +1806,125 @@ Returns: JSON with the updated server, or an error if not found."""
         if not result:
             return json.dumps({"error": "MCP server not found"})
         return json.dumps(result, default=_serialize)
+
+    # ── Capability consent ────────────────────────────────────────────────
+    #
+    # Consent is what stops one person's hook, tool, or skill from being
+    # injected into another person's agent run without their knowledge. A
+    # capability attached to an agent only reaches a user who can read it AND
+    # has approved it (or is exempt: built-in, the attacher, or its owner).
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List capabilities attached to agents that are waiting for
+your approval, or that you declined.
+
+A capability reaches you through an agent only when you approve it. Built-in
+capabilities, ones you attached yourself, and ones you own never need approval.
+
+Returns: JSON with a `pending` array (agent, capability, type) and a `declined`
+array. Approve or decline with decide_capability_consent."""
+    )
+    async def list_pending_capability_consents() -> str:
+        user_id, org_id, _, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+
+        repo = await _get_definition_repository()
+        pending = await repo.list_pending_capability_consents(
+            str(org_id), str(user_id)
+        )
+        declined = await repo.list_declined_capability_consents(
+            str(org_id), str(user_id)
+        )
+        return json.dumps(
+            {
+                "pending": pending,
+                "declined": declined,
+                "total": len(pending) + len(declined),
+            },
+            default=_serialize,
+        )
+
+    @mcp.tool(
+        description="""Approve or decline a capability attached to an agent.
+
+Approving makes the capability available to *you* in that agent. Declining
+keeps it unavailable to you; the decision is sticky and never re-prompts, but
+you can approve it later. Neither affects any other user.
+
+Args:
+    agent_id: UUID of the agent definition
+    capability_type: 'skill', 'managed_tool', 'hook', or 'mcp_server'
+    capability_id: UUID of the capability
+    decision: 'approved' or 'declined'
+
+Returns: JSON with the recorded decision, or an error."""
+    )
+    async def decide_capability_consent(
+        agent_id: str,
+        capability_type: str,
+        capability_id: str,
+        decision: str,
+    ) -> str:
+        user_id, org_id, _, memory_scope, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+
+        if decision not in ("approved", "declined"):
+            return json.dumps(
+                {"error": "decision must be 'approved' or 'declined'"}
+            )
+
+        from lucent.db.definitions import (
+            DefinitionRepository as _Repo,
+            get_authorized_definitions_pool,
+            normalize_capability_type,
+        )
+
+        try:
+            canonical_type = normalize_capability_type(capability_type)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        pool = await get_pool()
+        authorized = await get_authorized_definitions_pool(
+            pool, {"id": str(user_id), "organization_id": str(org_id)}
+        )
+        # The agent must be usable by this user before they can have an opinion
+        # about its composition.
+        agent = await _Repo(authorized).get_usable_agent(agent_id)
+        if not agent:
+            return json.dumps({"error": "Agent not found", "code": 404})
+
+        repo = _Repo(pool)
+        recorded = await repo.upsert_capability_consent(
+            org_id=str(org_id),
+            agent_id=agent_id,
+            user_id=str(user_id),
+            capability_type=canonical_type,
+            capability_id=capability_id,
+            state=decision,
+        )
+        if not recorded:
+            return json.dumps(
+                {
+                    "error": (
+                        "That capability is not attached to this agent, so there "
+                        "is nothing to decide."
+                    ),
+                    "code": 404,
+                }
+            )
+        return json.dumps(
+            {
+                "status": decision,
+                "agent_id": agent_id,
+                "capability_type": canonical_type,
+                "capability_id": capability_id,
+            }
+        )

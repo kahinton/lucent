@@ -468,6 +468,7 @@ def create_app() -> FastAPI:
         request.state.definition_proposal_count = 0
         request.state.sandbox_proposal_count = 0
         request.state.user_file_unseen_count = 0
+        request.state.capability_consent_count = 0
 
         # Only needed for web page rendering, not API/static/other methods.
         if request.method == "GET" and not request.url.path.startswith(("/api/", "/static/")):
@@ -508,6 +509,18 @@ def create_app() -> FastAPI:
                         )
                         request.state.pending_approval_count = count
                         request.state.definition_proposal_count = definition_count or 0
+                        # Capabilities other people attached to agents this user
+                        # can use, awaiting an explicit approve/decline.
+                        try:
+                            request.state.capability_consent_count = (
+                                await DefinitionRepository(
+                                    pool
+                                ).count_pending_capability_consents(
+                                    str(org_id), str(effective_user.id)
+                                )
+                            )
+                        except Exception:
+                            request.state.capability_consent_count = 0
                         if role_value in {"admin", "owner"}:
                             from lucent.db.sandbox_template import SandboxTemplateRepository
 

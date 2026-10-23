@@ -144,6 +144,16 @@ class FakeConn:
             return []
         return [dict(self.pool.result_row)]
 
+    async def fetchval(self, query: str, *params: Any) -> Any:
+        """Boolean existence probes (attachment checks, scope lookups).
+
+        The attach path asks whether the junction row already exists. These
+        tests assert on the mutation + audit funnel, and each grant starts from
+        a clean state, so "not attached yet" is the accurate answer.
+        """
+        self._record("fetchval", query, *params)
+        return False
+
 
 class FakePool:
     """asyncpg.Pool stand-in handing out one FakeConn per acquire()."""
@@ -353,24 +363,44 @@ def test_definition_approvals_audited(mutate, actor_owner):
 # 2. Grants and revocations are audited
 # ---------------------------------------------------------------------------
 
+# ``system=True`` is the documented system-originated attach path: it skips the
+# principal clearance lookups, which is what lets these tests exercise the
+# mutation + audit funnel against a fake connection. Authorization itself is
+# covered by tests/test_agent_capability_consent.py against real Postgres.
 @pytest.mark.parametrize(
     "grant_call,revoke_call",
     [
         (
-            lambda repo: repo.grant_skill(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
-            lambda repo: repo.revoke_skill(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
+            lambda repo: repo.grant_skill(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
+            lambda repo: repo.revoke_skill(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
         ),
         (
-            lambda repo: repo.grant_managed_tool(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
-            lambda repo: repo.revoke_managed_tool(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
+            lambda repo: repo.grant_managed_tool(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
+            lambda repo: repo.revoke_managed_tool(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
         ),
         (
-            lambda repo: repo.grant_mcp_server(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
-            lambda repo: repo.revoke_mcp_server(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
+            lambda repo: repo.grant_mcp_server(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
+            lambda repo: repo.revoke_mcp_server(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
         ),
         (
-            lambda repo: repo.grant_hook(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
-            lambda repo: repo.revoke_hook(AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID),
+            lambda repo: repo.grant_hook(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
+            lambda repo: repo.revoke_hook(
+                AGENT_ID, TOOL_ID, org_id=ORG_ID, user_id=USER_ID, system=True
+            ),
         ),
     ],
 )

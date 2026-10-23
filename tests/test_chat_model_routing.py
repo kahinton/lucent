@@ -92,10 +92,16 @@ class _FakeCaptureRepo:
         raise AssertionError("maybe_capture_experience should not run")
 
 
+_FAKE_USER_ID = "11111111-1111-1111-1111-111111111111"
+_FAKE_ORG_ID = "22222222-2222-2222-2222-222222222222"
+
+
 async def _fake_session_user(_request):
+    # Real UUIDs: chat composes the agent through the clearance-gated pool,
+    # which rejects non-UUID principal identities.
     return {
-        "id": "user-id",
-        "organization_id": "org-id",
+        "id": _FAKE_USER_ID,
+        "organization_id": _FAKE_ORG_ID,
         "display_name": "Tester",
     }, object()
 
@@ -290,29 +296,8 @@ async def test_chat_stream_v2_includes_assigned_agent_mcp_servers(monkeypatch):
         def __init__(self, _pool):
             pass
 
-        async def get_agent(self, _agent_id, _organization_id):
+        async def get_usable_agent(self, _agent_id):
             return {"id": "agent-id", "name": "code", "content": "# Code agent"}
-
-        async def get_agent_skills(self, _agent_id):
-            return []
-
-        async def get_agent_managed_tools(self, _agent_id):
-            return []
-
-        async def get_agent_mcp_servers(self, _agent_id):
-            return [
-                {
-                    "id": "github-server",
-                    "server_type": "http",
-                    "url": "https://mcp.example.test",
-                    "headers": {"X-Token": "token"},
-                    "allowed_tools": ["search_repositories"],
-                },
-                {"id": "copilot-github", "server_type": "copilot_github"},
-            ]
-
-        async def get_agent_hooks(self, _agent_id):
-            return []
 
     class _CapturingEngine:
         name = "copilot"
@@ -335,6 +320,23 @@ async def test_chat_stream_v2_includes_assigned_agent_mcp_servers(monkeypatch):
     async def fake_render_active_user_context(*_args):
         return "context"
 
+    async def _fake_resolve(**_kwargs):
+        from lucent.agent_capabilities import ResolvedCapabilities
+
+        return ResolvedCapabilities(
+            agent_id="agent-id",
+            mcp_servers=[
+                {
+                    "id": "github-server",
+                    "server_type": "http",
+                    "url": "https://mcp.example.test",
+                    "headers": {"X-Token": "token"},
+                    "allowed_tools": ["search_repositories"],
+                },
+                {"id": "copilot-github", "server_type": "copilot_github"},
+            ],
+        )
+
     monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
     monkeypatch.setattr(chat, "_can_user_access_model", _allow_model)
     monkeypatch.setattr(chat, "_render_active_user_context", fake_render_active_user_context)
@@ -342,6 +344,14 @@ async def test_chat_stream_v2_includes_assigned_agent_mcp_servers(monkeypatch):
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
     monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: _CapturingEngine())
     monkeypatch.setattr("lucent.db.definitions.DefinitionRepository", _AgentRepo)
+
+    async def _fake_authorized_pool(*_args, **_kwargs):
+        return object()
+
+    monkeypatch.setattr(
+        "lucent.db.definitions.get_authorized_definitions_pool", _fake_authorized_pool
+    )
+    monkeypatch.setattr("lucent.agent_capabilities.resolve_agent_capabilities", _fake_resolve)
     monkeypatch.setattr("lucent.secrets.SecretRegistry.get", lambda: object())
 
     response = await chat.chat_stream_v2(

@@ -252,25 +252,22 @@ async def build_subagent_prompt(
         skill_names = db_agent.get("skill_names", [])
         granted_skills: list[dict] = []
         if resolved_skills is not None:
+            # Already resolved for this task's requester (attached + readable +
+            # consented). Re-filtering by the agent's declared names keeps the
+            # prompt aligned with the definition's frontmatter.
             granted_skills = [
                 skill for skill in resolved_skills if skill.get("name") in skill_names
             ]
         elif skill_names:
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    response = await client.get(
-                        f"{runtime.API_BASE}/definitions/skills",
-                        params={"status": "active"},
-                        headers=runtime.API_HEADERS,
-                    )
-                    if response.status_code == 200:
-                        data = response.json()
-                        skills = data.get("items", data) if isinstance(data, dict) else data
-                        granted_skills = [
-                            skill for skill in skills if skill.get("name") in skill_names
-                        ]
-            except Exception:
-                runtime.log(f"Failed to load skills for agent '{agent_type}'", "DEBUG")
+            # No resolver output means we have no requester to gate against, so
+            # there is no safe way to decide which skills this run may use.
+            # Fail closed rather than fetching the org's skill list unfiltered —
+            # that fallback silently bypassed the capability gates.
+            runtime.log(
+                f"No resolved skills supplied for agent '{agent_type}'; "
+                "omitting skills from the prompt rather than loading them ungated",
+                "DEBUG",
+            )
         skills_section = render_skills_section(granted_skills)
         if skills_section:
             skills_context = "\n\n" + skills_section

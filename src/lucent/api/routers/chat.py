@@ -376,6 +376,36 @@ async def _get_session_user(request: Request):
     return user, pool
 
 
+def _render_pending_capabilities_notice(pending: list[dict[str, Any]]) -> str:
+    """Tell the model which capabilities exist but await the user's approval.
+
+    Rendered instead of silently omitting them: from the model's point of view
+    an unapproved skill is indistinguishable from a missing one, and it would
+    otherwise tell the user the agent cannot do something when it merely has not
+    been authorized yet.
+    """
+    lines = [
+        "## Capabilities awaiting this user's approval",
+        (
+            "These are attached to the agent but the user has not approved them, "
+            "so they are NOT available right now. Do not attempt to use them. If "
+            "the user asks for one of these, tell them to approve it on the "
+            "agent's page under Definitions."
+        ),
+        "",
+    ]
+    labels = {
+        "skill": "skill",
+        "managed_tool": "managed tool",
+        "hook": "hook",
+        "mcp_server": "external provider",
+    }
+    for item in pending:
+        kind = labels.get(str(item.get("capability_type")), str(item.get("capability_type")))
+        lines.append(f"- {item.get('capability_name')} ({kind})")
+    return "\n".join(lines)
+
+
 def _build_mcp_config(
     session_token: str,
     *,
@@ -1393,27 +1423,70 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
     return "\n".join(parts)
 
 
-async def _load_default_chat_agent(repo, org_id: str) -> dict | None:
+async def _load_default_chat_agent(pool, user: dict, org_id: str) -> dict | None:
     """Resolve the default chat persona to the built-in `lucent` identity agent.
 
     When a user does not pick an agent, the chat should still be composed from
     the same definition the daemon uses for its core identity — so the default
-    persona has the lucent agent's skills, managed tools, and hooks. Returns the
-    full agent dict, or None if no active `lucent` agent exists.
+    persona has the lucent agent's skills, managed tools, and hooks.
+
+    The agent is resolved through the *clearance-gated* usage path, exactly like
+    a picked agent. The default persona is not more privileged than an explicit
+    choice: if an org owner withdraws the built-in's org-wide read clearance,
+    the default persona must stop resolving for ordinary members.
     """
     try:
-        result = await repo.list_agents(org_id, status="active")
-        items = result.get("items", result) if isinstance(result, dict) else result
-        for candidate in items or []:
+        from lucent.db.definitions import (
+            DefinitionRepository,
+            get_authorized_definitions_pool,
+        )
+
+        authorized_pool = await get_authorized_definitions_pool(
+            pool, {"id": str(user.get("id") or ""), "organization_id": str(org_id)}
+        )
+        listing = await DefinitionRepository(authorized_pool).list_agents_accessible_by(
+            str(user.get("id") or ""), str(org_id), status="active", limit=200
+        )
+        for candidate in listing.get("items") or []:
             if (candidate.get("name") or "").strip().lower() == "lucent":
-                return await repo.get_agent(str(candidate["id"]), org_id)
+                return await DefinitionRepository(authorized_pool).get_usable_agent(
+                    str(candidate["id"])
+                )
     except Exception:
         logger.debug("Failed to resolve default lucent chat agent", exc_info=True)
     return None
 
 
+async def _load_agent_capabilities(
+    pool, user: dict, agent_id: str | None, org_id: str
+):
+    """Resolve the agent's capability chain for this user.
+
+    Returns an empty resolution (never an unfiltered one) when anything goes
+    wrong, so a failure can only ever *narrow* what an agent may use.
+    """
+    from lucent.agent_capabilities import ResolvedCapabilities, resolve_agent_capabilities
+
+    try:
+        return await resolve_agent_capabilities(
+            pool=pool,
+            user=user,
+            agent_id=agent_id,
+            org_id=org_id,
+            user_role=str(user.get("role") or "") or None,
+        )
+    except Exception:
+        logger.warning("Failed to resolve agent capabilities", exc_info=True)
+        return ResolvedCapabilities(agent_id=agent_id)
+
+
 async def _load_agent_hooks(pool, agent_id: str | None) -> list[dict[str, Any]]:
-    """Load active hook definitions granted to an agent, if any."""
+    """Load active hook definitions granted to an agent, if any.
+
+    Legacy v1 chat path only (it composes no capabilities at all, so there is no
+    user to gate against). ``/stream-v2`` resolves hooks through
+    :func:`_load_agent_capabilities` and must not call this.
+    """
     if not agent_id:
         return []
     try:
@@ -2166,6 +2239,8 @@ async def chat_stream_v2(
     agent_name = None
     agent_skill_names: list[str] = []
     agent_managed_tools: list[dict[str, Any]] = []
+    agent_hooks: list[dict[str, Any]] = []
+    agent_mcp_servers: list[dict[str, Any]] = []
     # The agent actually composed for this turn (may be the lucent default even
     # when the user did not pick one). Used for hooks, managed-tool grants, and
     # tool allow-listing so the default persona has full parity.
@@ -2192,24 +2267,42 @@ async def chat_stream_v2(
             if not agent:
                 raise HTTPException(status_code=403, detail="Agent is not available to this user")
         else:
-            # Default persona: the built-in `lucent` identity resolves
-            # org-shared (runtime composition trusts the agent for now).
-            agent = await _load_default_chat_agent(repo, str(user["organization_id"]))
+            # Default persona: resolved through the same clearance gate as a
+            # picked agent, so withdrawing the built-in's org grant narrows it.
+            agent = await _load_default_chat_agent(
+                pool, user, str(user["organization_id"])
+            )
         if agent:
             effective_agent_id = str(agent["id"])
             system_prompt_parts.append(agent.get("content", ""))
             agent_name = agent.get("name", "Lucent")
+            # The agent is the structural hub: capabilities reach this turn only
+            # when this user can read them AND has consented (or is exempt).
+            capabilities = await _load_agent_capabilities(
+                pool, user, effective_agent_id, str(user["organization_id"])
+            )
             # Skills are listed (name/id/description); the agent loads full
             # instructions on demand via get_skill_definition.
-            skills = await repo.get_agent_skills(effective_agent_id, str(user["organization_id"]))
-            agent_skill_names = [str(s["name"]) for s in skills if s.get("name")]
+            skills = capabilities.skills
+            agent_skill_names = capabilities.skill_names
             skills_section = render_skills_section(skills)
             if skills_section:
                 system_prompt_parts.append(skills_section)
-            agent_managed_tools = await repo.get_agent_managed_tools(effective_agent_id, str(user["organization_id"]))
+            agent_managed_tools = capabilities.managed_tools
             tools_section = render_managed_tools_section(agent_managed_tools)
             if tools_section:
                 system_prompt_parts.append(tools_section)
+            if capabilities.pending:
+                # Tell the model what it is missing so it can point the user at
+                # the approvals panel instead of guessing or failing silently.
+                system_prompt_parts.append(
+                    _render_pending_capabilities_notice(capabilities.pending)
+                )
+            # Hooks and MCP servers come from the same resolution, so they are
+            # filtered identically. Loading them separately is what previously
+            # let an unfiltered read bypass the capability gates.
+            agent_hooks = capabilities.hooks
+            agent_mcp_servers = capabilities.mcp_servers
     except Exception:
         logger.debug("Failed to load agent definition for chat", exc_info=True)
 
@@ -2284,7 +2377,8 @@ async def chat_stream_v2(
 
     system_prompt_parts.append(await _render_active_user_context(user, pool))
     system_prompt = "\n\n".join(system_prompt_parts)
-    agent_hooks = await _load_agent_hooks(pool, effective_agent_id)
+    # Hooks were resolved with the rest of the capability chain above; an agent
+    # whose hook the user never consented to runs without it.
 
     last_message = body.messages[-1].content if body.messages else ""
     attachments = _normalize_last_attachments(body.messages)
@@ -2390,11 +2484,8 @@ async def chat_stream_v2(
     )
     if any((tool.get("runtime_config") or {}).get("mcp_proxy") for tool in agent_managed_tools):
         mcp_config["memory-server"]["exclude_tools"] = ["run_managed_tool"]
-    agent_mcp_servers = (
-        await repo.get_agent_mcp_servers(effective_agent_id)
-        if effective_agent_id
-        else []
-    )
+    # MCP servers were resolved with the rest of the capability chain; the
+    # unfiltered junction read is no longer performed here.
     agent_mcp_config, enable_agent_provider_discovery = await _build_agent_mcp_config(
         agent_mcp_servers
     )

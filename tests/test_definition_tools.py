@@ -411,7 +411,10 @@ class TestGrantSkillToAgent:
             },
         )
         assert "error" in result
-        assert "Agent not found" in result["error"]
+        # Non-disclosure: an unknown agent is indistinguishable from one the
+        # caller cannot see, so the message must not confirm existence.
+        assert result["code"] == 403
+        assert "Not permitted" in result["error"]
 
     @pytest.mark.asyncio
     async def test_grant_nonexistent_skill(self, mcp, auth_user, repo):
@@ -432,7 +435,8 @@ class TestGrantSkillToAgent:
             },
         )
         assert "error" in result
-        assert "Skill not found" in result["error"]
+        assert result["code"] == 403
+        assert "Not permitted" in result["error"]
 
     @pytest.mark.asyncio
     async def test_no_auth_returns_error(self, mcp):

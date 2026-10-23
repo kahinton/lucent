@@ -71,6 +71,9 @@ async def live_status(request: Request) -> JSONResponse:
             requester_user_id=user_id,
             requester_role=role,
         ),
+        "consents": await DefinitionRepository(pool).count_pending_capability_consents(
+            org_id, user_id
+        ),
         "files": await UserFileRepository(pool).count_unseen_current_revisions(
             org_id, user_id
         ),

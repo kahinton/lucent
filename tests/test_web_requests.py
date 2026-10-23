@@ -184,7 +184,9 @@ class TestLiveStatus:
         assert response.status_code == 200
         assert response.headers["cache-control"] == "no-store"
         badges = response.json()["badges"]
-        assert set(badges) == {"activity", "definitions", "files", "handoffs", "sandboxes"}
+        assert set(badges) == {
+            "activity", "consents", "definitions", "files", "handoffs", "sandboxes"
+        }
         assert all(isinstance(count, int) and count >= 0 for count in badges.values())
 
 

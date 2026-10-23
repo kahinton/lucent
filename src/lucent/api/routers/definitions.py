@@ -231,6 +231,22 @@ class GrantAccess(BaseModel):
     target_id: str  # skill_id or mcp_server_id
 
 
+class CapabilityConsentDecision(BaseModel):
+    """One user's approve/decline decision for a capability on an agent."""
+
+    capability_type: str = Field(
+        ...,
+        pattern=r"^(skill|managed_tool|hook|mcp_server|skills|managed_tools|hooks|mcp_servers|tool|tools|mcp)$",
+        description="Capability family",
+    )
+    capability_id: str = Field(..., min_length=1, description="Capability UUID")
+    decision: str = Field(
+        ...,
+        pattern=r"^(approved|declined)$",
+        description="'approved' to enable it for you, 'declined' to keep it off",
+    )
+
+
 class ImportRequest(BaseModel):
     """Request body for importing a definition from an external source."""
     source_type: str = Field(
@@ -370,114 +386,132 @@ async def delete_agent(agent_id: str, user: AuthenticatedUser):
         raise HTTPException(404, "Agent not found")
 
 
-# ── Agent Access Grants ──────────────────────────────────────────────────
+# ── Agent Access Grants ─────────────────────────────────────────────
+#
+# The agent is the structural hub for capability access. Attaching requires
+# read clearance on both the agent and the capability (enforced inside
+# DefinitionRepository), so a member who can see both may attach. That is
+# safe because an attachment no longer takes effect for anyone else
+# silently: every other user must approve it for themselves, and detaching
+# is limited to the agent owner, the capability owner, or an org admin.
+
+_ATTACH_DENIED_MSG = (
+    "You can only attach capabilities you can see to agents you can see"
+)
+_DETACH_DENIED_MSG = (
+    "Only the agent owner, the capability owner, or an organization admin "
+    "can detach it"
+)
+
+
+async def _attach_capability(
+    *,
+    agent_id: str,
+    capability_type: str,
+    target_id: str,
+    user,
+) -> dict:
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    outcome = await repo.grant_capability(
+        agent_id=agent_id,
+        capability_type=capability_type,
+        capability_id=target_id,
+        org_id=str(user.organization_id),
+        actor_user_id=str(user.id),
+    )
+    from lucent.db.definitions import GrantOutcome
+
+    if outcome is GrantOutcome.ALREADY_ATTACHED:
+        return {
+            "status": "already_attached",
+            "warning": (
+                "This capability is already attached to this agent by another "
+                "user. Approve it for yourself to use it."
+            ),
+        }
+    if outcome is GrantOutcome.DENIED:
+        raise HTTPException(403, _ATTACH_DENIED_MSG)
+    if outcome is GrantOutcome.FAILED:
+        raise HTTPException(400, f"Failed to grant {capability_type}")
+    return {"status": "granted"}
+
+
+async def _detach_capability(
+    *,
+    agent_id: str,
+    capability_type: str,
+    target_id: str,
+    user,
+) -> dict:
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    revoked = await repo.revoke_capability(
+        agent_id=agent_id,
+        capability_type=capability_type,
+        capability_id=target_id,
+        org_id=str(user.organization_id),
+        user_id=str(user.id),
+        user_role=user.role.value,
+    )
+    if not revoked:
+        raise HTTPException(403, _DETACH_DENIED_MSG)
+    return {"status": "revoked"}
 
 
 @router.post("/agents/{agent_id}/skills")
-async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
-    pool = await get_pool()
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Agent not found")
-    if not await repo.get_skill(
-        body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Skill not found")
-    if not await repo.grant_skill(agent_id, body.target_id, org_id=org_id, user_id=str(user.id)):
-        raise HTTPException(400, "Failed to grant skill")
-    return {"status": "granted"}
-
+async def grant_skill_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
+    return await _attach_capability(
+        agent_id=agent_id,
+        capability_type="skill",
+        target_id=body.target_id,
+        user=user,
+    )
 
 @router.delete("/agents/{agent_id}/skills/{skill_id}")
-async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: AdminUser):
-    pool = await get_pool()
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    if not await repo.get_agent(
-        agent_id,
-        str(user.organization_id),
-        requester_user_id=str(user.id),
-        requester_role=user.role.value,
-    ):
-        raise HTTPException(404, "Agent not found")
-    await repo.revoke_skill(
-        agent_id, skill_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+async def revoke_skill_from_agent(agent_id: str, skill_id: str, user: AuthenticatedUser):
+    return await _detach_capability(
+        agent_id=agent_id,
+        capability_type="skill",
+        target_id=skill_id,
+        user=user,
     )
-    return {"status": "revoked"}
-
 
 @router.post("/agents/{agent_id}/mcp-servers")
-async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
-    pool = await get_pool()
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Agent not found")
-    if not await repo.grant_mcp_server(
-        agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
-    ):
-        raise HTTPException(400, "Failed to grant MCP server")
-    return {"status": "granted"}
-
+async def grant_mcp_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
+    return await _attach_capability(
+        agent_id=agent_id,
+        capability_type="mcp_server",
+        target_id=body.target_id,
+        user=user,
+    )
 
 @router.delete("/agents/{agent_id}/mcp-servers/{server_id}")
-async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AdminUser):
-    pool = await get_pool()
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    if not await repo.get_agent(
-        agent_id,
-        str(user.organization_id),
-        requester_user_id=str(user.id),
-        requester_role=user.role.value,
-    ):
-        raise HTTPException(404, "Agent not found")
-    await repo.revoke_mcp_server(
-        agent_id, server_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+async def revoke_mcp_from_agent(agent_id: str, server_id: str, user: AuthenticatedUser):
+    return await _detach_capability(
+        agent_id=agent_id,
+        capability_type="mcp_server",
+        target_id=server_id,
+        user=user,
     )
-    return {"status": "revoked"}
-
 
 @router.post("/agents/{agent_id}/hooks")
-async def grant_hook_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
-    pool = await get_pool()
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Agent not found")
-    hook = await repo.get_hook(
-        body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+async def grant_hook_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
+    return await _attach_capability(
+        agent_id=agent_id,
+        capability_type="hook",
+        target_id=body.target_id,
+        user=user,
     )
-    if not hook or hook.get("status") != "active":
-        raise HTTPException(404, "Active hook not found")
-    if not await repo.grant_hook(agent_id, body.target_id, org_id=org_id, user_id=str(user.id)):
-        raise HTTPException(400, "Failed to grant hook")
-    return {"status": "granted"}
-
 
 @router.delete("/agents/{agent_id}/hooks/{hook_id}")
-async def revoke_hook_from_agent(agent_id: str, hook_id: str, user: AdminUser):
-    pool = await get_pool()
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    if not await repo.get_agent(
-        agent_id,
-        str(user.organization_id),
-        requester_user_id=str(user.id),
-        requester_role=user.role.value,
-    ):
-        raise HTTPException(404, "Agent not found")
-    await repo.revoke_hook(
-        agent_id, hook_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+async def revoke_hook_from_agent(agent_id: str, hook_id: str, user: AuthenticatedUser):
+    return await _detach_capability(
+        agent_id=agent_id,
+        capability_type="hook",
+        target_id=hook_id,
+        user=user,
     )
-    return {"status": "revoked"}
 
 
 # ── Skill Endpoints ──────────────────────────────────────────────────────
@@ -1090,42 +1124,77 @@ async def discover_managed_mcp_proxy_tools(tool_id: str, user: AuthenticatedUser
 
 
 @router.post("/agents/{agent_id}/tools")
-async def grant_managed_tool_to_agent(agent_id: str, body: GrantAccess, user: AdminUser):
-    pool = await get_pool()
-    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    org_id = str(user.organization_id)
-    if not await repo.get_agent(
-        agent_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
-    ):
-        raise HTTPException(404, "Agent not found")
-    tool = await repo.get_managed_tool(
-        body.target_id, org_id, requester_user_id=str(user.id), requester_role=user.role.value
+async def grant_managed_tool_to_agent(agent_id: str, body: GrantAccess, user: AuthenticatedUser):
+    return await _attach_capability(
+        agent_id=agent_id,
+        capability_type="managed_tool",
+        target_id=body.target_id,
+        user=user,
     )
-    if not tool or tool.get("status") != "active":
-        raise HTTPException(404, "Active managed tool not found")
-    if not await repo.grant_managed_tool(
-        agent_id, body.target_id, org_id=org_id, user_id=str(user.id),
-    ):
-        raise HTTPException(400, "Failed to grant managed tool")
-    return {"status": "granted"}
 
 
 @router.delete("/agents/{agent_id}/tools/{tool_id}")
-async def revoke_managed_tool_from_agent(agent_id: str, tool_id: str, user: AdminUser):
+async def revoke_managed_tool_from_agent(agent_id: str, tool_id: str, user: AuthenticatedUser):
+    return await _detach_capability(
+        agent_id=agent_id,
+        capability_type="managed_tool",
+        target_id=tool_id,
+        user=user,
+    )
+
+
+# ── Capability Consent ────────────────────────────────────────────────────
+#
+# Consent is per (user, agent, capability). It is how a person stays in control
+# of what other people have attached to an agent they use — the mechanism that
+# stops a hook or managed tool from being injected into their runs.
+
+
+@router.get("/agents/{agent_id}/consents")
+async def list_agent_consents(agent_id: str, user: AuthenticatedUser):
+    """Return this user's consent state for every capability on the agent."""
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    if not await repo.get_agent(
-        agent_id,
-        str(user.organization_id),
-        requester_user_id=str(user.id),
-        requester_role=user.role.value,
-    ):
-        raise HTTPException(404, "Agent not found")
-    await repo.revoke_managed_tool(
-        agent_id, tool_id,
-        org_id=str(user.organization_id), user_id=str(user.id),
+    org_id = str(user.organization_id)
+    pending = await repo.list_pending_capability_consents(org_id, str(user.id))
+    declined = await repo.list_declined_capability_consents(org_id, str(user.id))
+    return {
+        "pending": [item for item in pending if str(item["agent_id"]) == str(agent_id)],
+        "declined": [item for item in declined if str(item["agent_id"]) == str(agent_id)],
+    }
+
+
+@router.get("/consents")
+async def list_pending_consents(user: AuthenticatedUser):
+    """Everything across all agents awaiting this user's approval or declined."""
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    org_id = str(user.organization_id)
+    pending = await repo.list_pending_capability_consents(org_id, str(user.id))
+    declined = await repo.list_declined_capability_consents(org_id, str(user.id))
+    return {
+        "pending": pending,
+        "declined": declined,
+        "total": len(pending) + len(declined),
+    }
+
+
+@router.post("/agents/{agent_id}/consents")
+async def decide_agent_consent(agent_id: str, body: CapabilityConsentDecision, user: AuthenticatedUser):
+    """Approve or decline one capability for this user."""
+    pool = await get_pool()
+    repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    recorded = await repo.upsert_capability_consent(
+        org_id=str(user.organization_id),
+        agent_id=agent_id,
+        user_id=str(user.id),
+        capability_type=body.capability_type,
+        capability_id=body.capability_id,
+        state=body.decision,
     )
-    return {"status": "revoked"}
+    if not recorded:
+        raise HTTPException(404, "That capability is not attached to this agent")
+    return {"status": body.decision}
 
 
 # ── Pending Proposals ─────────────────────────────────────────────────────

@@ -8,13 +8,20 @@ principal has an explicit read clearance — its owner or owner-group, an
 explicit user/group grant, a built-in's automatic org-wide grant (removable
 by an org owner/admin), or a whole-org grant. Management surfaces (definitions
 UI, approvals, grants) stay on the org-scoped legacy path, role-gated at the
-routes; runtime composition (what an agent pulls in when it runs) still
-trusts the agent.
+routes.
+
+Runtime composition follows the same rule, applied through the agent. A
+capability (skill, managed tool, hook, MCP server) reaches a running agent only
+when it is *attached* to that agent, the *requesting user* can read it, and
+that user has *consented* (or is exempt: built-in, the attacher, or its owner).
+The agent is the structural hub; see ``lucent.agent_capabilities``.
 """
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Final
 from uuid import UUID
 
@@ -155,6 +162,119 @@ class BuiltInProtectionError(Exception):
 
     def __init__(self, msg: str = BUILTIN_PROTECTION_MSG):
         super().__init__(msg)
+
+
+class GrantOutcome(str, Enum):
+    """Result of attaching or detaching a capability on an agent.
+
+    Three distinct outcomes instead of a bool, because callers must tell
+    "you did it" from "someone already did it" from "you may not". Truthiness
+    is preserved for the older ``if not await repo.grant_*()`` call sites:
+    ``ATTACHED`` and ``ALREADY_ATTACHED`` are truthy, ``DENIED``/``FAILED``
+    are falsy. An attachment that exists and that the caller was allowed to
+    create is a success either way — the distinction is for messaging.
+    """
+
+    ATTACHED = "attached"
+    ALREADY_ATTACHED = "already_attached"
+    DENIED = "denied"
+    FAILED = "failed"
+
+    def __bool__(self) -> bool:
+        return self in (GrantOutcome.ATTACHED, GrantOutcome.ALREADY_ATTACHED)
+
+    @property
+    def ok(self) -> bool:
+        """True when the capability is attached to the agent after this call."""
+        return bool(self)
+
+
+@dataclass(frozen=True)
+class CapabilitySpec:
+    """One capability family's storage locations.
+
+    ``capability_type`` is the value stored in
+    ``agent_capability_consents.capability_type`` and the ``definition_type``
+    recorded in the audit stream.
+    """
+
+    capability_type: str
+    target_table: str
+    junction_table: str
+    fk_column: str      # column on the junction table that holds the capability
+    agent_column: str   # column on the junction table that holds the agent
+    consent_column: str  # column on agent_capability_consents for this family
+    has_config_override: bool = False
+
+
+CAPABILITY_SPECS: Final[tuple[CapabilitySpec, ...]] = (
+    CapabilitySpec(
+        capability_type="skill",
+        target_table="skill_definitions",
+        junction_table="agent_skills",
+        fk_column="skill_id",
+        agent_column="agent_id",
+        consent_column="skill_id",
+    ),
+    CapabilitySpec(
+        capability_type="managed_tool",
+        target_table="managed_tool_definitions",
+        junction_table="agent_managed_tools",
+        fk_column="tool_id",
+        agent_column="agent_id",
+        consent_column="managed_tool_id",
+        has_config_override=True,
+    ),
+    CapabilitySpec(
+        capability_type="hook",
+        target_table="hook_definitions",
+        junction_table="agent_hooks",
+        fk_column="hook_id",
+        agent_column="agent_id",
+        consent_column="hook_id",
+        has_config_override=True,
+    ),
+    CapabilitySpec(
+        capability_type="mcp_server",
+        target_table="mcp_server_configs",
+        junction_table="agent_mcp_servers",
+        fk_column="mcp_server_id",
+        agent_column="agent_id",
+        consent_column="mcp_server_id",
+    ),
+)
+
+CAPABILITY_SPEC_BY_TYPE: Final[dict[str, CapabilitySpec]] = {
+    spec.capability_type: spec for spec in CAPABILITY_SPECS
+}
+
+# Aliases accepted from callers/UI. Kept narrow on purpose: anything else is a
+# programming error and should raise rather than silently no-op.
+_CAPABILITY_TYPE_ALIASES: Final[dict[str, str]] = {
+    "skill": "skill",
+    "skills": "skill",
+    "managed_tool": "managed_tool",
+    "managed_tools": "managed_tool",
+    "tool": "managed_tool",
+    "tools": "managed_tool",
+    "hook": "hook",
+    "hooks": "hook",
+    "mcp_server": "mcp_server",
+    "mcp_servers": "mcp_server",
+    "mcp": "mcp_server",
+}
+
+
+def normalize_capability_type(value: str) -> str:
+    """Map a caller-facing capability name onto its canonical type."""
+    key = (value or "").strip().lower()
+    try:
+        return _CAPABILITY_TYPE_ALIASES[key]
+    except KeyError:
+        raise ValueError(f"Unsupported capability type: {value}") from None
+
+
+CONSENT_STATES: Final[frozenset[str]] = frozenset({"approved", "declined"})
 
 
 class DefinitionRepository:
@@ -1807,66 +1927,50 @@ class DefinitionRepository:
         self, agent_id: str, tool_id: str,
         org_id: str | None = None, user_id: str | None = None,
         config_override: dict | None = None,
+        *, actor_user_id: str | None = None, system: bool = False,
     ) -> bool:
-        try:
-            async with scoped_acquire_on(
-                self.pool, organization_id=org_id
-            ) as conn:
-                await conn.execute(
-                    "INSERT INTO agent_managed_tools (agent_id, tool_id, config_override) "
-                    "VALUES ($1, $2, $3::text::jsonb) "
-                    "ON CONFLICT (agent_id, tool_id) DO UPDATE "
-                    "SET config_override = EXCLUDED.config_override",
-                    agent_id,
-                    tool_id,
-                    json.dumps(config_override) if config_override is not None else None,
-                )
-            if org_id:
-                await self._audit(
-                    DEFINITION_GRANT, org_id, "managed_tool", tool_id,
-                    user_id=user_id,
-                    context={"agent_id": agent_id},
-                    notes=f"Granted managed tool '{tool_id}' to agent '{agent_id}'",
-                )
-            return True
-        except Exception:
-            logger.error("Failed to grant managed tool %s to agent %s", tool_id, agent_id,
-                         exc_info=True)
-            return False
+        outcome = await self.grant_capability(
+            agent_id=agent_id,
+            capability_type="managed_tool",
+            capability_id=tool_id,
+            org_id=org_id or "",
+            actor_user_id=actor_user_id or user_id,
+            system=system,
+            config_override=config_override,
+        )
+        return outcome.ok
 
     async def revoke_managed_tool(
         self, agent_id: str, tool_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        *, actor_user_id: str | None = None, requester_role: str | None = None,
+        system: bool = False,
     ) -> bool:
-        async with scoped_acquire_on(
-            self.pool, organization_id=org_id
-        ) as conn:
-            result = await conn.execute(
-                "DELETE FROM agent_managed_tools WHERE agent_id = $1 AND tool_id = $2",
-                agent_id,
-                tool_id,
-            )
-        revoked = result == "DELETE 1"
-        if revoked and org_id:
-            await self._audit(
-                DEFINITION_REVOKE, org_id, "managed_tool", tool_id,
-                user_id=user_id,
-                context={"agent_id": agent_id},
-                notes=f"Revoked managed tool '{tool_id}' from agent '{agent_id}'",
-            )
-        return revoked
+        return await self.revoke_capability(
+            agent_id=agent_id,
+            capability_type="managed_tool",
+            capability_id=tool_id,
+            org_id=org_id or "",
+            user_id=actor_user_id or user_id,
+            user_role=requester_role,
+            system=system,
+        )
 
     async def get_agent_managed_tools(self, agent_id: str, org_id: str | None = None) -> list[dict]:
+        # The organization predicate is defense in depth: the junction table
+        # has no organization column, so a cross-org pairing could only be
+        # written by a bug. It must never be *read* as if it were valid.
         query = """
-            SELECT t.*, amt.config_override FROM managed_tool_definitions t
+            SELECT t.*, amt.config_override, amt.granted_by FROM managed_tool_definitions t
             JOIN agent_managed_tools amt ON t.id = amt.tool_id
             WHERE amt.agent_id = $1 AND t.status = 'active'
+              AND ($2::uuid IS NULL OR t.organization_id = $2::uuid)
             ORDER BY t.name
         """
         async with scoped_acquire_on(
             self.pool, organization_id=org_id, role="system" if not org_id else None
         ) as conn:
-            rows = await conn.fetch(query, agent_id)
+            rows = await conn.fetch(query, agent_id, org_id)
         return [self._normalize_tool_row(r) for r in rows]
 
     async def is_managed_tool_granted_to_agent(self, agent_id: str, tool_id: str, org_id: str | None = None) -> bool:
@@ -2049,196 +2153,744 @@ class DefinitionRepository:
 
     # ── Access Grants ─────────────────────────────────────────────────────
 
+    async def _assert_capability_attach_allowed(
+        self,
+        *,
+        agent_id: str,
+        capability_id: str,
+        spec: CapabilitySpec,
+        org_id: str,
+        actor_user_id: str | None,
+        system: bool,
+    ) -> GrantOutcome:
+        """Authorize attaching one capability to one agent.
+
+        Fail-closed chokepoint shared by every attach surface (web, REST, MCP,
+        built-in sync). Attaching requires *read* clearance on both endpoints:
+        an agent a user cannot see is not one they may modify, and a capability
+        a user cannot see is not one they may hand to an agent.
+
+        ``system=True`` is the seed path (built-in sync, default hooks). It
+        skips the read checks because there is no principal, and it is only
+        reachable from code that runs as the instance. Everything else must
+        name an actor.
+        """
+        if not org_id:
+            # Tenant-scoped writes are fail-closed: no organization, no write.
+            return GrantOutcome.DENIED
+        if system:
+            return GrantOutcome.ATTACHED
+        if not actor_user_id:
+            return GrantOutcome.DENIED
+
+        from lucent.db.pool import get_authorized_pool_for_user
+
+        try:
+            authorized_pool = await get_authorized_pool_for_user(
+                self.pool,
+                {"id": actor_user_id, "organization_id": org_id},
+                DEFINITIONS_AUTH_POLICIES,
+                "read",
+            )
+        except (KeyError, TypeError, ValueError):
+            return GrantOutcome.DENIED
+
+        repository = DefinitionRepository(authorized_pool)
+        agent = await repository.get_usable_agent(agent_id)
+        if not agent or str(agent.get("organization_id")) != str(org_id):
+            return GrantOutcome.DENIED
+
+        capability = await self._get_usable_capability(repository, spec, capability_id)
+        if not capability:
+            return GrantOutcome.DENIED
+
+        # A capability attached to an agent must belong to the same
+        # organization. The junction tables carry no organization column, so
+        # this is the only place the cross-tenant pairing can be rejected.
+        if str(capability.get("organization_id")) != str(org_id):
+            return GrantOutcome.DENIED
+        return GrantOutcome.ATTACHED
+
+    @staticmethod
+    async def _get_usable_capability(
+        repository: "DefinitionRepository",
+        spec: CapabilitySpec,
+        capability_id: str,
+    ) -> dict | None:
+        """Clearance-gated lookup for one capability family.
+
+        ``repository`` must be bound to an authorized pool, so an unreadable
+        capability is simply absent rather than merely unvalidated.
+        """
+        getter = {
+            "skill": repository.get_usable_skill,
+            "managed_tool": repository.get_usable_managed_tool,
+            "hook": repository.get_usable_hook,
+            "mcp_server": repository.get_usable_mcp_server,
+        }[spec.capability_type]
+        return await getter(capability_id)
+
+    async def can_attach_capability(
+        self,
+        *,
+        agent_id: str,
+        capability_type: str,
+        capability_id: str,
+        org_id: str,
+        actor_user_id: str,
+    ) -> bool:
+        """Public read-only check for UI affordances (no writes)."""
+        spec = CAPABILITY_SPEC_BY_TYPE[normalize_capability_type(capability_type)]
+        outcome = await self._assert_capability_attach_allowed(
+            agent_id=agent_id,
+            capability_id=capability_id,
+            spec=spec,
+            org_id=org_id,
+            actor_user_id=actor_user_id,
+            system=False,
+        )
+        return outcome.ok
+
+    async def _capability_is_attached(
+        self, spec: CapabilitySpec, agent_id: str, capability_id: str, org_id: str,
+    ) -> bool:
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            return bool(
+                await conn.fetchval(
+                    f"SELECT EXISTS(SELECT 1 FROM {spec.junction_table} "
+                    f"WHERE {spec.agent_column} = $1 AND {spec.fk_column} = $2)",
+                    agent_id,
+                    capability_id,
+                )
+            )
+
+    async def _get_junction_granted_by(
+        self, spec: CapabilitySpec, agent_id: str, capability_id: str, org_id: str,
+    ) -> str | None:
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            value = await conn.fetchval(
+                f"SELECT granted_by FROM {spec.junction_table} "
+                f"WHERE {spec.agent_column} = $1 AND {spec.fk_column} = $2",
+                agent_id,
+                capability_id,
+            )
+        return str(value) if value else None
+
+    async def _audit_capability_attach(
+        self,
+        *,
+        spec: CapabilitySpec,
+        agent_id: str,
+        capability_id: str,
+        org_id: str | None,
+        user_id: str | None,
+        event_type: str,
+        verb: str,
+    ) -> None:
+        if not org_id:
+            return
+        await self._audit(
+            event_type, org_id, spec.capability_type, capability_id,
+            user_id=user_id,
+            context={"agent_id": agent_id},
+            notes=f"{verb} {spec.capability_type} '{capability_id}' "
+                  f"{'to' if verb == 'Granted' else 'from'} agent '{agent_id}'",
+        )
+
+    async def _insert_capability_grant(
+        self,
+        *,
+        spec: CapabilitySpec,
+        agent_id: str,
+        capability_id: str,
+        org_id: str,
+        actor_user_id: str | None,
+        config_override: dict | None = None,
+    ) -> bool:
+        columns = [spec.agent_column, spec.fk_column, "granted_by"]
+        values = ["$1", "$2", "$3"]
+        params: list[Any] = [agent_id, capability_id, actor_user_id]
+        updates = []
+        if spec.has_config_override:
+            columns.append("config_override")
+            values.append(f"${len(params) + 1}::text::jsonb")
+            params.append(
+                json.dumps(config_override) if config_override is not None else None
+            )
+            updates.append("config_override = EXCLUDED.config_override")
+
+        # granted_by is only recorded on first attach. A second attach by a
+        # different user is refused up front (ALREADY_ATTACHED), so the only
+        # way to reach the conflict path is a retry by the same actor.
+        conflict_target = f"({spec.agent_column}, {spec.fk_column})"
+        conflict_action = (
+            "DO UPDATE SET " + ", ".join(updates) if updates else "DO NOTHING"
+        )
+        query = (
+            f"INSERT INTO {spec.junction_table} ({', '.join(columns)}) "
+            f"VALUES ({', '.join(values)}) "
+            f"ON CONFLICT {conflict_target} {conflict_action}"
+        )
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            await conn.execute(query, *params)
+        return True
+
+    async def grant_capability(
+        self,
+        *,
+        agent_id: str,
+        capability_type: str,
+        capability_id: str,
+        org_id: str,
+        actor_user_id: str | None,
+        system: bool = False,
+        config_override: dict | None = None,
+    ) -> GrantOutcome:
+        """Generic attach path: authorize, insert, and report the outcome."""
+        spec = CAPABILITY_SPEC_BY_TYPE[normalize_capability_type(capability_type)]
+        if not org_id:
+            return GrantOutcome.FAILED
+        allowed = await self._assert_capability_attach_allowed(
+            agent_id=agent_id,
+            capability_id=capability_id,
+            spec=spec,
+            org_id=org_id,
+            actor_user_id=actor_user_id,
+            system=system,
+        )
+        if not allowed.ok:
+            return GrantOutcome.DENIED
+        try:
+            if await self._capability_is_attached(spec, agent_id, capability_id, org_id):
+                return GrantOutcome.ALREADY_ATTACHED
+            await self._insert_capability_grant(
+                spec=spec,
+                agent_id=agent_id,
+                capability_id=capability_id,
+                org_id=org_id,
+                actor_user_id=None if system else actor_user_id,
+                config_override=config_override,
+            )
+        except Exception:
+            logger.error(
+                "Failed to attach %s %s to agent %s",
+                spec.capability_type, capability_id, agent_id, exc_info=True,
+            )
+            return GrantOutcome.FAILED
+        await self._audit_capability_attach(
+            spec=spec, agent_id=agent_id, capability_id=capability_id,
+            org_id=org_id, user_id=actor_user_id,
+            event_type=DEFINITION_GRANT, verb="Granted",
+        )
+        return GrantOutcome.ATTACHED
+
+    async def can_revoke_capability(
+        self,
+        *,
+        agent_id: str,
+        capability_type: str,
+        capability_id: str,
+        org_id: str,
+        user_id: str,
+        user_role: str | None = None,
+    ) -> bool:
+        """May this user detach a capability from this agent?
+
+        Detaching is destructive for everyone using the agent, so it is
+        restricted to the people responsible for the two ends: the agent's
+        owner, the capability's owner, or an org admin/owner. A user who simply
+        does not want the capability declines it for themselves instead, which
+        never affects anyone else.
+        """
+        spec = CAPABILITY_SPEC_BY_TYPE[normalize_capability_type(capability_type)]
+        if not org_id:
+            return False
+        role = self._role_value(user_role)
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            agent_row = await conn.fetchrow(
+                "SELECT owner_user_id, owner_group_id, scope FROM agent_definitions "
+                "WHERE id = $1 AND organization_id = $2",
+                agent_id, org_id,
+            )
+            capability_row = await conn.fetchrow(
+                f"SELECT owner_user_id, owner_group_id, scope FROM {spec.target_table} "
+                "WHERE id = $1 AND organization_id = $2",
+                capability_id, org_id,
+            )
+            group_ids = [
+                str(row["group_id"])
+                for row in await conn.fetch(
+                    "SELECT group_id FROM user_groups WHERE user_id = $1",
+                    UUID(user_id),
+                )
+            ]
+        if not agent_row or not capability_row:
+            return False
+        if role in ("admin", "owner"):
+            return True
+        if agent_row["owner_user_id"] and str(agent_row["owner_user_id"]) == str(user_id):
+            return True
+        if capability_row["owner_user_id"] and str(capability_row["owner_user_id"]) == str(user_id):
+            return True
+        for owner_group_id in (
+            agent_row["owner_group_id"],
+            capability_row["owner_group_id"],
+        ):
+            if owner_group_id and str(owner_group_id) in group_ids:
+                return True
+        return False
+
+    async def revoke_capability(
+        self,
+        *,
+        agent_id: str,
+        capability_type: str,
+        capability_id: str,
+        org_id: str,
+        user_id: str | None,
+        user_role: str | None = None,
+        system: bool = False,
+    ) -> bool:
+        """Generic detach path: authorize, delete, and audit."""
+        spec = CAPABILITY_SPEC_BY_TYPE[normalize_capability_type(capability_type)]
+        if not org_id:
+            return False
+        if not system:
+            if not user_id:
+                return False
+            if not await self.can_revoke_capability(
+                agent_id=agent_id,
+                capability_type=spec.capability_type,
+                capability_id=capability_id,
+                org_id=org_id,
+                user_id=user_id,
+                user_role=user_role,
+            ):
+                return False
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            result = await conn.execute(
+                f"DELETE FROM {spec.junction_table} "
+                f"WHERE {spec.agent_column} = $1 AND {spec.fk_column} = $2",
+                agent_id,
+                capability_id,
+            )
+            # Detaching removes the ask: a stale approval for a capability that
+            # is no longer attached would silently apply if it were re-added.
+            await conn.execute(
+                f"DELETE FROM agent_capability_consents "
+                f"WHERE agent_id = $1 AND capability_type = $2 "
+                f"AND {spec.consent_column} = $3",
+                agent_id,
+                spec.capability_type,
+                capability_id,
+            )
+        revoked = result == "DELETE 1"
+        if revoked:
+            await self._audit_capability_attach(
+                spec=spec, agent_id=agent_id, capability_id=capability_id,
+                org_id=org_id, user_id=user_id,
+                event_type=DEFINITION_REVOKE, verb="Revoked",
+            )
+        return revoked
+
     async def grant_skill(
         self, agent_id: str, skill_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        *, actor_user_id: str | None = None, system: bool = False,
     ) -> bool:
-        try:
-            async with scoped_acquire_on(
-                self.pool, organization_id=org_id
-            ) as conn:
-                await conn.execute(
-                    "INSERT INTO agent_skills (agent_id, skill_id) "
-                    "VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    agent_id,
-                    skill_id,
-                )
-            if org_id:
-                await self._audit(
-                    DEFINITION_GRANT, org_id, "skill", skill_id,
-                    user_id=user_id,
-                    context={"agent_id": agent_id},
-                    notes=f"Granted skill '{skill_id}' to agent '{agent_id}'",
-                )
-            return True
-        except Exception:
-            logger.error("Failed to grant skill %s to agent %s", skill_id, agent_id, exc_info=True)
-            return False
+        outcome = await self.grant_capability(
+            agent_id=agent_id,
+            capability_type="skill",
+            capability_id=skill_id,
+            org_id=org_id or "",
+            actor_user_id=actor_user_id or user_id,
+            system=system,
+        )
+        return outcome.ok
 
     async def revoke_skill(
         self, agent_id: str, skill_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        *, actor_user_id: str | None = None, requester_role: str | None = None,
+        system: bool = False,
     ) -> bool:
-        async with scoped_acquire_on(
-            self.pool, organization_id=org_id
-        ) as conn:
-            result = await conn.execute(
-                "DELETE FROM agent_skills WHERE agent_id = $1 AND skill_id = $2",
-                agent_id,
-                skill_id,
-            )
-        revoked = result == "DELETE 1"
-        if revoked and org_id:
-            await self._audit(
-                DEFINITION_REVOKE, org_id, "skill", skill_id,
-                user_id=user_id,
-                context={"agent_id": agent_id},
-                notes=f"Revoked skill '{skill_id}' from agent '{agent_id}'",
-            )
-        return revoked
+        return await self.revoke_capability(
+            agent_id=agent_id,
+            capability_type="skill",
+            capability_id=skill_id,
+            org_id=org_id or "",
+            user_id=actor_user_id or user_id,
+            user_role=requester_role,
+            system=system,
+        )
 
     async def grant_mcp_server(
         self, agent_id: str, mcp_server_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        *, actor_user_id: str | None = None, system: bool = False,
     ) -> bool:
-        try:
-            async with scoped_acquire_on(
-                self.pool, organization_id=org_id
-            ) as conn:
-                await conn.execute(
-                    "INSERT INTO agent_mcp_servers (agent_id, mcp_server_id) "
-                    "VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    agent_id,
-                    mcp_server_id,
-                )
-            if org_id:
-                await self._audit(
-                    DEFINITION_GRANT, org_id, "mcp_server", mcp_server_id,
-                    user_id=user_id,
-                    context={"agent_id": agent_id},
-                    notes=f"Granted MCP server '{mcp_server_id}' to agent '{agent_id}'",
-                )
-            return True
-        except Exception:
-            logger.error(
-                "Failed to grant MCP server %s to agent %s",
-                mcp_server_id,
-                agent_id,
-                exc_info=True,
-            )
-            return False
+        outcome = await self.grant_capability(
+            agent_id=agent_id,
+            capability_type="mcp_server",
+            capability_id=mcp_server_id,
+            org_id=org_id or "",
+            actor_user_id=actor_user_id or user_id,
+            system=system,
+        )
+        return outcome.ok
 
     async def revoke_mcp_server(
         self, agent_id: str, mcp_server_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        *, actor_user_id: str | None = None, requester_role: str | None = None,
+        system: bool = False,
     ) -> bool:
-        async with scoped_acquire_on(
-            self.pool, organization_id=org_id
-        ) as conn:
-            result = await conn.execute(
-                "DELETE FROM agent_mcp_servers WHERE agent_id = $1 AND mcp_server_id = $2",
-                agent_id,
-                mcp_server_id,
-            )
-        revoked = result == "DELETE 1"
-        if revoked and org_id:
-            await self._audit(
-                DEFINITION_REVOKE, org_id, "mcp_server", mcp_server_id,
-                user_id=user_id,
-                context={"agent_id": agent_id},
-                notes=f"Revoked MCP server '{mcp_server_id}' from agent '{agent_id}'",
-            )
-        return revoked
+        return await self.revoke_capability(
+            agent_id=agent_id,
+            capability_type="mcp_server",
+            capability_id=mcp_server_id,
+            org_id=org_id or "",
+            user_id=actor_user_id or user_id,
+            user_role=requester_role,
+            system=system,
+        )
 
     async def grant_hook(
         self, agent_id: str, hook_id: str,
         org_id: str | None = None, user_id: str | None = None,
         config_override: dict | None = None,
+        *, actor_user_id: str | None = None, system: bool = False,
     ) -> bool:
-        try:
-            async with scoped_acquire_on(
-                self.pool, organization_id=org_id
-            ) as conn:
-                await conn.execute(
-                    "INSERT INTO agent_hooks (agent_id, hook_id, config_override) "
-                    "VALUES ($1, $2, $3::text::jsonb) "
-                    "ON CONFLICT (agent_id, hook_id) DO UPDATE "
-                    "SET config_override = EXCLUDED.config_override",
-                    agent_id,
-                    hook_id,
-                    json.dumps(config_override) if config_override is not None else None,
-                )
-            if org_id:
-                await self._audit(
-                    DEFINITION_GRANT, org_id, "hook", hook_id,
-                    user_id=user_id,
-                    context={"agent_id": agent_id},
-                    notes=f"Granted hook '{hook_id}' to agent '{agent_id}'",
-                )
-            return True
-        except Exception:
-            logger.error("Failed to grant hook %s to agent %s", hook_id, agent_id, exc_info=True)
-            return False
+        outcome = await self.grant_capability(
+            agent_id=agent_id,
+            capability_type="hook",
+            capability_id=hook_id,
+            org_id=org_id or "",
+            actor_user_id=actor_user_id or user_id,
+            system=system,
+            config_override=config_override,
+        )
+        return outcome.ok
 
     async def revoke_hook(
         self, agent_id: str, hook_id: str,
         org_id: str | None = None, user_id: str | None = None,
+        *, actor_user_id: str | None = None, requester_role: str | None = None,
+        system: bool = False,
     ) -> bool:
-        async with scoped_acquire_on(
-            self.pool, organization_id=org_id
-        ) as conn:
-            result = await conn.execute(
-                "DELETE FROM agent_hooks WHERE agent_id = $1 AND hook_id = $2",
-                agent_id,
-                hook_id,
+        return await self.revoke_capability(
+            agent_id=agent_id,
+            capability_type="hook",
+            capability_id=hook_id,
+            org_id=org_id or "",
+            user_id=actor_user_id or user_id,
+            user_role=requester_role,
+            system=system,
+        )
+
+    # ── Capability consent ────────────────────────────────────────────────
+
+    async def upsert_capability_consent(
+        self,
+        *,
+        org_id: str,
+        agent_id: str,
+        user_id: str,
+        capability_type: str,
+        capability_id: str,
+        state: str,
+    ) -> bool:
+        """Record one user's approve/decline decision for a capability.
+
+        Consent is only recorded against a capability that is actually
+        attached to the agent; otherwise a stale decision would silently apply
+        the next time somebody attached it.
+        """
+        spec = CAPABILITY_SPEC_BY_TYPE[normalize_capability_type(capability_type)]
+        if state not in CONSENT_STATES:
+            raise ValueError(f"Unsupported consent state: {state}")
+        if not org_id:
+            return False
+        if not await self._capability_is_attached(spec, agent_id, capability_id, org_id):
+            return False
+        columns = [
+            "organization_id", "agent_id", "capability_type",
+            spec.consent_column, "user_id", "state",
+        ]
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            await conn.execute(
+                f"INSERT INTO agent_capability_consents ({', '.join(columns)}) "
+                "VALUES ($1, $2, $3, $4, $5, $6) "
+                f"ON CONFLICT (agent_id, user_id, {spec.consent_column}) "
+                f"WHERE capability_type = '{spec.capability_type}' "
+                "DO UPDATE SET state = EXCLUDED.state, decided_at = NOW()",
+                org_id, agent_id, spec.capability_type, capability_id, user_id, state,
             )
-        revoked = result == "DELETE 1"
-        if revoked and org_id:
-            await self._audit(
-                DEFINITION_REVOKE, org_id, "hook", hook_id,
-                user_id=user_id,
-                context={"agent_id": agent_id},
-                notes=f"Revoked hook '{hook_id}' from agent '{agent_id}'",
+        await self._audit(
+            DEFINITION_UPDATE, org_id, spec.capability_type, capability_id,
+            user_id=user_id,
+            context={"agent_id": agent_id, "consent_state": state},
+            notes=(
+                f"{'Approved' if state == 'approved' else 'Declined'} "
+                f"{spec.capability_type} '{capability_id}' for agent '{agent_id}'"
+            ),
+        )
+        return True
+
+    async def list_capability_consents(
+        self, agent_id: str, user_id: str, org_id: str,
+    ) -> dict[str, dict[str, str]]:
+        """Return this user's recorded decisions for one agent, by type → id."""
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            rows = await conn.fetch(
+                "SELECT capability_type, skill_id, managed_tool_id, hook_id, "
+                "mcp_server_id, state FROM agent_capability_consents "
+                "WHERE agent_id = $1 AND user_id = $2 AND organization_id = $3",
+                agent_id, user_id, org_id,
             )
-        return revoked
+        decisions: dict[str, dict[str, str]] = {spec.capability_type: {} for spec in CAPABILITY_SPECS}
+        for row in rows:
+            spec = CAPABILITY_SPEC_BY_TYPE[str(row["capability_type"])]
+            target_id = row[spec.consent_column]
+            if target_id:
+                decisions[spec.capability_type][str(target_id)] = str(row["state"])
+        return decisions
+
+    # Shared consent predicate: $2 = user_id, $4 = the user's group ids.
+    # Kept in one place so the pending listing, the badge count, and the runtime
+    # resolver's exemptions cannot drift apart.
+    _CONSENT_CANDIDATE_PREDICATE = (
+        "(j.granted_by IS NULL OR j.granted_by <> $2) "
+        "AND COALESCE(c.scope, 'instance') <> 'built-in' "
+        "AND (c.owner_user_id IS NULL OR c.owner_user_id <> $2) "
+        "AND (c.owner_group_id IS NULL OR NOT (c.owner_group_id = ANY($4::uuid[])))"
+    )
+
+    # Readability gate, mirroring ``_authorized_table_sql``: a capability the
+    # user cannot read must never be surfaced here. Without this the approvals
+    # panel would disclose the name and description of capabilities the user
+    # has no clearance for, and would ask them to approve something that could
+    # never take effect (the runtime resolver already skips unreadable
+    # capabilities, so the two views would disagree).
+    _CONSENT_READABLE_PREDICATE = """
+        EXISTS (
+            SELECT 1 FROM auth_clearances ac
+            WHERE ac.auth_id = c.auth_id
+              AND (
+                    (ac.principal_type = 'user'  AND ac.principal_id = $2::uuid)
+                 OR (ac.principal_type = 'group' AND ac.principal_id = ANY($4::uuid[]))
+                 OR (ac.principal_type = 'org'   AND ac.principal_id = $1::uuid)
+              )
+        )
+    """
+
+    @classmethod
+    def _consent_candidate_predicate(cls) -> str:
+        return cls._CONSENT_CANDIDATE_PREDICATE
+
+    @classmethod
+    def _consent_readable_predicate(cls) -> str:
+        return cls._CONSENT_READABLE_PREDICATE
+
+    async def _list_capability_consent_candidates(
+        self,
+        *,
+        org_id: str,
+        user_id: str,
+        state: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """Attached capabilities in a given consent state for one user.
+
+        ``state=None`` means "no recorded decision yet" (pending). The
+        exemption predicates mirror :func:`lucent.agent_capabilities._is_exempt`
+        so the listing and the runtime resolver can never disagree about who
+        needs to approve what.
+        """
+        results: list[dict] = []
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            group_ids = [
+                UUID(str(row["group_id"]))
+                for row in await conn.fetch(
+                    "SELECT group_id FROM user_groups WHERE user_id = $1",
+                    UUID(user_id),
+                )
+            ]
+            for spec in CAPABILITY_SPECS:
+                state_clause = (
+                    "AND consent.id IS NULL"
+                    if state is None
+                    else "AND consent.state = $6"
+                )
+                params: list[Any] = [
+                    UUID(org_id),
+                    UUID(user_id),
+                    spec.capability_type,
+                    group_ids,
+                    limit,
+                ]
+                if state is not None:
+                    params.append(state)
+                rows = await conn.fetch(
+                    f"""
+                    SELECT c.id AS capability_id, c.name AS capability_name,
+                           c.description AS capability_description,
+                           a.id AS agent_id, a.name AS agent_name
+                    FROM {spec.junction_table} j
+                    JOIN agent_definitions a
+                      ON a.id = j.{spec.agent_column}
+                     AND a.organization_id = $1
+                     AND a.status = 'active'
+                    JOIN {spec.target_table} c
+                      ON c.id = j.{spec.fk_column}
+                     AND c.organization_id = $1
+                     AND c.status = 'active'
+                    LEFT JOIN agent_capability_consents consent
+                      ON consent.agent_id = a.id
+                     AND consent.user_id = $2
+                     AND consent.capability_type = $3
+                     AND consent.{spec.consent_column} = c.id
+                    WHERE {self._consent_candidate_predicate()}
+                      AND {self._consent_readable_predicate()}
+                      {state_clause}
+                    ORDER BY a.name, c.name
+                    LIMIT $5
+                    """,
+                    *params,
+                )
+                for row in rows:
+                    results.append(
+                        {
+                            "capability_type": spec.capability_type,
+                            "capability_id": str(row["capability_id"]),
+                            "capability_name": row["capability_name"],
+                            "capability_description": row["capability_description"],
+                            "agent_id": str(row["agent_id"]),
+                            "agent_name": row["agent_name"],
+                        }
+                    )
+        results.sort(key=lambda item: (item["agent_name"], item["capability_name"]))
+        return results
+
+    async def list_pending_capability_consents(
+        self, org_id: str, user_id: str, *, limit: int = 100,
+    ) -> list[dict]:
+        """Capabilities attached to an agent this user has not decided on yet."""
+        return await self._list_capability_consent_candidates(
+            org_id=org_id, user_id=user_id, state=None, limit=limit,
+        )
+
+    async def list_declined_capability_consents(
+        self, org_id: str, user_id: str, *, limit: int = 100,
+    ) -> list[dict]:
+        """Capabilities this user declined, kept visible for re-approval."""
+        return await self._list_capability_consent_candidates(
+            org_id=org_id, user_id=user_id, state="declined", limit=limit,
+        )
+
+
+    async def count_pending_capability_consents(self, org_id: str, user_id: str) -> int:
+        """Cheap navigation-badge count (same predicate as the full listing)."""
+        total = 0
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            group_ids = [
+                UUID(str(row["group_id"]))
+                for row in await conn.fetch(
+                    "SELECT group_id FROM user_groups WHERE user_id = $1",
+                    UUID(user_id),
+                )
+            ]
+            for spec in CAPABILITY_SPECS:
+                count = await conn.fetchval(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {spec.junction_table} j
+                    JOIN agent_definitions a
+                      ON a.id = j.{spec.agent_column}
+                     AND a.organization_id = $1
+                     AND a.status = 'active'
+                    JOIN {spec.target_table} c
+                      ON c.id = j.{spec.fk_column}
+                     AND c.organization_id = $1
+                     AND c.status = 'active'
+                    LEFT JOIN agent_capability_consents consent
+                      ON consent.agent_id = a.id
+                     AND consent.user_id = $2
+                     AND consent.capability_type = $3
+                     AND consent.{spec.consent_column} = c.id
+                    WHERE {self._CONSENT_CANDIDATE_PREDICATE}
+                      AND {self._CONSENT_READABLE_PREDICATE}
+                      AND consent.id IS NULL
+                    """,
+                    UUID(org_id),
+                    UUID(user_id),
+                    spec.capability_type,
+                    group_ids,
+                )
+                total += int(count or 0)
+        return total
+
+    async def get_accessible_capability_ids(
+        self, capability_type: str, org_id: str,
+    ) -> set[str]:
+        """IDs of one capability family the authorized pool's principal can read.
+
+        Requires an authorized pool: the pool rewrite injects the clearance
+        filter, so an unreadable capability is absent rather than merely
+        unvalidated. Raises ``TypeError`` on a plain pool — fail closed.
+        """
+        spec = CAPABILITY_SPEC_BY_TYPE[normalize_capability_type(capability_type)]
+        if not isinstance(self.pool, AuthorizedDatabasePool):
+            raise TypeError(
+                "Capability usage reads require an AuthorizedDatabasePool "
+                "(capability visibility is clearance-driven)"
+            )
+        rows = await self._authorized_conn_fetch(
+            f"SELECT id FROM {spec.target_table} WHERE organization_id = $1",
+            UUID(org_id),
+        )
+        return {str(row["id"]) for row in rows}
 
     async def get_agent_skills(self, agent_id: str, org_id: str | None = None) -> list[dict]:
         query = """
-            SELECT s.* FROM skill_definitions s
+            SELECT s.*, ags.granted_by FROM skill_definitions s
             JOIN agent_skills ags ON s.id = ags.skill_id
             WHERE ags.agent_id = $1 AND s.status = 'active'
+              AND ($2::uuid IS NULL OR s.organization_id = $2::uuid)
             ORDER BY s.name
         """
         async with scoped_acquire_on(
             self.pool, organization_id=org_id, role="system" if not org_id else None
         ) as conn:
-            rows = await conn.fetch(query, agent_id)
+            rows = await conn.fetch(query, agent_id, org_id)
         return [self._normalize_definition_row(r) for r in rows]
 
     async def get_agent_mcp_servers(self, agent_id: str, org_id: str | None = None) -> list[dict]:
         query = """
-            SELECT m.*, agm.allowed_tools FROM mcp_server_configs m
+            SELECT m.*, agm.allowed_tools, agm.granted_by FROM mcp_server_configs m
             JOIN agent_mcp_servers agm ON m.id = agm.mcp_server_id
             WHERE agm.agent_id = $1 AND m.status = 'active'
+              AND ($2::uuid IS NULL OR m.organization_id = $2::uuid)
             ORDER BY m.name
         """
         async with scoped_acquire_on(
             self.pool, organization_id=org_id, role="system" if not org_id else None
         ) as conn:
-            rows = await conn.fetch(query, agent_id)
+            rows = await conn.fetch(query, agent_id, org_id)
         return [self._normalize_mcp_row(r) for r in rows]
 
     async def get_agent_hooks(self, agent_id: str, org_id: str | None = None) -> list[dict]:
         query = """
-            SELECT h.*, ah.config_override FROM hook_definitions h
+            SELECT h.*, ah.config_override, ah.granted_by FROM hook_definitions h
             JOIN agent_hooks ah ON h.id = ah.hook_id
             WHERE ah.agent_id = $1 AND h.status = 'active'
+              AND ($2::uuid IS NULL OR h.organization_id = $2::uuid)
             ORDER BY h.name
         """
         async with scoped_acquire_on(
             self.pool, organization_id=org_id, role="system" if not org_id else None
         ) as conn:
-            rows = await conn.fetch(query, agent_id)
+            rows = await conn.fetch(query, agent_id, org_id)
         return [self._normalize_hook_row(r) for r in rows]
 
     async def grant_default_hooks_to_agent(self, agent_id: str, org_id: str) -> int:
@@ -2248,8 +2900,8 @@ class DefinitionRepository:
         ) as conn:
             result = await conn.execute(
                 """
-                INSERT INTO agent_hooks (agent_id, hook_id)
-                SELECT $1, h.id
+                INSERT INTO agent_hooks (agent_id, hook_id, granted_by)
+                SELECT $1, h.id, NULL
                 FROM hook_definitions h
                 WHERE h.organization_id = $2
                     AND h.status = 'active'
@@ -2270,8 +2922,8 @@ class DefinitionRepository:
         ) as conn:
             result = await conn.execute(
                 """
-                INSERT INTO agent_hooks (agent_id, hook_id)
-                SELECT a.id, h.id
+                INSERT INTO agent_hooks (agent_id, hook_id, granted_by)
+                SELECT a.id, h.id, NULL
                 FROM agent_definitions a
                 JOIN hook_definitions h ON h.organization_id = a.organization_id
                 WHERE a.organization_id = $1
@@ -3047,12 +3699,14 @@ class DefinitionRepository:
                 )
                 current_skill_ids = {str(r["skill_id"]) for r in current_rows}
 
-                # Add missing grants
+                # Add missing grants. System-originated (granted_by stays NULL):
+                # built-in skills are consent-exempt by scope, and a NULL
+                # grantor must never look like "somebody else attached this".
                 to_add = declared_skill_ids - current_skill_ids
                 for sid in to_add:
                     await conn.execute(
-                        "INSERT INTO agent_skills (agent_id, skill_id) "
-                        "VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                        "INSERT INTO agent_skills (agent_id, skill_id, granted_by) "
+                        "VALUES ($1, $2, NULL) ON CONFLICT DO NOTHING",
                         agent_id,
                         sid,
                     )

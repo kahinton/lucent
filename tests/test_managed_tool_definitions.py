@@ -281,7 +281,10 @@ async def test_repository_managed_tool_proposal_and_grant(repo, auth_user):
         status="active",
         owner_user_id=user_id,
     )
-    assert await repo.grant_managed_tool(str(agent["id"]), str(tool["id"]), org_id=org_id)
+    assert await repo.grant_managed_tool(
+        str(agent["id"]), str(tool["id"]),
+        org_id=org_id, actor_user_id=user_id,
+    )
     granted = await repo.get_agent_managed_tools(str(agent["id"]))
     assert [item["name"] for item in granted] == ["echo-value"]
     assert await repo.is_managed_tool_granted_to_agent(str(agent["id"]), str(tool["id"]))
@@ -346,7 +349,10 @@ async def test_run_managed_tool_uses_trusted_agent_context(mcp, repo, auth_user)
         status="active",
         owner_user_id=user_id,
     )
-    await repo.grant_managed_tool(str(agent["id"]), str(tool["id"]), org_id=org_id)
+    await repo.grant_managed_tool(
+        str(agent["id"]), str(tool["id"]),
+        org_id=org_id, actor_user_id=user_id,
+    )
     set_llm_context(agent_definition_id=str(agent["id"]))
 
     mocked = AsyncMock(

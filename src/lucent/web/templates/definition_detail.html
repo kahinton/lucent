@@ -9,6 +9,17 @@
     <span class="text-gray-700">{{ definition.name }}</span>
 </div>
 
+{% if request.query_params.get('error') %}
+<div class="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800" role="alert">
+    {{ request.query_params.get('error') }}
+</div>
+{% endif %}
+{% if request.query_params.get('warning') %}
+<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="alert">
+    {{ request.query_params.get('warning') }}
+</div>
+{% endif %}
+
 <div class="bg-white rounded-lg border border-gray-200 p-6 mb-6">
     <div class="flex items-start justify-between gap-4">
         <div class="flex-1 min-w-0">
@@ -275,6 +286,85 @@
         {% endif %}
     </div>
 </div>
+
+{# Per-user consent. Capabilities attached by other people do not take effect
+   for you until you approve them, so they are surfaced here as an explicit
+   decision rather than silently appearing in — or vanishing from — the lists. #}
+{% if pending_capabilities %}
+<div class="bg-amber-50 border border-amber-200 rounded-lg p-5 mb-6">
+    <div class="flex flex-wrap items-start justify-between gap-3 mb-3">
+        <div class="min-w-0">
+            <h2 class="text-sm font-semibold text-amber-800 uppercase tracking-wider">Awaiting your approval</h2>
+            <p class="text-xs text-amber-700 mt-1">
+                These are attached to this agent by other people. They stay inactive for you until you approve them.
+            </p>
+        </div>
+        <div class="flex shrink-0 gap-2">
+            <form method="POST" action="/definitions/agents/{{ definition.id }}/consent/bulk">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="decision" value="approved">
+                <button type="submit" class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 font-medium">Approve all</button>
+            </form>
+            <form method="POST" action="/definitions/agents/{{ definition.id }}/consent/bulk">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="decision" value="declined">
+                <button type="submit" class="px-3 py-1.5 text-sm bg-white text-amber-800 border border-amber-300 rounded-md hover:bg-amber-100 font-medium">Decline all</button>
+            </form>
+        </div>
+    </div>
+    <div class="space-y-2">
+        {% for item in pending_capabilities %}
+        <div class="flex flex-wrap items-center justify-between gap-2 bg-white p-2 rounded-md border border-amber-100">
+            <div class="min-w-0 flex-1">
+                <span class="text-sm font-medium text-gray-800">{{ item.capability_name }}</span>
+                <span class="ml-2 px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600">{{ item.capability_type | replace('_', ' ') }}</span>
+                {% if item.capability_description %}<p class="text-xs text-gray-500 mt-0.5 truncate">{{ item.capability_description }}</p>{% endif %}
+            </div>
+            <div class="flex shrink-0 gap-2">
+                <form method="POST" action="/definitions/agents/{{ definition.id }}/consent">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="capability_type" value="{{ item.capability_type }}">
+                    <input type="hidden" name="capability_id" value="{{ item.capability_id }}">
+                    <input type="hidden" name="decision" value="approved">
+                    <button type="submit" class="px-3 py-1 text-xs bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Approve</button>
+                </form>
+                <form method="POST" action="/definitions/agents/{{ definition.id }}/consent">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="capability_type" value="{{ item.capability_type }}">
+                    <input type="hidden" name="capability_id" value="{{ item.capability_id }}">
+                    <input type="hidden" name="decision" value="declined">
+                    <button type="submit" class="px-3 py-1 text-xs bg-white text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50 font-medium">Decline</button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if declined_capabilities %}
+<div class="bg-white border border-gray-200 rounded-lg p-5 mb-6">
+    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-1">Declined by you</h2>
+    <p class="text-xs text-gray-500 mb-3">These stay inactive for you. Approving one turns it back on for your runs only.</p>
+    <div class="space-y-2">
+        {% for item in declined_capabilities %}
+        <div class="flex flex-wrap items-center justify-between gap-2 p-2 rounded-md border border-gray-100">
+            <div class="min-w-0 flex-1">
+                <span class="text-sm font-medium text-gray-500 line-through">{{ item.capability_name }}</span>
+                <span class="ml-2 px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600">{{ item.capability_type | replace('_', ' ') }}</span>
+            </div>
+            <form method="POST" action="/definitions/agents/{{ definition.id }}/consent" class="shrink-0">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="capability_type" value="{{ item.capability_type }}">
+                <input type="hidden" name="capability_id" value="{{ item.capability_id }}">
+                <input type="hidden" name="decision" value="approved">
+                <button type="submit" class="px-3 py-1 text-xs bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Re-approve</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
 {% endif %}
 
 {% if definition_type == 'mcp-server' %}

@@ -350,6 +350,7 @@
                 {% endif %}
                 {% set state_definition_proposal_count = request.state.definition_proposal_count | default(0) %}
                 {% set definition_proposal_count = [state_definition_proposal_count, context_definition_proposal_count] | max %}
+                {% set capability_consent_count = request.state.capability_consent_count | default(0) %}
                 <nav class="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
                     <a href="/chat" aria-label="Chat" title="Chat" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if request.url.path == '/chat' %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if request.url.path == '/chat' %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -409,6 +410,11 @@
                         <span class="sidebar-label">Agents</span>
                         <span id="definition-proposal-sidebar-badge" data-live-badge="definitions" data-live-badge-suppressed="{{ 'true' if '/definitions' in request.url.path else 'false' }}" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold {% if definition_proposal_count <= 0 or '/definitions' in request.url.path %}hidden{% endif %}" title="Definition proposals awaiting review" aria-live="polite">
                             {{ definition_proposal_count }}
+                        </span>
+                        {# Capabilities other people attached to your agents that
+                           are waiting for you to approve or decline them. #}
+                        <span id="capability-consent-sidebar-badge" data-live-badge="consents" data-live-badge-suppressed="{{ 'true' if '/definitions' in request.url.path else 'false' }}" class="sidebar-count-badge inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 {% if capability_consent_count <= 0 or '/definitions' in request.url.path %}hidden{% endif %}" title="Agent capabilities awaiting your approval" aria-live="polite">
+                            {{ capability_consent_count }}
                         </span>
                     </a>
                     

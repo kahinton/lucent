@@ -1773,61 +1773,154 @@ class TestMemberRoleBlocked:
         )
         assert resp.status_code == 403
 
-    # --- Grant management ---
+    # --- Capability attach/detach ---
+    #
+    # Attaching no longer requires a role: it requires read clearance on both
+    # the agent and the capability, enforced inside the repository. A member who
+    # can see both ends may attach. That is safe because an attachment takes
+    # effect for nobody else until they approve it themselves.
 
-    async def test_member_cannot_grant_skill(
-        self, member_client, member_agent_def, member_skill_def
+    async def test_member_can_grant_skill(
+        self, member_client, member_agent_def, member_skill_def, db_pool
     ):
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/grant-skill",
             data=_csrf_data(member_client, {"skill_id": str(member_skill_def["id"])}),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
-    async def test_member_cannot_revoke_skill(
-        self, member_client, member_agent_def, member_skill_def
+        # Assert on the junction row: the fixture skill is still 'proposed', so
+        # the active-only capability loader would not surface it yet.
+        async with db_pool.acquire() as conn:
+            attached = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM agent_skills "
+                "WHERE agent_id = $1 AND skill_id = $2)",
+                member_agent_def["id"],
+                member_skill_def["id"],
+            )
+        assert attached is True
+
+    async def test_member_can_revoke_skill(
+        self, member_client, member_agent_def, member_skill_def, db_pool
     ):
+        org_id = str(member_agent_def["organization_id"])
+        repo = DefinitionRepository(db_pool)
+        await repo.grant_capability(
+            agent_id=str(member_agent_def["id"]),
+            capability_type="skill",
+            capability_id=str(member_skill_def["id"]),
+            org_id=org_id,
+            actor_user_id=str(member_agent_def["created_by"]),
+        )
+
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/revoke-skill/{member_skill_def['id']}",
             data=_csrf_data(member_client),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
+        remaining = await repo.get_agent_skills(
+            str(member_agent_def["id"]), org_id
+        )
+        assert str(member_skill_def["id"]) not in {str(s["id"]) for s in remaining}
 
-    async def test_member_cannot_grant_mcp(
+    async def test_member_can_grant_mcp(
         self, member_client, member_agent_def, member_mcp_def
     ):
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/grant-mcp",
             data=_csrf_data(member_client, {"server_id": str(member_mcp_def["id"])}),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
-    async def test_member_cannot_revoke_mcp(
-        self, member_client, member_agent_def, member_mcp_def
-    ):
-        resp = await member_client.post(
-            f"/definitions/agents/{member_agent_def['id']}/revoke-mcp/{member_mcp_def['id']}",
-            data=_csrf_data(member_client),
-        )
-        assert resp.status_code == 403
-
-    async def test_member_cannot_grant_hook(
+    async def test_member_can_grant_hook(
         self, member_client, member_agent_def, member_hook_def
     ):
         resp = await member_client.post(
             f"/definitions/agents/{member_agent_def['id']}/grant-hook",
             data=_csrf_data(member_client, {"hook_id": str(member_hook_def["id"])}),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 303
 
-    async def test_member_cannot_revoke_hook(
-        self, member_client, member_agent_def, member_hook_def
+    async def test_member_cannot_attach_to_an_agent_they_cannot_see(
+        self, member_client, member_user, member_skill_def, db_pool
     ):
-        resp = await member_client.post(
-            f"/definitions/agents/{member_agent_def['id']}/revoke-hook/{member_hook_def['id']}",
-            data=_csrf_data(member_client),
+        """Attaching is gated by read clearance on the *agent*, not by role."""
+        _user, org, _token = member_user
+        repo = DefinitionRepository(db_pool)
+        hidden_agent = await repo.create_agent(
+            name="Hidden Agent",
+            description="Owned by someone else",
+            content="# Hidden Agent",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            owner_user_id=str(_user["id"]),
+            status="active",
         )
-        assert resp.status_code == 403
+        # Strip the creator's own clearance so the member truly cannot see it.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM auth_clearances WHERE auth_id = "
+                "(SELECT auth_id FROM agent_definitions WHERE id = $1)",
+                hidden_agent["id"],
+            )
+
+        resp = await member_client.post(
+            f"/definitions/agents/{hidden_agent['id']}/grant-skill",
+            data=_csrf_data(member_client, {"skill_id": str(member_skill_def["id"])}),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "error=" in resp.headers["location"]
+
+    async def test_member_cannot_attach_a_skill_they_cannot_see(
+        self, member_client, member_user, member_agent_def, db_pool
+    ):
+        _user, org, _token = member_user
+        repo = DefinitionRepository(db_pool)
+        hidden_skill = await repo.create_skill(
+            name="Hidden Skill",
+            description="Owned by someone else",
+            content="# Hidden Skill",
+            org_id=str(org["id"]),
+            created_by=str(_user["id"]),
+            owner_user_id=str(_user["id"]),
+            status="active",
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM auth_clearances WHERE auth_id = "
+                "(SELECT auth_id FROM skill_definitions WHERE id = $1)",
+                hidden_skill["id"],
+            )
+
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/grant-skill",
+            data=_csrf_data(member_client, {"skill_id": str(hidden_skill["id"])}),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "error=" in resp.headers["location"]
+
+    async def test_second_attach_returns_already_attached_warning(
+        self, member_client, member_agent_def, member_skill_def, db_pool
+    ):
+        """One row per (agent, capability); a second attacher is told to approve."""
+        org_id = str(member_agent_def["organization_id"])
+        repo = DefinitionRepository(db_pool)
+        await repo.grant_capability(
+            agent_id=str(member_agent_def["id"]),
+            capability_type="skill",
+            capability_id=str(member_skill_def["id"]),
+            org_id=org_id,
+            actor_user_id=str(member_agent_def["created_by"]),
+        )
+        resp = await member_client.post(
+            f"/definitions/agents/{member_agent_def['id']}/grant-skill",
+            data=_csrf_data(member_client, {"skill_id": str(member_skill_def["id"])}),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "warning=" in resp.headers["location"]
 
     async def test_member_cannot_update_mcp_tools(
         self, member_client, member_agent_def, member_mcp_def
