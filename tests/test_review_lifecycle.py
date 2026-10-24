@@ -1118,6 +1118,308 @@ class TestBackwardsCompatibility:
 
 
 # =========================================================================
+# SECTION 6b: Finalize vs. in-flight work, and completion regression
+# =========================================================================
+
+
+class TestFinalizeWithInFlightWork:
+    """Finishing a request must never silently ignore work that is running."""
+
+    @pytest.mark.parametrize("status", ["claimed", "running"])
+    async def test_completing_request_cancels_in_flight_task(
+        self, repo, org_id, status
+    ):
+        """A claimed/running sibling is cancelled in the same transaction.
+
+        Before the fix, finalize only looked at pending/planned tasks, so the
+        in-flight task kept executing (burning model time / mutating state) with
+        no record that it had been orphaned. Asserted on observable state: the
+        task's status and its `cancelled` event.
+        """
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        done = await _make_task(repo, rid, org_id, title="Finished")
+        inflight = await _make_task(repo, rid, org_id, title="Still running")
+
+        await _complete_task_flow(repo, done)
+        claimed = await repo.claim_task(str(inflight["id"]), "test-inst", org_id=org_id)
+        if status == "running":
+            await repo.start_task(
+                str(inflight["id"]),
+                org_id=org_id,
+                instance_id=claimed["claimed_by"],
+            )
+
+        updated = await repo.update_request_status(rid, "completed", org_id=org_id)
+        assert updated["status"] == REQUEST_STATUS_COMPLETED
+
+        after = await repo.get_task(str(inflight["id"]), org_id=org_id)
+        assert after["status"] == "cancelled", (
+            "in-flight work must not be left executing under a completed request"
+        )
+        events = await repo.list_task_events(str(inflight["id"]), org_id=org_id)
+        cancel_events = [e for e in events["items"] if e["event_type"] == "cancelled"]
+        assert cancel_events, "the cancellation must be recorded on the task"
+        assert "still executing" in cancel_events[-1]["detail"]
+
+    async def test_complete_request_does_not_regress_via_late_task_transition(
+        self, repo, org_id
+    ):
+        """A completed request cannot be pulled back to `review` by a task write.
+
+        `_check_request_completion` runs from every terminal task transition and
+        never checked the request's current status, so a task settling after the
+        request was already decided could move it back into the review queue,
+        where nothing would ever drain it (proved live by the daemon).
+
+        The late transition is reached through a `needs_review` task: finalize
+        deliberately leaves those alone (they are a human decision, not
+        orphaned dispatchable work), so a retry-then-complete after the fact is
+        a genuine path to the race.
+        """
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        t1 = await _make_task(repo, rid, org_id, title="Task 1")
+        t2 = await _make_task(repo, rid, org_id, title="Task 2", sequence_order=1)
+
+        await _complete_task_flow(repo, t1)
+        await repo.claim_task(str(t2["id"]), "test-inst", org_id=org_id)
+        await repo.mark_task_needs_review(
+            str(t2["id"]), "needs a human", org_id=org_id
+        )
+
+        # The request is decided while t2 is parked in needs_review.
+        await repo.update_request_status(rid, "completed", org_id=org_id)
+        assert (await repo.get_request(rid, org_id))["status"] == REQUEST_STATUS_COMPLETED
+
+        # t2 is retried and finishes last — the classic late-write race.
+        assert await repo.retry_task(str(t2["id"]), org_id=org_id) is not None
+        await repo.claim_task(str(t2["id"]), "test-inst", org_id=org_id)
+        await repo.complete_task(str(t2["id"]), "late result", org_id=org_id)
+
+        after = await repo.get_request(rid, org_id)
+        assert after["status"] == REQUEST_STATUS_COMPLETED, (
+            "a settled request must not be regressed by a later task transition"
+        )
+
+    async def test_completion_guard_is_conditional_not_global(self, repo, org_id):
+        """The guard must not stop `pending`-state requests from advancing.
+
+        The status guard is scoped to the automated completion path only; a
+        normal pending request still moves to `review` when its work finishes.
+        """
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id)
+        await _complete_task_flow(repo, task)
+
+        after = await repo.get_request(str(req["id"]), org_id)
+        assert after["status"] == REQUEST_STATUS_REVIEW
+
+
+class TestReconcileStuckReview:
+    """A request stranded in `review` must be drained, not left forever."""
+
+    async def _strand_in_review_with_review_task(self, repo, org_id, review_result):
+        """Build the production shape: request in `review`, review task settled."""
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        work = await _make_task(repo, rid, org_id, title="Work")
+        await _complete_task_flow(repo, work)
+        assert (await repo.get_request(rid, org_id))["status"] == REQUEST_STATUS_REVIEW
+
+        review_task = await _make_task(
+            repo, rid, org_id, title="Post-completion review", sequence_order=10000000
+        )
+        await repo.claim_task(str(review_task["id"]), "test-inst", org_id=org_id)
+        await repo.complete_task(str(review_task["id"]), review_result, org_id=org_id)
+        # Simulate the decision never landing: force the request back into review.
+        await repo.update_request_status(rid, "review", org_id=org_id)
+        return rid, review_task
+
+    async def test_stuck_review_with_approved_decision_is_completed(
+        self, repo, org_id
+    ):
+        """The recorded APPROVED verdict is applied instead of re-reviewing."""
+        rid, review_task = await self._strand_in_review_with_review_task(
+            repo,
+            org_id,
+            "REQUEST_REVIEW_DECISION: APPROVED\nTASK_IDS_TO_REWORK: none\n"
+            "FEEDBACK: looks good\nMEMORIES_UPDATED: none\n",
+        )
+
+        fixed = await repo.reconcile_request_statuses(org_id=org_id)
+        assert fixed >= 1
+
+        after = await repo.get_request(rid, org_id)
+        assert after["status"] == REQUEST_STATUS_COMPLETED
+
+        events = await repo.list_task_events(str(review_task["id"]), org_id=org_id)
+        assert any(
+            e["event_type"] == "request_review_approved"
+            and (e["metadata"] or {}).get("reconciled") is True
+            for e in events["items"]
+        )
+
+    async def test_stuck_review_with_needs_rework_decision_is_reopened(
+        self, repo, org_id
+    ):
+        """A recorded NEEDS_REWORK verdict moves the request back for rework."""
+        rid, _review_task = await self._strand_in_review_with_review_task(
+            repo,
+            org_id,
+            "REQUEST_REVIEW_DECISION: NEEDS_REWORK\n"
+            "FEEDBACK: missing the deliverable\nMEMORIES_UPDATED: none\n",
+        )
+
+        await repo.reconcile_request_statuses(org_id=org_id)
+
+        after = await repo.get_request(rid, org_id)
+        assert after["status"] == REQUEST_STATUS_NEEDS_REWORK
+
+    async def test_stuck_review_needs_rework_requeues_the_named_task(
+        self, repo, org_id
+    ):
+        """The production shape: the verdict names a task that must reopen.
+
+        Flipping the request to `needs_rework` without reopening the named task
+        would leave every task `completed` and nothing dispatchable — the same
+        stall under a new label, which is the defect this reconciler exists to
+        clear (live instance 2b583368 sat that way from 2026-09-01). The live
+        review path requeues named tasks, so the reconciler must too.
+        """
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        work = await _make_task(repo, rid, org_id, title="Work")
+        await _complete_task_flow(repo, work)
+
+        review_task = await _make_task(
+            repo, rid, org_id, title="Post-completion review", sequence_order=10000000
+        )
+        await repo.claim_task(str(review_task["id"]), "test-inst", org_id=org_id)
+        await repo.complete_task(
+            str(review_task["id"]),
+            "REQUEST_REVIEW_DECISION: NEEDS_REWORK\n"
+            f"TASK_IDS_TO_REWORK: {work['id']}\n"
+            "FEEDBACK: findings were never delivered to the user\n"
+            "MEMORIES_UPDATED: none\n",
+            org_id=org_id,
+        )
+        # The decision never landed on the request row.
+        await repo.update_request_status(rid, "review", org_id=org_id)
+
+        await repo.reconcile_request_statuses(org_id=org_id)
+
+        # The named task is dispatchable again, not quietly abandoned.
+        reopened = await repo.get_task(str(work["id"]), org_id=org_id)
+        assert reopened["status"] == "pending"
+        assert reopened["result"] is None
+
+        # And the request left `review`, so the daemon will pick the work up.
+        after = await repo.get_request(rid, org_id)
+        assert after["status"] != REQUEST_STATUS_REVIEW
+        assert after["status"] == REQUEST_STATUS_IN_PROGRESS
+
+        events = await repo.list_task_events(str(review_task["id"]), org_id=org_id)
+        reconciled = [
+            e
+            for e in events["items"]
+            if e["event_type"] == "request_review_needs_rework"
+            and (e["metadata"] or {}).get("reconciled") is True
+        ]
+        assert reconciled, "the reconciliation must be recorded"
+        assert str(work["id"]) in (reconciled[0]["metadata"] or {}).get(
+            "requeued_task_ids", []
+        )
+
+    async def test_stuck_review_needs_rework_does_not_reopen_the_review_task(
+        self, repo, org_id
+    ):
+        """A verdict naming its own review task must not restart the review."""
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        work = await _make_task(repo, rid, org_id, title="Work")
+        await _complete_task_flow(repo, work)
+
+        review_task = await _make_task(
+            repo, rid, org_id, title="Post-completion review", sequence_order=10000000
+        )
+        await repo.claim_task(str(review_task["id"]), "test-inst", org_id=org_id)
+        # The verdict names the review task itself, alongside the real work.
+        await repo.complete_task(
+            str(review_task["id"]),
+            "REQUEST_REVIEW_DECISION: NEEDS_REWORK\n"
+            f"TASK_IDS_TO_REWORK: {review_task['id']}, {work['id']}\n"
+            "FEEDBACK: try again\nMEMORIES_UPDATED: none\n",
+            org_id=org_id,
+        )
+        await repo.update_request_status(rid, "review", org_id=org_id)
+
+        await repo.reconcile_request_statuses(org_id=org_id)
+
+        # The review task keeps its verdict; it is not sent back to pending.
+        still_done = await repo.get_task(str(review_task["id"]), org_id=org_id)
+        assert still_done["status"] == "completed"
+
+        # The real work task still reopens, so the rework is not lost.
+        reopened = await repo.get_task(str(work["id"]), org_id=org_id)
+        assert reopened["status"] == "pending"
+
+    async def test_stuck_review_without_a_decision_flags_a_human(
+        self, repo, org_id
+    ):
+        """No usable recorded decision → flag once for a human, never guess."""
+        rid, review_task = await self._strand_in_review_with_review_task(
+            repo, org_id, "I have some thoughts but no verdict."
+        )
+
+        await repo.reconcile_request_statuses(org_id=org_id)
+
+        after = await repo.get_request(rid, org_id)
+        assert after["status"] == REQUEST_STATUS_REVIEW
+        events = await repo.list_task_events(str(review_task["id"]), org_id=org_id)
+        markers = [
+            e
+            for e in events["items"]
+            if e["event_type"] == "request_review_manual_required"
+        ]
+        assert markers, "the stall must be visible rather than silent"
+
+        # Re-running the reconciler must not stack duplicate markers.
+        await repo.reconcile_request_statuses(org_id=org_id)
+        events_again = await repo.list_task_events(
+            str(review_task["id"]), org_id=org_id
+        )
+        assert (
+            len(
+                [
+                    e
+                    for e in events_again["items"]
+                    if e["event_type"] == "request_review_manual_required"
+                ]
+            )
+            == 1
+        )
+
+    async def test_reconcile_leaves_in_flight_review_alone(self, repo, org_id):
+        """A review task still queued or running is not a stall."""
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        work = await _make_task(repo, rid, org_id, title="Work")
+        await _complete_task_flow(repo, work)
+        review_task = await _make_task(
+            repo, rid, org_id, title="Post-completion review", sequence_order=10000000
+        )
+        await repo.claim_task(str(review_task["id"]), "test-inst", org_id=org_id)
+
+        await repo.reconcile_request_statuses(org_id=org_id)
+
+        after = await repo.get_request(rid, org_id)
+        assert after["status"] == REQUEST_STATUS_REVIEW
+        task_after = await repo.get_task(str(review_task["id"]), org_id=org_id)
+        assert task_after["status"] == "claimed"
+
+
+# =========================================================================
 # SECTION 7: Daemon Helper Tests (_parse_review_decision)
 # =========================================================================
 
@@ -1422,3 +1724,70 @@ class TestActiveSummary:
 
         summary = await repo.get_active_summary(org_id)
         assert summary["requests"]["active"] >= 1
+
+
+# =========================================================================
+# SECTION 10: Daemon review-task creation guards
+# =========================================================================
+
+
+class TestCreateRequestReviewTaskGuards:
+    """The review task must not be created over unfinished work."""
+
+    @staticmethod
+    def _daemon():
+        from daemon.daemon import LucentDaemon
+
+        return LucentDaemon()
+
+    def test_defers_review_while_a_sibling_is_executing(self, monkeypatch):
+        """No review task while work is in flight.
+
+        A review reads terminal task output. Creating it while a sibling is
+        still claimed/running is how a production request was auto-approved
+        with one of two tasks mid-execution.
+        """
+        import asyncio
+
+        from daemon.review import lifecycle
+
+        daemon = self._daemon()
+        created: list[dict] = []
+
+        async def fake_create_task(**kwargs):
+            created.append(kwargs)
+            return {"id": "review-task-id", **kwargs}
+
+        monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", fake_create_task)
+
+        request_data = {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "title": "Ship it",
+            "description": "do the thing",
+            "organization_id": "22222222-2222-2222-2222-222222222222",
+            "created_by": "33333333-3333-3333-3333-333333333333",
+            "tasks": [
+                {
+                    "id": "44444444-4444-4444-4444-444444444444",
+                    "title": "Finished",
+                    "status": "completed",
+                    "result": "done",
+                },
+                {
+                    "id": "55555555-5555-5555-5555-555555555555",
+                    "title": "Executing",
+                    "status": "running",
+                },
+            ],
+        }
+
+        result = asyncio.run(
+            lifecycle._create_request_review_task(
+                daemon,
+                "11111111-1111-1111-1111-111111111111",
+                request_data,
+            )
+        )
+
+        assert result is None
+        assert created == [], "no review task may be created over executing work"

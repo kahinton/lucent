@@ -241,6 +241,65 @@ class SubagentReportService:
                 self._flush_after_debounce(), name="subagent-reports-flush"
             )
 
+    @staticmethod
+    def _signal_identity(signal: dict[str, Any]) -> str:
+        """A stable identity for one contributing notification.
+
+        Every notification is already unique: migration 145's trigger publishes
+        exactly one signal per (session, request, task, status transition), and
+        the debounce key in ``_on_notification`` keeps at most one of each per
+        burst. Replaying the same transition (a trigger re-fire after a
+        reconnect) yields the same identity, which is what makes de-duplication
+        still work.
+        """
+        return f"{signal.get('kind', '')}:{signal.get('task_id') or ''}"
+
+    @staticmethod
+    def _state_fingerprint(signal: dict[str, Any], context: dict[str, Any]) -> str:
+        """Observable state as-of this burst, for signals with no task id.
+
+        Request-level notifications carry no per-event id, so ``kind`` alone
+        cannot distinguish a second ``request.review`` (after a rework cycle)
+        from a replay of the first. The re-read state can: a genuine replay
+        lands on the same rows and produces the same fingerprint, while a later
+        transition that changed the request's contents produces a different one.
+        """
+        counts = context.get("counts") or {}
+        request = context.get("request") or {}
+        parts = [
+            str(request.get("status") or ""),
+            str(counts.get("total") or 0),
+            str(counts.get("completed") or 0),
+            str(counts.get("failed") or 0),
+            str(counts.get("running") or 0),
+            str(counts.get("queued") or 0),
+        ]
+        return ":".join(parts)
+
+    @classmethod
+    def _burst_identity(
+        cls,
+        signals: list[dict[str, Any]],
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Identity of a whole burst — the *set of events*, not of kinds.
+
+        This used to hash only the sorted set of kinds, so two genuinely
+        distinct bursts that happened to share a kind set (e.g. two separate
+        ``task.completed`` bursts on the same request) produced the same key and
+        the second one was silently dropped. Including each signal's own
+        identity means a burst can only collide with a replay of itself.
+        """
+        parts = [cls._signal_identity(s) for s in signals]
+        if context is not None:
+            for signal in signals:
+                if not signal.get("task_id"):
+                    parts.append(
+                        f"{signal.get('kind', '')}#"
+                        f"{cls._state_fingerprint(signal, context)}"
+                    )
+        return "|".join(sorted(parts))
+
     # -- reporting -----------------------------------------------------
 
     @staticmethod
@@ -287,13 +346,19 @@ class SubagentReportService:
                     for part in [card["body"], "Also: " + "; ".join(extras) + "."]
                     if part
                 )
-            # The dedupe key covers the whole burst, so a repeated notification
-            # for any event in it cannot produce a duplicate card.
-            card["dedupe_key"] = f"{primary['request_id']}:" + "|".join(
-                sorted(s.get("kind", "") for s in signals)
+            # The dedupe key covers the whole burst, so a replayed notification
+            # cannot produce a duplicate card — while a *different* burst that
+            # happens to carry the same kinds still gets its own card.
+            card["dedupe_key"] = (
+                f"{primary['request_id']}:"
+                f"{self._burst_identity(signals, context)}"
             )
             event_row = await self._write_card(primary, card, context)
             if event_row is None:
+                # The card is a duplicate, but a reply owed for an earlier
+                # suppressed burst may never have been generated. Suppressing a
+                # duplicate card must not also swallow that reply.
+                await self._reply_for_suppressed_burst(primary, card, context)
                 return
             await self._maybe_generate_reply(primary, card, context, event_row)
 
@@ -329,10 +394,65 @@ class SubagentReportService:
             if not context:
                 return
             card = self._build_card(signal, context)
+            card["dedupe_key"] = (
+                f"{signal['request_id']}:"
+                f"{self._burst_identity([signal], context)}"
+            )
             event_row = await self._write_card(signal, card, context)
             if event_row is None:
+                await self._reply_for_suppressed_burst(signal, card, context)
                 return
             await self._maybe_generate_reply(signal, card, context, event_row)
+
+    async def _reply_for_suppressed_burst(
+        self,
+        signal: dict[str, Any],
+        card: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        """Answer a burst whose card was de-duplicated, when no reply exists yet.
+
+        Suppression is about the *card*, not the answer. Two paths used to
+        return early on a suppressed card and lose the reply entirely: a burst
+        replayed while its first reply turn was still rate-limited or blocked by
+        an in-flight user turn (``_reply_too_soon`` / ``_awaiting_user_turn``),
+        and any burst that matched an existing key. The person then saw the work
+        finish with no acknowledgement, because the only card for it had already
+        been written.
+
+        The reply is generated only when this session's most recent report
+        event has no reply attached, so a genuine duplicate (card *and* reply
+        already delivered) stays silent.
+        """
+        session_id = context["session"]["id"]
+        org_id = signal["organization_id"]
+        try:
+            repo = LLMSessionRepository(await _get_pool())
+            events = await repo.list_events(
+                session_id,
+                org_id,
+                user_id=context["session"].get("user_id"),
+                limit=50,
+                newest_first=True,
+            )
+        except Exception:
+            logger.debug("Could not check report reply state", exc_info=True)
+            return
+        for row in events:
+            if row.get("event_type") != REPORT_EVENT_TYPE:
+                continue
+            # Only the newest report matters: if it already has a reply, the
+            # conversation is up to date and another turn would be noise.
+            if row.get("message_id"):
+                return
+            # Answer from the card that is actually in the transcript, not from
+            # the suppressed duplicate's freshly built one — the reply must
+            # describe what the person can see.
+            stored = row.get("raw") if isinstance(row.get("raw"), dict) else None
+            await self._maybe_generate_reply(
+                signal, stored or card, context, dict(row)
+            )
+            return
 
     async def _load_context(self, signal: dict[str, Any]) -> dict[str, Any] | None:
         """Re-read the real state. The notification payload is never trusted."""
@@ -414,6 +534,7 @@ class SubagentReportService:
 
     @staticmethod
     def _dedupe_key(signal: dict[str, Any]) -> str:
+        """Legacy single-signal key. ``_build_card`` uses the burst identity."""
         return f"{signal['kind']}:{signal['request_id']}:{signal.get('task_id') or ''}"
 
     def _build_card(

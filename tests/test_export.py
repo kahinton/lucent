@@ -101,6 +101,48 @@ class TestMemoryExport:
         assert all("special-tag" in m["tags"] for m in test_memories)
 
     @pytest.mark.asyncio
+    async def test_export_filter_by_tags_uses_any_match_semantics(
+        self, db_pool, test_user, clean_test_data
+    ):
+        """Export with multiple tags must match ANY of them (union), not all."""
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+
+        alpha_tag = f"{prefix}-alpha"
+        beta_tag = f"{prefix}-beta"
+
+        # Memory A carries only alpha (plus a shared tag), memory B only beta.
+        await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Alpha memory",
+            tags=[alpha_tag, "export-test"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} Beta memory",
+            tags=[beta_tag, "export-test"],
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        result = await repo.export(
+            tags=[alpha_tag, beta_tag],
+            requesting_user_id=test_user["id"],
+            requesting_org_id=test_user["organization_id"],
+        )
+
+        test_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        contents = {m["content"] for m in test_memories}
+
+        assert f"{prefix} Alpha memory" in contents
+        assert f"{prefix} Beta memory" in contents
+        assert len({m["id"] for m in test_memories}) == 2
+
+    @pytest.mark.asyncio
     async def test_export_includes_full_content(self, db_pool, test_user, clean_test_data):
         """Export should return full content, not truncated."""
         prefix = clean_test_data

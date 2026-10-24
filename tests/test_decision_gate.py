@@ -611,6 +611,79 @@ async def test_gate_skips_with_no_terminal_tasks(monkeypatch):
     assert recording.calls == []
 
 
+@pytest.mark.parametrize("status", ["claimed", "running"])
+async def test_gate_refuses_to_clear_a_request_with_in_flight_work(
+    monkeypatch, status
+):
+    """A request with a claimed/running task must never be auto-approved.
+
+    The pre-screen asks its questions about *terminal* tasks, so an in-flight
+    sibling is invisible to it. This happened in production: the gate cleared a
+    request at 0.73 confidence while one of two tasks was still executing. The
+    gate must fall through (skipped → full review) instead of passing.
+    """
+    daemon = _fake_daemon()
+    recording = _RecordingDecide(
+        _response({"request_fulfilled": 0.97, "not_blocked": 0.99})
+    )
+    monkeypatch.setattr(decision_gate, "decide", recording)
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(
+        decision_gate, "resolve_decision_model", _async_return("nimble")
+    )
+    monkeypatch.setattr(
+        "daemon.daemon.RequestAPI.get_request_memories", _async_return([])
+    )
+    request_data = _request_data(
+        tasks=[
+            _task(title="Finished"),
+            _task(title="Still executing", status=status),
+        ]
+    )
+
+    outcome = await maybe_decision_gate(daemon, str(uuid4()), request_data)
+
+    assert outcome.verdict == "skipped"
+    assert not outcome.auto_approve
+    # The decision model was never even asked: screening partial output would
+    # be a guess about work that does not exist yet.
+    assert recording.calls == []
+
+
+async def test_precondition_blocks_in_flight_task(monkeypatch):
+    """A passed screen is still downgraded when a sibling is executing."""
+    daemon = _fake_daemon()
+    reason = decision_gate._precondition_blockers(
+        daemon,
+        _request_data(
+            tasks=[_task(title="Finished"), _task(title="Executing", status="running")]
+        ),
+        [],
+    )
+    assert reason is not None
+    assert "still executing" in reason
+    assert "Executing" in reason
+    # Sanity: the same request without the in-flight sibling is clear.
+    assert (
+        decision_gate._precondition_blockers(daemon, _request_data(), []) is None
+    )
+
+
+async def test_terminal_tasks_view_is_honest_about_in_flight(monkeypatch):
+    """`_terminal_tasks` still returns only judged tasks — but it no longer
+    silently *authorizes* a clear: the in-flight set is exposed alongside it."""
+    daemon = _fake_daemon()
+    request_data = _request_data(
+        tasks=[_task(title="Finished"), _task(title="Executing", status="running")]
+    )
+
+    terminal = decision_gate._terminal_tasks(daemon, request_data)
+    in_flight = decision_gate._in_flight_tasks(daemon, request_data)
+
+    assert [t["title"] for t in terminal] == ["Finished"]
+    assert [t["title"] for t in in_flight] == ["Executing"]
+
+
 async def test_gate_fail_on_low_score(monkeypatch):
     daemon = _fake_daemon()
     recording = _RecordingDecide(

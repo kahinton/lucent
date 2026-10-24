@@ -26,6 +26,8 @@ from lucent.constants import (
     REQUEST_STATUS_FAILED,
     REQUEST_STATUS_IN_PROGRESS,
     REQUEST_STATUS_NEEDS_REWORK,
+    REQUEST_STATUS_PENDING,
+    REQUEST_STATUS_PLANNED,
     REQUEST_STATUS_REVIEW,
     VALID_DECOMPOSITION_MODES,
     VALID_REQUEST_SOURCES,
@@ -532,6 +534,96 @@ def _requires_post_completion_review(*, organization_id: str | None = None) -> b
     from lucent.settings import post_completion_review_enabled
 
     return post_completion_review_enabled(organization_id=organization_id)
+
+
+# Request states that task completion is allowed to advance out of.
+#
+# ``_check_request_completion`` runs on every task transition, so it must never
+# be able to *regress* a decision that has already been made. ``completed``,
+# ``cancelled`` and ``failed`` are settled outcomes a human or the review gate
+# already chose; ``review`` is an explicit gate whose owner is the review task
+# (or a human), not an incidental sibling task. ``rejection_processing`` is an
+# approval-flow state that only the rejection path may leave.
+_COMPLETION_ADVANCEABLE_STATUSES: tuple[str, ...] = (
+    REQUEST_STATUS_PENDING,
+    REQUEST_STATUS_PLANNED,
+    REQUEST_STATUS_IN_PROGRESS,
+    REQUEST_STATUS_NEEDS_REWORK,
+)
+
+# Matches the daemon's `_parse_review_decision` recognition rule. Kept in sync
+# with it deliberately: two parsers that disagreed would let the reconciler
+# apply a decision the live review path would not (or vice versa).
+_REVIEW_DECISION_RE = re.compile(
+    r"(?:REQUEST_REVIEW_DECISION|DECISION)\s*:\s*(APPROVED|NEEDS_REWORK)",
+    re.IGNORECASE,
+)
+
+# Mirrors `TASK_IDS_TO_REWORK:` parsing in daemon/review/lifecycle.py. Without
+# it the reconciler could apply a NEEDS_REWORK verdict but not reopen the tasks
+# the verdict named — leaving the request labelled "needs rework" with every
+# task still `completed` and nothing dispatchable, i.e. the same stall under a
+# new name.
+_REVIEW_TASK_IDS_RE = re.compile(
+    r"TASK_IDS_TO_REWORK\s*:\s*(.+?)(?:\n[A-Z_ ]+\s*:|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# A task id as the daemon accepts it: bare hex/uuid, optionally wrapped.
+_REVIEW_TASK_ID_RE = re.compile(r"[0-9a-fA-F-]{8,64}")
+
+# Mirrors `FEEDBACK:` parsing in the daemon's review parser. Carried into the
+# reopened task so the next attempt knows *why* it was sent back, exactly as
+# the live rework path does.
+_REVIEW_FEEDBACK_RE = re.compile(
+    r"FEEDBACK\s*:\s*(.+?)(?:\n[A-Z_ ]+\s*:|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _recorded_review_decision(result: str | None) -> str | None:
+    """Return the decision a completed review task recorded, or None.
+
+    Only used to finish a decision that was already made but never landed on
+    the request row. Returning None means "no usable decision on record" —
+    callers must then leave the request for a human rather than guess.
+    """
+    match = _REVIEW_DECISION_RE.search(result or "")
+    return match.group(1).upper() if match else None
+
+
+def _recorded_review_task_ids(result: str | None) -> list[str]:
+    """Return the task ids a NEEDS_REWORK verdict asked to reopen.
+
+    Mirrors the daemon's parser so a reconciled rework re-queues the same tasks
+    the live review path would have re-queued. An empty list means the verdict
+    named no reopenable task, which callers treat as "cannot proceed
+    automatically".
+    """
+    match = _REVIEW_TASK_IDS_RE.search(result or "")
+    if not match:
+        return []
+    ids: list[str] = []
+    for candidate in re.split(r"[\s,]+", match.group(1).strip()):
+        cleaned = candidate.strip().strip("[](){}")
+        if cleaned and _REVIEW_TASK_ID_RE.fullmatch(cleaned):
+            ids.append(cleaned)
+    return ids
+
+
+def _recorded_review_feedback(result: str | None) -> str:
+    """Return the reviewer's feedback text, or a neutral fallback.
+
+    The live rework path stores this on the reopened task so the next attempt
+    knows why it was sent back; a reconciled rework should not be less
+    informative than a live one.
+    """
+    match = _REVIEW_FEEDBACK_RE.search(result or "")
+    if match:
+        text = match.group(1).strip()
+        if text:
+            return text[:10000]
+    return "Reopened by the stuck-review reconciler."
 
 
 _VALID_OUTPUT_FAILURE_POLICIES = {"fail", "fallback", "retry_then_fallback"}
@@ -2008,12 +2100,130 @@ class RequestRepository:
             )
         return dict(row) if row else None
 
+    async def _cancel_tasks_for_terminal_request(
+        self, conn, *, request_id: str, status: str, now: datetime
+    ) -> None:
+        """Settle every task of a request that has just reached a terminal state.
+
+        Queued tasks are simply cancelled. In-flight tasks (``claimed``/
+        ``running``) are the interesting case: finalizing a request used to
+        ignore them entirely, so a request could report "done" while a sibling
+        task kept executing — burning model time and mutating state with no
+        record that its work had been orphaned.
+
+        For ``completed`` we settle them here, in the same transaction as the
+        request transition, so the outcome is atomic and visible: the task
+        becomes ``cancelled`` with a ``cancelled`` event, and the owning
+        daemon session's later completion write is refused by its own
+        ``status IN ('claimed','running')`` guard (a no-op, not a regression).
+
+        ``cancel_requested_at`` is stamped at the same time on purpose. The
+        row transition alone would not stop the provider call: the daemon
+        learns about it from the ``task_cancel`` notification published by
+        migration 144's trigger (and from its periodic durability sweep). The
+        stamp is what actually interrupts the session; the status is what
+        records the outcome.
+
+        For ``cancelled`` the existing behaviour is preserved unchanged: only
+        the signal is stamped, because the owning session (or the reaper, once
+        the claim goes stale) is the only party allowed to finalize a cancel.
+        """
+        queued = await conn.fetch(
+            """UPDATE tasks
+               SET status = 'cancelled', completed_at = $2, updated_at = $2
+               WHERE request_id = $1 AND status IN ('pending', 'planned')
+               RETURNING id""",
+            UUID(request_id),
+            now,
+        )
+        if queued:
+            await conn.executemany(
+                """INSERT INTO task_events (task_id, event_type, detail, metadata)
+                   VALUES ($1, 'cancelled', $2, $3)""",
+                [
+                    (
+                        task["id"],
+                        f"Task cancelled because parent request was {status}",
+                        {"request_status": status},
+                    )
+                    for task in queued
+                ],
+            )
+
+        if status == REQUEST_STATUS_CANCELLED:
+            # Signal only — see the docstring. Do not transition underneath a
+            # live claim.
+            await conn.execute(
+                """UPDATE tasks
+                   SET cancel_requested_at = COALESCE(cancel_requested_at, $2),
+                       updated_at = $2
+                   WHERE request_id = $1
+                     AND status IN ('claimed', 'running')
+                     AND cancel_requested_at IS NULL""",
+                UUID(request_id),
+                now,
+            )
+            return
+
+        if status != REQUEST_STATUS_COMPLETED:
+            return
+
+        in_flight = await conn.fetch(
+            """UPDATE tasks
+               SET status = 'cancelled',
+                   completed_at = COALESCE(completed_at, $2),
+                   updated_at = $2,
+                   cancel_requested_at = COALESCE(cancel_requested_at, $2),
+                   claimed_by = NULL,
+                   claim_expires_at = NULL
+               WHERE request_id = $1
+                 AND status IN ('claimed', 'running')
+               RETURNING id""",
+            UUID(request_id),
+            now,
+        )
+        if in_flight:
+            await conn.executemany(
+                """INSERT INTO task_events (task_id, event_type, detail, metadata)
+                   VALUES ($1, 'cancelled', $2, $3)""",
+                [
+                    (
+                        task["id"],
+                        "Task cancelled because parent request was completed "
+                        "while this task was still executing",
+                        {
+                            "request_status": status,
+                            "was_in_flight": True,
+                        },
+                    )
+                    for task in in_flight
+                ],
+            )
+
     async def update_request_status(
-        self, request_id: str, status: str, org_id: str | None = None
+        self,
+        request_id: str,
+        status: str,
+        org_id: str | None = None,
+        *,
+        expected_current_statuses: tuple[str, ...] | None = None,
     ) -> dict | None:
+        """Move a request to ``status``, applying the terminal side effects.
+
+        ``expected_current_statuses`` is an optimistic guard evaluated inside
+        the UPDATE's own WHERE clause, which is what makes it race-free: the
+        transition only lands when the request is still in one of the named
+        states, so a concurrent finalize cannot be overwritten. Automated
+        callers pass it (see ``_check_request_completion``) so a late task
+        transition can never regress a request that already finished; manual
+        callers leave it unset and keep last-write-wins behaviour.
+        """
         if status not in VALID_REQUEST_STATUSES:
             valid = ", ".join(sorted(VALID_REQUEST_STATUSES))
             raise ValueError(f"Invalid status '{status}'. Must be one of: {valid}")
+        guard: list[str] | None = (
+            list(expected_current_statuses) if expected_current_statuses else None
+        )
         now = datetime.now(timezone.utc)
         completed_at = (
             now
@@ -2029,72 +2239,49 @@ class RequestRepository:
         ) as conn:
             async with conn.transaction():
                 if org_id:
-                    row = await conn.fetchrow(
-                        """UPDATE requests
-                           SET status = $2, updated_at = $3,
-                               completed_at = COALESCE($4, completed_at),
-                               reviewed_at = COALESCE($5, reviewed_at)
-                           WHERE id = $1 AND organization_id = $6 RETURNING *""",
+                    params: list[Any] = [
                         UUID(request_id),
                         status,
                         now,
                         completed_at,
                         reviewed_at,
                         UUID(org_id),
-                    )
-                else:
+                    ]
+                    guard_clause = ""
+                    if guard is not None:
+                        params.append(guard)
+                        guard_clause = f" AND status = ANY(${len(params)}::text[])"
                     row = await conn.fetchrow(
                         """UPDATE requests
                            SET status = $2, updated_at = $3,
                                completed_at = COALESCE($4, completed_at),
                                reviewed_at = COALESCE($5, reviewed_at)
-                           WHERE id = $1 RETURNING *""",
-                        UUID(request_id),
-                        status,
-                        now,
-                        completed_at,
-                        reviewed_at,
+                           WHERE id = $1 AND organization_id = $6"""
+                        + guard_clause
+                        + " RETURNING *",
+                        *params,
+                    )
+                else:
+                    params = [UUID(request_id), status, now, completed_at, reviewed_at]
+                    guard_clause = ""
+                    if guard is not None:
+                        params.append(guard)
+                        guard_clause = f" AND status = ANY(${len(params)}::text[])"
+                    row = await conn.fetchrow(
+                        """UPDATE requests
+                           SET status = $2, updated_at = $3,
+                               completed_at = COALESCE($4, completed_at),
+                               reviewed_at = COALESCE($5, reviewed_at)
+                           WHERE id = $1"""
+                        + guard_clause
+                        + " RETURNING *",
+                        *params,
                     )
 
                 if row and status in (REQUEST_STATUS_COMPLETED, REQUEST_STATUS_CANCELLED):
-                    cancelled_tasks = await conn.fetch(
-                        """UPDATE tasks
-                           SET status = 'cancelled', completed_at = $2, updated_at = $2
-                           WHERE request_id = $1 AND status IN ('pending', 'planned')
-                           RETURNING id""",
-                        UUID(request_id),
-                        now,
+                    await self._cancel_tasks_for_terminal_request(
+                        conn, request_id=request_id, status=status, now=now
                     )
-                    if cancelled_tasks:
-                        await conn.executemany(
-                            """INSERT INTO task_events (task_id, event_type, detail, metadata)
-                               VALUES ($1, 'cancelled', $2, $3)""",
-                            [
-                                (
-                                    task["id"],
-                                    f"Task cancelled because parent request was {status}",
-                                    {"request_status": status},
-                                )
-                                for task in cancelled_tasks
-                            ],
-                        )
-                    if status == REQUEST_STATUS_CANCELLED:
-                        # Cancelling a request is a hard stop for everything in
-                        # it. Tasks that are already claimed/running cannot be
-                        # transitioned here (their owning session still holds
-                        # the claim), so signal them instead: the daemon
-                        # interrupts the matching session and finalizes the task
-                        # through finalize_requested_cancel().
-                        await conn.execute(
-                            """UPDATE tasks
-                               SET cancel_requested_at = COALESCE(cancel_requested_at, $2),
-                                   updated_at = $2
-                               WHERE request_id = $1
-                                 AND status IN ('claimed', 'running')
-                                 AND cancel_requested_at IS NULL""",
-                            UUID(request_id),
-                            now,
-                        )
 
         # When a request reaches a terminal state, close any linked schedule run.
         # This runs in a separate connection from the request status update above,
@@ -4970,15 +5157,22 @@ class RequestRepository:
         return await self.get_task(task_id, org_id=org_id)
 
     async def has_orphaned_tasks(self, *, org_id: str | None = None) -> bool:
-        """True when a pending/planned task belongs to a terminal request.
+        """True when a non-terminal task belongs to a terminal request.
 
         Such a task can never be dispatched (the queue excludes terminal
         parents), so it should be cancelled rather than left in the queued
         backlog. ``completed`` and ``cancelled`` are hard terminal; ``failed``
         is retryable and is intentionally left alone.
+
+        ``claimed``/``running`` rows are included: the transition-time
+        cancellation in :meth:`update_request_status` covers new cases, but a
+        row left behind by a crash, a rolled-back transaction, or a pre-fix
+        deployment is exactly the shape this sweep exists for, and an
+        in-flight task under a terminal request is the worst one to miss —
+        it is still consuming model time.
         """
         where = """
-            t.status IN ('pending', 'planned')
+            t.status IN ('pending', 'planned', 'claimed', 'running')
               AND r.status IN ('cancelled', 'completed')
         """
         params: list[Any] = []
@@ -5000,16 +5194,23 @@ class RequestRepository:
             )
 
     async def cancel_orphaned_tasks(self, *, org_id: str | None = None) -> int:
-        """Cancel pending/planned tasks whose parent request is terminal.
+        """Cancel non-terminal tasks whose parent request is terminal.
 
         Cancellation at request-transition time is the primary path; this is
         the self-healing sweep for rows that predate that path or were created
         before the parent reached a terminal state. Returns the number of tasks
         cancelled.
+
+        In-flight rows are cancelled here because the sweep runs under the
+        stale-task reaper's umbrella: nothing else will ever move them, the
+        parent is already terminal, and the owning session's own completion
+        write is refused by its status guard. ``cancel_requested_at`` is
+        stamped alongside so the daemon still interrupts any live provider
+        call for that task.
         """
         now = datetime.now(timezone.utc)
         where = """
-            t.status IN ('pending', 'planned')
+            t.status IN ('pending', 'planned', 'claimed', 'running')
               AND r.status IN ('cancelled', 'completed')
         """
         params: list[Any] = [now]
@@ -5024,7 +5225,12 @@ class RequestRepository:
                     f"""UPDATE tasks t
                         SET status = 'cancelled',
                             completed_at = $1,
-                            updated_at = $1
+                            updated_at = $1,
+                            cancel_requested_at = COALESCE(
+                                t.cancel_requested_at, $1
+                            ),
+                            claimed_by = NULL,
+                            claim_expires_at = NULL
                         FROM requests r
                         WHERE r.id = t.request_id
                           AND {where}
@@ -5457,6 +5663,40 @@ AND (
             "has_more": offset + len(rows) < total_count,
         }
 
+    async def get_live_task_output(
+        self,
+        request_id: str,
+        org_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Return in-flight model output for the request's running tasks.
+
+        Keyed by task id so the page can look output up while rendering each
+        task. Only tasks that are actually in flight are returned: a settled
+        task's durable text lives in ``tasks.result`` and the daemon deletes
+        its scratch row, so anything left behind is stale and is filtered out
+        here rather than trusted.
+        """
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            rows = await conn.fetch(
+                """SELECT o.task_id, o.content, o.updated_at
+                   FROM task_live_output o
+                   JOIN tasks t ON t.id = o.task_id
+                   WHERE t.request_id = $1
+                     AND o.organization_id = $2
+                     AND t.status IN ('claimed', 'running')""",
+                UUID(request_id),
+                UUID(org_id),
+            )
+        return {
+            str(row["task_id"]): {
+                "content": row["content"] or "",
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        }
+
     # ── Task ↔ Memory Links ──────────────────────────────────────────────
 
     async def link_memory(
@@ -5619,6 +5859,14 @@ AND (
         the title-based exclusion those fallback reviews would count as
         work tasks and re-trigger another review task on completion,
         producing an infinite loop.
+
+        This is only ever allowed to *advance* a request. It is called from
+        every task transition (complete/fail/cancel), so without a guard a
+        late task write could drag an already-decided request backwards —
+        e.g. a task finishing after a request was completed would move it
+        back to 'review' and strand it. The guard is applied inside
+        ``update_request_status``'s WHERE clause, not read-then-write, so a
+        concurrent finalize cannot be overwritten between the two.
         """
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
@@ -5655,14 +5903,35 @@ AND (
                 )
                 else REQUEST_STATUS_COMPLETED
             )
-            await self.update_request_status(request_id, status, org_id=org_id)
+            advanced = await self.update_request_status(
+                request_id,
+                status,
+                org_id=org_id,
+                expected_current_statuses=_COMPLETION_ADVANCEABLE_STATUSES,
+            )
+            if advanced is None:
+                # The request had already left the advanceable set (it was
+                # completed/cancelled/failed/review, or another writer won the
+                # race). Not an error — the deliberate outcome is "do not
+                # regress a decision that was already made" — but it is worth
+                # seeing, because a task settling after its request finished is
+                # otherwise invisible.
+                logger.info(
+                    "Task completion for request %s did not advance it to %s: "
+                    "the request is already past the states task completion may "
+                    "move it out of",
+                    request_id,
+                    status,
+                )
 
     async def reconcile_request_statuses(self, org_id: str | None = None) -> int:
         """Fix request statuses that got out of sync with their tasks.
 
-        Handles two cases:
+        Handles three cases:
         1. Request is 'in_progress' but all tasks are terminal → complete/fail it
         2. Request is 'pending' but has running/completed tasks → mark in_progress
+        3. Request is stuck in 'review' with a completed review task whose
+           recorded decision never landed → apply that decision
 
         Returns the number of requests fixed.
         """
@@ -5706,6 +5975,159 @@ AND (
                     str(row["id"]), org_id=str(row["organization_id"])
                 )
                 fixed += 1
+
+            # Case 3: a request stuck in 'review' that has nothing left to
+            # dispatch and no review task that will ever run again.
+            #
+            # Nothing else repairs this shape. `_create_request_review_task`
+            # deliberately refuses to add a second review task when a review
+            # task already exists (that guard is what prevents an infinite
+            # review loop when the review agent's output cannot be parsed), so
+            # a request whose review task completed — but whose decision never
+            # reached the request row, e.g. a later task transition regressed
+            # it out of 'completed' — has no path forward at all.
+            #
+            # The action is to *finish the decision that was already recorded*
+            # rather than to re-review: re-opening a review task would re-run
+            # an LLM review for a verdict that already exists, and would loop
+            # for any review whose decision text is unparseable. A review task
+            # that recorded no usable decision is therefore left for a human,
+            # with a one-shot event so the stall is visible instead of silent.
+            stuck_rows = await conn.fetch(
+                f"""SELECT r.id, r.organization_id
+                      FROM requests r
+                     WHERE r.status = 'review' {org_filter}
+                       AND NOT EXISTS (
+                           SELECT 1 FROM tasks t
+                            WHERE t.request_id = r.id
+                              AND t.status IN ('pending', 'planned', 'claimed', 'running')
+                       )
+                       AND EXISTS (
+                           SELECT 1 FROM tasks t
+                            WHERE t.request_id = r.id
+                              AND (t.agent_type = 'request-review'
+                                   OR t.title = 'Post-completion review')
+                       )""",
+                *params,
+            )
+            for row in stuck_rows:
+                request_org_id = str(row["organization_id"])
+                review_task = await conn.fetchrow(
+                    """SELECT id, status, result, error
+                         FROM tasks
+                        WHERE request_id = $1
+                          AND (agent_type = 'request-review'
+                               OR title = 'Post-completion review')
+                        ORDER BY COALESCE(completed_at, updated_at) DESC
+                        LIMIT 1""",
+                    row["id"],
+                )
+                if review_task is None:
+                    continue
+                decision = _recorded_review_decision(review_task["result"])
+                if decision == "APPROVED":
+                    updated = await self.update_request_status(
+                        str(row["id"]),
+                        REQUEST_STATUS_COMPLETED,
+                        org_id=request_org_id,
+                        expected_current_statuses=(REQUEST_STATUS_REVIEW,),
+                    )
+                    if updated:
+                        await self.add_task_event(
+                            str(review_task["id"]),
+                            "request_review_approved",
+                            "Reconciled: request was stuck in review; applied "
+                            "the APPROVED decision already recorded by its "
+                            "review task.",
+                            {"reconciled": True, "recommendation": "APPROVED"},
+                            org_id=request_org_id,
+                        )
+                        fixed += 1
+                elif decision == "NEEDS_REWORK":
+                    # Requeue the tasks the verdict named *before* moving the
+                    # request. Flipping the status alone would reproduce the
+                    # very stall this case exists to clear: a request reading
+                    # "needs rework" whose tasks are all still `completed` has
+                    # nothing dispatchable, so it would sit there forever under
+                    # a new label.
+                    #
+                    # Ordering matches the live path in
+                    # daemon/review/lifecycle.py: requeue named tasks, and only
+                    # fall back to a bare status flip when nothing could be
+                    # reopened (which is also what that path does).
+                    reopen_ids = _recorded_review_task_ids(review_task["result"])
+                    rework_feedback = _recorded_review_feedback(review_task["result"])
+                    requeued: list[str] = []
+                    for candidate_id in reopen_ids:
+                        # Guard against a verdict that names the review task
+                        # itself — reopening it would re-run the review whose
+                        # decision we are applying.
+                        if str(candidate_id) == str(review_task["id"]):
+                            continue
+                        reopened = await self.requeue_completed_task_for_rework(
+                            str(candidate_id),
+                            rework_feedback,
+                            org_id=request_org_id,
+                        )
+                        if reopened:
+                            requeued.append(str(candidate_id))
+
+                    # requeue_completed_task_for_rework already moves the parent
+                    # to in_progress; a bare flip is only correct when no task
+                    # was reopened.
+                    updated = (
+                        None
+                        if requeued
+                        else await self.update_request_status(
+                            str(row["id"]),
+                            REQUEST_STATUS_NEEDS_REWORK,
+                            org_id=request_org_id,
+                            expected_current_statuses=(REQUEST_STATUS_REVIEW,),
+                        )
+                    )
+                    if requeued or updated:
+                        await self.add_task_event(
+                            str(review_task["id"]),
+                            "request_review_needs_rework",
+                            (
+                                "Reconciled: request was stuck in review; "
+                                "applied the NEEDS_REWORK decision already "
+                                "recorded by its review task"
+                                + (
+                                    f" and reopened {len(requeued)} task(s)."
+                                    if requeued
+                                    else " (no task could be reopened)."
+                                )
+                            ),
+                            {
+                                "reconciled": True,
+                                "recommendation": "NEEDS_REWORK",
+                                "requeued_task_ids": requeued,
+                            },
+                            org_id=request_org_id,
+                        )
+                        fixed += 1
+                else:
+                    # No usable decision on record: a human has to decide.
+                    # Emit the marker once so the stall is observable rather
+                    # than looking like work that is still in progress.
+                    existing = await conn.fetchval(
+                        """SELECT 1 FROM task_events
+                            WHERE task_id = $1
+                              AND event_type = 'request_review_manual_required'""",
+                        review_task["id"],
+                    )
+                    if not existing:
+                        await self.add_task_event(
+                            str(review_task["id"]),
+                            "request_review_manual_required",
+                            "Request is in review with no dispatchable work and "
+                            "no recorded review decision; a human decision is "
+                            "required.",
+                            {"reconciled": True, "reason": "no_recorded_decision"},
+                            org_id=request_org_id,
+                        )
+                        fixed += 1
 
         return fixed
 

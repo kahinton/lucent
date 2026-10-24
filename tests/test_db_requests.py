@@ -261,6 +261,38 @@ class TestOrphanedTaskCleanup:
         still_pending = await repo.get_task(str(task["id"]), org_id=org_id)
         assert still_pending["status"] == "pending"
 
+    @pytest.mark.asyncio
+    async def test_orphan_sweep_reaches_in_flight_tasks(
+        self, repo, req, task, test_organization, db_pool
+    ):
+        """An in-flight task under a terminal request is the worst orphan.
+
+        The sweep only looked at pending/planned rows, so a claimed/running
+        task whose parent had already finished was invisible to it — while
+        still consuming model time. It must be swept, signalled, and recorded.
+        """
+        org_id = str(test_organization["id"])
+        await repo.claim_task(str(task["id"]), "test-inst", org_id=org_id)
+
+        # Terminal parent, task untouched — the pre-fix / crash shape.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE requests SET status = 'completed' WHERE id = $1::uuid",
+                str(req["id"]),
+            )
+
+        assert await repo.has_orphaned_tasks(org_id=org_id) is True
+        assert await repo.cancel_orphaned_tasks(org_id=org_id) == 1
+
+        updated = await repo.get_task(str(task["id"]), org_id=org_id)
+        assert updated["status"] == "cancelled"
+        assert updated["claimed_by"] is None
+        # The interrupt signal is stamped so a live provider call still stops.
+        assert updated["cancel_requested_at"] is not None
+        events = await repo.list_task_events(str(task["id"]), org_id=org_id)
+        assert any(event["event_type"] == "cancelled" for event in events["items"])
+        assert await repo.has_orphaned_tasks(org_id=org_id) is False
+
 
 class TestCreateTask:
     @pytest.mark.asyncio

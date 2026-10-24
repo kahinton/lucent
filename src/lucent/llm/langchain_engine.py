@@ -224,6 +224,37 @@ def _messages_for_hooks(messages: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _stream_chunk_text(content: Any) -> str:
+    """Extract displayable text from one streamed chunk's content.
+
+    Providers differ: older Ollama/OpenAI shims stream plain strings, while
+    modern block-based providers (Anthropic, newer Ollama, most "cloud" models)
+    stream a LIST of typed content blocks — ``{"type": "text", "text": "..."}``
+    interleaved with reasoning/metadata blocks. The previous string-only check
+    silently dropped every list-shaped chunk, which meant no progress events
+    were ever emitted for those models even though the final answer assembled
+    fine. Extracting text blocks (and ignoring everything else) makes streaming
+    work for both shapes.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                # Reasoning/thinking blocks are deliberately skipped: they are
+                # not the answer, and mixing them into a progress pane would
+                # misrepresent what the task is producing.
+                if block.get("type") in (None, "text") and isinstance(
+                    block.get("text"), str
+                ):
+                    parts.append(block["text"])
+        return "".join(parts)
+    return ""
+
+
 def _current_user_text_from_messages(messages: list[Any]) -> str | None:
     """Return the raw text of the LAST human message, for message-phase hooks.
 
@@ -787,7 +818,7 @@ class LangChainEngine(LLMEngine):
                                 ) from exc
 
                             aggregate = chunk if aggregate is None else aggregate + chunk
-                            chunk_text = chunk.content if isinstance(chunk.content, str) else ""
+                            chunk_text = _stream_chunk_text(chunk.content)
                             if chunk_text:
                                 on_event(
                                     SessionEvent(

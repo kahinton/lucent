@@ -191,6 +191,26 @@ async def _create_request_review_task(daemon, request_id: str, request_data: dic
     """Create a review task when a request enters review state."""
     tasks = request_data.get('tasks', []) or []
     review_tasks = [t for t in tasks if daemon._is_request_review_task(t)]
+    # A review judges finished output. If any sibling is still executing, the
+    # review would read a partial result set and could approve work that has
+    # not happened yet — the exact shape of a production auto-approval made
+    # while one of two tasks was still running. Deferring is safe rather than a
+    # stall: the dispatch loop calls this again on its next pass, and the
+    # request cannot leave `review` on its own while a task still holds a claim.
+    in_flight = [
+        t
+        for t in tasks
+        if not daemon._is_request_review_task(t)
+        and t.get('status') in ('claimed', 'running')
+    ]
+    if in_flight:
+        runtime.log(
+            f'Request {request_id[:8]} is in `review` but '
+            f'{len(in_flight)} task(s) are still executing; deferring review '
+            'until the work settles.',
+            'WARN',
+        )
+        return None
     if any((t.get('status') in ('pending', 'planned', 'claimed', 'running') for t in review_tasks)):
         return None
     manual_review_tasks = [t for t in review_tasks if t.get('status') == 'needs_review']
@@ -203,9 +223,17 @@ async def _create_request_review_task(daemon, request_id: str, request_data: dic
         return None
     completed_reviews = [t for t in review_tasks if t.get('status') == 'completed']
     if completed_reviews:
+        # The review already ran and its decision is on the task row. Do NOT
+        # create a second review task — that re-runs an LLM review for a
+        # verdict that already exists, and loops forever for any review whose
+        # output could not be parsed. The decision is applied by
+        # `reconcile_request_statuses` (case 3), which finishes the recorded
+        # APPROVED/NEEDS_REWORK, or flags the request for a human when the
+        # recorded output has no usable decision.
         runtime.log(
             f'Request {request_id[:8]} remains in `review` after '
-            f'{len(completed_reviews)} completed review task(s); awaiting a manual decision.',
+            f'{len(completed_reviews)} completed review task(s); the recorded '
+            'decision is applied by status reconciliation.',
             'WARN',
         )
         return None

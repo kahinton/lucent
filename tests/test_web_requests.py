@@ -480,9 +480,9 @@ class TestRequestDetail:
 
         assert resp.status_code == 200
         assert f'id="task-{task["id"]}"' in resp.text
-        assert f'id="task-{task["id"]}-execution"' in resp.text
-        assert f'id="result-preview-{task["id"]}"' in resp.text
-        assert f'id="result-full-{task["id"]}"' in resp.text
+        # Technical detail is collapsed; the produced output is its own panel.
+        assert f'id="task-{task["id"]}-technical"' in resp.text
+        assert f'id="task-{task["id"]}-result"' in resp.text
         assert 'data-live-revision="' in resp.text
         assert "renderRequestMarkdown(root)" in resp.text
         assert "captureRequestLiveState(target)" in resp.text
@@ -519,7 +519,7 @@ class TestRequestDetail:
 
         resp = await client.get(f"/requests/{req['id']}")
         assert resp.status_code == 200
-        assert "This request is waiting for approval" in resp.text
+        assert "Lucent would like to start this work" in resp.text
         assert f'action="/requests/{req["id"]}/approval"' in resp.text
         assert 'value="approve"' in resp.text
         assert 'value="reject"' in resp.text
@@ -558,7 +558,7 @@ class TestRequestDetail:
         resp = await client.get(f"/activity/{req['id']}")
 
         assert resp.status_code == 200
-        assert "This request is ready for review" in resp.text
+        assert "does it look right" in resp.text
         assert f'hx-post="/daemon/review/{req["id"]}/action"' in resp.text
         assert 'value="approve"' in resp.text
         assert 'value="reject"' in resp.text

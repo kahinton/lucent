@@ -4,9 +4,10 @@
 
 {% block extra_head %}
 <style nonce="{{ request.state.csp_nonce }}">
-    .request-markdown h1 { font-size: 1.125rem; line-height: 1.5rem; font-weight: 700; color: rgb(17 24 39); margin: 1rem 0 0.5rem; }
-    .request-markdown h2 { font-size: 1rem; line-height: 1.5rem; font-weight: 700; color: rgb(17 24 39); margin: 0.875rem 0 0.375rem; }
-    .request-markdown h3, .request-markdown h4 { font-size: 0.875rem; line-height: 1.25rem; font-weight: 700; color: rgb(31 41 55); margin: 0.75rem 0 0.25rem; }
+    /* Markdown surfaces inside result bodies. Scoped to this page only. */
+    .request-markdown h1 { font-size: 1.125rem; line-height: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+    .request-markdown h2 { font-size: 1rem; line-height: 1.5rem; font-weight: 700; margin: 0.875rem 0 0.375rem; }
+    .request-markdown h3, .request-markdown h4 { font-size: 0.875rem; line-height: 1.25rem; font-weight: 700; margin: 0.75rem 0 0.25rem; }
     .request-markdown p { margin: 0.4rem 0; }
     .request-markdown ul, .request-markdown ol { margin: 0.5rem 0 0.5rem 1.25rem; }
     .request-markdown li { margin: 0.125rem 0; }
@@ -24,10 +25,423 @@
     .request-markdown tr:nth-child(even) td { background: rgb(249 250 251 / 0.55); }
     .request-markdown th[data-align="center"], .request-markdown td[data-align="center"] { text-align: center; }
     .request-markdown th[data-align="right"], .request-markdown td[data-align="right"] { text-align: right; }
+
+    /* Live stream pane. Plain wrapped text on purpose: partial markdown (an
+       unclosed code fence, a half-written table) renders as garbage, so
+       in-flight output is shown literally and swapped for rendered markdown
+       only once the step settles. */
+    .live-stream {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.75rem;
+        line-height: 1.55;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 18rem;
+        overflow-y: auto;
+        scroll-behavior: smooth;
+    }
+    .live-stream::after {
+        content: '';
+        display: inline-block;
+        width: 0.45rem;
+        height: 0.9rem;
+        margin-left: 2px;
+        vertical-align: text-bottom;
+        background: currentColor;
+        animation: live-caret 1.1s steps(2, start) infinite;
+    }
+    .live-stream.is-idle::after { animation: none; opacity: 0; }
+    @keyframes live-caret { 0%, 49% { opacity: 0.6; } 50%, 100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) {
+        .live-stream::after { animation: none; opacity: 0.3; }
+        .live-stream { scroll-behavior: auto; }
+    }
 </style>
 {% endblock %}
 
 {% block content %}
+{# ── status vocabulary ──────────────────────────────────────────────────
+   The database speaks in dispatch states (claimed, needs_review). People
+   reading this page need "Queued / Running / Done". Two macros keep every
+   badge on the page honest and consistent. #}
+{% macro task_status_label(status) -%}
+{%- if status in ('pending', 'planned') -%}Queued
+{%- elif status == 'claimed' -%}Starting
+{%- elif status == 'running' -%}Running
+{%- elif status == 'completed' -%}Done
+{%- elif status == 'failed' -%}Failed
+{%- elif status == 'needs_review' -%}Needs a check
+{%- elif status == 'cancelled' -%}Cancelled
+{%- else -%}{{ status | replace('_', ' ') | title }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro task_status_class(status) -%}
+{%- if status in ('pending', 'planned') -%}bg-gray-100 text-gray-500
+{%- elif status == 'claimed' -%}bg-sky-100 text-sky-700
+{%- elif status == 'running' -%}bg-blue-100 text-blue-700
+{%- elif status == 'completed' -%}bg-emerald-100 text-emerald-700
+{%- elif status == 'failed' -%}bg-red-100 text-red-700
+{%- elif status == 'needs_review' -%}bg-purple-100 text-purple-700
+{%- elif status == 'cancelled' -%}bg-gray-100 text-gray-400
+{%- else -%}bg-gray-100 text-gray-600
+{%- endif -%}
+{%- endmacro %}
+
+{% macro format_duration(seconds) -%}
+{%- if seconds is none -%}
+{%- elif seconds < 60 -%}{{ seconds }}s
+{%- elif seconds < 3600 -%}{{ seconds // 60 }}m {{ seconds % 60 }}s
+{%- else -%}{{ seconds // 3600 }}h {{ (seconds % 3600) // 60 }}m
+{%- endif -%}
+{%- endmacro %}
+
+{% macro markdown_block(content, classes='') %}
+<div class="js-markdown-block request-markdown {{ classes }}"><script type="application/json" nonce="{{ request.state.csp_nonce }}">{{ (content or '') | tojson }}</script></div>
+{% endmacro %}
+
+{% macro output_card(output) %}
+<div class="flex items-start gap-3 rounded-lg border {% if output.is_primary %}border-primary-200 bg-primary-50{% else %}border-gray-200 bg-white{% endif %} p-3">
+    <span class="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg
+        {% if output.output_type == 'github_pr' %}bg-purple-100 text-purple-700
+        {% elif output.output_type == 'github_issue' %}bg-emerald-100 text-emerald-700
+        {% elif output.output_type == 'email' %}bg-blue-100 text-blue-700
+        {% elif output.output_type == 'document' %}bg-amber-100 text-amber-700
+        {% else %}bg-gray-100 text-gray-600{% endif %}">
+        {% if output.output_type == 'github_pr' %}
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m9-9a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+        {% elif output.output_type == 'email' %}
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" /></svg>
+        {% else %}
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5A3.375 3.375 0 0010.125 2.25H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
+        {% endif %}
+    </span>
+    <div class="min-w-0 flex-1">
+        {% if output.url %}
+        <a href="{{ output.url }}" target="_blank" rel="noopener noreferrer" class="font-medium text-gray-900 break-words hover:text-primary-700">{{ output.title }}</a>
+        {% else %}
+        <span class="font-medium text-gray-900 break-words">{{ output.title }}</span>
+        {% endif %}
+        {% if output.description %}
+        <div class="mt-1.5">{{ markdown_block(output.description, 'text-xs text-gray-600') }}</div>
+        {% endif %}
+        <p class="mt-1 text-[11px] text-gray-400">
+            {{ output.output_type | replace('_', ' ') }}{% if output.created_at %} · {{ output.created_at.strftime('%b %d, %H:%M') }}{% endif %}
+        </p>
+    </div>
+</div>
+{% endmacro %}
+
+{% macro render_task(task, depth=0) %}
+<article id="task-{{ task.id }}" data-task-id="{{ task.id }}"
+    data-task-status="{{ task.status }}"
+    data-started-at="{{ task.claimed_at.isoformat() if task.claimed_at else '' }}"
+    class="mb-2 rounded-xl border bg-white p-4
+        {% if task.status == 'running' %}border-blue-300
+        {% elif task.status == 'failed' %}border-red-200
+        {% else %}border-gray-200{% endif %}
+        {% if depth > 0 %}ml-6 border-l-4{% endif %}">
+    <div class="flex items-start gap-3">
+        <!-- Step number doubles as the status mark: one glyph, not two. -->
+        <div class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold
+            {% if task.status == 'completed' %}bg-emerald-100 text-emerald-700
+            {% elif task.status in ('running', 'claimed') %}bg-blue-100 text-blue-700
+            {% elif task.status == 'failed' %}bg-red-100 text-red-700
+            {% elif task.status == 'needs_review' %}bg-purple-100 text-purple-700
+            {% else %}bg-gray-100 text-gray-500{% endif %}">
+            {% if task.status == 'completed' %}
+            <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
+            {% elif task.status == 'failed' %}
+            <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            {% else %}
+            {{ task.sequence_order + 1 }}
+            {% endif %}
+        </div>
+
+        <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                <h3 class="text-sm font-semibold text-gray-900">{{ task.title }}</h3>
+                <div class="flex shrink-0 items-center gap-2">
+                    <span class="rounded px-2 py-0.5 text-xs font-medium {{ task_status_class(task.status) }}">
+                        {% if task.status in ('claimed', 'running') %}
+                        <span class="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current align-middle"></span>
+                        {% endif %}
+                        {{ task_status_label(task.status) }}
+                    </span>
+                    <span class="text-xs tabular-nums text-gray-400" data-duration-for="{{ task.id }}">
+                        {% if task.duration_seconds is not none %}{{ format_duration(task.duration_seconds) }}{% endif %}
+                    </span>
+                </div>
+            </div>
+
+            <!-- Plain-language phase. Deliberately not the raw event list.
+                 A failed step already shows its real error below, so it does
+                 not get a vague one-liner on top. -->
+            {% if task.activity_line and task.status not in ('completed', 'cancelled', 'failed') %}
+            <p class="mt-1 text-xs {% if task.status == 'needs_review' %}text-purple-600{% else %}text-gray-500{% endif %}">
+                {{ task.activity_line }}{% if task.status == 'running' %}…{% endif %}
+            </p>
+            {% endif %}
+
+            {% if task.description and task.status in ('pending', 'planned') %}
+            <p class="mt-1 line-clamp-2 text-xs text-gray-500">{{ task.description }}</p>
+            {% endif %}
+
+            <!-- Live model output while the step is in flight. -->
+            {% if task.status in ('claimed', 'running') %}
+            <div class="mt-3 rounded-lg border border-gray-200 bg-gray-50">
+                <div class="flex items-center justify-between gap-2 border-b border-gray-200 px-3 py-1.5">
+                    <span class="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Writing now</span>
+                    <span class="js-live-state text-[11px] text-gray-400">{% if task.live_output %}live{% else %}warming up{% endif %}</span>
+                </div>
+                <div class="live-stream px-3 py-2 text-gray-700{% if not task.live_output %} is-idle{% endif %}"
+                     id="live-output-{{ task.id }}"
+                     data-live-output-for="{{ task.id }}"
+                     aria-live="polite"
+                     aria-label="Live output for {{ task.title }}">{% if task.live_output %}{{ task.live_output }}{% else %}Waiting for the model to start writing…{% endif %}</div>
+            </div>
+            {% endif %}
+
+            <!-- Failure explanation in plain language. -->
+            {% if task.error and task.status in ('failed', 'needs_review') %}
+            <div class="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                <p class="text-xs text-red-800">{{ task.error }}</p>
+            </div>
+            {% endif %}
+
+            <!-- Final output: what the user actually came for. -->
+            {% if task.result and task.status == 'completed' %}
+            <details id="task-{{ task.id }}-result" class="group mt-3">
+                <summary class="flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-primary-600 hover:text-primary-700">
+                    <svg class="h-3.5 w-3.5 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+                    <span class="group-open:hidden">Show what it produced</span>
+                    <span class="hidden group-open:inline">Hide output</span>
+                </summary>
+                <div class="mt-2 max-h-[32rem] overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+                    {{ markdown_block(task.result, 'text-sm text-gray-700') }}
+                </div>
+            </details>
+            {% elif task.result and task.status in ('failed', 'needs_review') %}
+            <details id="task-{{ task.id }}-result" class="group mt-2">
+                <summary class="flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700">
+                    <svg class="h-3.5 w-3.5 transition-transform group-open:rotate-90" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
+                    Show what it got through
+                </summary>
+                <div class="mt-2 max-h-[32rem] overflow-y-auto rounded-lg border border-gray-200 bg-gray-50 p-3">
+                    {{ markdown_block(task.result, 'text-sm text-gray-700') }}
+                </div>
+            </details>
+            {% endif %}
+
+            <!-- Files are listed once, in "What it produced" at the top.
+                 Repeating them inside every step was exactly the kind of
+                 duplication that made this page hard to scan. The pointer is
+                 only useful when more than one step could have produced them. -->
+            {% if task.outputs and work_count > 1 %}
+            <p class="mt-3 text-xs text-gray-500">
+                This step produced {{ task.outputs | length }} item{% if task.outputs|length != 1 %}s{% endif %}, listed above.
+            </p>
+            {% endif %}
+
+            <!-- Recovery action, only when relevant. -->
+            {% if can_review_request and task.status in ('failed', 'needs_review') %}
+            <div class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-gray-50 px-3 py-2">
+                <p class="text-xs text-gray-500">Try this step again — earlier steps are kept.</p>
+                <form method="POST" action="/requests/tasks/{{ task.id }}/retry">
+                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                    <button type="submit" class="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-800">Retry this step</button>
+                </form>
+            </div>
+            {% endif %}
+
+            {% if task.sub_tasks %}
+            <div class="mt-3 space-y-2">
+                {% for sub in task.sub_tasks %}
+                {{ render_task(sub, depth + 1) }}
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <!-- Everything technical, collapsed by default. -->
+            <details id="task-{{ task.id }}-technical" class="group mt-3 rounded-lg border border-gray-200 bg-gray-50">
+                <summary class="flex cursor-pointer list-none items-center justify-between gap-2 rounded-lg px-3 py-2 text-xs font-medium text-gray-500 hover:bg-gray-100">
+                    <span>Technical detail</span>
+                    <svg class="h-3.5 w-3.5 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+                </summary>
+                <div class="space-y-3 border-t border-gray-200 px-3 py-3">
+                    <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-gray-700">
+                        {% if task.description %}
+                        <dt class="text-gray-400">Instructions</dt>
+                        <dd class="whitespace-pre-wrap">{{ task.description }}</dd>
+                        {% endif %}
+                        <dt class="text-gray-400">Agent</dt>
+                        <dd>{{ task.agent_type or '—' }}</dd>
+                        <dt class="text-gray-400">Model</dt>
+                        <dd class="font-mono">{{ task.model or 'default' }}</dd>
+                        {% if task.reasoning_effort %}
+                        <dt class="text-gray-400">Reasoning</dt>
+                        <dd class="font-mono">{{ task.reasoning_effort }}</dd>
+                        {% endif %}
+                        <dt class="text-gray-400">Task ID</dt>
+                        <dd class="font-mono break-all text-gray-500">{{ task.id }}</dd>
+                        {% if task.claimed_by %}
+                        <dt class="text-gray-400">Run by</dt>
+                        <dd class="font-mono text-gray-500">{{ task.claimed_by }}</dd>
+                        {% endif %}
+                        {% if task.created_at %}
+                        <dt class="text-gray-400">Created</dt>
+                        <dd>{{ task.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+                        {% endif %}
+                        {% if task.claimed_at %}
+                        <dt class="text-gray-400">Started</dt>
+                        <dd>{{ task.claimed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+                        {% endif %}
+                        {% if task.completed_at %}
+                        <dt class="text-gray-400">Finished</dt>
+                        <dd>{{ task.completed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+                        {% endif %}
+                        {% if task.validation_status and task.validation_status != 'not_applicable' %}
+                        <dt class="text-gray-400">Validation</dt>
+                        <dd>
+                            <span class="rounded px-1.5 py-0.5 text-[11px]
+                                {% if task.validation_status == 'valid' %}bg-green-50 text-green-600
+                                {% elif task.validation_status in ('invalid', 'repair_failed') %}bg-red-50 text-red-600
+                                {% elif task.validation_status == 'repair_succeeded' %}bg-yellow-50 text-yellow-700
+                                {% else %}bg-gray-100 text-gray-500{% endif %}">{{ task.validation_status }}</span>
+                        </dd>
+                        {% endif %}
+                    </dl>
+
+                    {% if task.sandbox_template_id or task.sandbox_config %}
+                    {% set sb = task.sandbox_config or {} %}
+                    <div class="border-t border-gray-200 pt-2">
+                        <h4 class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Sandbox</h4>
+                        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-gray-700">
+                            {% if task.sandbox_template_id %}<dt class="text-gray-400">Template</dt><dd class="font-mono text-gray-500">{{ task.sandbox_template_id }}</dd>{% endif %}
+                            {% if sb.image %}<dt class="text-gray-400">Image</dt><dd class="font-mono">{{ sb.image }}</dd>{% endif %}
+                            {% if sb.repo_url %}<dt class="text-gray-400">Repo</dt><dd class="break-all font-mono">{{ sb.repo_url }}{% if sb.branch %} @ {{ sb.branch }}{% endif %}</dd>{% endif %}
+                            {% if sb.network_mode %}<dt class="text-gray-400">Network</dt><dd class="font-mono">{{ sb.network_mode }}</dd>{% endif %}
+                            {% if sb.memory_limit %}<dt class="text-gray-400">Memory</dt><dd class="font-mono">{{ sb.memory_limit }}</dd>{% endif %}
+                            {% if sb.cpu_limit %}<dt class="text-gray-400">CPU</dt><dd class="font-mono">{{ sb.cpu_limit }}</dd>{% endif %}
+                            {% if sb.timeout_seconds %}<dt class="text-gray-400">Timeout</dt><dd class="font-mono">{{ sb.timeout_seconds }}s</dd>{% endif %}
+                        </dl>
+                    </div>
+                    {% endif %}
+
+                    {% if task.validation_errors %}
+                    <div class="border-t border-gray-200 pt-2">
+                        <h4 class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-red-400">Validation errors</h4>
+                        <pre class="max-h-40 overflow-auto rounded bg-red-50 p-2 text-[11px] whitespace-pre-wrap text-red-700">{{ task.validation_errors | tojson(indent=2) }}</pre>
+                    </div>
+                    {% endif %}
+
+                    {% if task.result_structured %}
+                    <div class="border-t border-gray-200 pt-2">
+                        <h4 class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Structured result</h4>
+                        <pre class="max-h-48 overflow-auto rounded bg-white p-2 text-[11px] whitespace-pre-wrap text-gray-600">{{ task.result_structured | tojson(indent=2) }}</pre>
+                    </div>
+                    {% endif %}
+
+                    {% if task.memories %}
+                    <div class="border-t border-gray-200 pt-2">
+                        <h4 class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Memories it touched</h4>
+                        <div class="space-y-1">
+                            {% for mem in task.memories %}
+                            <div class="flex items-center gap-2 text-xs">
+                                <span class="rounded px-1.5 py-0.5
+                                    {% if mem.relation == 'created' %}bg-green-50 text-green-600
+                                    {% elif mem.relation == 'updated' %}bg-blue-50 text-blue-600
+                                    {% else %}bg-gray-100 text-gray-500{% endif %}">{{ mem.relation }}</span>
+                                <a href="/memories/{{ mem.memory_id }}" class="truncate text-primary-600 hover:underline">{{ mem.content[:80] if mem.content else mem.memory_id }}</a>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {% if task.events %}
+                    <div class="border-t border-gray-200 pt-2">
+                        <h4 class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">Event log</h4>
+                        <div class="max-h-56 space-y-0.5 overflow-y-auto">
+                            {% for event in task.events %}
+                            <div class="flex items-start gap-2 text-[11px]">
+                                <span class="shrink-0 font-mono text-gray-400">{{ event.created_at.strftime('%H:%M:%S') }}</span>
+                                <span class="shrink-0 rounded bg-gray-100 px-1 font-mono text-gray-500">{{ event.event_type }}</span>
+                                <span class="min-w-0 text-gray-600">{{ event.detail or '' }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    {% if can_review_request and task.status in ('pending', 'planned', 'failed', 'needs_review', 'cancelled') %}
+                    <div class="space-y-2 border-t border-gray-200 pt-2">
+                        <details id="task-{{ task.id }}-edit" class="rounded-lg border border-blue-200 bg-blue-50">
+                            <summary class="cursor-pointer rounded-lg px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-100">Edit instructions, agent, or model</summary>
+                            <form method="POST" action="/requests/tasks/{{ task.id }}/edit" class="space-y-3 border-t border-blue-200 p-3">
+                                <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                                <div>
+                                    <label class="mb-1 block text-xs font-medium text-gray-600">Title</label>
+                                    <input type="text" name="title" value="{{ task.title or '' }}" maxlength="512" class="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-sm focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                                </div>
+                                <div>
+                                    <label class="mb-1 block text-xs font-medium text-gray-600">Instructions</label>
+                                    <textarea name="description" rows="6" class="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500">{{ task.description or '' }}</textarea>
+                                </div>
+                                <div class="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="mb-1 block text-xs font-medium text-gray-600">Agent</label>
+                                        <select name="agent_type" class="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                            {% for agent in available_agents %}
+                                            <option value="{{ agent.name }}" {% if agent.name == task.agent_type %}selected{% endif %}>{{ agent.name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="mb-1 block text-xs font-medium text-gray-600">Model</label>
+                                        <select name="model" class="js-task-model w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                            {% for m in available_models %}
+                                            <option value="{{ m.id }}" data-reasoning-efforts="{{ (m.reasoning_efforts or [])|join(',') }}" {% if m.id == task.model %}selected{% endif %}>{{ m.id }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="mb-1 block text-xs font-medium text-gray-600">Reasoning effort</label>
+                                    <select name="reasoning_effort" data-current="{{ task.reasoning_effort or '' }}" class="js-task-reasoning w-full rounded-md border border-purple-200 bg-purple-50 px-2 py-1.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-purple-500">
+                                        <option value="">provider default</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="mb-1 block text-xs font-medium text-gray-600">Sandbox template</label>
+                                    <select name="sandbox_template_id" class="w-full rounded-md border border-gray-300 px-2 py-1.5 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                        <option value="__none__" {% if not task.sandbox_template_id %}selected{% endif %}>(none — run without sandbox)</option>
+                                        {% for t in available_sandbox_templates %}
+                                        <option value="{{ t.id }}" {% if t.id == (task.sandbox_template_id|string) %}selected{% endif %}>{{ t.name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="flex justify-end">
+                                    <button type="submit" class="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700">Save changes</button>
+                                </div>
+                            </form>
+                        </details>
+
+                        {% if task.status != 'cancelled' %}
+                        <form id="task-cancel-form-{{ task.id }}" hx-preserve="true" method="POST" action="/requests/tasks/{{ task.id }}/cancel" data-confirm="Stop this step? What it has done so far is kept.">
+                            <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                            <button type="submit" class="rounded-md border border-red-200 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50">Stop this step</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+            </details>
+        </div>
+    </div>
+</article>
+{% endmacro %}
+
 <div id="request-live-content"{% if req.status not in ('completed', 'failed', 'cancelled') %} data-live-refresh{% endif %} data-live-revision="{{ live_revision }}"
     hx-get="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}"
     hx-trigger="lucent:live-refresh"
@@ -35,323 +449,180 @@
     hx-select="#request-live-content"
     hx-target="this"
     hx-swap="outerHTML">
-<!-- Header -->
+
+{% set work_count = work_progress.total %}
+{% set work_done = work_progress.done %}
+{% set work_running = work_progress.running %}
+{% set work_failed = work_progress.attention %}
+{% set work_queued = work_progress.queued %}
+
+<!-- ── Header: what this is, and where it stands ─────────────────────── -->
 <div class="mb-6">
-    <div class="flex items-center gap-2 text-sm text-gray-500 mb-2">
-        <a href="/activity" class="hover:text-gray-700">Activity</a>
-        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
-        <span class="text-gray-700">{{ req.title[:60] }}</span>
-    </div>
-    <div class="flex items-start justify-between gap-4">
-        <div>
-            <h1 class="text-2xl font-bold text-gray-900">{{ req.title }}</h1>
-            {% if req.description %}
-            <p class="text-sm text-gray-500 mt-1 max-w-3xl line-clamp-2">{{ req.description[:240] }}{% if req.description|length > 240 %}…{% endif %}</p>
-            {% endif %}
-            {% if goal_info %}
-            <div class="mt-3 inline-flex items-start gap-2 bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 text-sm">
-                <svg class="w-4 h-4 text-purple-600 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 21l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.18L12 21z"/>
-                </svg>
-                <div class="min-w-0">
-                    <div class="flex items-center gap-2 flex-wrap">
-                        <span class="text-[11px] font-semibold uppercase tracking-wider text-purple-700">Goal</span>
-                        <a href="/memories/{{ goal_info.id }}" class="font-medium text-purple-900 hover:text-purple-700 truncate">{{ goal_info.title }}</a>
-                    </div>
-                    {% if goal_info.milestone_index %}
-                    <div class="mt-0.5 flex items-center gap-2 flex-wrap text-xs text-purple-800">
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 font-medium">
-                            Milestone {{ goal_info.milestone_index }}{% if goal_info.milestone_total %} of {{ goal_info.milestone_total }}{% endif %}
-                        </span>
-                        {% if goal_info.milestone_status %}
-                        <span class="inline-flex items-center gap-1">
-                            <span class="w-1.5 h-1.5 rounded-full
-                                {% if goal_info.milestone_status == 'completed' %}bg-emerald-500
-                                {% elif goal_info.milestone_status == 'active' %}bg-blue-500
-                                {% elif goal_info.milestone_status == 'abandoned' %}bg-gray-400
-                                {% else %}bg-amber-500{% endif %}"></span>
-                            {{ goal_info.milestone_status }}
-                        </span>
-                        {% endif %}
-                        {% if goal_info.milestone_label %}
-                        <span class="text-purple-700">— {{ goal_info.milestone_label }}</span>
-                        {% endif %}
-                    </div>
-                    {% elif req.goal_memory_id %}
-                    <div class="mt-0.5 text-xs text-purple-700/80">No specific milestone</div>
-                    {% endif %}
-                </div>
-            </div>
-            {% endif %}
-        </div>
-        <div class="flex items-center gap-2 shrink-0">
-            <!-- Status -->
-            <span class="px-3 py-1 rounded-md text-sm font-medium
-                {% if req.status == 'completed' %}bg-green-100 text-green-700
-                {% elif req.status == 'in_progress' %}bg-blue-100 text-blue-700
+    <a href="/activity" class="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800">
+        <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" /></svg>
+        All activity
+    </a>
+
+    <div class="mt-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <h1 class="text-2xl font-bold leading-tight text-gray-900">{{ req.title }}</h1>
+        <div class="flex shrink-0 flex-wrap items-center gap-2">
+            <span class="rounded-md px-3 py-1 text-sm font-medium
+                {% if req.status == 'completed' %}bg-emerald-100 text-emerald-700
+                {% elif req.status in ('in_progress', 'review') %}bg-blue-100 text-blue-700
                 {% elif req.status == 'pending' %}bg-amber-100 text-amber-700
                 {% elif req.status == 'planned' %}bg-purple-100 text-purple-700
                 {% elif req.status == 'failed' %}bg-red-100 text-red-700
-                {% elif req.status == 'rejection_processing' %}bg-orange-100 text-orange-700
+                {% elif req.status == 'cancelled' %}bg-gray-100 text-gray-500
                 {% else %}bg-gray-100 text-gray-600{% endif %}">
-                {{ req.status | replace('_', ' ') }}
+                {{ req.status | replace('_', ' ') | title }}
             </span>
-            <span class="px-3 py-1 rounded-md text-sm bg-gray-100 text-gray-500">{{ req.source }}</span>
             {% if req.approval_status == 'pending_approval' %}
-            <span class="px-3 py-1 rounded-md text-sm bg-amber-200 text-amber-800 font-medium">awaiting approval</span>
+            <span class="rounded-md bg-amber-200 px-3 py-1 text-sm font-medium text-amber-900">Awaiting approval</span>
             {% elif req.approval_status == 'rejected' %}
-            <span class="px-3 py-1 rounded-md text-sm bg-red-200 text-red-800 font-medium">rejected</span>
-            {% elif req.approval_status == 'approved' %}
-            <span class="px-3 py-1 rounded-md text-sm bg-emerald-100 text-emerald-700">approved</span>
-            {% endif %}
-            {% if req.priority != 'medium' %}
-            <span class="px-3 py-1 rounded-md text-sm
-                {% if req.priority == 'urgent' %}bg-red-100 text-red-700
-                {% elif req.priority == 'high' %}bg-orange-100 text-orange-700
-                {% else %}bg-gray-100 text-gray-500{% endif %}">
-                {{ req.priority }}
-            </span>
+            <span class="rounded-md bg-red-200 px-3 py-1 text-sm font-medium text-red-900">Sent back</span>
             {% endif %}
         </div>
     </div>
+
+    {% if goal_info %}
+    <div class="mt-3 inline-flex items-start gap-2 rounded-lg border border-purple-200 bg-purple-50 px-3 py-2 text-sm">
+        <svg class="mt-0.5 h-4 w-4 shrink-0 text-purple-600" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 21l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.18L12 21z" />
+        </svg>
+        <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+                <span class="text-[11px] font-semibold uppercase tracking-wider text-purple-700">Part of a goal</span>
+                <a href="/memories/{{ goal_info.id }}" class="truncate font-medium text-purple-900 hover:text-purple-700">{{ goal_info.title }}</a>
+            </div>
+            {% if goal_info.milestone_index %}
+            <p class="mt-0.5 text-xs text-purple-800">
+                Milestone {{ goal_info.milestone_index }}{% if goal_info.milestone_total %} of {{ goal_info.milestone_total }}{% endif %}{% if goal_info.milestone_label %} — {{ goal_info.milestone_label }}{% endif %}
+            </p>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 </div>
 
+<!-- ── Action banner: only when the user can actually do something ───── -->
 {% if req.approval_status == 'pending_approval' and req.status not in ('cancelled', 'rejection_processing') %}
-<div class="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+<div class="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4">
     <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div class="flex items-start gap-3">
-            <div class="mt-0.5 rounded-lg bg-amber-100 p-2 text-amber-700">
-                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z" />
-                </svg>
-            </div>
-            <div>
-                <h2 class="text-sm font-semibold text-amber-950">This request is waiting for approval</h2>
-                <p class="mt-1 max-w-2xl text-sm text-amber-800">
-                    Review the request and task plan here. Approving releases it for daemon execution; rejecting sends feedback into the planning loop.
-                </p>
-            </div>
+        <div>
+            <h2 class="text-sm font-semibold text-gray-900">Lucent would like to start this work</h2>
+            <p class="mt-1 max-w-2xl text-sm text-gray-600">Approve to let it begin. If the plan is wrong, send it back with a note and it will re-plan.</p>
         </div>
         {% if can_review_request %}
         <div class="flex flex-col gap-2 sm:min-w-[24rem]">
             <form method="post" action="/requests/{{ req.id }}/approval" class="flex flex-col gap-2 sm:flex-row">
                 <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                 <input type="hidden" name="action" value="approve">
-                <input type="text" name="comment" maxlength="10000" placeholder="Optional approval note" class="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500">
-                <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 transition-colors">
-                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+                <input type="text" name="comment" maxlength="10000" placeholder="Optional note" class="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+                <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700">
+                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                     Approve
                 </button>
             </form>
-            <details id="request-reject-feedback" class="rounded-lg border border-amber-200 bg-white/70">
-                <summary class="cursor-pointer list-none px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100/60 rounded-lg">
-                    Reject with feedback
-                </summary>
-                <form method="post" action="/requests/{{ req.id }}/approval" class="space-y-2 border-t border-amber-100 p-3" data-confirm="Reject this request and return it to the planning loop?">
+            <details id="request-reject-feedback" class="rounded-lg border border-amber-300 bg-gray-50">
+                <summary class="cursor-pointer list-none rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Send back with a note</summary>
+                <form method="post" action="/requests/{{ req.id }}/approval" class="space-y-2 border-t border-amber-200 p-3" data-confirm="Send this back to be re-planned?">
                     <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                     <input type="hidden" name="action" value="reject">
-                    <label class="block text-xs font-medium text-amber-900" for="reject-comment">Rejection reason</label>
-                    <textarea id="reject-comment" name="comment" rows="3" maxlength="10000" required placeholder="What should change before this work runs?" class="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"></textarea>
+                    <label class="block text-xs font-medium text-gray-600" for="reject-comment">What should change?</label>
+                    <textarea id="reject-comment" name="comment" rows="3" maxlength="10000" required placeholder="What should be different before this runs?" class="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"></textarea>
                     <div class="flex justify-end">
-                        <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700 transition-colors">
-                            <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            Reject request
-                        </button>
+                        <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700">Send back</button>
                     </div>
                 </form>
             </details>
         </div>
         {% else %}
-        <div class="rounded-lg border border-amber-200 bg-white/70 px-3 py-2 text-sm text-amber-800">
-            Admin or owner approval is required.
-        </div>
+        <div class="rounded-lg border border-amber-300 bg-gray-50 px-3 py-2 text-sm text-gray-600">An admin or owner needs to approve this.</div>
         {% endif %}
     </div>
 </div>
 {% endif %}
 
 {% if req.status == 'review' %}
-<div class="mb-6 rounded-xl border border-blue-200 bg-blue-50 p-4 shadow-sm">
+<div class="mb-6 rounded-xl border border-blue-300 bg-blue-50 p-4">
     <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div class="flex items-start gap-3">
-            <div class="mt-0.5 rounded-lg bg-blue-100 p-2 text-blue-700">
-                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 8.25v3.75m0 3h.008v.008H12V15zm9-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-            </div>
-            <div>
-                <h2 class="text-sm font-semibold text-blue-950">This request is ready for review</h2>
-                <p class="mt-1 max-w-2xl text-sm text-blue-800">
-                    Approve the completed work, or return it for rework with the changes you need.
-                </p>
-            </div>
+        <div>
+            <h2 class="text-sm font-semibold text-gray-900">The work is finished — does it look right?</h2>
+            <p class="mt-1 max-w-2xl text-sm text-gray-600">Approve to close this out, or send it back with the changes you need.</p>
         </div>
         <div id="review-actions-{{ req.id }}" class="flex flex-col gap-2 sm:min-w-[24rem]">
             {% if can_review_request %}
             <form hx-post="/daemon/review/{{ req.id }}/action" hx-target="#review-actions-{{ req.id }}" hx-swap="innerHTML" class="flex flex-col gap-2 sm:flex-row">
                 <input type="hidden" name="action" value="approve">
-                <input type="text" name="comment" maxlength="10000" placeholder="Optional approval note" class="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500">
-                <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700">
-                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+                <input type="text" name="comment" maxlength="10000" placeholder="Optional note" class="min-w-0 flex-1 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+                <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700">
+                    <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                     Approve
                 </button>
             </form>
-            <details id="request-review-rework" class="rounded-lg border border-blue-200 bg-white/70">
-                <summary class="cursor-pointer list-none rounded-lg px-3 py-2 text-sm font-medium text-blue-800 hover:bg-blue-100/60">
-                    Return for rework
-                </summary>
-                <form hx-post="/daemon/review/{{ req.id }}/action" hx-target="#review-actions-{{ req.id }}" hx-swap="innerHTML" class="space-y-2 border-t border-blue-100 p-3" data-confirm="Return this request for rework?">
+            <details id="request-review-rework" class="rounded-lg border border-blue-300 bg-gray-50">
+                <summary class="cursor-pointer list-none rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Send back for changes</summary>
+                <form hx-post="/daemon/review/{{ req.id }}/action" hx-target="#review-actions-{{ req.id }}" hx-swap="innerHTML" class="space-y-2 border-t border-blue-200 p-3" data-confirm="Send this back for changes?">
                     <input type="hidden" name="action" value="reject">
-                    <label class="block text-xs font-medium text-blue-900" for="review-comment">Required changes</label>
+                    <label class="block text-xs font-medium text-gray-600" for="review-comment">What needs to change?</label>
                     <textarea id="review-comment" name="comment" rows="3" maxlength="10000" required placeholder="What should Lucent revise?" class="w-full rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-red-500 focus:outline-none focus:ring-1 focus:ring-red-500"></textarea>
                     <div class="flex justify-end">
-                        <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-red-700">
-                            Return for rework
-                        </button>
+                        <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-700">Send back</button>
                     </div>
                 </form>
             </details>
             {% else %}
-            <div class="rounded-lg border border-blue-200 bg-white/70 px-3 py-2 text-sm text-blue-800">
-                Admin or request-owner review is required.
-            </div>
+            <div class="rounded-lg border border-blue-300 bg-gray-50 px-3 py-2 text-sm text-gray-600">An admin or the requester needs to review this.</div>
             {% endif %}
         </div>
     </div>
 </div>
 {% endif %}
 
-{% if can_review_request and req.status not in ('completed', 'cancelled') %}
-<div class="mb-6 flex justify-end">
-    <form id="request-cancel-form" hx-preserve="true" method="post" action="/requests/{{ req.id }}/cancel" data-confirm="Cancel this request? Its work history will remain available.">
-        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
-        <button type="submit" class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 transition-colors">
-            Cancel request
-        </button>
-    </form>
-</div>
-{% endif %}
-
-{% macro markdown_block(content, classes='') %}
-<div class="js-markdown-block request-markdown {{ classes }}"><script type="application/json" nonce="{{ request.state.csp_nonce }}">{{ (content or '') | tojson }}</script></div>
-{% endmacro %}
-
-{% if req.description %}
-<div class="mb-6 rounded-xl border border-gray-200 bg-white shadow-sm">
-    <details id="request-body-details" class="group" {% if req.description|length <= 900 %}open{% endif %}>
-        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 hover:bg-gray-50 rounded-xl">
-            <div>
-                <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Request Body</h2>
-                <p class="mt-0.5 text-xs text-gray-400">{{ req.description|length }} chars{% if req.description|length > 900 %} · collapsed by default{% endif %}</p>
-                {% if req.description|length > 900 %}
-                <p class="mt-1 max-w-2xl text-xs text-gray-500 group-open:hidden">{{ req.description[:220] }}…</p>
-                {% endif %}
-            </div>
-            <div class="flex items-center gap-2 text-xs font-medium text-primary-600">
-                <span class="group-open:hidden">Expand</span>
-                <span class="hidden group-open:inline">Collapse</span>
-                <svg class="h-4 w-4 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
-            </div>
-        </summary>
-        <div class="border-t border-gray-100 px-4 py-3">
-            {{ markdown_block(req.description, 'max-h-[34rem] overflow-y-auto pr-2 text-sm text-gray-700') }}
-        </div>
-    </details>
-</div>
-{% endif %}
-
-<!-- Stats Bar -->
-{% if req.stats %}
-<div class="grid grid-cols-5 gap-3 mb-6">
-    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
-        <p class="text-xs text-gray-500">Total</p>
-        <p class="text-xl font-bold text-gray-900">{{ req.stats.total }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
-        <p class="text-xs text-gray-500">Pending</p>
-        <p class="text-xl font-bold text-amber-600">{{ req.stats.pending }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
-        <p class="text-xs text-gray-500">Running</p>
-        <p class="text-xl font-bold text-blue-600">{{ req.stats.running }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
-        <p class="text-xs text-gray-500">Completed</p>
-        <p class="text-xl font-bold text-green-600">{{ req.stats.completed }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-3 text-center">
-        <p class="text-xs text-gray-500">Failed</p>
-        <p class="text-xl font-bold text-red-600">{{ req.stats.failed }}</p>
-    </div>
-</div>
-{% endif %}
-
-{% macro output_icon(output) %}
-    {% if output.output_type == 'github_pr' %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-purple-100 text-purple-700" title="GitHub pull request">PR</span>
-    {% elif output.output_type == 'github_issue' %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700" title="GitHub issue">#</span>
-    {% elif output.output_type == 'email' %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-blue-100 text-blue-700" title="Email">✉</span>
-    {% elif output.output_type == 'document' %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-amber-100 text-amber-700" title="Document">Doc</span>
-    {% elif output.output_type == 'file' %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-slate-100 text-slate-700" title="File">File</span>
-    {% elif output.output_type == 'memory' %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700" title="Memory">Mem</span>
-    {% elif output.output_type == 'deployment' %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-100 text-cyan-700" title="Deployment">🚀</span>
-    {% else %}
-    <span class="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-gray-100 text-gray-600" title="Output">↗</span>
-    {% endif %}
-{% endmacro %}
-
-{% macro output_card(output, compact=False) %}
-<div class="rounded-lg border {% if output.is_primary %}border-primary-200 bg-primary-50{% else %}border-gray-200 bg-white{% endif %} p-3 shadow-sm">
-    <div class="flex items-start gap-3">
-        <div class="shrink-0 text-xs font-bold">{{ output_icon(output) }}</div>
-        <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2 flex-wrap">
-                {% if output.url %}
-                <a href="{{ output.url }}" target="_blank" rel="noopener noreferrer" class="font-medium text-gray-900 hover:text-primary-700 break-words">{{ output.title }}</a>
-                {% else %}
-                <span class="font-medium text-gray-900 break-words">{{ output.title }}</span>
-                {% endif %}
-                {% if output.is_primary %}<span class="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-primary-100 text-primary-700">primary</span>{% endif %}
-                <span class="px-1.5 py-0.5 rounded text-[10px] bg-gray-100 text-gray-500">{{ output.output_type | replace('_', ' ') }}</span>
-                {% if output.provider %}<span class="px-1.5 py-0.5 rounded text-[10px] bg-gray-50 text-gray-500">{{ output.provider }}</span>{% endif %}
-            </div>
-            {% if output.description %}
-            <div class="mt-2 {% if compact %}max-h-28 overflow-y-auto rounded-md bg-gray-50 px-2 py-1.5{% endif %}">
-                {{ markdown_block(output.description, 'text-xs text-gray-600') }}
-            </div>
+<!-- ── Progress: one sentence and one bar, not five counters ─────────── -->
+{% if work_count %}
+<div class="mb-6 rounded-xl border border-gray-200 bg-white p-4">
+    <div class="flex items-baseline justify-between gap-3">
+        <p class="text-sm font-medium text-gray-900">
+            {% if work_running %}
+                Step {{ work_done + 1 }} of {{ work_count }} in progress
+            {% elif work_failed == 1 %}
+                1 step needs attention
+            {% elif work_failed %}
+                {{ work_failed }} steps need attention
+            {% elif work_done == work_count %}
+                All {{ work_count }} step{% if work_count != 1 %}s{% endif %} complete
+            {% else %}
+                {{ work_done }} of {{ work_count }} step{% if work_count != 1 %}s{% endif %} complete{% if work_queued %} · {{ work_queued }} queued{% endif %}
             {% endif %}
-            <div class="mt-1 flex items-center gap-2 text-[11px] text-gray-400 flex-wrap">
-                {% if output.external_id %}<span class="font-mono">{{ output.external_id }}</span>{% endif %}
-                {% if output.created_at %}<span>{{ output.created_at.strftime('%Y-%m-%d %H:%M') }}</span>{% endif %}
-                {% if output.url %}<span class="truncate max-w-sm font-mono">{{ output.url }}</span>{% endif %}
-            </div>
-        </div>
+        </p>
+        <p class="shrink-0 text-xs text-gray-400">
+            {% if req.status == 'cancelled' %}
+                Stopped{% if req.completed_at %} {{ req.completed_at.strftime('%b %d, %H:%M') }}{% endif %}
+            {% elif req.completed_at and req.created_at %}
+                Finished in {{ format_duration(((req.completed_at - req.created_at).total_seconds() | int)) }}
+            {% elif req.created_at %}
+                Started {{ req.created_at.strftime('%H:%M') }}
+            {% endif %}
+        </p>
+    </div>
+    {% set pct = ((work_done / work_count) * 100) | int %}
+    <div class="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+        <div class="h-full rounded-full transition-all duration-500
+            {% if work_failed %}bg-red-400{% elif work_running %}bg-blue-400{% else %}bg-emerald-400{% endif %}"
+            style="width: {{ pct }}%"></div>
     </div>
 </div>
-{% endmacro %}
+{% endif %}
 
+<!-- ── Deliverables ──────────────────────────────────────────────────── -->
 {% if req.outputs %}
-<div class="mb-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-    <div class="mb-3 flex items-center justify-between gap-3">
-        <div>
-            <h2 class="text-lg font-semibold text-gray-900">Outputs</h2>
-            <p class="text-sm text-gray-500">Deliverables produced by this request.</p>
-        </div>
-        <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">{{ req.outputs | length }} output{% if req.outputs|length != 1 %}s{% endif %}</span>
+<div class="mb-6">
+    <div class="mb-2 flex items-center justify-between gap-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">What it produced</h2>
+        <span class="text-xs text-gray-400">{{ req.outputs | length }} item{% if req.outputs|length != 1 %}s{% endif %}</span>
     </div>
-    <div class="grid gap-3 md:grid-cols-2">
+    <div class="grid gap-2 md:grid-cols-2">
         {% for output in req.outputs %}
         {{ output_card(output) }}
         {% endfor %}
@@ -359,680 +630,197 @@
 </div>
 {% endif %}
 
-<div class="grid grid-cols-3 gap-6">
-    <!-- Left: Task Tree (2 cols) -->
-    <div class="col-span-2 space-y-3">
-        <h2 class="text-lg font-semibold text-gray-900">Task Breakdown</h2>
+<!-- ── The steps ──────────────────────────────────────────────────────── -->
+<h2 class="mb-2 text-sm font-semibold uppercase tracking-wider text-gray-500">Steps</h2>
 
-        {% macro render_task(task, depth=0) %}
-        <details id="task-{{ task.id }}" class="bg-white rounded-lg border border-gray-200 group {% if depth > 0 %}ml-6 border-l-2 border-l-gray-300{% endif %}" {% if task.status in ('running', 'claimed', 'failed', 'needs_review') %}open{% endif %}>
-            <summary class="p-3 cursor-pointer list-none">
-                <div class="flex items-start justify-between gap-3">
-                    <div class="flex-1 min-w-0">
-                        <div class="flex items-center gap-2 flex-wrap">
-                            <svg class="w-4 h-4 text-gray-400 transition-transform group-open:rotate-90 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5"/></svg>
+{% if work_tasks %}
+    {% for task in work_tasks %}
+    {{ render_task(task) }}
+    {% endfor %}
+{% elif internal_tasks %}
+<div class="rounded-xl border border-gray-200 bg-white p-5 text-sm text-gray-500">
+    This request has no work steps of its own — Lucent only ran its own bookkeeping for it.
+</div>
+{% else %}
+<div class="rounded-xl border border-gray-200 bg-white p-5 text-sm text-gray-500">
+    Nothing has been planned for this request yet.
+</div>
+{% endif %}
 
-                            <!-- Step number -->
-                            <span class="text-xs font-mono text-gray-400">#{{ task.sequence_order + 1 }}</span>
+<!-- ── Everything else, tucked away ───────────────────────────────────── -->
+<div class="mt-8 rounded-xl border border-gray-200 bg-white">
+    <details id="request-more" class="group">
+        <summary class="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-4 py-3 hover:bg-gray-50">
+            <div>
+                <h2 class="text-sm font-semibold text-gray-900">More about this request</h2>
+                <p class="mt-0.5 text-xs text-gray-400">The original instructions, full activity log, and linked items.</p>
+            </div>
+            <svg class="h-4 w-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+        </summary>
 
-                            <span class="font-medium text-gray-900 text-sm">{{ task.title }}</span>
+        <div class="space-y-5 border-t border-gray-200 px-4 py-4">
+            {% if req.description %}
+            <section>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">The original request</h3>
+                <div class="max-h-[28rem] overflow-y-auto rounded-lg bg-gray-50 p-3">
+                    {{ markdown_block(req.description, 'text-sm text-gray-700') }}
+                </div>
+            </section>
+            {% endif %}
 
-                            <!-- Status -->
-                            <span class="px-1.5 py-0.5 rounded text-xs
-                                {% if task.status == 'completed' %}bg-green-100 text-green-700
-                                {% elif task.status == 'running' %}bg-blue-100 text-blue-700
-                                {% elif task.status == 'claimed' %}bg-blue-50 text-blue-600
-                                {% elif task.status == 'pending' or task.status == 'planned' %}bg-gray-100 text-gray-500
-                                {% elif task.status == 'failed' %}bg-red-100 text-red-700
-                                {% elif task.status == 'needs_review' %}bg-purple-100 text-purple-700
-                                {% else %}bg-gray-100 text-gray-600{% endif %}">
-                                {% if task.status == 'running' %}
-                                <span class="inline-block w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse mr-1"></span>
-                                {% endif %}
-                                {{ task.status }}
-                            </span>
-
-                            <!-- Agent type -->
-                            {% if task.agent_type %}
-                            <span class="px-1.5 py-0.5 rounded text-xs bg-indigo-50 text-indigo-600">{{ task.agent_type }}</span>
-                            {% endif %}
-
-                            <!-- Model -->
-                            {% if task.model %}
-                            <span class="px-1.5 py-0.5 rounded text-xs bg-violet-50 text-violet-600 font-mono">{{ task.model }}</span>
-                            {% endif %}
-
-                            <!-- Claimed by -->
-                            {% if task.claimed_by %}
-                            <span class="px-1.5 py-0.5 rounded text-xs bg-gray-50 text-gray-500" title="Instance: {{ task.claimed_by }}">{{ task.claimed_by[:20] }}</span>
-                            {% endif %}
-
-                            <!-- Memory count -->
-                            {% if task.memories %}
-                            <span class="px-1.5 py-0.5 rounded text-xs bg-emerald-50 text-emerald-600">{{ task.memories|length }} memories</span>
-                            {% endif %}
-
-                            {% if task.outputs %}
-                            <span class="px-1.5 py-0.5 rounded text-xs bg-primary-50 text-primary-600">{{ task.outputs|length }} outputs</span>
-                            {% endif %}
-                        </div>
-                        {% if task.description %}
-                        <p class="text-xs text-gray-500 mt-1 ml-6">{{ task.description[:200] }}</p>
-                        {% endif %}
-                    </div>
-                    {% if task.completed_at %}
-                    <span class="text-xs text-gray-400 shrink-0">
-                        {{ task.completed_at.strftime('%H:%M:%S') }}
-                        {% if task.claimed_at %}
-                        <span class="text-gray-300">({{ ((task.completed_at - task.claimed_at).total_seconds() | int) }}s)</span>
-                        {% endif %}
-                    </span>
-                    {% elif task.claimed_at %}
-                    <span class="text-xs text-blue-400 shrink-0">started {{ task.claimed_at.strftime('%H:%M:%S') }}</span>
+            <section>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Request details</h3>
+                <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+                    <dt class="text-gray-400">Request ID</dt>
+                    <dd class="font-mono text-gray-600">{{ req.id }}</dd>
+                    <dt class="text-gray-400">Asked by</dt>
+                    <dd class="text-gray-600">{{ req.source | replace('_', ' ') | title }}</dd>
+                    <dt class="text-gray-400">Priority</dt>
+                    <dd class="text-gray-600">{{ req.priority | title }}</dd>
+                    {% if req.created_at %}
+                    <dt class="text-gray-400">Created</dt>
+                    <dd class="text-gray-600">{{ req.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
                     {% endif %}
-                </div>
-            </summary>
-
-            <div class="px-3 pb-3 border-t border-gray-100 pt-2 space-y-3">
-                <!-- Retry button for failed tasks -->
-                {% if can_review_request and task.status in ('failed', 'needs_review') %}
-                <div class="flex items-center justify-between">
-                    <span class="text-xs {% if task.status == 'needs_review' %}text-purple-600{% else %}text-red-500{% endif %}">{% if task.status == 'needs_review' %}Automatic completion could not satisfy the task requirements. Review and retry this task.{% else %}This task failed and can be retried.{% endif %}</span>
-                    <form method="POST" action="/requests/tasks/{{ task.id }}/retry">
-                        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
-                        <button type="submit" class="px-3 py-1 text-xs font-medium rounded-md {% if task.status == 'needs_review' %}bg-purple-100 text-purple-700 hover:bg-purple-200{% else %}bg-amber-100 text-amber-700 hover:bg-amber-200{% endif %} transition-colors">
-                            Retry Task
-                        </button>
-                    </form>
-                </div>
-                {% endif %}
-
-                <!-- Inline edit form for any task that isn't running or already completed -->
-                {% if can_review_request and task.status not in ('claimed', 'running', 'completed') %}
-                <details class="bg-blue-50 rounded-lg border border-blue-200" id="task-{{ task.id }}-edit">
-                    <summary class="cursor-pointer px-3 py-2 text-xs font-semibold text-blue-700 uppercase tracking-wider hover:bg-blue-100 rounded-lg flex items-center gap-2">
-                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.862 4.487z"/></svg>
-                        Edit task
-                    </summary>
-                    <form method="POST" action="/requests/tasks/{{ task.id }}/edit" class="px-3 pb-3 pt-2 space-y-3">
-                        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Title</label>
-                            <input type="text" name="title" value="{{ task.title or '' }}" maxlength="512"
-                                   class="w-full text-sm font-mono px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500" />
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Description</label>
-                            <textarea name="description" rows="6"
-                                      class="w-full text-xs font-mono px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500">{{ task.description or '' }}</textarea>
-                        </div>
-                        <div class="grid grid-cols-2 gap-3">
-                            <div>
-                                <label class="block text-xs font-medium text-gray-600 mb-1">Agent</label>
-                                <select name="agent_type" class="w-full text-xs font-mono px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500">
-                                    {% for agent in available_agents %}
-                                    <option value="{{ agent.name }}" {% if agent.name == task.agent_type %}selected{% endif %}>{{ agent.name }}</option>
-                                    {% endfor %}
-                                </select>
-                            </div>
-                            <div>
-                                <label class="block text-xs font-medium text-gray-600 mb-1">Model</label>
-                                <select name="model" class="js-task-model w-full text-xs font-mono px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500">
-                                    {% for m in available_models %}
-                                    <option value="{{ m.id }}" data-reasoning-efforts="{{ (m.reasoning_efforts or [])|join(',') }}" {% if m.id == task.model %}selected{% endif %}>{{ m.id }}</option>
-                                    {% endfor %}
-                                </select>
-                            </div>
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Reasoning effort</label>
-                            <select name="reasoning_effort" data-current="{{ task.reasoning_effort or '' }}" class="js-task-reasoning w-full text-xs font-mono px-2 py-1.5 border border-purple-200 rounded-md focus:outline-none focus:ring-1 focus:ring-purple-500 bg-purple-50">
-                                <option value="">provider default</option>
-                            </select>
-                            <p class="mt-1 text-[10px] text-gray-500">Only shown when the selected model exposes selectable reasoning levels.</p>
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-600 mb-1">Sandbox template</label>
-                            <select name="sandbox_template_id" class="w-full text-xs font-mono px-2 py-1.5 border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500">
-                                <option value="__none__" {% if not task.sandbox_template_id %}selected{% endif %}>(none — run without sandbox)</option>
-                                {% for t in available_sandbox_templates %}
-                                <option value="{{ t.id }}" {% if t.id == (task.sandbox_template_id|string) %}selected{% endif %}>{{ t.name }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div class="flex items-center justify-end gap-2 pt-1">
-                            <button type="submit" class="px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 transition-colors">
-                                Save changes
-                            </button>
-                        </div>
-                    </form>
-                </details>
-                {% if task.status != 'cancelled' %}
-                <form id="task-cancel-form-{{ task.id }}" hx-preserve="true" method="POST" action="/requests/tasks/{{ task.id }}/cancel" class="flex justify-end" data-confirm="Cancel this task? Its activity history will remain available.">
-                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
-                    <button type="submit" class="px-3 py-1 text-xs font-medium rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50 transition-colors">
-                        Cancel task
-                    </button>
-                </form>
-                {% endif %}
-                {% endif %}
-
-                <!-- Execution Details: sandbox, model, validation, timing -->
-                <details id="task-{{ task.id }}-execution" class="bg-gray-50 rounded-lg border border-gray-200">
-                    <summary class="cursor-pointer px-3 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wider hover:bg-gray-100 rounded-lg">
-                        Execution Details
-                    </summary>
-                    <div class="px-3 pb-3 pt-1 space-y-2 text-xs text-gray-700">
-                        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-                            <dt class="text-gray-400">Task ID</dt>
-                            <dd class="font-mono text-gray-600 break-all">{{ task.id }}</dd>
-
-                            {% if task.description %}
-                            <dt class="text-gray-400">Description</dt>
-                            <dd class="whitespace-pre-wrap">{{ task.description }}</dd>
-                            {% endif %}
-
-                            <dt class="text-gray-400">Agent</dt>
-                            <dd>{{ task.agent_type or '—' }}</dd>
-
-                            <dt class="text-gray-400">Model</dt>
-                            <dd class="font-mono">{{ task.model or 'default' }}</dd>
-
-                            <dt class="text-gray-400">Reasoning</dt>
-                            <dd class="font-mono">{{ task.reasoning_effort or 'provider default' }}</dd>
-
-                            <dt class="text-gray-400">Priority</dt>
-                            <dd>{{ task.priority }}</dd>
-
-                            <dt class="text-gray-400">Sequence</dt>
-                            <dd>#{{ task.sequence_order + 1 }}</dd>
-
-                            {% if task.requesting_user_id %}
-                            <dt class="text-gray-400">Requesting user</dt>
-                            <dd class="font-mono text-gray-500">{{ task.requesting_user_id }}</dd>
-                            {% endif %}
-
-                            {% if task.claimed_by %}
-                            <dt class="text-gray-400">Claimed by</dt>
-                            <dd class="font-mono text-gray-500">{{ task.claimed_by }}</dd>
-                            {% endif %}
-
-                            {% if task.claim_version and task.claim_version > 1 %}
-                            <dt class="text-gray-400">Claim attempts</dt>
-                            <dd>{{ task.claim_version }}</dd>
-                            {% endif %}
-
-                            {% if task.claim_expires_at %}
-                            <dt class="text-gray-400">Claim expires</dt>
-                            <dd>{{ task.claim_expires_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
-                            {% endif %}
-
-                            {% if task.last_heartbeat_at %}
-                            <dt class="text-gray-400">Last heartbeat</dt>
-                            <dd>{{ task.last_heartbeat_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
-                            {% endif %}
-
-                            <dt class="text-gray-400">Created</dt>
-                            <dd>{{ task.created_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
-
-                            {% if task.claimed_at %}
-                            <dt class="text-gray-400">Started</dt>
-                            <dd>{{ task.claimed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}</dd>
-                            {% endif %}
-
-                            {% if task.completed_at %}
-                            <dt class="text-gray-400">Completed</dt>
-                            <dd>
-                                {{ task.completed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
-                                {% if task.claimed_at %}
-                                <span class="text-gray-400">(ran for {{ ((task.completed_at - task.claimed_at).total_seconds() | int) }}s)</span>
-                                {% endif %}
-                            </dd>
-                            {% endif %}
-
-                            <dt class="text-gray-400">Validation</dt>
-                            <dd>
-                                <span class="px-1.5 py-0.5 rounded text-[11px]
-                                    {% if task.validation_status == 'valid' %}bg-green-50 text-green-600
-                                    {% elif task.validation_status in ('invalid', 'repair_failed') %}bg-red-50 text-red-600
-                                    {% elif task.validation_status == 'repair_succeeded' %}bg-yellow-50 text-yellow-700
-                                    {% else %}bg-gray-100 text-gray-500{% endif %}">
-                                    {{ task.validation_status }}
-                                </span>
-                                {% if task.validation_errors %}
-                                <span class="text-red-600 ml-1">{{ task.validation_errors | length }} errors</span>
-                                {% endif %}
-                            </dd>
-
-                            {% if task.parent_task_id %}
-                            <dt class="text-gray-400">Parent task</dt>
-                            <dd class="font-mono text-gray-500">{{ task.parent_task_id }}</dd>
-                            {% endif %}
-                        </dl>
-
-                        {% if task.sandbox_config or task.sandbox_template_id %}
-                        <div class="mt-3 pt-2 border-t border-gray-200">
-                            <h5 class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Sandbox</h5>
-                            <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-                                {% if task.sandbox_template_id %}
-                                <dt class="text-gray-400">Template</dt>
-                                <dd class="font-mono text-gray-500">{{ task.sandbox_template_id }}</dd>
-                                {% endif %}
-                                {% set sb = task.sandbox_config or {} %}
-                                {% if sb.image %}
-                                <dt class="text-gray-400">Image</dt>
-                                <dd class="font-mono">{{ sb.image }}</dd>
-                                {% endif %}
-                                {% if sb.repo_url %}
-                                <dt class="text-gray-400">Repo</dt>
-                                <dd class="font-mono break-all">{{ sb.repo_url }}{% if sb.branch %} @ {{ sb.branch }}{% endif %}</dd>
-                                {% endif %}
-                                {% if sb.working_dir %}
-                                <dt class="text-gray-400">Working dir</dt>
-                                <dd class="font-mono">{{ sb.working_dir }}</dd>
-                                {% endif %}
-                                {% if sb.network_mode %}
-                                <dt class="text-gray-400">Network</dt>
-                                <dd>
-                                    <span class="font-mono">{{ sb.network_mode }}</span>
-                                    {% if sb.allowed_hosts %}
-                                    <span class="text-gray-400">({{ sb.allowed_hosts | length }} allowed hosts)</span>
-                                    {% endif %}
-                                </dd>
-                                {% endif %}
-                                {% if sb.allowed_hosts %}
-                                <dt class="text-gray-400">Allowed hosts</dt>
-                                <dd class="font-mono text-[11px] text-gray-600">{{ sb.allowed_hosts | join(', ') }}</dd>
-                                {% endif %}
-                                {% if sb.memory_limit %}
-                                <dt class="text-gray-400">Memory limit</dt>
-                                <dd class="font-mono">{{ sb.memory_limit }}</dd>
-                                {% endif %}
-                                {% if sb.cpu_limit %}
-                                <dt class="text-gray-400">CPU limit</dt>
-                                <dd class="font-mono">{{ sb.cpu_limit }}</dd>
-                                {% endif %}
-                                {% if sb.timeout_seconds %}
-                                <dt class="text-gray-400">Timeout</dt>
-                                <dd class="font-mono">{{ sb.timeout_seconds }}s</dd>
-                                {% endif %}
-                                {% if sb.output_mode %}
-                                <dt class="text-gray-400">Output mode</dt>
-                                <dd class="font-mono">{{ sb.output_mode }}</dd>
-                                {% endif %}
-                                {% if sb.setup_commands %}
-                                <dt class="text-gray-400">Setup commands</dt>
-                                <dd class="font-mono text-[11px]">{{ sb.setup_commands | length }} command(s)</dd>
-                                {% endif %}
-                                {% if sb.env_vars %}
-                                <dt class="text-gray-400">Env vars</dt>
-                                <dd class="font-mono text-[11px]">{{ sb.env_vars.keys() | list | join(', ') }}</dd>
-                                {% endif %}
-                                {% if sb.commit_approved %}
-                                <dt class="text-gray-400">Git commits</dt>
-                                <dd>approved</dd>
-                                {% endif %}
-                            </dl>
-                        </div>
-                        {% endif %}
-
-                        {% if task.output_contract %}
-                        <div class="mt-3 pt-2 border-t border-gray-200">
-                            <h5 class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Output Contract</h5>
-                            <div class="bg-white rounded p-2 font-mono text-[11px] text-gray-600 max-h-32 overflow-auto whitespace-pre-wrap">{{ task.output_contract | tojson(indent=2) }}</div>
-                        </div>
-                        {% endif %}
-
-                        {% if task.validation_errors %}
-                        <div class="mt-3 pt-2 border-t border-gray-200">
-                            <h5 class="text-[11px] font-semibold text-red-400 uppercase tracking-wider mb-1">Validation Errors</h5>
-                            <div class="bg-red-50 rounded p-2 font-mono text-[11px] text-red-700 max-h-32 overflow-auto whitespace-pre-wrap">{{ task.validation_errors | tojson(indent=2) }}</div>
-                        </div>
-                        {% endif %}
-
-                        {% if task.result_structured %}
-                        <div class="mt-3 pt-2 border-t border-gray-200">
-                            <h5 class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Structured Result</h5>
-                            <div class="bg-white rounded p-2 font-mono text-[11px] text-gray-600 max-h-48 overflow-auto whitespace-pre-wrap">{{ task.result_structured | tojson(indent=2) }}</div>
-                        </div>
-                        {% endif %}
-                    </div>
-                </details>
-
-                {% if task.outputs %}
-                <div>
-                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Outputs</h4>
-                    <div class="grid gap-2 md:grid-cols-2">
-                        {% for output in task.outputs %}
-                        {{ output_card(output, compact=True) }}
-                        {% endfor %}
-                    </div>
-                </div>
-                {% endif %}
-
-                <!-- Result (shown for both completed and failed tasks) -->
-                {% if task.result %}
-                <div>
-                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Output ({{ task.result | length }} chars)</h4>
-                    {% if task.result | length > 2000 and task.status != 'failed' %}
-                    <div id="result-preview-{{ task.id }}" class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 max-h-80 overflow-y-auto">
-                        {{ markdown_block(task.result[:3000] ~ '…', 'text-sm text-gray-700') }}
-                    </div>
-                    <button class="mt-1 text-xs text-primary-600 hover:text-primary-800 font-medium toggle-full-output"
-                            data-task-id="{{ task.id }}">
-                        Show full output ({{ task.result | length }} chars)
-                    </button>
-                    <div id="result-full-{{ task.id }}" class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 max-h-[80vh] overflow-y-auto" style="display:none;">
-                        {{ markdown_block(task.result, 'text-sm text-gray-700') }}
-                    </div>
-                    {% else %}
-                    <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700 max-h-96 overflow-y-auto">
-                        {{ markdown_block(task.result, 'text-sm text-gray-700') }}
-                    </div>
+                    {% if req.completed_at %}
+                    <dt class="text-gray-400">Finished</dt>
+                    <dd class="text-gray-600">{{ req.completed_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
                     {% endif %}
-                </div>
-                {% endif %}
+                </dl>
+            </section>
 
-                <!-- Error (only shown for failed tasks) -->
-                {% if task.error and task.status == 'failed' %}
-                <div>
-                    <h4 class="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1">Error</h4>
-                    <div class="bg-red-50 rounded p-2 text-sm text-red-700 font-mono text-xs whitespace-pre-wrap">{{ task.error }}</div>
-                    {% set failure_events = task.events | selectattr('event_type', 'equalto', 'sandbox_failed') | list %}
-                    {% if failure_events %}
-                    {% set fe = failure_events[-1] %}
-                    {% if fe.metadata %}
-                    <div class="mt-2">
-                        <h4 class="text-xs font-semibold text-red-400 uppercase tracking-wider mb-1">Sandbox Failure Metadata</h4>
-                        <div class="bg-red-50 rounded p-2 text-red-700 font-mono text-[11px] whitespace-pre-wrap">{{ fe.metadata | tojson(indent=2) }}</div>
-                    </div>
-                    {% endif %}
-                    {% endif %}
-                </div>
-                {% endif %}
-
-                <!-- Linked Memories -->
-                {% if task.memories %}
-                <div>
-                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Linked Memories</h4>
-                    <div class="space-y-1">
-                        {% for mem in task.memories %}
-                        <div class="flex items-center gap-2 text-xs">
-                            <span class="px-1.5 py-0.5 rounded
-                                {% if mem.relation == 'created' %}bg-green-50 text-green-600
-                                {% elif mem.relation == 'updated' %}bg-blue-50 text-blue-600
-                                {% else %}bg-gray-50 text-gray-500{% endif %}">
-                                {{ mem.relation }}
-                            </span>
-                            <a href="/memories/{{ mem.memory_id }}" class="text-primary-600 hover:underline truncate">
-                                {{ mem.content[:80] if mem.content else mem.memory_id }}
-                            </a>
-                            {% if mem.tags %}
-                            <div class="flex gap-1">
-                                {% for tag in mem.tags[:3] %}
-                                <span class="px-1 py-0.5 bg-gray-100 text-gray-400 rounded text-[10px]">{{ tag }}</span>
-                                {% endfor %}
-                            </div>
-                            {% endif %}
+            {% if internal_tasks %}
+            <section>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Lucent's own follow-up work</h3>
+                <p class="mb-2 text-xs text-gray-400">Checks Lucent runs on its own output. Nothing here needs your attention unless it says so.</p>
+                <div class="space-y-1">
+                    {% for task in internal_tasks %}
+                    <div class="flex items-center justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2 text-xs">
+                        <div class="min-w-0">
+                            <span class="truncate font-medium text-gray-700">{{ task.title }}</span>
+                            <span class="ml-2 text-gray-400">{{ task.agent_type }}</span>
                         </div>
-                        {% endfor %}
+                        <span class="shrink-0 rounded px-2 py-0.5 font-medium {{ task_status_class(task.status) }}">{{ task_status_label(task.status) }}</span>
                     </div>
-                </div>
-                {% endif %}
-
-                <!-- Events Timeline -->
-                {% if task.events %}
-                <div>
-                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Timeline</h4>
-                    <div class="space-y-0.5">
-                        {% for event in task.events %}
-                        <div class="flex items-center gap-2 text-xs">
-                            <span class="text-gray-400 font-mono shrink-0">{{ event.created_at.strftime('%H:%M:%S') }}</span>
-                            <span class="w-1.5 h-1.5 rounded-full shrink-0
-                                {% if 'completed' in event.event_type %}bg-green-400
-                                {% elif 'failed' in event.event_type %}bg-red-400
-                                {% elif 'running' in event.event_type or 'claimed' in event.event_type %}bg-blue-400
-                                {% elif 'memory' in event.event_type %}bg-emerald-400
-                                {% else %}bg-gray-300{% endif %}"></span>
-                            <span class="text-gray-600">{{ event.detail or event.event_type }}</span>
-                        </div>
-                        {% endfor %}
-                    </div>
-                </div>
-                {% endif %}
-
-                <!-- Sub-tasks -->
-                {% if task.sub_tasks %}
-                <div>
-                    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">Sub-tasks</h4>
-                    {% for sub in task.sub_tasks %}
-                    {{ render_task(sub, depth + 1) }}
                     {% endfor %}
                 </div>
-                {% endif %}
-            </div>
-        </details>
-        {% endmacro %}
+            </section>
+            {% endif %}
 
-        {% if req.task_tree %}
-        {% for task in req.task_tree %}
-        {{ render_task(task) }}
-        {% endfor %}
-        {% else %}
-        <div class="bg-white rounded-lg border border-gray-200 p-6 text-center text-gray-500 text-sm">
-            No tasks planned yet. The cognitive layer will break this request into tasks during the next cycle.
-        </div>
-        {% endif %}
-    </div>
-
-    <!-- Right: Activity Feed (1 col) -->
-    <div>
-        <div class="mb-3 flex items-center justify-between gap-3">
-            <div>
-                <h2 class="text-lg font-semibold text-gray-900">Activity Feed</h2>
-                {% if recent_events %}<p class="text-xs text-gray-400">Showing recent task events</p>{% endif %}
-            </div>
-            {% if recent_events %}<span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500">{{ recent_events|length }}</span>{% endif %}
-        </div>
-        {% if recent_events %}
-        <div class="mb-2 flex flex-wrap gap-1.5" data-activity-filters>
-            <button type="button" class="js-activity-filter rounded-md bg-gray-900 px-2 py-1 text-xs font-medium text-white" data-filter="all">All</button>
-            <button type="button" class="js-activity-filter rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-200" data-filter="important">Important</button>
-            <button type="button" class="js-activity-filter rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100" data-filter="failed">Failures</button>
-            <button type="button" class="js-activity-filter rounded-md bg-primary-50 px-2 py-1 text-xs font-medium text-primary-600 hover:bg-primary-100" data-filter="output">Outputs</button>
-            <button type="button" class="js-activity-filter rounded-md bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-600 hover:bg-emerald-100" data-filter="memory">Memories</button>
-        </div>
-        {% endif %}
-        <div class="bg-white rounded-lg border border-gray-200 p-3 max-h-[calc(100vh-16rem)] overflow-y-auto">
-            {% if recent_events %}
-            <div class="space-y-2" id="activity-feed">
-                {% for event in recent_events %}
-                {% set et = event.event_type or '' %}
-                {% set important = ('failed' in et) or ('completed' in et) or ('output' in et) or ('review' in et) or ('approval' in et) %}
-                <div class="js-activity-event flex gap-2 text-xs border-b border-gray-50 pb-2 last:border-0" data-event-type="{{ et }}" data-important="{{ '1' if important else '0' }}" data-index="{{ loop.index0 }}">
-                    <!-- Event dot -->
-                    <div class="mt-1 shrink-0">
-                        <span class="block w-2 h-2 rounded-full
-                            {% if 'completed' in event.event_type %}bg-green-400
-                            {% elif 'failed' in event.event_type %}bg-red-400
-                            {% elif 'running' in event.event_type or 'claimed' in event.event_type %}bg-blue-400
-                            {% elif 'memory' in event.event_type %}bg-emerald-400
-                            {% elif 'created' in event.event_type %}bg-gray-300
-                            {% else %}bg-gray-300{% endif %}"></span>
-                    </div>
-                    <div class="flex-1 min-w-0">
-                        <p class="text-gray-700">
-                            {% if event.task_title %}<span class="font-medium">{{ event.task_title }}</span> — {% endif %}
-                            {{ event.detail or event.event_type }}
-                        </p>
-                        <div class="flex items-center gap-2 text-gray-400 mt-0.5">
-                            <span>{{ event.created_at.strftime('%H:%M:%S') }}</span>
-                            {% if event.agent_type %}
-                            <span class="px-1 py-0.5 bg-indigo-50 text-indigo-500 rounded">{{ event.agent_type }}</span>
-                            {% endif %}
+            {% if req.memories %}
+            <section>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Linked memories</h3>
+                <div class="space-y-1.5">
+                    {% for mem in req.memories %}
+                    <a href="/memories/{{ mem.memory_id }}" class="group/mem block rounded-lg bg-gray-50 px-3 py-2 hover:bg-gray-100">
+                        <div class="mb-0.5 flex items-center gap-1.5">
+                            <span class="rounded px-1.5 py-0.5 text-[10px] font-medium
+                                {% if mem.relation == 'goal' %}bg-purple-100 text-purple-700
+                                {% elif mem.relation == 'context' %}bg-blue-100 text-blue-700
+                                {% else %}bg-gray-200 text-gray-600{% endif %}">{{ mem.relation }}</span>
+                            <span class="text-[10px] text-gray-400">{{ mem.memory_type }}</span>
                         </div>
-                    </div>
+                        <p class="line-clamp-2 text-xs text-gray-700 group-hover/mem:text-primary-600">{{ mem.content[:150] }}{% if mem.content|length > 150 %}…{% endif %}</p>
+                    </a>
+                    {% endfor %}
                 </div>
-                {% endfor %}
-            </div>
-            <div class="mt-3 flex items-center justify-between border-t border-gray-100 pt-3 text-xs text-gray-400">
-                <span id="activity-count-label"></span>
-                <button type="button" id="activity-show-more" class="hidden rounded-md bg-gray-100 px-2.5 py-1 font-medium text-gray-600 hover:bg-gray-200">Show more</button>
-            </div>
-            {% else %}
-            <p class="text-sm text-gray-400 text-center py-4">No activity yet</p>
+            </section>
+            {% endif %}
+
+            {% if origin_sessions %}
+            <section>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Started from these conversations</h3>
+                <div class="space-y-2">
+                    {% for session in origin_sessions %}
+                    <div class="rounded-lg border border-indigo-100 bg-indigo-50/40 p-2.5">
+                        <div class="flex items-start justify-between gap-2">
+                            <div class="min-w-0">
+                                <p class="truncate text-xs font-medium text-gray-800">{{ session.title }}</p>
+                                <p class="mt-0.5 truncate text-[11px] text-gray-500">
+                                    {{ session.model or 'model unknown' }} · {{ session.message_count }} message{% if session.message_count != 1 %}s{% endif %}
+                                </p>
+                            </div>
+                            <a href="/chat/{{ session.id }}" class="shrink-0 rounded-md border border-indigo-100 bg-white px-2 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-100">Open</a>
+                        </div>
+                        {% if session.messages %}
+                        <details id="session-{{ session.id }}-transcript" class="group mt-2">
+                            <summary class="cursor-pointer select-none text-[11px] font-medium text-indigo-600 hover:text-indigo-700">Preview</summary>
+                            <div class="mt-2 max-h-64 space-y-2 overflow-y-auto pr-1">
+                                {% for msg in session.messages %}
+                                {% if msg.role in ['user', 'assistant'] %}
+                                <div class="rounded-md border border-indigo-50 bg-white/80 p-2">
+                                    <div class="mb-1 text-[10px] font-semibold uppercase tracking-wider {% if msg.role == 'user' %}text-indigo-500{% else %}text-gray-500{% endif %}">{{ msg.role }}</div>
+                                    <p class="whitespace-pre-wrap text-xs text-gray-700">{{ msg.content }}</p>
+                                </div>
+                                {% endif %}
+                                {% endfor %}
+                            </div>
+                        </details>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </section>
+            {% endif %}
+
+            {% if reviews %}
+            <section>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Review history</h3>
+                <div class="space-y-2">
+                    {% for review in reviews %}
+                    <div class="rounded-lg bg-gray-50 px-3 py-2">
+                        <div class="flex flex-wrap items-center gap-2 text-xs">
+                            {% if review.status == 'approved' %}
+                            <span class="rounded bg-emerald-100 px-1.5 py-0.5 font-medium text-emerald-700">Approved</span>
+                            {% else %}
+                            <span class="rounded bg-red-100 px-1.5 py-0.5 font-medium text-red-700">Sent back</span>
+                            {% endif %}
+                            <span class="text-gray-500">{{ review.reviewer_display_name or 'Unknown' }}</span>
+                            <span class="text-gray-400">{{ review.created_at.strftime('%Y-%m-%d %H:%M') if review.created_at }}</span>
+                        </div>
+                        {% if review.comments %}<p class="mt-1 text-xs text-gray-600">{{ review.comments[:300] }}</p>{% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </section>
+            {% endif %}
+
+            {% set all_events = [] %}
+            {% for task in req.tasks %}{% for event in task.events %}{% set _ = all_events.append(event) %}{% endfor %}{% endfor %}
+            {% if all_events %}
+            <section>
+                <h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-gray-500">Complete activity log</h3>
+                <p class="mb-2 text-xs text-gray-400">Every event Lucent recorded, newest first. Useful when something went wrong.</p>
+                <div class="max-h-80 space-y-0.5 overflow-y-auto rounded-lg bg-gray-50 p-3">
+                    {% for event in all_events | sort(attribute='created_at', reverse=true) %}
+                    <div class="flex items-start gap-2 text-[11px]">
+                        <span class="shrink-0 font-mono text-gray-400">{{ event.created_at.strftime('%m-%d %H:%M:%S') }}</span>
+                        <span class="shrink-0 rounded bg-white px-1 font-mono text-gray-500">{{ event.event_type }}</span>
+                        <span class="min-w-0 text-gray-600">{{ event.detail or '' }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+            </section>
+            {% endif %}
+
+            {% if can_review_request and req.status not in ('completed', 'cancelled') %}
+            <section class="border-t border-gray-200 pt-3">
+                <form id="request-cancel-form" hx-preserve="true" method="post" action="/requests/{{ req.id }}/cancel" data-confirm="Stop this whole request? Finished steps are kept.">
+                    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                    <button type="submit" class="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50">Stop this request</button>
+                </form>
+            </section>
             {% endif %}
         </div>
-
-        <!-- Request Metadata -->
-        <div class="mt-4 bg-white rounded-lg border border-gray-200 p-3">
-            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Details</h3>
-            <dl class="space-y-1 text-xs">
-                <div class="flex justify-between">
-                    <dt class="text-gray-500">ID</dt>
-                    <dd class="text-gray-700 font-mono">{{ (req.id | string)[:8] }}</dd>
-                </div>
-                <div class="flex justify-between">
-                    <dt class="text-gray-500">Created</dt>
-                    <dd class="text-gray-700">{{ req.created_at.strftime('%Y-%m-%d %H:%M:%S') if req.created_at }}</dd>
-                </div>
-                {% if req.completed_at %}
-                <div class="flex justify-between">
-                    <dt class="text-gray-500">Completed</dt>
-                    <dd class="text-gray-700">{{ req.completed_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
-                </div>
-                {% endif %}
-                <div class="flex justify-between">
-                    <dt class="text-gray-500">Source</dt>
-                    <dd class="text-gray-700">{{ req.source }}</dd>
-                </div>
-                <div class="flex justify-between">
-                    <dt class="text-gray-500">Priority</dt>
-                    <dd class="text-gray-700">{{ req.priority }}</dd>
-                </div>
-            </dl>
-        </div>
-
-        <!-- Originating Conversation -->
-        {% if origin_sessions %}
-        <div class="mt-4 bg-white rounded-lg border border-indigo-200 p-3">
-            <div class="flex items-start justify-between gap-3 mb-3">
-                <div>
-                    <h3 class="text-xs font-semibold text-indigo-500 uppercase tracking-wider">Conversation Sessions</h3>
-                    <p class="mt-0.5 text-xs text-gray-500">Request lineage from persisted Lucent chat sessions.</p>
-                </div>
-            </div>
-            <div class="space-y-3">
-                {% for session in origin_sessions %}
-                <div class="rounded-lg border border-indigo-100 bg-indigo-50/40 p-2.5">
-                    <div class="flex items-start justify-between gap-2">
-                        <div class="min-w-0">
-                            <div class="flex items-center gap-1.5 mb-1">
-                                <span class="inline-flex items-center rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">{{ session.relation }}</span>
-                                <span class="text-[10px] text-gray-400 font-mono">{{ session.id[:8] }}</span>
-                            </div>
-                            <p class="text-xs font-medium text-gray-800 truncate">{{ session.title }}</p>
-                            <p class="mt-0.5 text-[11px] text-gray-500 truncate">
-                                {{ session.model or 'model unknown' }}{% if session.reasoning_effort %} · {{ session.reasoning_effort }}{% endif %}
-                                · {{ session.message_count }} messages{% if session.event_count %} · {{ session.event_count }} events{% endif %}
-                            </p>
-                        </div>
-                        <a href="/chat/{{ session.id }}" class="shrink-0 rounded-md bg-white px-2 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-100 border border-indigo-100">Open full session</a>
-                    </div>
-                    {% if session.messages %}
-                    <details id="session-{{ session.id }}-transcript" class="mt-2 group">
-                        <summary class="cursor-pointer select-none text-[11px] font-medium text-indigo-600 hover:text-indigo-700">Preview transcript</summary>
-                        <div class="mt-2 max-h-64 overflow-y-auto space-y-2 pr-1">
-                            {% for msg in session.messages %}
-                            {% if msg.role in ['user', 'assistant'] %}
-                            <div class="rounded-md bg-white/80 border border-indigo-50 p-2">
-                                <div class="mb-1 text-[10px] font-semibold uppercase tracking-wider {% if msg.role == 'user' %}text-indigo-500{% else %}text-gray-500{% endif %}">{{ msg.role }}</div>
-                                <p class="text-xs text-gray-700 whitespace-pre-wrap">{{ msg.content }}</p>
-                            </div>
-                            {% endif %}
-                            {% endfor %}
-                        </div>
-                    </details>
-                    {% endif %}
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
-
-        <!-- Linked Memories -->
-        {% if req.memories %}
-        <div class="mt-4 bg-white rounded-lg border border-gray-200 p-3">
-            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Linked Memories</h3>
-            <div class="space-y-2">
-                {% for mem in req.memories %}
-                <div class="border-b border-gray-50 pb-2 last:border-0">
-                    <div class="flex items-center gap-1.5 mb-1">
-                        {% if mem.relation == 'goal' %}
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700">goal</span>
-                        {% elif mem.relation == 'context' %}
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700">context</span>
-                        {% else %}
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">{{ mem.relation }}</span>
-                        {% endif %}
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-50 text-gray-500">{{ mem.memory_type }}</span>
-                        {% if mem.metadata and mem.metadata.status %}
-                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-                            {% if mem.metadata.status == 'completed' %}bg-green-100 text-green-700
-                            {% elif mem.metadata.status == 'active' %}bg-yellow-100 text-yellow-700
-                            {% else %}bg-gray-100 text-gray-600{% endif %}">
-                            {{ mem.metadata.status }}
-                        </span>
-                        {% endif %}
-                    </div>
-                    <a href="/memories/{{ mem.memory_id }}" class="block group">
-                        <p class="text-xs text-gray-700 group-hover:text-primary-600 group-hover:underline line-clamp-2">{{ mem.content[:150] }}{% if mem.content|length > 150 %}…{% endif %}</p>
-                        <div class="text-[10px] text-gray-400 group-hover:text-primary-500 mt-0.5 font-mono">{{ (mem.memory_id | string)[:8] }}</div>
-                    </a>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
-
-        <!-- Review History -->
-        {% if reviews %}
-        <div class="mt-4 bg-white rounded-lg border border-gray-200 p-3">
-            <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Review History</h3>
-            <div class="space-y-2">
-                {% for review in reviews %}
-                <div class="border-b border-gray-50 pb-2 last:border-0">
-                    <div class="flex items-center gap-2 text-xs">
-                        {% if review.status == 'approved' %}
-                        <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-green-100 text-green-700">
-                            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
-                            Approved
-                        </span>
-                        {% else %}
-                        <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-red-100 text-red-700">
-                            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-                            Rejected
-                        </span>
-                        {% endif %}
-                        <span class="text-gray-500">by {{ review.reviewer_display_name or 'Unknown' }}</span>
-                        <span class="px-1 py-0.5 rounded bg-gray-50 text-gray-400">{{ review.source }}</span>
-                    </div>
-                    {% if review.comments %}
-                    <p class="text-xs text-gray-600 mt-1 ml-1">{{ review.comments[:200] }}</p>
-                    {% endif %}
-                    <p class="text-[10px] text-gray-400 mt-0.5 ml-1">{{ review.created_at.strftime('%Y-%m-%d %H:%M:%S') if review.created_at }}</p>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        {% endif %}
-    </div>
+    </details>
 </div>
 </div>
 {% endblock %}
 
 {% block extra_scripts %}
 <script nonce="{{ request.state.csp_nonce }}">
+/* ── Markdown rendering ────────────────────────────────────────────────
+   Result bodies are stored as markdown. They are rendered client-side from a
+   JSON payload so the text never round-trips through the template engine. */
 function escapeHtml(value) {
     return String(value || '')
         .replace(/&/g, '&amp;')
@@ -1062,18 +850,18 @@ function formatInlineMarkdown(line) {
     return out;
 }
 
-function isTableRow(line) {
-    const trimmed = String(line || '').trim();
-    if (!trimmed || !trimmed.includes('|')) return false;
-    if (/^@@CODE_BLOCK_\d+@@$/.test(trimmed)) return false;
-    return splitTableRow(trimmed).length >= 2;
-}
-
 function splitTableRow(line) {
     let row = String(line || '').trim();
     if (row.startsWith('|')) row = row.slice(1);
     if (row.endsWith('|')) row = row.slice(0, -1);
-    return row.split('|').map((cell) => cell.trim());
+    return row.split('|').map(function(cell) { return cell.trim(); });
+}
+
+function isTableRow(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed || trimmed.indexOf('|') === -1) return false;
+    if (/^@@CODE_BLOCK_\d+@@$/.test(trimmed)) return false;
+    return splitTableRow(trimmed).length >= 2;
 }
 
 function tableAlignments(separatorLine) {
@@ -1083,28 +871,25 @@ function tableAlignments(separatorLine) {
     for (const cell of cells) {
         const normalized = cell.replace(/\s+/g, '');
         if (!/^:?-{3,}:?$/.test(normalized)) return null;
-        if (normalized.startsWith(':') && normalized.endsWith(':')) {
-            alignments.push('center');
-        } else if (normalized.endsWith(':')) {
-            alignments.push('right');
-        } else {
-            alignments.push('left');
-        }
+        if (normalized.startsWith(':') && normalized.endsWith(':')) alignments.push('center');
+        else if (normalized.endsWith(':')) alignments.push('right');
+        else alignments.push('left');
     }
     return alignments;
 }
 
 function renderMarkdownTable(headers, alignments, rows) {
-    const alignAttr = (idx) => {
+    const alignAttr = function(idx) {
         const align = alignments[idx] || 'left';
         return align === 'left' ? '' : ` data-align="${align}"`;
     };
-    const headerHtml = headers.map((cell, idx) => `<th${alignAttr(idx)}>${formatInlineMarkdown(cell)}</th>`).join('');
+    const headerHtml = headers.map(function(cell, idx) {
+        return `<th${alignAttr(idx)}>${formatInlineMarkdown(cell)}</th>`;
+    }).join('');
     const bodyHtml = rows.map(function(row) {
-        const cells = headers.map(function(_header, idx) {
+        return `<tr>${headers.map(function(_header, idx) {
             return `<td${alignAttr(idx)}>${formatInlineMarkdown(row[idx] || '')}</td>`;
-        }).join('');
-        return `<tr>${cells}</tr>`;
+        }).join('')}</tr>`;
     }).join('');
     return `<div class="overflow-x-auto"><table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
 }
@@ -1132,16 +917,9 @@ function renderMarkdown(text) {
     for (let i = 0; i < lines.length; i += 1) {
         const line = lines[i];
         const trimmed = line.trim();
-        if (!trimmed) {
-            closeLists();
-            continue;
-        }
+        if (!trimmed) { closeLists(); continue; }
         const codeMatch = trimmed.match(/^@@CODE_BLOCK_(\d+)@@$/);
-        if (codeMatch) {
-            closeLists();
-            html.push(codeBlocks[Number(codeMatch[1])] || '');
-            continue;
-        }
+        if (codeMatch) { closeLists(); html.push(codeBlocks[Number(codeMatch[1])] || ''); continue; }
         if (isTableRow(trimmed) && i + 1 < lines.length) {
             const alignments = tableAlignments(lines[i + 1].trim());
             if (alignments) {
@@ -1149,20 +927,13 @@ function renderMarkdown(text) {
                 const headers = splitTableRow(trimmed);
                 const rows = [];
                 i += 2;
-                while (i < lines.length && isTableRow(lines[i])) {
-                    rows.push(splitTableRow(lines[i]));
-                    i += 1;
-                }
+                while (i < lines.length && isTableRow(lines[i])) { rows.push(splitTableRow(lines[i])); i += 1; }
                 i -= 1;
                 html.push(renderMarkdownTable(headers, alignments, rows));
                 continue;
             }
         }
-        if (/^---+$/.test(trimmed)) {
-            closeLists();
-            html.push('<hr>');
-            continue;
-        }
+        if (/^---+$/.test(trimmed)) { closeLists(); html.push('<hr>'); continue; }
         const heading = trimmed.match(/^(#{1,4})\s+(.+)$/);
         if (heading) {
             closeLists();
@@ -1171,11 +942,7 @@ function renderMarkdown(text) {
             continue;
         }
         const quote = trimmed.match(/^&gt;\s?(.*)$/);
-        if (quote) {
-            closeLists();
-            html.push(`<blockquote>${formatInlineMarkdown(quote[1])}</blockquote>`);
-            continue;
-        }
+        if (quote) { closeLists(); html.push(`<blockquote>${formatInlineMarkdown(quote[1])}</blockquote>`); continue; }
         const unordered = trimmed.match(/^[-*]\s+(.+)$/);
         if (unordered) {
             if (inOl) { html.push('</ol>'); inOl = false; }
@@ -1198,40 +965,30 @@ function renderMarkdown(text) {
 }
 
 function renderRequestMarkdown(root) {
-    root.querySelectorAll('.js-markdown-block').forEach(function(block) {
+    (root || document).querySelectorAll('.js-markdown-block').forEach(function(block) {
         const source = block.querySelector('script[type="application/json"]');
         let text = '';
         if (source) {
-            try {
-                text = JSON.parse(source.textContent || '""');
-            } catch (_err) {
-                text = source.textContent || '';
-            }
+            try { text = JSON.parse(source.textContent || '""'); }
+            catch (_err) { text = source.textContent || ''; }
         }
         block.innerHTML = renderMarkdown(text);
     });
 }
 
+/* ── Preserve view state across live refreshes ──────────────────────────
+   The page replaces itself when the server signals a change. Without this, an
+   open result panel would snap shut every time a sibling step advanced. */
 function captureRequestLiveState(root) {
     const details = {};
     root.querySelectorAll('details[id]').forEach(function(detail) {
         details[detail.id] = detail.open;
     });
-
-    const expandedOutputs = [];
     const scrollPositions = {};
     root.querySelectorAll('[id]').forEach(function(element) {
         if (element.scrollTop) scrollPositions[element.id] = element.scrollTop;
-        if (element.id.startsWith('result-full-') && element.style.display !== 'none') {
-            expandedOutputs.push(element.id);
-        }
     });
-
-    return {
-        details: details,
-        expandedOutputs: expandedOutputs,
-        scrollPositions: scrollPositions,
-    };
+    return { details: details, scrollPositions: scrollPositions };
 }
 
 function restoreRequestLiveState(root, state) {
@@ -1239,15 +996,6 @@ function restoreRequestLiveState(root, state) {
     Object.entries(state.details || {}).forEach(function(entry) {
         const detail = document.getElementById(entry[0]);
         if (detail) detail.open = entry[1];
-    });
-    (state.expandedOutputs || []).forEach(function(fullId) {
-        const full = document.getElementById(fullId);
-        const taskId = fullId.replace('result-full-', '');
-        const preview = document.getElementById('result-preview-' + taskId);
-        const button = root.querySelector('.toggle-full-output[data-task-id="' + taskId + '"]');
-        if (full) full.style.display = 'block';
-        if (preview) preview.style.display = 'none';
-        if (button) button.style.display = 'none';
     });
     Object.entries(state.scrollPositions || {}).forEach(function(entry) {
         const element = document.getElementById(entry[0]);
@@ -1261,17 +1009,6 @@ function isUnchangedRequestLiveResponse(target, responseText) {
     const incoming = response.getElementById('request-live-content');
     return incoming && target.dataset.liveRevision === incoming.dataset.liveRevision;
 }
-
-document.addEventListener('click', function(event) {
-    const button = event.target.closest('.toggle-full-output');
-    if (!button) return;
-    const taskId = button.getAttribute('data-task-id');
-    const preview = document.getElementById('result-preview-' + taskId);
-    const full = document.getElementById('result-full-' + taskId);
-    if (preview) preview.style.display = 'none';
-    if (full) full.style.display = 'block';
-    button.style.display = 'none';
-});
 
 document.addEventListener('htmx:beforeSwap', function(event) {
     const target = event.detail.target;
@@ -1299,86 +1036,130 @@ document.addEventListener('htmx:afterSettle', function() {
 
 renderRequestMarkdown(document);
 
-const activityEvents = Array.from(document.querySelectorAll('.js-activity-event'));
-const activityButtons = Array.from(document.querySelectorAll('.js-activity-filter'));
-const activityCountLabel = document.getElementById('activity-count-label');
-const activityShowMore = document.getElementById('activity-show-more');
-const activityState = { filter: 'all', visible: 20 };
+/* ── Live streaming output ──────────────────────────────────────────────
+   Only in-flight tasks get a stream pane, so this poller exists only when the
+   page rendered at least one. Kept separate from the page's live-refresh path
+   on purpose: token progress changes many times a second, while a whole-page
+   swap is expensive and would fight the reader's scroll position. */
+(function () {
+    const requestId = {{ req.id | string | tojson }};
+    const endpoint = `/activity/${requestId}/live`;
+    const POLL_MS = 2500;
+    let timer = null;
+    let inFlight = false;
+    let emptyPolls = 0;
 
-function activityMatches(card) {
-    const type = (card.dataset.eventType || '').toLowerCase();
-    if (activityState.filter === 'all') return true;
-    if (activityState.filter === 'important') return card.dataset.important === '1';
-    return type.includes(activityState.filter);
-}
+    function livePanes() {
+        return Array.prototype.slice.call(document.querySelectorAll('[data-live-output-for]'));
+    }
 
-function setActivityButtonState() {
-    activityButtons.forEach(function(btn) {
-        const active = btn.dataset.filter === activityState.filter;
-        const base = 'js-activity-filter rounded-md px-2 py-1 text-xs font-medium';
-        const inactiveByFilter = {
-            failed: 'bg-red-50 text-red-600 hover:bg-red-100',
-            output: 'bg-primary-50 text-primary-600 hover:bg-primary-100',
-            memory: 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100',
-            important: 'bg-gray-100 text-gray-600 hover:bg-gray-200',
-            all: 'bg-gray-100 text-gray-600 hover:bg-gray-200',
-        };
-        btn.className = active
-            ? `${base} bg-gray-900 text-white`
-            : `${base} ${inactiveByFilter[btn.dataset.filter] || inactiveByFilter.all}`;
-    });
-}
+    function isScrolledToBottom(element) {
+        return (element.scrollHeight - element.scrollTop - element.clientHeight) < 48;
+    }
 
-function updateActivityFeed() {
-    if (!activityEvents.length) return;
-    const matches = activityEvents.filter(activityMatches);
-    let shown = 0;
-    activityEvents.forEach(function(card) {
-        if (activityMatches(card) && shown < activityState.visible) {
-            card.hidden = false;
-            shown += 1;
-        } else {
-            card.hidden = true;
+    function applyOutput(pane, text) {
+        const atBottom = isScrolledToBottom(pane);
+        if (pane.textContent !== text) {
+            pane.textContent = text;
+            if (atBottom) pane.scrollTop = pane.scrollHeight;
         }
-    });
-    if (activityCountLabel) {
-        activityCountLabel.textContent = matches.length
-            ? `Showing ${Math.min(shown, matches.length)} of ${matches.length}`
-            : 'No matching events';
+        pane.classList.toggle('is-idle', !text);
     }
-    if (activityShowMore) {
-        activityShowMore.classList.toggle('hidden', shown >= matches.length);
+
+    async function poll() {
+        if (inFlight) return;
+        if (document.visibilityState !== 'visible') { schedule(); return; }
+        inFlight = true;
+        try {
+            const response = await fetch(endpoint, {
+                credentials: 'same-origin',
+                cache: 'no-store',
+                headers: { 'Accept': 'application/json' },
+            });
+            if (!response.ok) { schedule(); return; }
+            const payload = await response.json();
+            const tasks = payload.tasks || {};
+            let streaming = 0;
+
+            livePanes().forEach(function (pane) {
+                const entry = tasks[pane.dataset.liveOutputFor];
+                if (!entry) return;
+                streaming += 1;
+                const text = entry.content || '';
+                applyOutput(pane, text);
+                const state = pane.parentElement.querySelector('.js-live-state');
+                if (state) state.textContent = text ? 'live' : 'warming up';
+            });
+
+            if (streaming > 0) {
+                emptyPolls = 0;
+            } else {
+                // Nothing is in flight any more, but stream panes are still on
+                // screen — the page is stale. Ask the normal refresh path to
+                // re-render it with durable results. Two empty polls first, so
+                // the gap between "task settles" and "row is deleted" does not
+                // cause a redundant swap.
+                emptyPolls += 1;
+                if (emptyPolls >= 2 && window.htmx) {
+                    const region = document.getElementById('request-live-content');
+                    if (region) window.htmx.trigger(region, 'lucent:live-refresh');
+                    emptyPolls = 0;
+                }
+            }
+        } catch (_error) {
+            /* Live output is a progressive enhancement. */
+        } finally {
+            inFlight = false;
+            schedule();
+        }
     }
-    setActivityButtonState();
-}
 
-activityButtons.forEach(function(btn) {
-    btn.addEventListener('click', function() {
-        activityState.filter = btn.dataset.filter || 'all';
-        activityState.visible = 20;
-        updateActivityFeed();
-    });
-});
-if (activityShowMore) {
-    activityShowMore.addEventListener('click', function() {
-        activityState.visible += 20;
-        updateActivityFeed();
-    });
-}
-updateActivityFeed();
+    function schedule() {
+        if (timer) clearTimeout(timer);
+        if (!livePanes().length) return;
+        timer = setTimeout(poll, POLL_MS);
+    }
 
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') schedule();
+    });
+
+    if (livePanes().length) schedule();
+})();
+
+/* ── Elapsed time for running steps ─────────────────────────────────────
+   Ticks locally so a long step visibly advances without asking the server. */
+(function () {
+    function format(seconds) {
+        if (seconds < 60) return `${seconds}s`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+    }
+    function tick() {
+        const now = Date.now();
+        document.querySelectorAll('article[data-task-id]').forEach(function (task) {
+            if (['claimed', 'running'].indexOf(task.dataset.taskStatus) === -1) return;
+            const started = task.dataset.startedAt;
+            if (!started) return;
+            const elapsed = Math.max(0, Math.floor((now - Date.parse(started)) / 1000));
+            const target = task.querySelector('[data-duration-for]');
+            if (target) target.textContent = format(elapsed);
+        });
+    }
+    tick();
+    setInterval(tick, 1000);
+})();
+
+/* ── Reasoning-effort options follow the selected model ────────────────── */
 function refreshTaskReasoning(modelSelect) {
     const form = modelSelect.closest('form');
+    if (!form) return;
     const reasoningSelect = form.querySelector('.js-task-reasoning');
+    if (!reasoningSelect) return;
     const selected = modelSelect.options[modelSelect.selectedIndex];
     const efforts = ((selected && selected.dataset.reasoningEfforts) || '').split(',').filter(Boolean);
     const current = reasoningSelect.dataset.current || '';
     reasoningSelect.innerHTML = '<option value="">provider default</option>';
-    if (!efforts.length) {
-        reasoningSelect.value = '';
-        reasoningSelect.disabled = false;
-        return;
-    }
     for (const effort of efforts) {
         const opt = document.createElement('option');
         opt.value = effort;
@@ -1386,13 +1167,12 @@ function refreshTaskReasoning(modelSelect) {
         if (effort === current) opt.selected = true;
         reasoningSelect.appendChild(opt);
     }
-    reasoningSelect.disabled = false;
 }
 
 document.querySelectorAll('.js-task-model').forEach(function(select) {
     select.addEventListener('change', function() {
         const reasoningSelect = select.closest('form').querySelector('.js-task-reasoning');
-        reasoningSelect.dataset.current = '';
+        if (reasoningSelect) reasoningSelect.dataset.current = '';
         refreshTaskReasoning(select);
     });
     refreshTaskReasoning(select);

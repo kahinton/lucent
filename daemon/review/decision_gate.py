@@ -35,6 +35,14 @@ _DECISION_GATE_KEEP_ALIVE = "30m"
 
 _PRECONDITION_BLOCKED_STATUSES = ("failed", "cancelled", "needs_review")
 
+# A request with work still executing must never be auto-approved. The gate
+# screens the *terminal* tasks it was given, so an in-flight sibling is
+# invisible to the questions themselves: the screen would see two completed
+# tasks out of three and pass, while the third was still burning model time.
+# This happened in production at confidence 0.73 with one of two tasks
+# executing. Such requests fall through to the full LLM review / manual path.
+_IN_FLIGHT_TASK_STATUSES = ("claimed", "running")
+
 
 @dataclass(slots=True)
 class DecisionGateOutcome:
@@ -98,9 +106,30 @@ async def resolve_decision_model(daemon, org_id: str | None) -> str | None:
 
 
 def _terminal_tasks(daemon, request_data: dict) -> list[dict]:
+    """The settled work tasks the questions are asked about.
+
+    Only terminal tasks can be screened — a pending/claimed/running task has no
+    result to judge. Returning only terminal tasks used to make "done" quietly
+    mean "the terminal subset", which let the gate clear a request while a
+    sibling was still executing. In-flight tasks are therefore reported here
+    rather than silently dropped: ``maybe_decision_gate`` refuses to auto-approve
+    (and ``_precondition_blockers`` names the reason) whenever this returns
+    anything from :func:`_in_flight_tasks`.
+    """
     tasks = request_data.get("tasks") or []
     non_review = [t for t in tasks if not daemon._is_request_review_task(t)]
     return [t for t in non_review if t.get("status") in ("completed", "failed", "cancelled")]
+
+
+def _in_flight_tasks(daemon, request_data: dict) -> list[dict]:
+    """Work tasks that still hold a claim. Non-empty means "not finished"."""
+    tasks = request_data.get("tasks") or []
+    return [
+        t
+        for t in tasks
+        if not daemon._is_request_review_task(t)
+        and t.get("status") in _IN_FLIGHT_TASK_STATUSES
+    ]
 
 
 def _has_contract(task: dict) -> bool:
@@ -116,8 +145,15 @@ def _precondition_blockers(
     The decision model cannot call ``update_memory`` or write to a target
     repo, and failed/needs_review tasks mean something already went wrong —
     auto-approving over any of those would silently skip mandatory work.
+
+    In-flight tasks are a blocker for the same reason: their output does not
+    exist yet, so nothing the decision model sees can speak for them.
     """
     tasks = [t for t in request_data.get("tasks") or [] if not daemon._is_request_review_task(t)]
+    in_flight = [t for t in tasks if t.get("status") in _IN_FLIGHT_TASK_STATUSES]
+    if in_flight:
+        titles = ", ".join(str(t.get("title", "?"))[:60] for t in in_flight[:3])
+        return f"task(s) still executing: {titles}"
     blocked = [t for t in tasks if t.get("status") in _PRECONDITION_BLOCKED_STATUSES]
     if blocked:
         titles = ", ".join(str(t.get("title", "?"))[:60] for t in blocked[:3])
@@ -406,6 +442,21 @@ async def maybe_decision_gate(
         return skipped(error=str(exc))
     if not enabled:
         return skipped()
+
+    # Refuse to screen a request that still has executing work. The questions
+    # are asked about terminal output, so a running task is invisible to them —
+    # screening anyway would let a cheap model clear a request while a sibling
+    # was mid-execution (observed in production at 0.73 confidence with one of
+    # two tasks running). Falling through as "skipped" is the conservative
+    # outcome: the ordinary review path runs and a human sees the real state.
+    in_flight = _in_flight_tasks(daemon, request_data)
+    if in_flight:
+        titles = ", ".join(str(t.get("title", "?"))[:60] for t in in_flight[:3])
+        return skipped(warn=(
+            f"Request {request_id[:8]} decision pre-screen refused: "
+            f"{len(in_flight)} task(s) still executing ({titles}); "
+            "auto-approval is unsafe until the work settles"
+        ))
 
     done = _terminal_tasks(daemon, request_data)
     if not done:

@@ -2299,7 +2299,9 @@ class MemoryRepository:
 
         Args:
             type: Optional filter by memory type.
-            tags: Optional filter by tags (all must match).
+            tags: Optional filter by tags (any match — a memory is returned when
+                its tags overlap the given list, i.e. OR semantics). This matches
+                ``search_memories`` tag filtering.
             importance_min: Optional minimum importance.
             importance_max: Optional maximum importance.
             created_after: Filter memories created after this date.
@@ -2331,7 +2333,8 @@ class MemoryRepository:
             param_idx += 1
 
         if tags:
-            conditions.append(f"tags @> ${param_idx}")
+            # ``&&`` is array overlap (any-match / OR), matching search_memories.
+            conditions.append(f"tags && ${param_idx}")
             params.append(tags)
             param_idx += 1
 

@@ -52,6 +52,10 @@ from daemon.dispatch import policy as task_policy
 from daemon.dispatch import decision_step
 from daemon.dispatch import fusion
 from daemon.dispatch import model_auto
+from daemon.observability.live_output import (
+    FLUSH_INTERVAL_SECONDS as LIVE_OUTPUT_FLUSH_SECONDS,
+    build_live_output_writer,
+)
 from daemon.observability.tools import (
     _MEMORY_CAPTURE_TOOLS,
     _MEMORY_SEARCH_TOOLS,
@@ -3985,6 +3989,44 @@ class LucentDaemon(
         audit_tasks: list[asyncio.Task] = []
         tool_call_inputs: dict[str, dict | str] = {}
 
+        # In-flight output: forward streamed assistant text to the activity
+        # page so a running task shows what it is actually writing. Inert for
+        # auxiliary sessions (fusion candidates, continuations, fan-out).
+        live_output = build_live_output_writer(
+            audit_context,
+            database_url=DATABASE_URL,
+            log=log,
+        )
+        if live_output.task_id:
+            log(f"Live output streaming enabled for task {live_output.task_id[:8]}")
+
+        async def flush_live_output_soon() -> None:
+            """Persist buffered deltas if enough has accumulated."""
+            if not live_output.should_flush():
+                return
+            try:
+                await live_output.flush()
+            except Exception:
+                log("Live output flush failed", "DEBUG")
+
+        async def live_output_ticker() -> None:
+            """Flush on a clock so a pause mid-sentence still reaches the page.
+
+            The delta callback only flushes when enough text has piled up. A
+            model that streams a sentence and then thinks for a while would
+            leave the reader looking at a stale partial line, so this ticks
+            independently of the stream.
+            """
+            while True:
+                await asyncio.sleep(LIVE_OUTPUT_FLUSH_SECONDS)
+                await flush_live_output_soon()
+
+        live_ticker_task: asyncio.Task | None = None
+        if live_output.task_id:
+            live_ticker_task = asyncio.create_task(
+                live_output_ticker(), name=f"live-output-ticker-{name}"
+            )
+
         try:
 
             async def audit_stream_tool_result(event: SessionEvent) -> None:
@@ -4053,6 +4095,15 @@ class LucentDaemon(
                 if event.type == SessionEventType.MESSAGE:
                     if event.content:
                         log(f"  [{name}] message: {event.content[:200]}...", "STREAM")
+                elif event.type == SessionEventType.MESSAGE_DELTA:
+                    # Cheapest possible path: buffer now, write later from a
+                    # background task so a slow database never backpressures
+                    # the model stream.
+                    live_output.append(event.content)
+                    if live_output.should_flush():
+                        audit_tasks.append(
+                            asyncio.create_task(flush_live_output_soon())
+                        )
                 elif event.type == SessionEventType.ERROR:
                     terminal_outcome["error"] = event.content or "Provider session error"
                     log(f"  [{name}] error: {event.content}", "ERROR")
@@ -4152,8 +4203,17 @@ class LucentDaemon(
             terminal_outcome["error"] = f"Provider session failed: {error}"
             raise
         finally:
+            if live_ticker_task is not None:
+                live_ticker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await live_ticker_task
             if audit_tasks:
                 await asyncio.gather(*audit_tasks, return_exceptions=True)
+            # Scratch row is not history: once this session ends the durable
+            # text belongs to the task result, so drop the live copy. Inert
+            # writers (auxiliary sessions) have nothing to delete.
+            with contextlib.suppress(Exception):
+                await live_output.close()
             if session_id in self.active_sessions:
                 self.active_sessions.remove(session_id)
 

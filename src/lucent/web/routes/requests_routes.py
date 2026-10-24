@@ -1,11 +1,12 @@
 """Request tracking and activity routes."""
 
 import logging
+from datetime import datetime, timezone
 from hashlib import sha256
 from math import ceil
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
@@ -131,6 +132,56 @@ def _needs_prework_approval(req: dict) -> bool:
         req.get("approval_status") == "pending_approval"
         and req.get("status") not in ("cancelled", "rejection_processing")
     )
+
+
+# Agent types Lucent uses for its own bookkeeping rather than work the user
+# asked for. The detail page keeps them out of the main step list — a human
+# reading "what happened to my request" should not have to parse
+# "Post-completion review" #10000001 — and offers them under Details instead.
+INTERNAL_AGENT_TYPES = frozenset({"request-review", "decision-step"})
+
+# Plain-language progress for the "what's happening right now" line.
+#
+# Task events are developer-facing ("composition_surface", "mcp_tool_usage"),
+# which is fine in a technical log and useless to anyone else. Only the events
+# that genuinely describe a phase change are translated; everything else is
+# skipped so the line stays a description of the current state rather than a
+# replay of the machine's internal steps.
+_ACTIVITY_LABELS: dict[str, str] = {
+    "agent_dispatched": "Lucent is working on this",
+    "claimed": "Lucent picked this up",
+    "sandbox_created": "Setting up a fresh workspace",
+    "sandbox_reused": "Picking up its workspace again",
+    "sandbox_output_processed": "Collecting the results",
+    "tool_requirement_repair": "Double-checking its work",
+    "session_interrupted": "Resuming after an interruption",
+    "session_requeued": "Resuming after an interruption",
+    "needs_review": "Waiting for a quick check",
+    "completed": "Finished",
+    "failed": "Something went wrong",
+    "cancelled": "Cancelled",
+    "cancelled_by_user": "Cancelled",
+    "review_approved": "Approved",
+    "review_rejected": "Sent back for changes",
+}
+
+
+def _task_activity_line(task: dict) -> str:
+    """Return a one-line, non-technical description of what a task is doing."""
+    status = task.get("status")
+    if status in ("completed", "failed", "cancelled", "needs_review"):
+        return _ACTIVITY_LABELS.get(status, "")
+
+    for event in reversed(task.get("events") or []):
+        label = _ACTIVITY_LABELS.get(str(event.get("event_type") or ""))
+        if label:
+            return label
+
+    if status == "claimed":
+        return "Starting up"
+    if status == "running":
+        return "Working on it"
+    return "Waiting for its turn"
 
 
 # =============================================================================
@@ -281,6 +332,56 @@ async def requests_redirect(request: Request):
     qs = str(request.url.query)
     url = "/activity" + ("?" + qs if qs else "")
     return RedirectResponse(url=url, status_code=301)
+
+
+@router.get("/activity/{request_id}/live")
+async def request_live_output(request: Request, request_id: str):
+    """Return in-flight model output for a request's running tasks.
+
+    Polled by the detail page while anything is running. Reads only the
+    transient scratch table (see migration 148) so it stays a cheap indexed
+    lookup that does not touch the task tree, events, or memory links.
+
+    Deliberately returns text and nothing else: the page re-fetches full state
+    through the normal live-refresh path, and this endpoint exists purely to
+    make progress visible between those refreshes.
+    """
+    user = await get_user_context(request)
+    pool = await get_pool()
+    org_id = str(user.organization_id)
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    requester_user_id, include_system = request_visibility_context(user)
+    # Reuse the detail page's visibility rule so this endpoint can never leak
+    # output for a request the user cannot open.
+    req = await repo.get_request(
+        request_id,
+        org_id,
+        requester_user_id=requester_user_id,
+        include_system=include_system,
+    )
+    if not req:
+        raise HTTPException(404, "Request not found")
+
+    outputs = await repo.get_live_task_output(request_id, org_id)
+    return JSONResponse(
+        {
+            "request_status": req.get("status"),
+            "tasks": {
+                task_id: {
+                    "content": payload["content"],
+                    "updated_at": (
+                        payload["updated_at"].isoformat()
+                        if payload.get("updated_at")
+                        else None
+                    ),
+                }
+                for task_id, payload in outputs.items()
+            },
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/activity/{request_id}", response_class=HTMLResponse)
@@ -438,14 +539,72 @@ async def request_detail(request: Request, request_id: str):
         origin_sessions = []
         origin_session = None
 
-    # Get recent events for the activity feed
-    recent_events = []
-    for task in req.get("tasks", []):
-        for event in task.get("events", []):
-            event["task_title"] = task["title"]
-            event["agent_type"] = task.get("agent_type")
-            recent_events.append(event)
-    recent_events.sort(key=lambda e: e["created_at"], reverse=True)
+    # In-flight model output for running tasks (migration 148 scratch rows).
+    # Rendered server-side on first paint, then kept fresh by the page's
+    # poller so a long task visibly streams instead of just saying "Running".
+    try:
+        live_output = await repo.get_live_task_output(request_id, org_id)
+    except Exception:
+        logger.exception("Live task output unavailable for request %s", request_id)
+        live_output = {}
+
+    # Split the task list into the steps a person asked for and the agent's own
+    # bookkeeping sessions (post-completion review et al). The latter stay
+    # reachable under Details but no longer dominate the page.
+    work_tasks: list[dict] = []
+    internal_tasks: list[dict] = []
+    for task in req.get("task_tree", []):
+        bucket = (
+            internal_tasks
+            if str(task.get("agent_type") or "") in INTERNAL_AGENT_TYPES
+            else work_tasks
+        )
+        bucket.append(task)
+
+    now = datetime.now(timezone.utc)
+
+    def _decorate(task: dict) -> None:
+        """Attach the view-model fields the detail page renders."""
+        task["activity_line"] = _task_activity_line(task)
+        task["live_output"] = (live_output.get(str(task["id"])) or {}).get("content")
+        started = task.get("claimed_at")
+        ended = task.get("completed_at")
+        if started and ended:
+            task["duration_seconds"] = int((ended - started).total_seconds())
+        elif started and task.get("status") in ("claimed", "running"):
+            task["duration_seconds"] = int((now - started).total_seconds())
+        else:
+            task["duration_seconds"] = None
+        for sub in task.get("sub_tasks") or []:
+            _decorate(sub)
+
+    for task in work_tasks + internal_tasks:
+        _decorate(task)
+
+    # Progress counts cover nested sub-tasks too: a root task with three
+    # children is four units of work, and reporting "1 of 1" while three
+    # sub-tasks were still running would be a lie the old stats bar avoided.
+    def _walk(tasks: list[dict]) -> list[dict]:
+        flat: list[dict] = []
+        for task in tasks:
+            flat.append(task)
+            flat.extend(_walk(task.get("sub_tasks") or []))
+        return flat
+
+    work_flat = _walk(work_tasks)
+    work_progress = {
+        "total": len(work_flat),
+        "done": sum(1 for t in work_flat if t.get("status") == "completed"),
+        "running": sum(
+            1 for t in work_flat if t.get("status") in ("claimed", "running")
+        ),
+        "attention": sum(
+            1 for t in work_flat if t.get("status") in ("failed", "needs_review")
+        ),
+        "queued": sum(
+            1 for t in work_flat if t.get("status") in ("pending", "planned")
+        ),
+    }
 
     # Load review history for this request
     from lucent.db.reviews import ReviewRepository
@@ -540,7 +699,9 @@ async def request_detail(request: Request, request_id: str):
         {
             "user": user,
             "req": req,
-            "recent_events": recent_events[:50],
+            "work_tasks": work_tasks,
+            "internal_tasks": internal_tasks,
+            "work_progress": work_progress,
             "reviews": reviews,
             "available_models": available_models,
             "available_agents": available_agents,

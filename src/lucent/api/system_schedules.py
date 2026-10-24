@@ -206,7 +206,13 @@ async def execute_stale_task_reaper_schedule(
             org_id=org_id,
         )
         has_orphans = await req_repo.has_orphaned_tasks(org_id=org_id)
-        if not has_stale and not has_orphans:
+        # Requests stranded in a status their tasks can no longer move are the
+        # same class of drift as a stale claim, and this is the only server-side
+        # sweep that runs on a timer — so it is where the reconciliation has to
+        # happen. `RequestRepository.reconcile_request_statuses` is a no-op when
+        # nothing is stuck, so the extra call costs one indexed query per pass.
+        reconciled = await req_repo.reconcile_request_statuses(org_id=org_id)
+        if not has_stale and not has_orphans and not reconciled:
             skip_event = {
                 "event_type": "schedule.skipped",
                 "schedule_id": schedule_id,
@@ -229,7 +235,7 @@ async def execute_stale_task_reaper_schedule(
         )
         await sched_repo.complete_run(
             str(run["id"]),
-            result=f"released={released} cancelled={cancelled}",
+            result=f"released={released} cancelled={cancelled} reconciled={reconciled}",
             org_id=org_id,
         )
         if released:
@@ -244,7 +250,19 @@ async def execute_stale_task_reaper_schedule(
                 cancelled,
                 org_id[:8],
             )
-        return {"schedule": sched, "run": run, "released": released, "cancelled": cancelled}
+        if reconciled:
+            logger.info(
+                "Server stale-task reaper reconciled %d request(s) for org=%s",
+                reconciled,
+                org_id[:8],
+            )
+        return {
+            "schedule": sched,
+            "run": run,
+            "released": released,
+            "cancelled": cancelled,
+            "reconciled": reconciled,
+        }
     except Exception as exc:
         await sched_repo.fail_run(str(run["id"]), error=str(exc)[:1000], org_id=org_id)
         logger.exception("Server stale-task reaper failed for schedule %s", schedule_id)
