@@ -4,67 +4,128 @@
 
 {% block content %}
 {% set base_path = base_path|default('/schedules') %}
-<div class="mb-6">
-    <div class="flex items-center justify-between">
-        <div>
-            <h1 class="text-2xl font-bold text-gray-900">Workflows</h1>
-            <p class="text-sm text-gray-500">Trigger request-backed task flows from schedules, webhooks, manual runs, or connection events</p>
-        </div>
-        <div class="flex items-center gap-2">
-            <a href="/workflows/new" class="inline-flex items-center gap-1.5 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 transition-colors">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
-                New Workflow
+<div class="mb-5">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h1 class="text-2xl font-bold text-gray-900">Workflows</h1>
+
+        <div class="flex flex-wrap items-center gap-2 sm:justify-end">
+            {# Same operational strip as Activity and Handoffs: counts top-right,
+               quiet, labels collapsing to bare numbers on small screens. #}
+            {% if summary %}
+            <div class="flex flex-wrap items-center gap-1 text-xs text-gray-500">
+                <a href="{{ base_path }}?status=active&per_page={{ per_page }}"
+                   class="flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-gray-100 hover:text-gray-800"
+                   title="Enabled workflows that are currently active">
+                    <span class="h-1.5 w-1.5 rounded-full bg-primary-500"></span>
+                    <span>{{ summary.active or 0 }}</span><span class="hidden sm:inline">active</span>
+                </a>
+                <span class="flex items-center gap-1.5 px-2 py-1" title="Active workflows whose next run is due now">
+                    <span class="h-1.5 w-1.5 rounded-full {% if summary.due_now %}bg-pink-500{% else %}bg-gray-500{% endif %}"></span>
+                    <span>{{ summary.due_now or 0 }}</span><span class="hidden sm:inline">due now</span>
+                </span>
+                <a href="{{ base_path }}?status=paused&per_page={{ per_page }}"
+                   class="flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-gray-100 hover:text-gray-800"
+                   title="Paused workflows">
+                    <span class="h-1.5 w-1.5 rounded-full bg-gray-400"></span>
+                    <span>{{ summary.paused or 0 }}</span><span class="hidden sm:inline">paused</span>
+                </a>
+                {% if summary.completed %}
+                <a href="{{ base_path }}?status=completed&per_page={{ per_page }}"
+                   class="flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-gray-100 hover:text-gray-800"
+                   title="Finished one-off workflows">
+                    <span class="h-1.5 w-1.5 rounded-full bg-gray-400"></span>
+                    <span>{{ summary.completed }}</span><span class="hidden sm:inline">finished</span>
+                </a>
+                {% endif %}
+            </div>
+            {% endif %}
+            <a href="{{ base_path }}/new" class="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-700">
+                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+                New workflow
             </a>
         </div>
     </div>
 </div>
 
-<!-- Summary Cards -->
-{% if summary %}
-<div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Active</p>
-        <p class="text-2xl font-bold text-blue-600">{{ summary.active or 0 }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Due Now</p>
-        <p class="text-2xl font-bold text-amber-600">{{ summary.due_now or 0 }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Paused</p>
-        <p class="text-2xl font-bold text-gray-500">{{ summary.paused or 0 }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Scheduled</p>
-        <p class="text-2xl font-bold text-indigo-600">{{ summary.scheduled or summary.one_time or 0 }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Webhooks</p>
-        <p class="text-2xl font-bold text-emerald-600">{{ summary.webhook or 0 }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Manual</p>
-        <p class="text-2xl font-bold text-cyan-600">{{ summary.manual or 0 }}</p>
-    </div>
-</div>
-{% endif %}
+{# One control row, matching Activity and Handoffs: plain GET form that works
+   without JS, enhanced by HTMX to swap just the list. #}
+<form method="GET" action="{{ base_path }}" id="workflow-filters"
+      class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center"
+      hx-get="{{ base_path }}" hx-target="#workflow-results" hx-swap="innerHTML"
+      hx-push-url="true" hx-select="#workflow-results"
+      hx-trigger="submit, change from:select, keyup changed delay:400ms from:input[name='q']">
+    <input type="hidden" name="per_page" value="{{ per_page }}">
 
-<!-- Status Filter -->
-<div class="flex gap-2 mb-4">
-    <a href="{{ base_path }}?per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if not filter_status and filter_enabled is none %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
-    <a href="{{ base_path }}?status=active&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'active' %}bg-blue-500 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">Active</a>
-    <a href="{{ base_path }}?status=paused&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'paused' %}bg-gray-500 text-white{% else %}bg-gray-50 text-gray-700 hover:bg-gray-100{% endif %}">Paused</a>
-    <a href="{{ base_path }}?status=completed&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'completed' %}bg-green-500 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Completed</a>
-    <a href="{{ base_path }}?enabled=true&per_page={{ per_page }}" class="px-3 py-1 text-sm rounded-md {% if filter_enabled == 'true' %}bg-emerald-500 text-white{% else %}bg-emerald-50 text-emerald-700 hover:bg-emerald-100{% endif %}">Enabled</a>
-</div>
+    <div class="relative flex-1 sm:max-w-xs">
+        <label for="workflow-search" class="sr-only">Search workflows</label>
+        <svg class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
+        </svg>
+        <input type="search" name="q" id="workflow-search" value="{{ search_query or '' }}"
+               placeholder="Search workflows"
+               class="w-full rounded-lg border border-gray-300 bg-white py-2 pl-8 pr-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
+    </div>
+
+    <label class="text-xs font-medium text-gray-500 sm:ml-1" for="workflow-state">State</label>
+    <select name="status" id="workflow-state"
+            class="rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
+        <option value="" {% if not filter_status %}selected{% endif %}>Any state</option>
+        <option value="active" {% if filter_status == 'active' %}selected{% endif %}>Active</option>
+        <option value="paused" {% if filter_status == 'paused' %}selected{% endif %}>Paused</option>
+        <option value="completed" {% if filter_status == 'completed' %}selected{% endif %}>Finished</option>
+        <option value="expired" {% if filter_status == 'expired' %}selected{% endif %}>Expired</option>
+    </select>
+
+    <label class="text-xs font-medium text-gray-500 sm:ml-1" for="workflow-trigger">Trigger</label>
+    <select name="trigger" id="workflow-trigger"
+            class="rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
+        <option value="" {% if not filter_trigger %}selected{% endif %}>Any trigger</option>
+        <option value="schedule" {% if filter_trigger == 'schedule' %}selected{% endif %}>On a schedule</option>
+        <option value="webhook" {% if filter_trigger == 'webhook' %}selected{% endif %}>Webhook</option>
+        <option value="manual" {% if filter_trigger == 'manual' %}selected{% endif %}>Manual</option>
+        <option value="integration_event" {% if filter_trigger == 'integration_event' %}selected{% endif %}>Connection event</option>
+    </select>
+
+    {# The Clear link is rendered for full page loads and toggled client-side
+       afterwards: this form is OUTSIDE #workflow-results, so an HTMX filter
+       change swaps the list without re-rendering the form. Without the toggle,
+       Clear could never appear after an in-page filter change. #}
+    <a href="{{ base_path }}?per_page={{ per_page }}" id="workflow-clear"
+       class="inline-flex w-fit items-center gap-1 rounded-lg px-2 py-2 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-800{% if not (search_query or filter_status or filter_trigger or filter_enabled) %} hidden{% endif %}">
+        Clear
+    </a>
+</form>
+
+<script nonce="{{ request.state.csp_nonce }}">
+(function () {
+    var form = document.getElementById('workflow-filters');
+    var clear = document.getElementById('workflow-clear');
+    if (!form || !clear) return;
+    function sync() {
+        var q = form.querySelector('input[name="q"]');
+        var hasFilter = (q && q.value.trim() !== '') ||
+            Array.prototype.some.call(form.querySelectorAll('select'), function (s) {
+                if (s.name === 'status' && s.value === 'paused') return true;
+                return s.value !== '';
+            });
+        clear.classList.toggle('hidden', !hasFilter);
+    }
+    form.addEventListener('input', sync);
+    form.addEventListener('change', sync);
+    sync();
+})();
+</script>
 
 {% from "partials/pagination.html" import pagination_controls %}
 {% set filter_params = {} %}
 {% if filter_status %}{% set _ = filter_params.update({"status": filter_status}) %}{% endif %}
 {% if filter_enabled %}{% set _ = filter_params.update({"enabled": filter_enabled}) %}{% endif %}
+{% if filter_trigger %}{% set _ = filter_params.update({"trigger": filter_trigger}) %}{% endif %}
+{% if search_query %}{% set _ = filter_params.update({"q": search_query}) %}{% endif %}
 
 {{ pagination_controls(base_url=base_path, page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=filter_params, entity_name="workflows") }}
 
+<div id="workflow-results">
 <!-- Workflow List -->
 <div class="space-y-3">
     <!-- System Workflows Section -->
@@ -76,8 +137,8 @@
     {% if system_schedules %}
     <div class="mb-2">
         <div class="flex items-center gap-2 mb-3 px-1">
-            <svg class="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
-            <span class="text-xs font-semibold text-indigo-600 uppercase tracking-wider">System Workflows</span>
+            <svg class="w-4 h-4 text-primary-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+            <span class="text-xs font-semibold text-primary-700 uppercase tracking-wider">System workflows</span>
             <span class="text-xs text-gray-400">Built-in &mdash; cannot be deleted</span>
         </div>
         {% for sched in system_schedules %}
@@ -85,12 +146,12 @@
             <div class="flex items-start justify-between">
                 <a href="{{ base_path }}/{{ sched.id }}" class="flex-1 min-w-0">
                     <div class="flex items-center gap-2 flex-wrap">
-                        <svg class="w-4 h-4 text-indigo-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
+                        <svg class="w-4 h-4 text-primary-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" /></svg>
                         <span class="font-medium text-gray-900">{{ sched.title }}</span>
 
                         <!-- Status badge -->
                         {% if sched.enabled and sched.status == 'active' %}
-                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-700">active</span>
+                        <span class="px-2 py-0.5 rounded text-xs font-medium bg-primary-100 text-primary-700">active</span>
                         {% elif sched.status == 'paused' or not sched.enabled %}
                         <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">paused</span>
                         {% endif %}
@@ -98,23 +159,23 @@
                         <!-- Trigger type -->
                         {% set trigger_type = sched.trigger_type or 'schedule' %}
                         {% if trigger_type == 'webhook' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-emerald-100/70 text-emerald-700">webhook</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-700">webhook</span>
                         {% elif trigger_type == 'manual' %}
                         <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">manual</span>
                         {% elif trigger_type == 'integration_event' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-violet-100/70 text-violet-700">connection event</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-700">connection event</span>
                         {% elif sched.schedule_type == 'interval' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-indigo-100/60 text-indigo-600">
+                        <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700">
                             every {% if sched.interval_seconds >= 3600 %}{{ sched.interval_seconds // 3600 }}h{% endif %}{% if sched.interval_seconds % 3600 %}{{ (sched.interval_seconds % 3600) // 60 }}m{% endif %}
                         </span>
                         {% elif sched.schedule_type == 'cron' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-indigo-100/60 text-indigo-600 font-mono">{{ sched.cron_expression }}</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700 font-mono">{{ sched.cron_expression }}</span>
                         {% endif %}
 
                         {% if sched.is_server_workflow %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-indigo-100/60 text-indigo-700">server function</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700">server function</span>
                         {% else %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-indigo-100/60 text-indigo-600">{{ sched.agent_type }}</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700">{{ sched.agent_type }}</span>
                         {% endif %}
                         <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">{{ (sched.actions|length) if sched.actions else 1 }} action{{ 's' if ((sched.actions|length) if sched.actions else 1) != 1 }}</span>
                     </div>
@@ -127,11 +188,11 @@
                     <form method="POST" action="{{ base_path }}/{{ sched.id }}/toggle">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         {% if sched.enabled %}
-                        <button type="submit" class="p-1.5 rounded-md text-indigo-600 hover:bg-indigo-100 transition-colors" title="Pause workflow">
+                        <button type="submit" class="p-1.5 rounded-md text-primary-600 hover:bg-primary-50 transition-colors" title="Pause workflow">
                             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5" /></svg>
                         </button>
                         {% else %}
-                        <button type="submit" class="p-1.5 rounded-md text-green-600 hover:bg-green-50 transition-colors" title="Resume workflow">
+                        <button type="submit" class="p-1.5 rounded-md text-primary-600 hover:bg-primary-50 transition-colors" title="Resume workflow">
                             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.986V5.653z" /></svg>
                         </button>
                         {% endif %}
@@ -158,7 +219,7 @@
     {% if loop.first or sched.is_daemon_created != loop.previtem.is_daemon_created %}
     <div class="flex items-center gap-2 mb-3 mt-6 px-1">
         <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0021 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" /></svg>
-        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">{% if sched.is_daemon_created %}Daemon Workflows{% else %}Your Workflows{% endif %}</span>
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">{% if sched.is_daemon_created %}Lucent's workflows{% else %}Your workflows{% endif %}</span>
     </div>
     {% endif %}
     <div class="bg-white rounded-lg border border-gray-200 hover:border-gray-300 hover:shadow-sm transition-all p-4">
@@ -169,38 +230,38 @@
 
                     <!-- Status badge -->
                     {% if sched.enabled and sched.status == 'active' %}
-                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700">active</span>
+                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-primary-100 text-primary-700">active</span>
                     {% elif sched.status == 'paused' or not sched.enabled %}
                     <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">paused</span>
                     {% elif sched.status == 'completed' %}
-                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">completed</span>
+                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">finished</span>
                     {% elif sched.status == 'expired' %}
-                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">expired</span>
+                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">expired</span>
                     {% endif %}
 
                     <!-- Trigger type -->
                     {% set trigger_type = sched.trigger_type or 'schedule' %}
                     {% if trigger_type == 'webhook' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-emerald-50 text-emerald-700">
+                    <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-700">
                         <svg class="w-3 h-3 inline -mt-0.5 mr-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" /></svg>
                         webhook
                     </span>
                     {% elif trigger_type == 'manual' %}
                     <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">manual</span>
                     {% elif trigger_type == 'integration_event' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-violet-50 text-violet-700">connection event</span>
+                    <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-700">connection event</span>
                     {% elif sched.schedule_type == 'once' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-indigo-50 text-indigo-600">
+                    <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700">
                         <svg class="w-3 h-3 inline -mt-0.5 mr-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                         once
                     </span>
                     {% elif sched.schedule_type == 'interval' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-violet-50 text-violet-600">
+                    <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700">
                         <svg class="w-3 h-3 inline -mt-0.5 mr-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.183" /></svg>
                         every {{ sched.interval_seconds // 3600 }}h{{ ' %02d' | format((sched.interval_seconds % 3600) // 60) }}m{% if sched.interval_seconds < 3600 %} ({{ sched.interval_seconds // 60 }}m){% endif %}
                     </span>
                     {% elif sched.schedule_type == 'cron' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-cyan-50 text-cyan-600 font-mono">
+                    <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700 font-mono">
                         <svg class="w-3 h-3 inline -mt-0.5 mr-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" /></svg>
                         {{ sched.cron_expression }}
                     </span>
@@ -208,9 +269,9 @@
 
                     <!-- Executor -->
                     {% if sched.is_server_workflow %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-indigo-50 text-indigo-700">server function</span>
+                    <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700">server function</span>
                     {% else %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">{{ sched.agent_type }}</span>
+                    <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700">{{ sched.agent_type }}</span>
                     {% endif %}
                     <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">{{ (sched.actions|length) if sched.actions else 1 }} action{{ 's' if ((sched.actions|length) if sched.actions else 1) != 1 }}</span>
                 </div>
@@ -223,11 +284,11 @@
                 <form method="POST" action="{{ base_path }}/{{ sched.id }}/toggle">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     {% if sched.enabled %}
-                    <button type="submit" class="p-1.5 rounded-md text-blue-600 hover:bg-blue-50 transition-colors" title="Pause workflow">
+                    <button type="submit" class="p-1.5 rounded-md text-primary-600 hover:bg-primary-50 transition-colors" title="Pause workflow">
                         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5" /></svg>
                     </button>
                     {% else %}
-                    <button type="submit" class="p-1.5 rounded-md text-green-600 hover:bg-green-50 transition-colors" title="Resume workflow">
+                    <button type="submit" class="p-1.5 rounded-md text-primary-600 hover:bg-primary-50 transition-colors" title="Resume workflow">
                         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.986V5.653z" /></svg>
                     </button>
                     {% endif %}
@@ -253,11 +314,20 @@
 
     {% if not system_schedules and not user_schedules %}
     <div class="rounded-xl border border-dashed border-gray-300 bg-white p-8 text-center">
-        <p class="text-sm font-medium text-gray-700">No workflows yet.</p>
+        {% if search_query or filter_status or filter_trigger %}
+        {# Filtered to nothing is not the same as "you have none" — saying
+           "No workflows yet" here would be actively misleading. #}
+        <p class="text-sm font-medium text-gray-700">No workflows match those filters</p>
+        <p class="mt-1 text-sm text-gray-500">Try a shorter search, or clear the filters to see everything.</p>
+        <a href="{{ base_path }}" class="mt-4 inline-flex rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Clear filters</a>
+        {% else %}
+        <p class="text-sm font-medium text-gray-700">No workflows yet</p>
         <p class="mt-1 text-sm text-gray-500">Use the wizard to create a scheduled, webhook, manual, or connection-triggered flow.</p>
-        <a href="/workflows/new" class="mt-4 inline-flex rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700">Create workflow</a>
+        <a href="{{ base_path }}/new" class="mt-4 inline-flex rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700">Create workflow</a>
+        {% endif %}
     </div>
     {% endif %}
+</div>
 </div>
 
 {{ pagination_controls(base_url=base_path, page=page, per_page=per_page, total_pages=total_pages, total_count=total_count, filter_params=filter_params, show_per_page=false, entity_name="workflows") }}

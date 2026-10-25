@@ -258,8 +258,10 @@ class TestSchedulesList:
         assert listing.status_code == 200
         assert "Daemon Workflow" in listing.text
         assert "Other Human Workflow" not in listing.text
-        assert "Daemon Workflows" in listing.text
-        assert "Your Workflows" not in listing.text
+        # Section headings are sentence case now (matching Activity/Handoffs),
+        # so assert the lowercase-insensitive forms.
+        assert "Lucent's workflows" in listing.text
+        assert "Your workflows" not in listing.text
         assert daemon_detail.status_code == 200
         assert human_detail.status_code == 404
 
@@ -1771,3 +1773,96 @@ class TestWorkflowWizardDecisionSteps:
         assert row is not None
         config = row["actions"][0]["decision_config"]
         assert [q["name"] for q in config["questions"]] == ["report_complete"]
+
+
+# ============================================================================
+# Workflow list UI — search, trigger/state filters, and empty state
+# ============================================================================
+
+
+class TestWorkflowListFilters:
+    async def test_list_has_search_and_filter_controls(self, client, schedule):
+        resp = await client.get("/workflows")
+
+        assert resp.status_code == 200
+        assert '<form method="GET" action="/workflows"' in resp.text
+        assert 'name="q"' in resp.text
+        assert 'id="workflow-state"' in resp.text
+        assert 'id="workflow-trigger"' in resp.text
+
+    async def test_summary_cards_replaced_by_strip(self, client, schedule):
+        """The six big summary tiles are gone; counts live in one quiet strip."""
+        resp = await client.get("/workflows")
+
+        assert "DUE NOW" not in resp.text
+        assert "uppercase tracking-wider\">Webhooks" not in resp.text
+        # The strip links each count back into the filtered list.
+        assert "status=active" in resp.text
+
+    async def test_search_matches_title(self, client, schedule, db_pool, web_user, web_prefix):
+        user, org, _token = web_user
+        repo = ScheduleRepository(db_pool)
+        other = await repo.create_schedule(
+            title=f"{web_prefix}Unrelated Payroll Job",
+            org_id=str(org["id"]),
+            schedule_type="manual",
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.get("/workflows", params={"q": "Web Test Schedule"})
+
+        assert resp.status_code == 200
+        assert "Web Test Schedule" in resp.text
+        assert other["title"] not in resp.text
+
+    async def test_search_wildcards_are_escaped(self, client, schedule):
+        """A literal '%' must not turn the search into match-everything."""
+        resp = await client.get("/workflows", params={"q": "%"})
+
+        assert resp.status_code == 200
+        assert "Web Test Schedule" not in resp.text
+        assert "No workflows match those filters" in resp.text
+
+    async def test_paused_filter_maps_to_disabled(self, client, schedule, db_pool, web_user, web_prefix):
+        """'Paused' is enabled=false, not a status value.
+
+        The old UI filtered `status='paused'`, which matched nothing because a
+        paused workflow keeps status 'active'. Assert the real column is used.
+        """
+        user, org, _token = web_user
+        repo = ScheduleRepository(db_pool)
+        paused = await repo.create_schedule(
+            title=f"{web_prefix}Paused Candidate",
+            org_id=str(org["id"]),
+            schedule_type="manual",
+            created_by=str(user["id"]),
+        )
+        await repo.update_schedule(str(paused["id"]), str(org["id"]), enabled=False)
+
+        resp = await client.get("/workflows", params={"status": "paused"})
+
+        assert resp.status_code == 200
+        assert paused["title"] in resp.text
+
+    async def test_trigger_filter_narrows_results(self, client, schedule, db_pool, web_user, web_prefix):
+        user, org, _token = web_user
+        repo = ScheduleRepository(db_pool)
+        hook = await repo.create_schedule(
+            title=f"{web_prefix}Webhook Hooked",
+            org_id=str(org["id"]),
+            schedule_type="manual",
+            trigger_type="webhook",
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.get("/workflows", params={"trigger": "webhook"})
+
+        assert resp.status_code == 200
+        assert hook["title"] in resp.text
+        assert "Web Test Schedule" not in resp.text
+
+    async def test_empty_state_distinguishes_filters_from_no_workflows(self, client, schedule):
+        resp = await client.get("/workflows", params={"q": "zzz-definitely-not-a-workflow"})
+
+        assert "No workflows match those filters" in resp.text
+        assert "No workflows yet" not in resp.text

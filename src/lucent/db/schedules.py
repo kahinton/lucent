@@ -886,6 +886,8 @@ class ScheduleRepository:
         include_daemon_created: bool = False,
         limit: int = 25,
         offset: int = 0,
+        search: str | None = None,
+        trigger_type: str | None = None,
     ) -> dict:
         async with scoped_acquire(organization_id=org_id) as conn:
             conditions = ["organization_id = $1::uuid"]
@@ -919,6 +921,26 @@ class ScheduleRepository:
             if enabled is not None:
                 conditions.append(f"enabled = ${idx}")
                 params.append(enabled)
+                idx += 1
+            if trigger_type:
+                conditions.append(f"COALESCE(trigger_type, 'schedule') = ${idx}")
+                params.append(trigger_type)
+                idx += 1
+            # Substring search over the fields a person remembers. LIKE
+            # metacharacters are escaped so a literal "%" cannot match
+            # every workflow.
+            if search and search.strip():
+                escaped = (
+                    search.strip()
+                    .replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
+                params.append(f"%{escaped}%")
+                conditions.append(
+                    f"(title ILIKE ${idx} ESCAPE '\\'"
+                    f" OR description ILIKE ${idx} ESCAPE '\\')"
+                )
                 idx += 1
 
             where = " AND ".join(conditions)
@@ -1632,6 +1654,7 @@ class ScheduleRepository:
         enabled: bool | None = None,
         limit: int = 25,
         offset: int = 0,
+        search: str | None = None,
     ) -> dict:
         """List schedules cleared for *use* by the pool's principal.
 
@@ -1657,6 +1680,19 @@ class ScheduleRepository:
         if enabled is not None:
             conditions.append(f"sc.enabled = ${len(params) + 1}")
             params.append(enabled)
+        # Same escaped substring match as list_schedules.
+        if search and search.strip():
+            escaped = (
+                search.strip()
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            params.append(f"%{escaped}%")
+            conditions.append(
+                f"(sc.title ILIKE ${len(params)} ESCAPE '\\'"
+                f" OR sc.description ILIKE ${len(params)} ESCAPE '\\')"
+            )
 
         where = " AND ".join(conditions)
         count_query = f"SELECT COUNT(*) AS total FROM schedules sc WHERE {where}"

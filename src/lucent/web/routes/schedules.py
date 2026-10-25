@@ -103,6 +103,8 @@ async def schedules_list(
     request: Request,
     status: str | None = None,
     enabled: str | None = None,
+    trigger: str | None = None,
+    q: str | None = None,
     page: int = 1,
     per_page: int = 25,
 ):
@@ -121,16 +123,30 @@ async def schedules_list(
     offset = (page - 1) * per_page
 
     org_id = str(user.organization_id)
+    search_query = (q or "").strip() or None
+    trigger_filter = (trigger or "").strip() or None
     enabled_filter = True if enabled == "true" else (False if enabled == "false" else None)
+    # "Paused" is not a status in this schema — a paused workflow keeps its
+    # status ('active') and is merely disabled. Filtering `status='paused'`
+    # therefore matched nothing, which is why the old Paused pill looked broken
+    # even though the summary counted several. Map the UI concept onto the real
+    # column for the query, but keep the ORIGINAL value for the template so the
+    # dropdown stays selected and the Clear link keeps appearing.
+    status_filter = status
+    if status_filter == "paused":
+        status_filter = None
+        enabled_filter = False
     if _include_daemon_workflows(user):
         result = await repo.list_schedules(
             org_id,
-            status=status,
+            status=status_filter,
             enabled=enabled_filter,
             created_by=str(user.id),
             include_daemon_created=True,
             limit=per_page,
             offset=offset,
+            search=search_query,
+            trigger_type=trigger_filter,
         )
     else:
         authorized = await get_authorized_schedules_pool(
@@ -139,10 +155,12 @@ async def schedules_list(
         result = await ScheduleRepository(authorized).list_schedules_accessible_by(
             str(user.id),
             org_id,
-            status=status,
+            status=status_filter,
             enabled=enabled_filter,
             limit=per_page,
             offset=offset,
+            search=search_query,
+            trigger_type=trigger_filter,
         )
     schedules = result["items"]
     for sched in schedules:
@@ -177,6 +195,8 @@ async def schedules_list(
             "summary": summary,
             "filter_status": status,
             "filter_enabled": enabled,
+            "filter_trigger": trigger_filter,
+            "search_query": search_query,
             "page": page,
             "per_page": per_page,
             "total_pages": total_pages,
