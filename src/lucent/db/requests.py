@@ -1938,6 +1938,7 @@ class RequestRepository:
         viewer_user_id: str | None = None,
         requester_user_id: str | None = None,
         include_system: bool = False,
+        search: str | None = None,
     ) -> dict:
         base = "FROM requests r WHERE r.organization_id = $1"
         params: list[Any] = [UUID(org_id)]
@@ -1945,6 +1946,24 @@ class RequestRepository:
             params.extend([UUID(requester_user_id), include_system])
             base += " AND " + self._request_visibility_condition(
                 f"${len(params) - 1}", f"${len(params)}"
+            )
+        # Free-text search over the two fields a person actually remembers.
+        #
+        # Substring (ILIKE) rather than full-text on purpose: request titles are
+        # short and people search for fragments ("green car", "poem"), which a
+        # tsquery would tokenize away. LIKE metacharacters in the user's input
+        # are escaped so a literal "%" cannot silently match every row.
+        if search and search.strip():
+            escaped = (
+                search.strip()
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            params.append(f"%{escaped}%")
+            base += (
+                f" AND (r.title ILIKE ${len(params)} ESCAPE '\\'"
+                f" OR r.description ILIKE ${len(params)} ESCAPE '\\')"
             )
         if status:
             statuses = [value.strip() for value in status.split(",") if value.strip()]

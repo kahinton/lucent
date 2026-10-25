@@ -621,8 +621,11 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert "Handoffs" in list_resp.text
     assert "Which source should I use?" in list_resp.text
     assert "Reply needed" in list_resp.text
-    assert "Questions, decisions, and updates from Lucent." in list_resp.text
-    assert "Waiting for your answer before Lucent continues." in list_resp.text
+    # The page speaks one filter language now: a search box plus a state
+    # dropdown, mirroring Activity.
+    assert '<form method="GET" action="/handoffs"' in list_resp.text
+    assert 'name="q"' in list_resp.text
+    assert 'name="status"' in list_resp.text
     assert "Inbox" not in list_resp.text
 
     old_path_resp = await web_client.get("/inbox")
@@ -894,3 +897,131 @@ async def test_workflow_user_interaction_action_triggers_handoff(
     assert refs_by_type["schedule_run"]["url"] is None
     assert refs_by_type["schedule_run"]["metadata"]["workflow_id"] == workflow["id"]
     assert refs_by_type["schedule_run"]["metadata"]["request_id"] is None
+
+
+# ============================================================================
+# Handoff list UI — search, state filter, and the shared accent convention
+# ============================================================================
+
+
+async def _make_handoff(repo, user, *, title, body="Body text.", requires_response=False):
+    return await repo.create_interaction(
+        org_id=user["organization_id"],
+        user_id=user["id"],
+        created_by=user["id"],
+        title=title,
+        body=body,
+        source="daemon",
+        interaction_type="handoff",
+        requires_response=requires_response,
+    )
+
+
+@pytest.mark.asyncio
+async def test_handoff_search_matches_title(interaction_user, db_pool, web_client):
+    repo = UserInteractionRepository(db_pool)
+    marker = uuid4().hex[:8]
+    match = await _make_handoff(repo, interaction_user, title=f"Watershed {marker} plan")
+    other = await _make_handoff(repo, interaction_user, title=f"Payroll {marker} question")
+
+    resp = await web_client.get("/handoffs", params={"q": f"Watershed {marker}"})
+
+    assert resp.status_code == 200
+    assert match["title"] in resp.text
+    assert other["title"] not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_handoff_search_matches_body(interaction_user, db_pool, web_client):
+    repo = UserInteractionRepository(db_pool)
+    marker = uuid4().hex[:8]
+    match = await _make_handoff(
+        repo,
+        interaction_user,
+        title=f"Unrelated {marker}",
+        body=f"The gauging station near {marker} needs a decision.",
+    )
+
+    resp = await web_client.get("/handoffs", params={"q": marker})
+
+    assert resp.status_code == 200
+    assert match["title"] in resp.text
+
+
+@pytest.mark.asyncio
+async def test_handoff_search_wildcards_are_escaped(
+    interaction_user, db_pool, web_client
+):
+    """A literal '%' must not match every handoff."""
+    repo = UserInteractionRepository(db_pool)
+    marker = uuid4().hex[:8]
+    await _make_handoff(repo, interaction_user, title=f"Escape probe {marker}")
+
+    resp = await web_client.get("/handoffs", params={"q": "%"})
+
+    assert resp.status_code == 200
+    assert f"Escape probe {marker}" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_handoff_search_query_is_echoed_back(
+    interaction_user, db_pool, web_client
+):
+    repo = UserInteractionRepository(db_pool)
+    await _make_handoff(repo, interaction_user, title="Echo me")
+
+    resp = await web_client.get("/handoffs", params={"q": "Echo me"})
+
+    assert 'value="Echo me"' in resp.text
+
+
+@pytest.mark.asyncio
+async def test_reply_needed_uses_pink_border_and_a_neutral_surface(
+    interaction_user, db_pool, web_client
+):
+    """Reply-needed moved from amber to the theme pink, border only.
+
+    The card surface must stay neutral — tinting it was what degraded text
+    contrast, so assert on the border class and the absence of any tint.
+    """
+    repo = UserInteractionRepository(db_pool)
+    marker = uuid4().hex[:8]
+    await _make_handoff(
+        repo,
+        interaction_user,
+        title=f"Needs a decision {marker}",
+        requires_response=True,
+    )
+
+    resp = await web_client.get("/handoffs")
+
+    assert "border-pink-500" in resp.text
+    assert "border-amber-400" not in resp.text
+    assert "bg-amber-50/70" not in resp.text
+    assert "bg-primary-50/50" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_state_dropdown_replaces_the_pill_row(interaction_user, db_pool, web_client):
+    resp = await web_client.get("/handoffs")
+
+    assert '<select name="status" id="handoff-state"' in resp.text
+    for value in ("active", "waiting_on_user", "responded", "resolved", "all"):
+        assert f'value="{value}"' in resp.text
+
+
+@pytest.mark.asyncio
+async def test_state_filter_narrows_results(interaction_user, db_pool, web_client):
+    repo = UserInteractionRepository(db_pool)
+    marker = uuid4().hex[:8]
+    waiting = await _make_handoff(
+        repo,
+        interaction_user,
+        title=f"Waiting item {marker}",
+        requires_response=True,
+    )
+
+    resp = await web_client.get("/handoffs", params={"status": "waiting_on_user"})
+
+    assert resp.status_code == 200
+    assert waiting["title"] in resp.text

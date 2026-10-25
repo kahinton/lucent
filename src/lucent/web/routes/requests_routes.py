@@ -194,6 +194,7 @@ async def activity_list(
     request: Request,
     status: str | None = None,
     source: str | None = None,
+    q: str | None = None,
     page: int = 1,
     per_page: int = 25,
 ):
@@ -208,6 +209,8 @@ async def activity_list(
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
     offset = (page - 1) * per_page
+
+    search_query = (q or "").strip() or None
 
     # Default: hide system (schedule) tasks unless explicitly requested
     if source is None:
@@ -225,6 +228,7 @@ async def activity_list(
         org_id, status=status_filter, source=source, limit=per_page, offset=offset,
         exclude_status=exclude_status, viewer_user_id=str(user.id),
         requester_user_id=requester_user_id, include_system=include_system,
+        search=search_query,
     )
     requests_data = requests_result["items"]
     total_count = requests_result["total_count"]
@@ -262,6 +266,7 @@ async def activity_list(
         "summary": summary,
         "filter_status": status,
         "filter_source": source,
+        "search_query": search_query,
         "pending_approval_count": pending_approval_count,
         "can_review_request": lambda req: can_review_request(user, req),
         "page": page,

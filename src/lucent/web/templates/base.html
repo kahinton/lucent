@@ -14,6 +14,9 @@
     <script src="/static/vendor/purify-3.2.4.min.js"></script>
     <link rel="stylesheet" href="/static/chat-message-ui.css?v={{ static_version('chat-message-ui.css') }}">
     <script src="/static/chat-message-ui.js?v={{ static_version('chat-message-ui.js') }}"></script>
+    <!-- Shared state treatments (teal→pink in-motion sweep). Loaded everywhere so
+         the chat composer and Activity "running" cards share one definition. -->
+    <link rel="stylesheet" href="/static/lucent-state.css?v={{ static_version('lucent-state.css') }}">
     <!-- Tailwind CSS (self-hosted) -->
     <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
     <script nonce="{{ request.state.csp_nonce }}">
@@ -124,9 +127,21 @@
             html.sidebar-collapsed #app-sidebar > .flex > a:first-child { min-height: 3.5rem; padding: 0; }
             html.sidebar-collapsed #app-sidebar .sidebar-user { justify-content: center; padding-left: 0; padding-right: 0; }
         }
-        main .bg-white.rounded-lg.border,
-        main .bg-white.rounded-xl.border {
+        /* Neutral card surface + physical shadow. The border-color !important is
+           what makes cards read as one surface family, but it also outranks
+           Tailwind's own border utilities — so cards whose border carries
+           MEANING (new, running, needs-reply) opt out with .lucent-state-card
+           below. Without that opt-out the accent is silently overwritten and the
+           card renders plain grey. */
+        main .bg-white.rounded-lg.border:not(.lucent-state-card),
+        main .bg-white.rounded-xl.border:not(.lucent-state-card) {
             border-color: var(--lucent-line) !important;
+            box-shadow: 0 3px 0 rgba(0, 0, 0, 0.16), 0 10px 24px rgba(0, 0, 0, 0.08);
+        }
+        /* State-accented cards keep the shared physical shadow but let their own
+           Tailwind border utility win. */
+        main .bg-white.rounded-lg.border.lucent-state-card,
+        main .bg-white.rounded-xl.border.lucent-state-card {
             box-shadow: 0 3px 0 rgba(0, 0, 0, 0.16), 0 10px 24px rgba(0, 0, 0, 0.08);
         }
         main button.bg-primary-600,
@@ -393,9 +408,11 @@
                         <span class="sidebar-label">Projects</span>
                     </a>
 
-                    <a href="/activity" aria-label="Activity" title="Activity" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/activity' in request.url.path or '/requests' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
+                    <a href="/activity" aria-label="Activity" title="Work Lucent has been doing in the background" class="flex items-center gap-2.5 px-2.5 py-2 text-sm font-medium rounded-lg transition-colors {% if '/activity' in request.url.path or '/requests' in request.url.path %}bg-primary-50 text-primary-700{% else %}text-gray-700 hover:bg-gray-50{% endif %}">
                         <svg class="w-5 h-5 {% if '/activity' in request.url.path or '/requests' in request.url.path %}text-primary-600{% else %}text-gray-400{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+                            {# Pulse line, not a sparkle: this is a work log, and the
+                               generic AI-sparkle glyph was deliberately dropped. #}
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3 12h3.75l2.25-6 3 12 2.25-6H21" />
                         </svg>
                         <span class="sidebar-label">Activity</span>
                         <span data-live-badge="activity" data-live-badge-suppressed="{{ 'true' if '/activity' in request.url.path or '/requests' in request.url.path else 'false' }}" class="sidebar-count-badge ml-auto inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold {% if request.state.pending_approval_count <= 0 or '/activity' in request.url.path or '/requests' in request.url.path %}hidden{% endif %}" title="Requests awaiting approval" aria-live="polite">

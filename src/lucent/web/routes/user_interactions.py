@@ -215,6 +215,7 @@ def _status_filter(status: str | None) -> tuple[str | None, bool]:
 async def handoffs_list(
     request: Request,
     status: str | None = None,
+    q: str | None = None,
     page: int = 1,
     per_page: int = 25,
 ):
@@ -226,6 +227,7 @@ async def handoffs_list(
     page = max(1, page)
     per_page = per_page if per_page in ALLOWED_PER_PAGE else 25
     offset = (page - 1) * per_page
+    search_query = (q or "").strip() or None
     status_value, include_resolved = _status_filter(status)
     result = await repo.list_interactions(
         org_id=str(user.organization_id),
@@ -234,6 +236,7 @@ async def handoffs_list(
         include_resolved=include_resolved,
         limit=per_page,
         offset=offset,
+        search=search_query,
     )
     items = result["items"]
     total_count = result["total_count"]
@@ -264,6 +267,7 @@ async def handoffs_list(
             "other": other,
             "attention_count": attention_count,
             "filter_status": status or "active",
+            "search_query": search_query,
             "page": min(page, total_pages),
             "per_page": per_page,
             "total_pages": total_pages,

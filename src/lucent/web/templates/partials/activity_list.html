@@ -87,9 +87,16 @@
 
 {% macro request_card(req, lane='default') %}
 {% set is_unviewed_completion = req.is_unviewed_completion | default(false) %}
+{% set is_running = lane == 'running' %}
+{% set has_state = is_running or is_unviewed_completion %}
+{# State is carried by the BORDER only — never by tinting the card surface, which
+   degrades text contrast. Both accents are the theme's own: teal for "new", and
+   the shared teal→pink sweep for "in motion". Cards with a state accent carry
+   .lucent-state-card so base.html's neutral-card border override does not
+   swallow it. #}
 <a href="/activity/{{ req.id }}" class="block rounded-xl border p-4 shadow-sm transition-all hover:shadow-md
-    {% if is_unviewed_completion %}border-emerald-300 bg-emerald-50/60 ring-2 ring-emerald-100 hover:border-emerald-400
-    {% elif lane == 'running' %}border-blue-200 bg-white hover:border-blue-300
+    {% if has_state %}lucent-state-card {% endif %}{% if is_running %}lucent-sweep lucent-sweep--on lucent-sweep--animated border-transparent bg-white
+    {% elif is_unviewed_completion %}border-primary-500 bg-white hover:border-primary-400
     {% else %}border-gray-200 bg-white hover:border-gray-300{% endif %}">
     <div class="flex items-start justify-between gap-4">
         <div class="flex-1 min-w-0">
@@ -210,7 +217,7 @@
         <div class="flex items-center justify-between gap-3">
             <div>
                 <h2 id="activity-approvals-heading" class="text-sm font-semibold text-amber-950">Needs approval</h2>
-                <p class="mt-0.5 text-sm text-amber-800">Review autonomous work before it starts. Approved items leave this lane and move into active work.</p>
+                <p class="mt-0.5 text-sm text-amber-800">Approve to let this work start, or send it back with a note.</p>
             </div>
             <span class="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800">{{ approval_requests|length }}</span>
         </div>
@@ -229,7 +236,7 @@
         <div class="flex items-center justify-between gap-3">
             <div>
                 <h2 id="activity-running-heading" class="text-sm font-semibold text-blue-950">Running now</h2>
-                <p class="mt-0.5 text-sm text-blue-800">These requests have tasks currently claimed or running, so they get a lane between approval gates and finished work.</p>
+                <p class="mt-0.5 text-sm text-blue-800">Lucent is actively working on these.</p>
             </div>
             <span class="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-800">{{ running_requests|length }}</span>
         </div>
@@ -246,8 +253,7 @@
 <section aria-labelledby="activity-recent-heading">
     <div class="mb-3 flex items-center justify-between gap-3">
         <div>
-            <h2 id="activity-recent-heading" class="text-sm font-semibold text-gray-900">{% if approval_requests or running_requests %}Recent and finished work{% else %}All activity{% endif %}</h2>
-            <p class="mt-0.5 text-sm text-gray-500">Completed cards show recorded output counts. Items finished since you last opened them are highlighted.</p>
+            <h2 id="activity-recent-heading" class="text-sm font-semibold text-gray-900">{% if approval_requests or running_requests %}Finished and recent{% else %}All activity{% endif %}</h2>
         </div>
         <span class="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600">{{ requests|length }}</span>
     </div>
@@ -265,6 +271,7 @@
 {% set filter_params = [] %}
 {% if filter_status %}{% set _ = filter_params.append("status=" ~ filter_status) %}{% endif %}
 {% if filter_source %}{% set _ = filter_params.append("source=" ~ filter_source) %}{% endif %}
+{% if search_query %}{% set _ = filter_params.append("q=" ~ (search_query | urlencode)) %}{% endif %}
 {% set _ = filter_params.append("per_page=" ~ per_page) %}
 {% set qs = filter_params | join("&") %}
 
@@ -330,7 +337,16 @@
 {% endif %}
 
 {% else %}
-<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
-    <p>No activity yet. Submit a request or let Lucent create one during a cognitive cycle.</p>
+<div class="rounded-xl border border-gray-200 bg-white px-6 py-10 text-center">
+    {% if search_query %}
+    <p class="text-sm font-medium text-gray-900">No requests match “{{ search_query }}”</p>
+    <p class="mt-1 text-sm text-gray-500">Try a shorter phrase, or clear the search to see everything.</p>
+    {% elif filter_status %}
+    <p class="text-sm font-medium text-gray-900">Nothing in this state right now</p>
+    <p class="mt-1 text-sm text-gray-500">Try “Any state”, or clear the filters.</p>
+    {% else %}
+    <p class="text-sm font-medium text-gray-900">No activity yet</p>
+    <p class="mt-1 text-sm text-gray-500">Ask Lucent for something, or let it create work during a cycle.</p>
+    {% endif %}
 </div>
 {% endif %}

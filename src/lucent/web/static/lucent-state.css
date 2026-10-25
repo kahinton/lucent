@@ -1,0 +1,72 @@
+/* Shared state treatments for Lucent surfaces.
+ *
+ * The chat composer's streaming halo and the Activity "running" card use the
+ * same teal→pink perimeter sweep. It lives here rather than in a page template
+ * so the two can never drift apart: change the gradient once and every surface
+ * that signals "in motion" follows.
+ *
+ *   .lucent-sweep            positioning only; draws nothing
+ *   .lucent-sweep--on        paints the perimeter
+ *   .lucent-sweep--animated  sweeps it (composer uses its own faster cadence)
+ *
+ * Painting is gated on --on deliberately: an always-on perimeter would
+ * advertise motion that is not happening.
+ *
+ * Hosts must carry a rounded-* class — the overlay inherits the border radius.
+ */
+
+@property --lucent-sweep-spread {
+    syntax: '<percentage>';
+    inherits: false;
+    initial-value: 0%;
+}
+
+.lucent-sweep {
+    position: relative;
+}
+
+/* One definition of the gradient, reused by both surfaces. */
+.lucent-sweep,
+.input-glow {
+    --lucent-sweep-gradient: conic-gradient(
+        from 0deg,
+        #00cfc1 0%,
+        #ff3f9b var(--lucent-sweep-spread),
+        rgba(0, 207, 193, 0.22) var(--lucent-sweep-spread),
+        rgba(0, 207, 193, 0.22) calc(100% - var(--lucent-sweep-spread)),
+        #ff3f9b calc(100% - var(--lucent-sweep-spread)),
+        #00cfc1 100%
+    );
+}
+
+.lucent-sweep--on::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: var(--lucent-sweep-gradient);
+    filter: drop-shadow(0 0 5px rgba(0, 207, 193, 0.24));
+    pointer-events: none;
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+}
+
+/* A column of running cards sweeping at the composer's 1.8s cadence reads as
+ * noise, so list surfaces run calmer. Same pattern, slower rhythm. */
+.lucent-sweep--on.lucent-sweep--animated::before {
+    animation: lucent-sweep 3.2s ease-in-out infinite alternate;
+}
+
+@keyframes lucent-sweep {
+    from { --lucent-sweep-spread: 0%; }
+    to { --lucent-sweep-spread: 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .lucent-sweep--on::before {
+        --lucent-sweep-spread: 50%;
+        animation: none !important;
+    }
+}

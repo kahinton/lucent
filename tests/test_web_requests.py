@@ -200,11 +200,43 @@ class TestActivityList:
         resp = await client.get("/activity")
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
+        # Single control row: a plain GET form that still works without JS.
         assert '<form method="GET" action="/activity"' in resp.text
         assert 'name="source"' in resp.text
         assert 'name="status"' in resp.text
+        assert 'name="q"' in resp.text
         assert 'value="user,cognitive,daemon"' in resp.text
-        assert "Apply filters" in resp.text
+
+    async def test_list_has_no_ai_sparkle_badge(self, client, sample_request):
+        """The page header must not lead with a generic AI sparkle glyph.
+
+        Scoped to the page's own header block: base.html legitimately uses
+        sparkle icons elsewhere (delegated-work panels), and this change is
+        about the Activity page not advertising itself with one.
+        """
+        resp = await client.get("/activity")
+        header = resp.text.split("<h1", 1)[0].rsplit("activity-live-content", 1)[-1]
+        assert "bg-gradient-to-br from-primary-400" not in header
+        assert "<h1" in resp.text
+
+    async def test_completed_card_uses_the_theme_teal_border(
+        self, client, db_pool, web_user
+    ):
+        """A finished-but-unseen request is marked with teal, not emerald."""
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="Teal border probe",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        await repo.update_request_status(str(req["id"]), "completed", str(org["id"]))
+
+        resp = await client.get("/activity")
+
+        # Completed and never viewed → unviewed_completion true.
+        assert "border-primary-500" in resp.text
+        assert "border-emerald-400" not in resp.text
 
     async def test_live_refresh_returns_full_marked_region(self, client, sample_request):
         pagination = await client.get("/activity", headers={"HX-Request": "true"})
@@ -320,6 +352,112 @@ class TestActivityList:
         # Request was created with source="user", should not appear
         assert "Web Test Request" not in resp.text
 
+    async def test_list_searches_title(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        match = await repo.create_request(
+            title="Find the misplaced river gauge",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+        other = await repo.create_request(
+            title="Unrelated payroll question",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.get("/activity", params={"q": "river gauge"})
+
+        assert resp.status_code == 200
+        assert match["title"] in resp.text
+        assert other["title"] not in resp.text
+
+    async def test_list_searches_description(self, client, db_pool, web_user):
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        match = await repo.create_request(
+            title="Quarterly review",
+            description="Needs a summary of the watershed sampling results.",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.get("/activity", params={"q": "watershed"})
+
+        assert resp.status_code == 200
+        assert match["title"] in resp.text
+
+    async def test_search_wildcards_are_escaped(self, client, db_pool, web_user):
+        """A literal '%' must not turn the search into "match everything".
+
+        Without escaping, '%%%' would be a LIKE pattern matching every row —
+        a silently wrong result rather than an obvious failure.
+        """
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        await repo.create_request(
+            title="Escape probe request",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.get("/activity", params={"q": "%"})
+
+        assert resp.status_code == 200
+        assert "Escape probe request" not in resp.text
+        assert "No requests match" in resp.text
+
+    async def test_search_with_no_matches_explains_itself(self, client, sample_request):
+        resp = await client.get("/activity", params={"q": "zzz-no-such-request"})
+        assert resp.status_code == 200
+        assert "No requests match" in resp.text
+
+    async def test_search_persists_in_the_input_and_pagination(
+        self, client, db_pool, web_user
+    ):
+        """The query must survive a re-render and page navigation."""
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        for index in range(3):
+            await repo.create_request(
+                title=f"Persisted search target {index}",
+                org_id=str(org["id"]),
+                created_by=str(user["id"]),
+            )
+
+        resp = await client.get(
+            "/activity", params={"q": "Persisted search", "per_page": 10}
+        )
+
+        assert resp.status_code == 200
+        # Echoed back into the search box...
+        assert 'value="Persisted search"' in resp.text
+        # ...and carried into pagination links (urlencoded, so "+" or "%20").
+        assert "q=Persisted+search" in resp.text or "q=Persisted%20search" in resp.text
+
+    async def test_workflow_scope_filter(self, client, db_pool, web_user):
+        """The scope dropdown's "Workflows" option maps to source=schedule."""
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        workflow_req = await repo.create_request(
+            title="Workflow source probe",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+            source="schedule",
+        )
+        normal_req = await repo.create_request(
+            title="Normal source probe",
+            org_id=str(org["id"]),
+            created_by=str(user["id"]),
+            source="user",
+        )
+
+        resp = await client.get("/activity", params={"source": "schedule"})
+
+        assert resp.status_code == 200
+        assert workflow_req["title"] in resp.text
+        assert normal_req["title"] not in resp.text
+
     async def test_list_groups_approvals_running_and_finished_outputs(
         self, client, db_pool, web_user
     ):
@@ -377,7 +515,7 @@ class TestActivityList:
         assert f'hx-post="/daemon/review/{approval["id"]}/action"' in resp.text
         assert "Running now" in resp.text
         assert "Lane Running Request" in resp.text
-        assert "Recent and finished work" in resp.text
+        assert "Finished and recent" in resp.text
         assert "Lane Completed Request" in resp.text
         assert "Finished since last viewed" in resp.text
         assert "1 output" in resp.text

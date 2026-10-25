@@ -10,115 +10,95 @@
     hx-select="#activity-live-content"
     hx-target="this"
     hx-swap="outerHTML">
-<div class="mb-6">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div class="flex items-center gap-3">
-            <div class="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 shadow-md">
-                <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-                </svg>
-            </div>
-            <div>
-                <h1 class="text-2xl font-bold text-gray-900">Activity</h1>
-                <p class="text-sm text-gray-500">All work — from you and from Lucent</p>
-            </div>
-        </div>
+{# ── Header: title left, ambient counts right ──────────────────────────
+   The counts live top-right as a quiet operational strip, matching the chat
+   window's pending/goals/daemon cluster. Deliberately low-contrast: this is
+   context, not the point of the page. Active and Queued are real drill-downs;
+   pending and running have no useful destination, so they stay plain text
+   rather than looking clickable and going nowhere. #}
+<div class="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+    <h1 class="text-2xl font-bold text-gray-900">Activity</h1>
+
+    <div class="flex flex-wrap items-center gap-1 text-xs text-gray-500 sm:justify-end">
         {% if pending_approval_count > 0 %}
-        <div class="inline-flex w-fit items-center gap-2 px-4 py-2 bg-amber-100 text-amber-800 text-sm font-medium rounded-lg">
-            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+        <span class="flex items-center gap-1.5 rounded-md bg-amber-100 px-2 py-1 font-medium text-amber-800"
+              title="{{ pending_approval_count }} request{% if pending_approval_count != 1 %}s{% endif %} awaiting your approval">
+            <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+            <span>{{ pending_approval_count }}</span><span class="hidden sm:inline">to approve</span>
+        </span>
+        {% endif %}
+        {% if summary %}
+        <a href="/activity?status=active&per_page={{ per_page }}&source=user,cognitive,daemon,schedule"
+           class="flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-gray-100 hover:text-gray-800"
+           title="Requests Lucent is working on right now">
+            <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 12h3.75l2.25-6 3 12 2.25-6H21" />
             </svg>
-            {{ pending_approval_count }} awaiting approval below
-        </div>
+            <span>{{ summary.requests.active or 0 }}</span><span class="hidden sm:inline">active</span>
+        </a>
+        <span class="flex items-center gap-1.5 px-2 py-1" title="Requests waiting to start">
+            <span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
+            <span>{{ summary.requests.pending or 0 }}</span><span class="hidden sm:inline">pending</span>
+        </span>
+        <span class="flex items-center gap-1.5 px-2 py-1" title="Tasks currently executing">
+            <span class="h-1.5 w-1.5 rounded-full bg-blue-400"></span>
+            <span>{{ summary.tasks.running or 0 }}</span><span class="hidden sm:inline">running</span>
+        </span>
+        <a href="/activity/queue"
+           class="flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-gray-100 hover:text-gray-800"
+           title="Tasks waiting for a free slot">
+            <span class="h-1.5 w-1.5 rounded-full bg-gray-400"></span>
+            <span>{{ summary.tasks.queued or 0 }}</span><span class="hidden sm:inline">queued</span>
+        </a>
         {% endif %}
     </div>
 </div>
 
-<!-- Summary Cards -->
-{% if summary %}
-<div class="grid grid-cols-2 gap-3 mb-6 sm:grid-cols-4 sm:gap-4">
-    <a href="/activity?status=active&per_page={{ per_page }}&source=user,cognitive,daemon,schedule" class="block bg-white rounded-lg border border-gray-200 p-4 transition-colors hover:border-blue-300 hover:shadow-sm" aria-label="View active requests">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Active</p>
-        <p class="text-2xl font-bold text-blue-600">{{ summary.requests.active or 0 }}</p>
-    </a>
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Pending</p>
-        <p class="text-2xl font-bold text-amber-600">{{ summary.requests.pending or 0 }}</p>
-    </div>
-    <div class="bg-white rounded-lg border border-gray-200 p-4">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Tasks Running</p>
-        <p class="text-2xl font-bold text-green-600">{{ summary.tasks.running or 0 }}</p>
-    </div>
-    <a href="/activity/queue" class="bg-white rounded-lg border border-gray-200 p-4 hover:border-gray-300 hover:shadow-sm transition-colors">
-        <p class="text-xs text-gray-500 uppercase tracking-wider">Tasks Queued</p>
-        <p class="text-2xl font-bold text-gray-600">{{ summary.tasks.queued or 0 }}</p>
-    </a>
-</div>
-{% endif %}
-
-<!-- Mobile filters -->
-<form method="GET" action="/activity" class="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-gray-200 bg-white p-3 sm:hidden">
+{# ── One control row: search, scope, state ─────────────────────────────
+   Replaces a 2-select mobile form and a desktop row of twelve pill-shaped
+   links. Plain GET form first, so it works without JS; HTMX enhances it by
+   swapping just the results list and keeping the URL in sync. #}
+<form method="GET" action="/activity" id="activity-filters"
+      class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center"
+      hx-get="/activity" hx-target="#activity-results" hx-swap="innerHTML"
+      hx-push-url="true" hx-trigger="submit, change from:select, keyup changed delay:400ms from:input[name='q']">
     <input type="hidden" name="per_page" value="{{ per_page }}">
-    <label class="min-w-0 text-xs font-medium text-gray-600">
-        Source
-        <select name="source" class="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none">
-            <option value="user,cognitive,daemon" {% if not filter_source or filter_source == 'user,cognitive,daemon' %}selected{% endif %}>All activity</option>
-            <option value="user" {% if filter_source == 'user' %}selected{% endif %}>You</option>
-            <option value="cognitive,daemon" {% if filter_source in ('cognitive', 'cognitive,daemon') %}selected{% endif %}>Lucent</option>
-            <option value="schedule" {% if filter_source == 'schedule' %}selected{% endif %}>System</option>
-        </select>
-    </label>
-    <label class="min-w-0 text-xs font-medium text-gray-600">
-        Status
-        <select name="status" class="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none">
-            <option value="" {% if not filter_status %}selected{% endif %}>All statuses</option>
-            <option value="active" {% if filter_status == 'active' %}selected{% endif %}>Active</option>
-            <option value="pending" {% if filter_status == 'pending' %}selected{% endif %}>Pending</option>
-            <option value="in_progress" {% if filter_status == 'in_progress' %}selected{% endif %}>In progress</option>
-            <option value="completed" {% if filter_status == 'completed' %}selected{% endif %}>Completed</option>
-            <option value="failed" {% if filter_status == 'failed' %}selected{% endif %}>Failed</option>
-            <option value="cancelled" {% if filter_status == 'cancelled' %}selected{% endif %}>Cancelled</option>
-            <option value="rejection_processing" {% if filter_status == 'rejection_processing' %}selected{% endif %}>Rejection processing</option>
-        </select>
-    </label>
-    <button type="submit" class="col-span-2 rounded-md bg-gray-900 px-3 py-2 text-sm font-medium text-white hover:bg-gray-800">Apply filters</button>
-</form>
 
-<!-- Desktop filters -->
-<div class="mb-4 hidden items-center gap-4 sm:flex">
-    <div class="flex gap-2">
-        <a href="/activity?source=user,cognitive,daemon&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md {% if not filter_source or filter_source == 'user,cognitive,daemon' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
-        <a href="/activity?source=user&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md flex items-center gap-1.5 {% if filter_source == 'user' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0" />
-            </svg>
-            You
-        </a>
-        <a href="/activity?source=cognitive,daemon&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md flex items-center gap-1.5 {% if filter_source in ('cognitive', 'cognitive,daemon') %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-            </svg>
-            Lucent
-        </a>
-        <a href="/activity?source=schedule&per_page={{ per_page }}{% if filter_status %}&status={{ filter_status }}{% endif %}" class="px-3 py-1.5 text-sm rounded-md flex items-center gap-1.5 {% if filter_source == 'schedule' %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">
-            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            System
-        </a>
+    <div class="relative flex-1 sm:max-w-xs">
+        <label for="activity-search" class="sr-only">Search requests</label>
+        <svg class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11a6 6 0 11-12 0 6 6 0 0112 0z" />
+        </svg>
+        <input type="search" name="q" id="activity-search" value="{{ search_query or '' }}"
+               placeholder="Search titles and descriptions"
+               class="w-full rounded-lg border border-gray-300 bg-white py-2 pl-8 pr-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
     </div>
-    <span class="text-gray-300">|</span>
-    <div class="flex gap-2">
-        <a href="/activity?per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if not filter_status %}bg-gray-900 text-white{% else %}bg-gray-100 text-gray-600 hover:bg-gray-200{% endif %}">All</a>
-        <a href="/activity?status=active&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'active' %}bg-blue-600 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">Active</a>
-        <a href="/activity?status=pending&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'pending' %}bg-amber-500 text-white{% else %}bg-amber-50 text-amber-700 hover:bg-amber-100{% endif %}">Pending</a>
-        <a href="/activity?status=in_progress&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'in_progress' %}bg-blue-500 text-white{% else %}bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}">In Progress</a>
-        <a href="/activity?status=completed&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'completed' %}bg-green-500 text-white{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">Completed</a>
-        <a href="/activity?status=failed&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'failed' %}bg-red-500 text-white{% else %}bg-red-50 text-red-700 hover:bg-red-100{% endif %}">Failed</a>
-        <a href="/activity?status=cancelled&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'cancelled' %}bg-gray-500 text-white{% else %}bg-gray-50 text-gray-500 hover:bg-gray-100{% endif %}">Cancelled</a>
-        <a href="/activity?status=rejection_processing&per_page={{ per_page }}{% if filter_source %}&source={{ filter_source }}{% endif %}" class="px-3 py-1 text-sm rounded-md {% if filter_status == 'rejection_processing' %}bg-orange-500 text-white{% else %}bg-orange-50 text-orange-600 hover:bg-orange-100{% endif %}">Rejection Processing</a>
-    </div>
-</div>
+
+    <label class="text-xs font-medium text-gray-500 sm:ml-1" for="activity-scope">Show</label>
+    <select name="source" id="activity-scope"
+            class="rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
+        <option value="user,cognitive,daemon" {% if filter_source == 'user,cognitive,daemon' %}selected{% endif %}>All work</option>
+        <option value="schedule" {% if filter_source == 'schedule' %}selected{% endif %}>Workflows</option>
+    </select>
+
+    <label class="text-xs font-medium text-gray-500 sm:ml-1" for="activity-state">State</label>
+    <select name="status" id="activity-state"
+            class="rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
+        <option value="" {% if not filter_status %}selected{% endif %}>Any state</option>
+        <option value="active" {% if filter_status == 'active' %}selected{% endif %}>In progress</option>
+        <option value="pending" {% if filter_status == 'pending' %}selected{% endif %}>Not started</option>
+        <option value="completed" {% if filter_status == 'completed' %}selected{% endif %}>Done</option>
+        <option value="failed" {% if filter_status == 'failed' %}selected{% endif %}>Failed</option>
+        <option value="cancelled" {% if filter_status == 'cancelled' %}selected{% endif %}>Cancelled</option>
+    </select>
+
+    {% if search_query or filter_status %}
+    <a href="/activity?per_page={{ per_page }}&source={{ filter_source }}"
+       class="inline-flex w-fit items-center gap-1 rounded-lg px-2 py-2 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-800">
+        Clear
+    </a>
+    {% endif %}
+</form>
 
 <!-- Activity Results (HTMX target) -->
 <div id="activity-results">
@@ -138,6 +118,39 @@ document.addEventListener('change', function(e) {
     var select = e.target.closest('.js-per-page-select');
     if (!select) return;
     updatePerPage(select.value);
+});
+
+/* Live typing must not steal the caret.
+   HTMX swaps #activity-results, but the search box lives outside that target,
+   so the input keeps focus and the caret position naturally. The one thing we
+   do need is to stop a *page-level* live refresh from re-rendering the whole
+   region while someone is mid-word — base.html already skips regions with a
+   focused editor, and this covers the moment just after a swap when focus may
+   briefly be lost. */
+document.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target && evt.detail.target.id === 'activity-results') {
+        var input = document.getElementById('activity-search');
+        if (input && document.activeElement !== input && input.value) {
+            // Only restore if the user was typing here (never steal focus from
+            // a field they deliberately moved to).
+            if (window.__lucentSearchWasFocused) {
+                input.focus();
+                input.setSelectionRange(input.value.length, input.value.length);
+            }
+        }
+    }
+});
+
+document.addEventListener('focusin', function(e) {
+    if (e.target && e.target.id === 'activity-search') {
+        window.__lucentSearchWasFocused = true;
+    }
+});
+
+document.addEventListener('focusout', function(e) {
+    if (e.target && e.target.id === 'activity-search') {
+        window.__lucentSearchWasFocused = false;
+    }
 });
 
 document.addEventListener('click', function(e) {

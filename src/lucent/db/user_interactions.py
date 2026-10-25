@@ -329,12 +329,27 @@ class UserInteractionRepository:
         include_resolved: bool = False,
         limit: int = 25,
         offset: int = 0,
+        search: str | None = None,
     ) -> dict[str, Any]:
         params: list[Any] = [str(org_id)]
         clauses = ["i.organization_id = $1::uuid"]
         if user_id is not None:
             params.append(str(user_id))
             clauses.append(f"i.user_id = ${len(params)}::uuid")
+        # Substring search over the two fields a person remembers. LIKE
+        # metacharacters are escaped so a literal "%" cannot match every row.
+        if search and search.strip():
+            escaped = (
+                search.strip()
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            params.append(f"%{escaped}%")
+            clauses.append(
+                f"(i.title ILIKE ${len(params)} ESCAPE '\\'"
+                f" OR i.body ILIKE ${len(params)} ESCAPE '\\')"
+            )
         if status:
             statuses = [status] if isinstance(status, str) else status
             normalized = [
