@@ -147,10 +147,9 @@ def _make_client(app, user_dict, role="member"):
 @pytest_asyncio.fixture
 async def admin_client(db_pool, usr_admin):
     """AsyncClient authenticated as admin."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        from lucent.api.app import create_app
+    from lucent.api.app import create_app
 
-        app = create_app()
+    app = create_app()
     _make_client(app, usr_admin, role="admin")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -161,10 +160,9 @@ async def admin_client(db_pool, usr_admin):
 @pytest_asyncio.fixture
 async def owner_client(db_pool, usr_owner):
     """AsyncClient authenticated as owner."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        from lucent.api.app import create_app
+    from lucent.api.app import create_app
 
-        app = create_app()
+    app = create_app()
     _make_client(app, usr_owner, role="owner")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -175,10 +173,9 @@ async def owner_client(db_pool, usr_owner):
 @pytest_asyncio.fixture
 async def hyperadmin_client(db_pool, usr_hyperadmin):
     """AsyncClient authenticated as hyperadmin."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        from lucent.api.app import create_app
+    from lucent.api.app import create_app
 
-        app = create_app()
+    app = create_app()
     _make_client(app, usr_hyperadmin, role="hyperadmin")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -189,10 +186,9 @@ async def hyperadmin_client(db_pool, usr_hyperadmin):
 @pytest_asyncio.fixture
 async def member_client(db_pool, usr_member):
     """AsyncClient authenticated as member."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        from lucent.api.app import create_app
+    from lucent.api.app import create_app
 
-        app = create_app()
+    app = create_app()
     _make_client(app, usr_member, role="member")
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

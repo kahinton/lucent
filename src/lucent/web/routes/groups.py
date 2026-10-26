@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lucent.db import AdminAuditRepository, GroupRepository, UserRepository, get_pool
 from lucent.db import admin_audit as audit_actions
+from lucent.rbac import is_admin_role
 
 from ._shared import _check_csrf, get_user_context, templates
 
@@ -17,7 +18,7 @@ router = APIRouter()
 def _can_manage(user) -> bool:
     """Check if user is admin or owner."""
     role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
-    return role_val in ("admin", "owner")
+    return is_admin_role(role_val)
 
 
 # =============================================================================

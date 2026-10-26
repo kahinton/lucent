@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from lucent.db import AccessRepository, MemoryRepository, get_pool
-from lucent.mode import is_team_mode
+from lucent.mode import deployment_label
 
 from ._shared import get_user_context, templates
 
@@ -83,7 +83,7 @@ async def memory_usage_analytics(request: Request, bucket: str = "day"):
         "memories_analytics.html",
         {
             "user": user,
-            "team_mode": is_team_mode,
+            "deployment_label": deployment_label,
             "selected_bucket": selected_bucket,
             "chart_data": chart_data,
             "least_accessed_items": least_accessed_items,

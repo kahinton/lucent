@@ -63,10 +63,9 @@ async def grp_member(db_pool, grp_org, grp_prefix):
 
 
 def _make_app_for_user(user_dict: dict, role: str):
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        from lucent.api.app import create_app
+    from lucent.api.app import create_app
 
-        app = create_app()
+    app = create_app()
 
     fake = CurrentUser(
         id=user_dict["id"],

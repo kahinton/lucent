@@ -342,6 +342,59 @@ services:
     command: ["python", "-m", "daemon.daemon"]
     restart: unless-stopped
 
+  # --- Local ops console (use with: docker compose --profile ops-console up -d) ---
+  #
+  # A standalone tool for administering organizations on a small local instance:
+  # create a tenant and its first admin, mint keys, read/change org settings,
+  # suspend/resume, and delete. It shares no code with the server — it is an HTTP
+  # client of the hyperadmin API, which makes it a test bed for the eventual
+  # hosted management site rather than a second source of truth.
+  #
+  # Requirements:
+  #   * the server must be in team mode (LUCENT_MODE=team + LUCENT_LICENSE_KEY),
+  #     because the /api/organizations router is only mounted then;
+  #   * LUCENT_OPS_API_KEY must be a hyperadmin API key
+  #     (python -m lucent.hyperadmin grant / mint-key);
+  #   * LUCENT_OPS_CONSOLE_TOKEN is the passphrase that guards the console UI.
+  #
+  # The port is published to 127.0.0.1 only. This is a local administration tool;
+  # exposing it on a network interface would publish an operator console.
+  ops-console:
+    build:
+      context: .
+      dockerfile: ops_console/Dockerfile
+    container_name: lucent-ops-console
+    profiles: ["ops-console"]
+    depends_on:
+      lucent:
+        condition: service_healthy
+    environment:
+      # Talk to the server over the compose network, not through the host.
+      LUCENT_OPS_BASE_URL: http://lucent:8766
+      LUCENT_OPS_API_KEY: ${LUCENT_OPS_API_KEY:-}
+      LUCENT_OPS_CONSOLE_TOKEN: ${LUCENT_OPS_CONSOLE_TOKEN:-}
+      # Stable cookie-signing secret so a restart does not sign everyone out.
+      # Unset = generated per process (safe, but operators must sign in again).
+      LUCENT_OPS_CONSOLE_SECRET: ${LUCENT_OPS_CONSOLE_SECRET:-}
+      LUCENT_OPS_INSTANCE_LABEL: ${LUCENT_OPS_INSTANCE_LABEL:-Local instance}
+      LUCENT_OPS_SECURE_COOKIES: ${LUCENT_OPS_SECURE_COOKIES:-false}
+      LUCENT_OPS_HOST: 0.0.0.0
+      LUCENT_OPS_PORT: "8767"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "127.0.0.1:${LUCENT_OPS_PORT:-8767}:8767"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8767/login')"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   lucent_data:
     driver: local

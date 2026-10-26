@@ -117,17 +117,15 @@ class RuntimeLoopsMixin:
         if not task_id:
             return
         task_id = str(task_id)
-        runtime._cancel_requested_task_ids.add(task_id)
-        runtime._task_cancel_ready.set()
-        session_name = runtime._active_task_sessions.get(task_id)
+        session_name = self._active_task_sessions.get(task_id)
         if not session_name:
             # Not ours (or not dispatched yet). The dispatch predicate now
             # refuses tasks with an outstanding cancel, so it will never start
             # here; the reaper finalizes it once the claim is stale.
             return
-        provider_task = runtime._active_session_tasks.get(session_name)
+        provider_task = self._active_session_tasks.get(session_name)
         if provider_task and not provider_task.done():
-            runtime._cancelled_sessions.add(session_name)
+            self._cancelled_sessions.add(session_name)
             provider_task.cancel()
             runtime.log(
                 f"Cancel requested for task {task_id[:8]}: interrupting session '{session_name}'",
@@ -226,7 +224,7 @@ class RuntimeLoopsMixin:
         """
         from daemon.runtime.module_proxy import runtime
 
-        active = runtime._active_task_sessions
+        active = self._active_task_sessions
         if not active:
             return
         org_id = await self._get_daemon_org_id()
@@ -244,9 +242,9 @@ class RuntimeLoopsMixin:
             session_name = active.get(task_id)
             if not task_id or not session_name:
                 continue
-            provider_task = runtime._active_session_tasks.get(session_name)
+            provider_task = self._active_session_tasks.get(session_name)
             if provider_task and not provider_task.done():
-                runtime._cancelled_sessions.add(session_name)
+                self._cancelled_sessions.add(session_name)
                 provider_task.cancel()
                 runtime.log(
                     f"Cancel sweep: interrupting session '{session_name}' "

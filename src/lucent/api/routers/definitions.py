@@ -15,7 +15,7 @@ from lucent.api.deps import AdminUser, AuthenticatedUser
 from lucent.db import DefinitionRepository, get_pool
 from lucent.db.audit import AuditRepository
 from lucent.db.definitions import BuiltInProtectionError
-from lucent.rbac import Role
+from lucent.rbac import Role, is_admin_role
 from lucent.security import scan_content_for_injection
 from lucent.services.mcp_discovery import (
     MCPDiscoveryError,
@@ -68,7 +68,7 @@ async def _can_manage(
     not clearance-driven here. Only members,
     owners of the resource, and group admins fall through to ``can_modify``.
     """
-    if user.role.value in ("admin", "owner"):
+    if is_admin_role(user.role.value):
         return True
     acl = AccessControlService(pool)
     return await acl.can_modify(
@@ -376,7 +376,7 @@ async def reject_agent(agent_id: str, user: AuthenticatedUser):
 
 @router.delete("/agents/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str, user: AuthenticatedUser):
-    if user.role.value not in ("admin", "owner"):
+    if not is_admin_role(user.role.value):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
     if not await _can_manage(pool, user, "agent", agent_id):
@@ -599,7 +599,7 @@ async def reject_skill(skill_id: str, user: AuthenticatedUser):
 
 @router.delete("/skills/{skill_id}", status_code=204)
 async def delete_skill(skill_id: str, user: AuthenticatedUser):
-    if user.role.value not in ("admin", "owner"):
+    if not is_admin_role(user.role.value):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
     if not await _can_manage(pool, user, "skill", skill_id):
@@ -882,7 +882,7 @@ async def reject_hook(hook_id: str, user: AuthenticatedUser):
 
 @router.delete("/hooks/{hook_id}", status_code=204)
 async def delete_hook(hook_id: str, user: AuthenticatedUser):
-    if user.role.value not in ("admin", "owner"):
+    if not is_admin_role(user.role.value):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
     if not await _can_manage(pool, user, "hook", hook_id):
@@ -1033,7 +1033,7 @@ async def reject_managed_tool(tool_id: str, user: AuthenticatedUser):
 
 @router.delete("/tools/{tool_id}", status_code=204)
 async def delete_managed_tool(tool_id: str, user: AuthenticatedUser):
-    if user.role.value not in ("admin", "owner"):
+    if not is_admin_role(user.role.value):
         raise HTTPException(403, "Forbidden: admin or owner role required")
     pool = await get_pool()
     if not await _can_manage(pool, user, "managed_tool", tool_id):

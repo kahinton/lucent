@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from lucent.api.deps import AuthenticatedUser
 from lucent.db.pool import get_pool
 from lucent.logging import get_logger
+from lucent.rbac import is_admin_role
 from lucent.sandbox.manager import get_sandbox_manager
 from lucent.sandbox.models import SandboxConfig, SandboxStatus, validate_extra_hosts
 from lucent.secrets import SecretRegistry, resolve_env_vars
@@ -131,7 +132,7 @@ async def _get_sandbox_for_user(sandbox_id: str, user: AuthenticatedUser) -> dic
     if org_id and str(org_id) != str(user.organization_id):
         raise HTTPException(status_code=404, detail="Sandbox not found")
     created_by = info.get("created_by") if isinstance(info, dict) else None
-    if user.role.value not in ("admin", "owner") and (
+    if not is_admin_role(user.role.value) and (
         not created_by or str(created_by) != str(user.id)
     ):
         raise HTTPException(status_code=404, detail="Sandbox not found")
@@ -244,7 +245,7 @@ async def list_sandboxes(user: AuthenticatedUser):
     yours", 2026-10-01).
     """
     manager = get_sandbox_manager()
-    if user.role.value in ("admin", "owner"):
+    if is_admin_role(user.role.value):
         result = await manager.list_all(str(user.organization_id))
     else:
         from lucent.db.sandbox import (
@@ -430,9 +431,9 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     _require_sandboxes_enabled(user)
-    if body.docker_bind_mounts and user.role.value not in ("admin", "owner"):
+    if body.docker_bind_mounts and not is_admin_role(user.role.value):
         raise HTTPException(403, "Only administrators can configure Docker bind mounts")
-    if body.extra_hosts and user.role.value not in ("admin", "owner"):
+    if body.extra_hosts and not is_admin_role(user.role.value):
         raise HTTPException(403, "Only administrators can configure Docker host mappings")
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
@@ -501,13 +502,13 @@ async def update_template(template_id: str, body: TemplateUpdateRequest, user: A
     from lucent.access_control import AccessControlService
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
-    if body.docker_bind_mounts and user.role.value not in ("admin", "owner"):
+    if body.docker_bind_mounts and not is_admin_role(user.role.value):
         raise HTTPException(403, "Only administrators can configure Docker bind mounts")
-    if body.extra_hosts and user.role.value not in ("admin", "owner"):
+    if body.extra_hosts and not is_admin_role(user.role.value):
         raise HTTPException(403, "Only administrators can configure Docker host mappings")
     pool = await get_pool()
     acl = AccessControlService(pool)
-    if user.role.value not in ("admin", "owner") and not await acl.can_modify(
+    if not is_admin_role(user.role.value) and not await acl.can_modify(
         str(user.id), "sandbox_template", template_id, str(user.organization_id)
     ):
         raise HTTPException(404, "Template not found")
@@ -529,7 +530,7 @@ async def delete_template(template_id: str, user: AuthenticatedUser):
 
     pool = await get_pool()
     acl = AccessControlService(pool)
-    if user.role.value not in ("admin", "owner") and not await acl.can_modify(
+    if not is_admin_role(user.role.value) and not await acl.can_modify(
         str(user.id), "sandbox_template", template_id, str(user.organization_id)
     ):
         raise HTTPException(404, "Template not found")
@@ -545,7 +546,7 @@ async def approve_template(template_id: str, user: AuthenticatedUser):
     """Approve a proposed sandbox template for use in tasks and launches."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
-    if user.role.value not in ("admin", "owner"):
+    if not is_admin_role(user.role.value):
         raise HTTPException(403, "Only administrators can approve sandbox templates")
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)
@@ -570,7 +571,7 @@ async def reject_template(template_id: str, user: AuthenticatedUser):
     """Reject a sandbox template so it cannot be used for work."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
-    if user.role.value not in ("admin", "owner"):
+    if not is_admin_role(user.role.value):
         raise HTTPException(403, "Only administrators can reject sandbox templates")
     pool = await get_pool()
     repo = SandboxTemplateRepository(pool)

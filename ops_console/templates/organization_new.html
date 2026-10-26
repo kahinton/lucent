@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}New organization{% endblock %}
+
+{% block content %}
+<div class="mb-5">
+    <a href="/" class="text-xs text-[#8f8b87] hover:underline">&larr; Organizations</a>
+    <h1 class="mt-2 text-xl font-semibold">New organization</h1>
+    <p class="mt-1 text-sm text-[#a7a3a0]">
+        Creates the workspace, its first admin, and a default API key in one step.
+        The password and key are shown once, here, and never again.
+    </p>
+</div>
+
+<form method="post" action="/organizations/new" class="space-y-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <div class="panel rounded-xl p-5">
+        <h2 class="mb-4 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Workspace</h2>
+        <div class="grid gap-4 sm:grid-cols-2">
+            <div class="sm:col-span-2">
+                <label for="name" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Organization name
+                </label>
+                <input id="name" name="name" required maxlength="255" value="{{ form.name or '' }}"
+                       placeholder="Acme Robotics"
+                       class="field w-full rounded-lg px-3 py-2 text-sm">
+                <p class="mt-1 text-xs text-[#6f6b68]">Unique on this instance; names are compared case-insensitively.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel rounded-xl p-5">
+        <h2 class="mb-4 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">First admin</h2>
+        <div class="grid gap-4 sm:grid-cols-2">
+            <div>
+                <label for="admin_email" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Email <span class="normal-case text-[#6f6b68]">(login)</span>
+                </label>
+                <input id="admin_email" name="admin_email" type="email" value="{{ form.admin_email or '' }}"
+                       placeholder="owner@acme.test"
+                       class="field w-full rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label for="admin_display_name" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Display name
+                </label>
+                <input id="admin_display_name" name="admin_display_name" value="{{ form.admin_display_name or '' }}"
+                       placeholder="Acme Owner"
+                       class="field w-full rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label for="admin_role" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Role
+                </label>
+                <select id="admin_role" name="admin_role" class="field w-full rounded-lg px-3 py-2 text-sm">
+                    <option value="owner" {% if form.admin_role != 'admin' %}selected{% endif %}>owner</option>
+                    <option value="admin" {% if form.admin_role == 'admin' %}selected{% endif %}>admin</option>
+                </select>
+                <p class="mt-1 text-xs text-[#6f6b68]">
+                    Use <span class="mono">admin</span> when you intend to keep instance-level ownership of this tenant.
+                </p>
+            </div>
+            <div>
+                <label for="admin_password" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Password <span class="normal-case text-[#6f6b68]">(optional)</span>
+                </label>
+                <input id="admin_password" name="admin_password" type="password" autocomplete="new-password"
+                       class="field w-full rounded-lg px-3 py-2 text-sm">
+                <p class="mt-1 text-xs text-[#6f6b68]">
+                    Leave blank to generate a temporary password. Either way the member must change it at first login.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel rounded-xl p-5">
+        <h2 class="mb-4 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Tenant defaults</h2>
+        <div class="grid gap-4 sm:grid-cols-2">
+            <div>
+                <label for="api_key_name" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Default API key name
+                </label>
+                <input id="api_key_name" name="api_key_name" value="{{ form.api_key_name or 'Default API key' }}"
+                       class="field w-full rounded-lg px-3 py-2 text-sm">
+                <p class="mt-1 text-xs text-[#6f6b68]">Leave blank to skip minting a key.</p>
+            </div>
+            <div>
+                <label for="model_id" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Enable model <span class="normal-case text-[#6f6b68]">(optional)</span>
+                </label>
+                <select id="model_id" name="model_id" class="field w-full rounded-lg px-3 py-2 text-sm">
+                    <option value="">Skip — configure models later</option>
+                    {% for model in models %}
+                    <option value="{{ model.id }}" {% if form.model_id == model.id %}selected{% endif %}>
+                        {{ model.name }}{% if model.provider %} — {{ model.provider }}{% endif %}
+                    </option>
+                    {% endfor %}
+                </select>
+                <p class="mt-1 text-xs text-[#6f6b68]">
+                    Enabled <em>and</em> granted to the tenant, so chat works on first login.
+                </p>
+            </div>
+        </div>
+        {% if not models %}
+        <p class="mt-3 rounded-lg border border-[#2a2a2a] bg-[#161616] px-3 py-2 text-xs text-[#a7a3a0]">
+            No models could be listed. The tenant can still be created; enable a model later from
+            Settings &rarr; Models as its owner.
+        </p>
+        {% endif %}
+    </div>
+
+    <div class="flex items-center gap-3">
+        <button type="submit" class="btn btn-primary">Create organization</button>
+        <a href="/" class="btn btn-quiet">Cancel</a>
+    </div>
+</form>
+{% endblock %}

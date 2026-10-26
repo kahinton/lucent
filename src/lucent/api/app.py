@@ -31,7 +31,7 @@ from lucent.api.system_schedules import (
 from lucent.db import close_db, init_db
 from lucent.log_context import clear_log_context, set_request_id
 from lucent.logging import get_correlation_id, get_logger, set_correlation_id
-from lucent.mode import is_team_mode
+from lucent.mode import deployment_label
 from lucent.rate_limit import get_rate_limiter
 from lucent.secrets import initialize_secret_provider
 from lucent.web.routes import router as web_router
@@ -372,15 +372,10 @@ def create_app() -> FastAPI:
             "SECURITY WARNING: LUCENT_CORS_ORIGINS is set to '*' — "
             "this allows ANY origin to make cross-origin requests."
         )
-        if is_team_mode():
-            logger.warning(
-                "CRITICAL: Wildcard CORS in team mode exposes multi-user data "
-                "to cross-origin attacks. Set explicit origins immediately."
-            )
-        else:
-            logger.warning(
-                "Set explicit origins (e.g. 'http://localhost:8766') for safe operation."
-            )
+        logger.warning(
+            "Wildcard CORS exposes this instance's data to cross-origin "
+            "attacks. Set explicit origins (e.g. 'http://localhost:8766')."
+        )
         logger.warning("=" * 72)
     allowed_origins = [o for o in cors_env.split(",") if o] if cors_env and cors_env != "*" else []
     # Never allow credentials with wildcard — only when explicit origins are set
@@ -690,17 +685,24 @@ def create_app() -> FastAPI:
         tags=["Admin Backends"],
     )
 
-    # Include team-only API routers
-    if is_team_mode():
-        from lucent.api.routers import access, audit, groups, organizations, users
+    # Organization / multi-user API routers.
+    #
+    # These used to be mounted only when ``is_team_mode()`` was true, which made
+    # a licensing/config setting decide whether a tenant could be administered:
+    # in "personal" mode the whole surface 404'd, so a hyperadmin could not
+    # provision or manage organizations at all. Access is now decided by the
+    # caller's role (``HyperadminUser``, ``AdminUser``, permissions), which is
+    # the only thing that should control it. An instance with no organizations
+    # simply returns an empty list.
+    from lucent.api.routers import access, audit, groups, organizations, users
 
-        app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
-        app.include_router(access.router, prefix="/api/access", tags=["Access"])
-        app.include_router(users.router, prefix="/api/users", tags=["Users"])
-        app.include_router(groups.router, prefix="/api", tags=["Groups"])
-        app.include_router(
-            organizations.router, prefix="/api/organizations", tags=["Organizations"]
-        )
+    app.include_router(audit.router, prefix="/api/audit", tags=["Audit"])
+    app.include_router(access.router, prefix="/api/access", tags=["Access"])
+    app.include_router(users.router, prefix="/api/users", tags=["Users"])
+    app.include_router(groups.router, prefix="/api", tags=["Groups"])
+    app.include_router(
+        organizations.router, prefix="/api/organizations", tags=["Organizations"]
+    )
 
     # Include definitions management router
     from lucent.api.routers import definitions
@@ -837,7 +839,7 @@ def create_app() -> FastAPI:
                 "detail": exc.detail or _error_title(exc.status_code),
                 "user": None,
                 "is_admin": False,
-                "team_mode": is_team_mode,
+                "deployment_label": deployment_label,
             }
             return templates.TemplateResponse(
                 request, "error.html", ctx, status_code=exc.status_code
@@ -866,7 +868,7 @@ def create_app() -> FastAPI:
                 "detail": "An unexpected error occurred. Please try again.",
                 "user": None,
                 "is_admin": False,
-                "team_mode": is_team_mode,
+                "deployment_label": deployment_label,
             }
             return templates.TemplateResponse(request, "error.html", ctx, status_code=500)
         return JSONResponse(

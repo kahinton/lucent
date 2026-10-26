@@ -11,6 +11,7 @@ from lucent.access_control import AccessControlService
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import GroupRepository, get_pool
 from lucent.db.secrets import SecretRepository, get_authorized_secrets_pool
+from lucent.rbac import is_admin_role
 from lucent.secrets import SecretRegistry, SecretScope
 
 from ._shared import _check_csrf, get_user_context, templates
@@ -98,7 +99,7 @@ async def create_secret_web(request: Request):
         pool = await get_pool()
         acl = AccessControlService(pool)
         role_value = user.role if isinstance(user.role, str) else user.role.value
-        if role_value not in ("admin", "owner"):
+        if not is_admin_role(role_value):
             user_group_ids = set(await acl.get_user_group_ids(str(user.id)))
             if owner_group_id not in user_group_ids:
                 raise HTTPException(status_code=403, detail="Permission denied")

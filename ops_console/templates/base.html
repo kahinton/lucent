@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <title>{% block title %}Ops console{% endblock %} · Lucent</title>
+    <link rel="icon" type="image/svg+xml" sizes="any" href="/static/lucent_logo_v2.svg">
+    <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#e6fffb', 100: '#bffaf2', 200: '#7feee4',
+                            300: '#3ee0d6', 400: '#00d4c7', 500: '#00b8ad',
+                            600: '#00968f', 700: '#08766f', 800: '#0b5d59',
+                            900: '#0d4846',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        :root { color-scheme: dark; }
+        body { background: #080808; }
+        .panel { background: #121212; border: 1px solid #262626; }
+        .field {
+            background: #0b0b0b; border: 1px solid #2e2e2e; color: #f7f5f1;
+        }
+        .field:focus { outline: none; border-color: #00b8ad; box-shadow: 0 0 0 1px #00b8ad; }
+        .btn {
+            display: inline-flex; align-items: center; gap: .4rem;
+            border-radius: .5rem; padding: .45rem .8rem; font-size: .8125rem;
+            font-weight: 600; transition: background-color .12s, border-color .12s;
+        }
+        .btn-primary { background: #00b8ad; color: #04211f; }
+        .btn-primary:hover { background: #00d4c7; }
+        .btn-quiet { background: #1a1a1a; color: #e8e6e3; border: 1px solid #2e2e2e; }
+        .btn-quiet:hover { background: #222; }
+        .btn-danger { background: #2a1313; color: #ff9b9b; border: 1px solid #45201f; }
+        .btn-danger:hover { background: #3a1a1a; }
+        .chip {
+            display: inline-flex; align-items: center; border-radius: 999px;
+            padding: .1rem .5rem; font-size: .6875rem; font-weight: 600;
+            letter-spacing: .02em; text-transform: uppercase;
+        }
+        .chip-active { background: #0c2a22; color: #6ee7b7; }
+        .chip-suspended { background: #2a1f0c; color: #fcd34d; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    </style>
+</head>
+<body class="min-h-full text-[#f7f5f1] antialiased">
+<div class="mx-auto max-w-6xl px-5 py-6">
+    <header class="mb-6 flex items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+            <a href="/" class="flex items-center gap-2">
+                <img src="/static/lucent_logo_v2.svg" alt="" class="h-7 w-7">
+                <span class="text-sm font-semibold tracking-wide">Lucent</span>
+            </a>
+            <span class="text-xs uppercase tracking-widest text-[#8f8b87]">Ops console</span>
+            <span class="chip bg-[#1a1a1a] text-[#a7a3a0]">{{ instance_label }}</span>
+        </div>
+        <nav class="flex items-center gap-2 text-sm">
+            <a href="/" class="btn btn-quiet">Organizations</a>
+            <a href="/audit" class="btn btn-quiet">Instance audit</a>
+            <a href="/status" class="btn btn-quiet">Status</a>
+            <form method="post" action="/logout" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn btn-quiet" type="submit">Sign out</button>
+            </form>
+        </nav>
+    </header>
+
+    {% if error %}
+    <div class="mb-4 rounded-lg border border-[#45201f] bg-[#2a1313] px-4 py-3 text-sm text-[#ffb4b4]">
+        {{ error }}
+    </div>
+    {% endif %}
+    {% if success %}
+    <div class="mb-4 rounded-lg border border-[#123b31] bg-[#0c2a22] px-4 py-3 text-sm text-[#8ef0c8]">
+        {{ success }}
+    </div>
+    {% endif %}
+
+    {% block content %}{% endblock %}
+
+    <footer class="mt-10 border-t border-[#1f1f1f] pt-4 text-xs text-[#6f6b68]">
+        Local administration tool. It calls the Lucent hyperadmin API and stores nothing of its own.
+        Secrets shown here are never retrievable again.
+    </footer>
+</div>
+</body>
+</html>

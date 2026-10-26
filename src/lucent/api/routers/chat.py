@@ -42,6 +42,7 @@ from lucent.llm.engine_resolution import resolve_engine
 from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
 from lucent.prompts.memory_usage import render_active_user_context
+from lucent.rbac import is_admin_role
 from lucent.settings import (
     chat_intro_summary_enabled,
     chat_intro_summary_model_id,
@@ -1255,7 +1256,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                 from lucent.db import MemoryRepository, get_authorized_memories_pool
 
                 repo = MemoryRepository(pool)
-                if str(user.get("role") or "") in ("admin", "owner"):
+                if is_admin_role(user.get("role")):
                     mem = await repo.get(
                         page_data["memory_id"], organization_id=org_id
                     )
@@ -1286,7 +1287,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                 )
 
                 repo = ScheduleRepository(pool)
-                if str(user.get("role") or "") in ("admin", "owner"):
+                if is_admin_role(user.get("role")):
                     sched = await repo.get_schedule_with_runs(
                         page_data["schedule_id"], org_id
                     )
@@ -1403,7 +1404,7 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
                 MemoryRepository(pool),
                 GitHubRepoAccessService(pool),
                 organization_id=org_id,
-                is_admin=str(user.get("role") or "") in ("admin", "owner"),
+                is_admin=is_admin_role(user.get("role")),
             )
             recent = await memory_access.search(
                 user_id=user["id"],

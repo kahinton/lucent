@@ -34,7 +34,7 @@ The UI shows the active source for each value:
 | `DATABASE_URL` | *(required)* | PostgreSQL connection string |
 | `LUCENT_HOST` | `0.0.0.0` | Server bind address |
 | `LUCENT_PORT` | `8766` | Server port |
-| `LUCENT_MODE` | `personal` | Deployment mode (`personal` or `team`; team requires a license key) |
+| `LUCENT_MODE` | `personal` | Reporting only (`personal` or `team`). Does **not** gate features; capability is decided by roles/permissions. A `team` label additionally reports whether `LUCENT_LICENSE_KEY` is valid |
 | `LUCENT_LICENSE_KEY` | — | License key for team mode |
 | `LUCENT_LOG_FORMAT` | `human` | Log output format (`human` or `json`) |
 | `LUCENT_LOG_LEVEL` | `INFO` | Logging verbosity |
@@ -105,6 +105,9 @@ registry (`lucent.llm.engine_registry`); every other surface derives from it.
 | `LUCENT_MODEL_VALIDATION` | `strict` | Model validation mode: `strict` rejects unknown models, `lenient` allows them |
 | `LUCENT_CHAT_MCP_URL` | `http://localhost:8766/mcp` | MCP URL for chat-initiated tool calls |
 | `LUCENT_CHAT_TIMEOUT` | `300` | Chat session timeout in seconds |
+| `LUCENT_API_KEY_PURGE_GRACE_DAYS` | `30` | How long past expiry an API key row is kept before the hourly reaper deletes it. Keys with no expiry are never eligible. |
+| `LUCENT_API_KEY_PURGE_INTERVAL_SECONDS` | `3600` | How often the server reaps expired API keys. |
+| `LUCENT_STALE_REAPER_INTERVAL_SECONDS` | `120` | How often the server runs the stale-task-claim reaper. |
 | `LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED` | `true` | Enable an extra skill-guided model call to write narrative experience memories for meaningful chat sessions |
 | `LUCENT_SESSION_EXPERIENCE_MODEL` | *(model registry default)* | Optional model override for session experience summaries |
 | `LUCENT_SESSION_EXPERIENCE_TIMEOUT` | `180` | Timeout in seconds for the session experience summary model call |

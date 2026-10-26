@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from lucent.db import get_pool
+from lucent.rbac import is_admin_role
 from lucent.web.live_events import live_event_broker
 from lucent.web.routes._shared import get_user_context
 
@@ -64,7 +65,7 @@ async def live_status(request: Request) -> JSONResponse:
         "activity": await request_repo.count_pending_approvals(
             org_id=org_id,
             requester_user_id=user_id,
-            include_system=role in {"admin", "owner"},
+            include_system=is_admin_role(role),
         ),
         "definitions": await DefinitionRepository(pool).count_pending_proposals(
             org_id=org_id,
@@ -83,7 +84,7 @@ async def live_status(request: Request) -> JSONResponse:
         ),
         "sandboxes": (
             await SandboxTemplateRepository(pool).count_proposed(org_id)
-            if role in {"admin", "owner"}
+            if is_admin_role(role)
             else 0
         ),
     }

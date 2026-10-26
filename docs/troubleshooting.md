@@ -122,7 +122,8 @@ asyncio.run(reset())
 
 ### `Permission denied` or `403 Forbidden`
 
-- **Role-based:** Some endpoints require `admin` or `owner` roles (team mode only)
+- **Role-based:** Some endpoints require `admin`, `owner`, or `hyperadmin` roles. This is enforced
+  by role/permission, not by `LUCENT_MODE`.
 - **Scope-based:** Daemon-scoped API keys (`daemon-tasks`) can only access `/api/daemon/*` endpoints
 - **Ownership:** You can only update/delete your own memories
 

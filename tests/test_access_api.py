@@ -110,11 +110,10 @@ async def acc_memory(db_pool, acc_member, acc_prefix):
 
 
 def _build_app_with_team_mode(user_dict, role="member"):
-    """Create app with team mode enabled and auth overridden."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        from lucent.api.app import create_app
+    """Create app with auth overridden."""
+    from lucent.api.app import create_app
 
-        app = create_app()
+    app = create_app()
     fake = CurrentUser(
         id=user_dict["id"],
         organization_id=user_dict.get("organization_id"),

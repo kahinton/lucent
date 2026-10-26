@@ -17,13 +17,14 @@ from lucent.db import get_pool
 from lucent.db.backends import BackendRepository
 from lucent.llm.engine_credentials import engine_config_schema, secret_key_for
 from lucent.llm.engine_registry import UnknownEngineError, engine_spec
+from lucent.rbac import is_admin_role
 
 router = APIRouter()
 
 
 def _require_admin_user(user: AuthenticatedUser) -> None:
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
-    if role not in ("admin", "owner"):
+    if not is_admin_role(role):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 

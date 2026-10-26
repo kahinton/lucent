@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from lucent.auth_providers import CSRF_COOKIE_NAME
 from lucent.db import get_pool
-from lucent.rbac import Role
+from lucent.rbac import Role, is_admin_role
 
 from ._shared import _check_csrf, get_user_context, templates
 
@@ -421,7 +421,7 @@ async def request_detail(request: Request, request_id: str):
         MemoryRepository(pool),
         GitHubRepoAccessService(pool),
         organization_id=org_id,
-        is_admin=role_value in ("admin", "owner"),
+        is_admin=is_admin_role(role_value),
     )
     req = await memory_access.filter_request_detail_memory_links(
         req,
@@ -441,7 +441,7 @@ async def request_detail(request: Request, request_id: str):
                 _UUID(str(goal_memory_id)),
                 user.id,
                 user.organization_id,
-                is_admin=role_value in ("admin", "owner"),
+                is_admin=is_admin_role(role_value),
             )
             if goal_mem and goal_mem.get("type") == "goal":
                 meta = goal_mem.get("metadata") or {}
@@ -502,7 +502,7 @@ async def request_detail(request: Request, request_id: str):
             loaded_session = await session_repo.get_session_detail(
                 session_id,
                 str(user.organization_id),
-                user_id=None if role_value in ("admin", "owner") else str(user.id),
+                user_id=None if is_admin_role(role_value) else str(user.id),
                 requester_role=role_value,
                 include_events=True,
             )
@@ -510,7 +510,7 @@ async def request_detail(request: Request, request_id: str):
                 continue
             session_owner = loaded_session.get("user_id")
             can_view_session = (
-                role_value in ("admin", "owner")
+                is_admin_role(role_value)
                 or str(session_owner) == str(user.id)
             )
             if not can_view_session:

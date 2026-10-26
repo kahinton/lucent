@@ -17,7 +17,6 @@ from lucent.db import (
     get_pool,
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
-from lucent.mode import is_team_mode
 from lucent.models.validation import normalize_tags, validate_memory_content_quality
 from lucent.rbac import Role
 from lucent.services.memory_access_service import MemoryAccessService
@@ -776,9 +775,13 @@ async def memory_revoke_access(
 
 @router.post("/memories/{memory_id}/share", response_class=HTMLResponse)
 async def memory_share(request: Request, memory_id: UUID):
-    """Toggle memory sharing (team mode only)."""
-    if not is_team_mode():
-        raise HTTPException(status_code=404, detail="Sharing requires team mode")
+    """Toggle memory sharing.
+
+    Previously refused outside team mode. Sharing is a per-memory access grant,
+    governed by ``Permission.MEMORY_SHARE`` and the access-control layer, so it
+    is available wherever the permission is. The route now only requires a
+    signed-in user (below).
+    """
     user = await get_user_context(request)
     await _check_csrf(request)
     pool = await get_pool()

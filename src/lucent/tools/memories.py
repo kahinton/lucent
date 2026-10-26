@@ -23,7 +23,6 @@ from lucent.db import (
 )
 from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
 from lucent.logging import get_logger
-from lucent.mode import is_team_mode
 from lucent.models.memory import (
     CreateMemoryInput,
     MemoryType,
@@ -1665,150 +1664,155 @@ Returns:
             logger.error("restore_memory_version failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to restore memory version: {e}")
 
-    # Team-only tools: sharing
-    if is_team_mode():
+    # Sharing tools.
+    #
+    # These were registered only in team mode, so a single-organization
+    # instance had no way to share a memory with a colleague through MCP even
+    # though the permission model already allowed it. Registration is now
+    # unconditional; the tools enforce ``Permission.MEMORY_SHARE`` (which every
+    # human role has) and the access-control layer decides visibility.
 
-        @mcp.tool()
-        async def share_memory(memory_id: str) -> str:
-            """Share a memory with other users in your organization.
+    @mcp.tool()
+    async def share_memory(memory_id: str) -> str:
+        """Share a memory with other users in your organization.
 
-            Only the owner of the memory can share it. Once shared, other users
-            in the same organization will be able to see this memory in their
-            search results.
+        Only the owner of the memory can share it. Once shared, other users
+        in the same organization will be able to see this memory in their
+        search results.
 
-            Args:
-                memory_id: The UUID of the memory to share.
+        Args:
+            memory_id: The UUID of the memory to share.
 
-            Returns:
-                JSON string with the updated memory showing shared=true, or an error.
-            """
-            try:
-                # Get current user context
-                user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
+        Returns:
+            JSON string with the updated memory showing shared=true, or an error.
+        """
+        try:
+            # Get current user context
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
 
-                if user_id is None:
-                    return _error_response("Authentication required to share memories")
+            if user_id is None:
+                return _error_response("Authentication required to share memories")
 
-                repo = await _get_repository()
+            repo = await _get_repository()
 
-                existing = await repo.get_accessible(
-                    UUID(memory_id),
-                    user_id,
-                    org_id,
-                    memory_scope=memory_scope,
+            existing = await repo.get_accessible(
+                UUID(memory_id),
+                user_id,
+                org_id,
+                memory_scope=memory_scope,
+            )
+            if existing is None or existing.get("user_id") != user_id:
+                return _error_response(
+                    "Memory not found or you are not the owner."
+                    " Only the owner can share a memory."
                 )
-                if existing is None or existing.get("user_id") != user_id:
+
+            duplicate = await repo.find_duplicate_technical_file_memory(
+                metadata=existing.get("metadata"),
+                requesting_user_id=user_id,
+                requesting_org_id=org_id,
+                exclude_id=UUID(memory_id),
+            )
+            if duplicate is not None:
+                scope = repo._technical_file_scope(existing.get("metadata"))
+                if scope is not None:
                     return _error_response(
-                        "Memory not found or you are not the owner."
-                        " Only the owner can share a memory."
+                        DuplicateTechnicalMemoryError(
+                            existing_memory=duplicate,
+                            repo=scope["repo"],
+                            filename=scope["filename"],
+                        ).message
                     )
 
-                duplicate = await repo.find_duplicate_technical_file_memory(
-                    metadata=existing.get("metadata"),
-                    requesting_user_id=user_id,
-                    requesting_org_id=org_id,
-                    exclude_id=UUID(memory_id),
-                )
-                if duplicate is not None:
-                    scope = repo._technical_file_scope(existing.get("metadata"))
-                    if scope is not None:
-                        return _error_response(
-                            DuplicateTechnicalMemoryError(
-                                existing_memory=duplicate,
-                                repo=scope["repo"],
-                                filename=scope["filename"],
-                            ).message
-                        )
+            result = await repo.set_shared(
+                memory_id=UUID(memory_id),
+                user_id=user_id,
+                shared=True,
+                organization_id=org_id,
+            )
 
-                result = await repo.set_shared(
-                    memory_id=UUID(memory_id),
-                    user_id=user_id,
-                    shared=True,
-                    organization_id=org_id,
+            if result is None:
+                return _error_response(
+                    "Memory not found or you are not the owner."
+                    " Only the owner can share a memory."
                 )
 
-                if result is None:
-                    return _error_response(
-                        "Memory not found or you are not the owner."
-                        " Only the owner can share a memory."
-                    )
+            # Log the share action
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=UUID(memory_id),
+                action_type="share",
+                user_id=user_id,
+                organization_id=org_id,
+                changed_fields=["shared"],
+                old_values={"shared": False},
+                new_values={"shared": True},
+                context=_get_audit_context(),
+            )
 
-                # Log the share action
-                audit_repo = await _get_audit_repository()
-                await audit_repo.log(
-                    memory_id=UUID(memory_id),
-                    action_type="share",
-                    user_id=user_id,
-                    organization_id=org_id,
-                    changed_fields=["shared"],
-                    old_values={"shared": False},
-                    new_values={"shared": True},
-                    context=_get_audit_context(),
+            return json.dumps(_serialize_memory(result), indent=2)
+
+        except ValueError as e:
+            return _error_response(f"Invalid memory_id: {str(e)}")
+        except Exception as e:
+            logger.error("share_memory failed: id=%s", memory_id, exc_info=e)
+            return _error_response(f"Failed to share memory: {str(e)}")
+
+    @mcp.tool()
+    async def unshare_memory(memory_id: str) -> str:
+        """Stop sharing a memory with your organization.
+
+        Only the owner of the memory can unshare it. Once unshared, the memory
+        will only be visible to the owner.
+
+        Args:
+            memory_id: The UUID of the memory to unshare.
+
+        Returns:
+            JSON string with the updated memory showing shared=false, or an error.
+        """
+        try:
+            # Get current user context
+            user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
+
+            if user_id is None:
+                return _error_response("Authentication required to unshare memories")
+
+            repo = await _get_repository()
+
+            result = await repo.set_shared(
+                memory_id=UUID(memory_id),
+                user_id=user_id,
+                shared=False,
+                organization_id=org_id,
+            )
+
+            if result is None:
+                return _error_response(
+                    "Memory not found or you are not the owner."
+                    " Only the owner can unshare a memory."
                 )
 
-                return json.dumps(_serialize_memory(result), indent=2)
+            # Log the unshare action
+            audit_repo = await _get_audit_repository()
+            await audit_repo.log(
+                memory_id=UUID(memory_id),
+                action_type="unshare",
+                user_id=user_id,
+                organization_id=org_id,
+                changed_fields=["shared"],
+                old_values={"shared": True},
+                new_values={"shared": False},
+                context=_get_audit_context(),
+            )
 
-            except ValueError as e:
-                return _error_response(f"Invalid memory_id: {str(e)}")
-            except Exception as e:
-                logger.error("share_memory failed: id=%s", memory_id, exc_info=e)
-                return _error_response(f"Failed to share memory: {str(e)}")
+            return json.dumps(_serialize_memory(result), indent=2)
 
-        @mcp.tool()
-        async def unshare_memory(memory_id: str) -> str:
-            """Stop sharing a memory with your organization.
-
-            Only the owner of the memory can unshare it. Once unshared, the memory
-            will only be visible to the owner.
-
-            Args:
-                memory_id: The UUID of the memory to unshare.
-
-            Returns:
-                JSON string with the updated memory showing shared=false, or an error.
-            """
-            try:
-                # Get current user context
-                user_id, org_id, user_role, memory_scope, memory_scope_user_id = await _get_current_user_context()
-
-                if user_id is None:
-                    return _error_response("Authentication required to unshare memories")
-
-                repo = await _get_repository()
-
-                result = await repo.set_shared(
-                    memory_id=UUID(memory_id),
-                    user_id=user_id,
-                    shared=False,
-                    organization_id=org_id,
-                )
-
-                if result is None:
-                    return _error_response(
-                        "Memory not found or you are not the owner."
-                        " Only the owner can unshare a memory."
-                    )
-
-                # Log the unshare action
-                audit_repo = await _get_audit_repository()
-                await audit_repo.log(
-                    memory_id=UUID(memory_id),
-                    action_type="unshare",
-                    user_id=user_id,
-                    organization_id=org_id,
-                    changed_fields=["shared"],
-                    old_values={"shared": True},
-                    new_values={"shared": False},
-                    context=_get_audit_context(),
-                )
-
-                return json.dumps(_serialize_memory(result), indent=2)
-
-            except ValueError as e:
-                return _error_response(f"Invalid memory_id: {str(e)}")
-            except Exception as e:
-                logger.error("unshare_memory failed: id=%s", memory_id, exc_info=e)
-                return _error_response(f"Failed to unshare memory: {str(e)}")
+        except ValueError as e:
+            return _error_response(f"Invalid memory_id: {str(e)}")
+        except Exception as e:
+            logger.error("unshare_memory failed: id=%s", memory_id, exc_info=e)
+            return _error_response(f"Failed to unshare memory: {str(e)}")
 
     @mcp.tool()
     async def create_daemon_task(

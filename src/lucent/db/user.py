@@ -541,6 +541,75 @@ class UserRepository:
 
         return user
 
+    async def transfer_ownership(
+        self,
+        *,
+        organization_id: UUID | str,
+        from_user_id: UUID | str,
+        to_user_id: UUID | str,
+        demote_to: str = "admin",
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Move the owner role from one member to another, atomically.
+
+        ``idx_one_owner_per_org`` (migration 007) permits at most one ``owner``
+        row per organization, so a transfer must demote *before* it promotes.
+        Doing it in the caller's order — promote then demote — always fails with
+        a unique violation, which is exactly what both ownership-transfer entry
+        points (``POST /api/organizations/current/transfer`` and the web
+        ``/settings/organization/transfer-ownership``) did. Both now route
+        through here.
+
+        The pair runs in one transaction: an instance can never be left with two
+        owners or none.
+
+        Args:
+            organization_id: The organization being transferred.
+            from_user_id: The current owner.
+            to_user_id: The member becoming owner.
+            demote_to: Role given to the outgoing owner.
+
+        Returns:
+            ``(promoted_user, demoted_user)``.
+        """
+        from lucent.db.pool import scoped_acquire
+
+        promote_q = """
+            UPDATE users
+            SET role = 'owner', updated_at = NOW()
+            WHERE id = $1 AND organization_id = $2
+            RETURNING id, external_id, provider, organization_id, email, display_name,
+                      avatar_url, provider_metadata, is_active, created_at, updated_at,
+                      last_login_at, role
+        """
+        demote_q = """
+            UPDATE users
+            SET role = $3, updated_at = NOW()
+            WHERE id = $1 AND organization_id = $2
+            RETURNING id, external_id, provider, organization_id, email, display_name,
+                      avatar_url, provider_metadata, is_active, created_at, updated_at,
+                      last_login_at, role
+        """
+
+        async with scoped_acquire(
+            organization_id=organization_id, user_id=from_user_id
+        ) as conn:
+            async with conn.transaction():
+                demoted_row = await conn.fetchrow(
+                    demote_q, str(from_user_id), str(organization_id), demote_to
+                )
+                promoted_row = await conn.fetchrow(
+                    promote_q, str(to_user_id), str(organization_id)
+                )
+
+        demoted = self._row_to_dict(demoted_row) if demoted_row else None
+        promoted = self._row_to_dict(promoted_row) if promoted_row else None
+
+        for user in (promoted, demoted):
+            if user:
+                await self._sync_individual_memory_for_user(user)
+
+        return promoted, demoted
+
     async def get_by_organization(
         self,
         organization_id: UUID,

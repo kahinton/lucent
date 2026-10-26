@@ -6,7 +6,144 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`LUCENT_MODE` no longer gates anything.** It is now reporting only: it sets
+  a UI label (`Team` / `Personal`) and a startup log line. The organization,
+  users, groups, audit, and access routers are mounted unconditionally, so an
+  instance that has tenants can always administer them and a caller without the
+  required role gets `403` rather than the `404` the old gate produced. MCP memory
+  sharing tools and the web share action are likewise always available, since
+  `Permission.MEMORY_SHARE` was already what governed them. `require_team_mode()`
+  is removed; a regression test asserts the routers stay mounted in every mode.
+  Consequence: `LUCENT_LICENSE_KEY` is reported (valid/invalid) but no longer
+  changes behaviour, and `team` without a key no longer silently downgrades to
+  `personal`.
+
+
 ### Added
+
+#### Instance administration (hyperadmin + local ops console)
+- **`POST /api/organizations/provision`** — create a complete, immediately usable
+  tenant in one call: the organization, its first admin (generated password
+  returned once), a default API key, seeded built-in agent/skill/hook/sandbox
+  definitions, and optionally an enabled-and-granted model. The whole tenant is
+  rolled back if the first admin cannot be created, so a headless organization
+  can no longer be left behind. This is the endpoint an external signup site
+  calls.
+- **Instance-operator member management** — list/add/remove members, change
+  roles, reset passwords, and mint API keys for *any* organization
+  (`/api/organizations/{id}/users/...`). Previously an operator could create an
+  organization but had no way to put a person in it.
+- **Per-tenant settings for operators** — `GET`/`PUT
+  /api/organizations/{id}/settings[/{key}]` reads and writes another
+  organization's runtime settings through the same validator the settings UI
+  uses. Read-only credential entries are omitted entirely rather than redacted.
+- **Instance audit trail** — `GET /api/organizations/instance/audit` plus
+  `GET /api/organizations/{id}/audit`. Every operator mutation writes **two**
+  rows: the operator's own organization (durable — survives tenant deletion) and
+  the target organization (so that tenant's admins can see the change).
+- **`python -m lucent.hyperadmin`** (`lucent-hyperadmin`) — `status`, `grant`,
+  `revoke`, `mint-key`. The only way to create an instance operator, because the
+  tenant-facing user endpoints refuse to assign the role. Revoking the last
+  hyperadmin is refused.
+- **Ops console** (`ops_console/`, `lucent-ops-console`) — a standalone local web
+  app for administering organizations: provision, members, settings, lifecycle,
+  audit, and a connection-status page that detects personal mode. It owns no
+  database connection and no Lucent imports; it is an HTTP client of the
+  hyperadmin API, so it doubles as a test bed for the hosted management site.
+  Launch with `docker compose --profile ops-console up -d`; binds to loopback and
+  is guarded by a separate console passphrase so the API key never reaches the
+  browser.
+- **`OrganizationRepository.get_stats`** and `list(..., status=, search=,
+  exclude_names=, include_stats=)` — member/owner/API-key counts without N+1
+  queries, and the internal `__lucent_system__` organization is now excluded from
+  operator-facing listings.
+- **`docs/instance-administration.md`** — the operator-facing guide.
+
+### Fixed
+
+- **Expired API keys were never reaped, and were counted as active.** Expiry was
+  enforced only when a key was *used* (`ApiKeyRepository.verify` refuses a lapsed
+  key), but the row kept `is_active = true` and `revoked_at IS NULL` forever.
+  Because every count filtered on those two columns, a live instance reported
+  **22,448 active API keys of which 13 could actually authenticate** — 22,435
+  permanently-dead rows. The bulk came from task-scoped keys, which are minted
+  with a 60-minute TTL: one day in April alone minted 5,982 of them from a single
+  process. Two changes:
+  - `OrganizationRepository.get_stats` / `list(include_stats=True)` now count
+    only keys that could still authenticate, so the operator console shows a real
+    number.
+  - `ApiKeyRepository.purge_expired()` deletes expired rows, and the server's
+    background loop calls it hourly with a 30-day grace window
+    (`LUCENT_API_KEY_PURGE_GRACE_DAYS`, `LUCENT_API_KEY_PURGE_INTERVAL_SECONDS`).
+    Keys with no expiry — the long-lived personal ones — are never eligible.
+    Deletion is batched: `api_keys` carries a per-row `AFTER DELETE` trigger that
+    clears the key's `auth_clearances` row, so a single statement over tens of
+    thousands of rows exceeds asyncpg's command timeout and rolls back entirely.
+    `tool_call_audit_log.api_key_id` is `ON DELETE SET NULL`, so audit history is
+    preserved.
+- **`lucent.hyperadmin status` still warned that the org API needed team mode.**
+  The warning outlived the gate it described (the routers are always mounted
+  now), so it told operators to change a setting that no longer does anything. It
+  is gone; the mode line is labelled "(reporting only)".
+- **`lucent.hyperadmin grant --create` reported a fresh account as "already a
+  hyperadmin".** Creating the operator stored `role=hyperadmin` immediately, so
+  the post-create check hit the "already" branch and the command never said it had
+  done anything — indistinguishable from being a no-op. It now distinguishes
+  created from pre-existing.
+- **Task cancellation never worked in the daemon.** Both halves of the mechanism
+  reached for the per-instance coordination state (`_active_task_sessions`,
+  `_active_session_tasks`, `_cancelled_sessions`) through the *module* proxy,
+  which resolves to the `__main__` module and therefore has none of them. Every
+  heartbeat logged `Heartbeat loop error: module '__main__' has no attribute
+  '_active_task_sessions'` (3,400+ times since the feature shipped), and because
+  the sweep raised on its first statement the durable DB half never ran: a
+  user-cancelled running task kept consuming model time until its claim lease
+  expired. The `task_cancel` NOTIFY handler failed at its first statement too, so
+  the low-latency interrupt was dead as well. Both now read `self`, matching how
+  every other loop in the file handles state. The write-only
+  `_task_cancel_ready` / `_cancel_requested_task_ids` scaffolding, which made the
+  path look wired up, is removed. Heartbeats themselves were unaffected and
+  continued to be recorded throughout.
+- **`tests/test_task_cancel_signals.py` asserted only that the cancel methods
+  existed**, never that they ran — which is how a method that raises immediately
+  passed CI. It now executes both paths against a stand-in object that exposes
+  the real instance attributes, so a return to module-proxy access fails.
+- **Ownership transfer was impossible.** `idx_one_owner_per_org` allows a single
+  owner row per organization, so the promote-then-demote order used by both
+  `POST /api/organizations/current/transfer` and the web
+  `/settings/organization/transfer-ownership` always failed with a unique
+  violation. `UserRepository.transfer_ownership` now performs demote-then-promote
+  in one transaction.
+- **Renaming a workspace from Settings returned 500.** The handler called
+  `org_repo.update(organization_id=..., name=...)`, but the signature is
+  `update(org_id, name)` — a `TypeError` on every rename.
+- **Audit context was double-JSON-encoded.** `AdminAuditRepository.log` passed
+  `json.dumps(...)` for `jsonb` columns while the pool already registers a
+  `jsonb` codec, so `context` was stored as a JSON *string*. Any query filtering
+  on a context key silently matched nothing. Values are now passed as objects,
+  and reads normalize historical rows.
+- **Deleting an organization always failed** for any tenant that had ever done
+  work: ten tables reference `organizations` with `ON DELETE NO ACTION`.
+  `OrganizationRepository.delete` clears them in one transaction first.
+- **Hyperadmins were locked out of the tenant UI.** ~60 route guards compared the
+  role against literal tuples (`("admin", "owner")`), which excluded the instance
+  operator from every tenant screen even though its permission set is a superset
+  of owner. `lucent.rbac.ADMIN_ROLES` / `OWNER_ROLES` and the
+  `is_admin_role`/`is_owner_role` helpers replace the literals.
+- **Organization names could collide.** Uniqueness was only checked in
+  application code (a check-then-insert race), so two concurrent signups could
+  create two identically named tenants. Migration 149 adds a case-insensitive
+  unique index; pre-existing duplicates are renamed rather than failing the
+  migration.
+
+### Changed
+
+- `OrganizationRepository.update` and `create` raise `OrganizationNameConflictError`
+  on a duplicate name; the API maps it to `409`.
+- Instance endpoints refuse `role: "hyperadmin"` for tenant members, and refuse
+  a second `owner` (ownership must be transferred, not granted twice).
 
 #### Delegated work as a sub-agent
 - **`requests.decomposition_mode`** (`planner` | `author`, migration 143).

@@ -478,6 +478,14 @@ class OrganizationResponse(BaseModel):
     suspended_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    user_count: int | None = Field(
+        default=None, description="Active human members (excludes daemon accounts)"
+    )
+    admin_count: int | None = Field(default=None, description="Members with admin+ role")
+    owner_names: list[str] | None = Field(
+        default=None, description="Display names of active owners"
+    )
+    api_key_count: int | None = Field(default=None, description="Active API keys")
 
 
 class OrganizationListResponse(BaseModel):
@@ -488,6 +496,182 @@ class OrganizationListResponse(BaseModel):
     offset: int
     limit: int
     has_more: bool
+
+
+# =============================================================================
+# Organization Provisioning (hyperadmin)
+# =============================================================================
+
+
+class OrganizationFirstAdmin(BaseModel):
+    """The first human member created with a new organization."""
+
+    email: str | None = Field(default=None, description="Login identifier")
+    display_name: str | None = Field(default=None)
+    external_id: str | None = Field(
+        default=None, description="Identity id; defaults to the email"
+    )
+    password: str | None = Field(
+        default=None,
+        description=(
+            "Plaintext password. Omit to have one generated and returned once "
+            "in the response."
+        ),
+    )
+    role: str = Field(default="owner", description="owner or admin")
+
+
+class OrganizationProvisionRequest(BaseModel):
+    """Create a fully usable organization in one call.
+
+    This is the shape an external signup site needs: name the tenant, name its
+    first admin, and get back the credentials that make it usable.
+    """
+
+    name: str = Field(..., min_length=1, max_length=255)
+    first_admin: OrganizationFirstAdmin | None = Field(
+        default=None,
+        description="First member. Omit to create the organization only (legacy behaviour).",
+    )
+    api_key_name: str | None = Field(
+        default="Default API key",
+        description="Name for the minted key, or null to skip minting.",
+    )
+    model_id: str | None = Field(
+        default=None,
+        description="Model to enable and grant so the tenant can chat immediately.",
+    )
+
+
+class ProvisionedUserResponse(BaseModel):
+    """The created first member."""
+
+    id: UUID
+    email: str | None
+    display_name: str | None
+    role: str
+    must_change_password: bool
+
+
+class OrganizationProvisionResponse(BaseModel):
+    """Result of provisioning, including the one-time credentials."""
+
+    organization: OrganizationResponse
+    user: ProvisionedUserResponse
+    api_key: str | None = Field(
+        default=None, description="Plaintext API key — shown once, never stored"
+    )
+    temporary_password: str | None = Field(
+        default=None, description="Generated password — shown once"
+    )
+    seeded: dict[str, int] = Field(default_factory=dict)
+    model_id: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class OrganizationAdminCreate(BaseModel):
+    """Add a member to any organization (hyperadmin)."""
+
+    email: str | None = Field(default=None)
+    display_name: str | None = Field(default=None)
+    external_id: str | None = Field(default=None)
+    role: str = Field(default="admin", description="member, admin, or owner")
+    password: str | None = Field(
+        default=None, description="Omit to generate a temporary password."
+    )
+
+
+class OrganizationAdminCreated(BaseModel):
+    """A member created by a hyperadmin, with one-time credentials."""
+
+    user: UserResponse
+    temporary_password: str | None = None
+    api_key: str | None = None
+
+
+class OrganizationApiKeyCreate(BaseModel):
+    """Mint an API key for a member of any organization."""
+
+    name: str = Field(default="Default API key", max_length=200)
+
+
+class OrganizationApiKeyCreated(BaseModel):
+    """The minted key. The plaintext is returned exactly once."""
+
+    id: UUID
+    name: str
+    key_prefix: str
+    api_key: str
+
+
+class OrganizationSettingValue(BaseModel):
+    """A single runtime setting value for an organization.
+
+    ``value`` is the raw value (a bool, number, string, or JSON object) so a
+    caller can read it, edit it, and write it back unchanged. ``display_value``
+    is the human-readable rendering the settings UI shows (for example
+    "Disabled" for a false boolean) and is for presentation only.
+    """
+
+    key: str
+    value: Any
+    value_type: str
+    source: str = Field(description="database, environment, or default")
+    title: str | None = None
+    section: str | None = None
+    display_value: str | None = None
+
+
+class OrganizationSettingsResponse(BaseModel):
+    """Runtime settings for one organization, grouped by section."""
+
+    organization_id: UUID
+    settings: list[OrganizationSettingValue]
+    sections: dict[str, list[OrganizationSettingValue]] = Field(default_factory=dict)
+
+
+class OrganizationSettingUpdate(BaseModel):
+    """Set or reset one runtime setting."""
+
+    value: Any = Field(default=None, description="Ignored when reset is true")
+    reset: bool = Field(
+        default=False, description="Delete the DB override and fall back to env/default"
+    )
+
+
+class InstanceAuditEntry(BaseModel):
+    """One instance-level (cross-organization) audit event."""
+
+    id: UUID
+    organization_id: UUID
+    actor_user_id: UUID | None
+    actor_display_name: str | None = None
+    action: str
+    entity_type: str
+    entity_id: UUID | None = None
+    entity_label: str | None = None
+    target_organization_id: str | None = None
+    changed_fields: list[str] | None = None
+    old_values: dict[str, Any] | None = None
+    new_values: dict[str, Any] | None = None
+    notes: str | None = None
+    created_at: datetime
+
+
+class InstanceAuditResponse(BaseModel):
+    """Paginated instance audit trail."""
+
+    entries: list[InstanceAuditEntry]
+    total_count: int
+    offset: int
+    limit: int
+    has_more: bool
+
+
+class OrganizationDeleteRequest(BaseModel):
+    """Permanently delete a tenant. ``confirm_name`` must match exactly."""
+
+    confirm_name: str = Field(..., description="The organization's current name")
 
 
 # =============================================================================

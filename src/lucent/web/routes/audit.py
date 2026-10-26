@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from lucent.db import AdminAuditRepository, AuditRepository, get_pool
+from lucent.rbac import is_admin_role
 
 from ._shared import get_user_context, templates
 
@@ -44,7 +45,7 @@ async def audit_logs(
     """
     user = await get_user_context(request)
     role_val = user.role.value if hasattr(user.role, "value") else str(user.role)
-    if role_val not in ("admin", "owner"):
+    if not is_admin_role(role_val):
         raise HTTPException(status_code=403, detail="Admin access required")
 
     pool = await get_pool()

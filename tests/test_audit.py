@@ -104,8 +104,7 @@ async def audit_memory(db_pool, audit_user, audit_prefix):
 @pytest_asyncio.fixture
 async def member_client(db_pool, audit_user):
     """httpx AsyncClient authenticated as a regular member."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        app = create_app()
+    app = create_app()
     fake_user = CurrentUser(
         id=audit_user["id"],
         organization_id=audit_user["organization_id"],
@@ -125,8 +124,7 @@ async def member_client(db_pool, audit_user):
 @pytest_asyncio.fixture
 async def admin_client(db_pool, audit_admin):
     """httpx AsyncClient authenticated as an admin."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        app = create_app()
+    app = create_app()
     fake_user = CurrentUser(
         id=audit_admin["id"],
         organization_id=audit_admin["organization_id"],

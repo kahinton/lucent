@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Organizations{% endblock %}
+
+{% block content %}
+<div class="mb-5 flex flex-wrap items-end justify-between gap-4">
+    <div>
+        <h1 class="text-xl font-semibold">Organizations</h1>
+        <p class="mt-1 text-sm text-[#a7a3a0]">
+            {{ total_count }} tenant{{ '' if total_count == 1 else 's' }} on this instance.
+            Suspended tenants keep all their data but cannot sign in.
+        </p>
+    </div>
+    <a href="/organizations/new" class="btn btn-primary">New organization</a>
+</div>
+
+<div class="panel mb-4 rounded-xl p-3">
+    <form method="get" action="/" class="flex flex-wrap items-end gap-3">
+        <div class="min-w-[14rem] flex-1">
+            <label for="search" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">Search</label>
+            <input id="search" name="search" value="{{ search or '' }}" placeholder="Organization name"
+                   class="field w-full rounded-lg px-3 py-2 text-sm">
+        </div>
+        <div>
+            <label for="status" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">Status</label>
+            <select id="status" name="status" class="field rounded-lg px-3 py-2 text-sm">
+                <option value="" {% if not status %}selected{% endif %}>Any</option>
+                <option value="active" {% if status == 'active' %}selected{% endif %}>Active</option>
+                <option value="suspended" {% if status == 'suspended' %}selected{% endif %}>Suspended</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-quiet">Filter</button>
+        {% if search or status %}
+        <a href="/" class="text-xs text-[#8f8b87] underline-offset-2 hover:underline">Clear</a>
+        {% endif %}
+    </form>
+</div>
+
+{% if organizations %}
+<div class="panel overflow-hidden rounded-xl">
+    <table class="w-full text-sm">
+        <thead class="border-b border-[#262626] text-left text-xs uppercase tracking-wide text-[#8f8b87]">
+            <tr>
+                <th class="px-4 py-3 font-medium">Organization</th>
+                <th class="px-4 py-3 font-medium">Status</th>
+                <th class="px-4 py-3 font-medium">Members</th>
+                <th class="px-4 py-3 font-medium">Owners</th>
+                <th class="px-4 py-3 font-medium">Keys</th>
+                <th class="px-4 py-3 font-medium">Created</th>
+                <th class="px-4 py-3"></th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-[#1f1f1f]">
+            {% for org in organizations %}
+            <tr class="hover:bg-[#171717]">
+                <td class="px-4 py-3">
+                    <a href="/organizations/{{ org.id }}" class="font-medium hover:text-[#3ee0d6]">
+                        {{ org.name }}
+                    </a>
+                    <div class="mono text-[11px] text-[#6f6b68]">{{ org.id }}</div>
+                </td>
+                <td class="px-4 py-3">
+                    <span class="chip chip-{{ org.status }}">{{ org.status }}</span>
+                </td>
+                <td class="px-4 py-3 text-[#d6d2ce]">{{ org.user_count if org.user_count is not none else '—' }}</td>
+                <td class="px-4 py-3 text-[#d6d2ce]">
+                    {% if org.owner_names %}
+                        {{ org.owner_names | join(', ') }}
+                    {% elif org.owner_names is not none %}
+                        <span class="text-[#c2410c]">none</span>
+                    {% else %}—{% endif %}
+                </td>
+                <td class="px-4 py-3 text-[#d6d2ce]">{{ org.api_key_count if org.api_key_count is not none else '—' }}</td>
+                <td class="px-4 py-3 text-[#8f8b87]">{{ org.created_at | shortdate }}</td>
+                <td class="px-4 py-3 text-right">
+                    <a href="/organizations/{{ org.id }}" class="btn btn-quiet">Manage</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if total_pages > 1 %}
+<div class="mt-4 flex items-center justify-between text-sm text-[#8f8b87]">
+    <div>Page {{ page }} of {{ total_pages }}</div>
+    <div class="flex gap-2">
+        {% if page > 1 %}
+        <a class="btn btn-quiet" href="{{ page_url(page - 1) }}">Previous</a>
+        {% endif %}
+        {% if page < total_pages %}
+        <a class="btn btn-quiet" href="{{ page_url(page + 1) }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="panel rounded-xl px-6 py-10 text-center">
+    <p class="text-sm text-[#a7a3a0]">
+        {% if search or status %}
+            No organizations match this filter.
+        {% else %}
+            No organizations yet. Create one to give someone their own workspace.
+        {% endif %}
+    </p>
+    {% if not search and not status %}
+    <a href="/organizations/new" class="btn btn-primary mt-4">New organization</a>
+    {% endif %}
+</div>
+{% endif %}
+{% endblock %}

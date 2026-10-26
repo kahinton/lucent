@@ -127,11 +127,10 @@ async def org_hyperadmin(db_pool, org_org, org_prefix):
 
 
 def _build_app_with_team_mode(user_dict, role="member"):
-    """Create app with team mode enabled and auth overridden."""
-    with patch("lucent.api.app.is_team_mode", return_value=True):
-        from lucent.api.app import create_app
+    """Create app with auth overridden."""
+    from lucent.api.app import create_app
 
-        app = create_app()
+    app = create_app()
     fake = CurrentUser(
         id=user_dict["id"],
         organization_id=user_dict.get("organization_id"),
@@ -570,13 +569,13 @@ class TestDeleteCurrentOrganization:
 
 
 class TestTransferOwnership:
-    @pytest.mark.xfail(
-        reason="Bug: organizations.py:279 promotes new owner before demoting old, "
-        "violating idx_one_owner_per_org unique constraint",
-        strict=True,
-    )
     async def test_transfer_to_member(self, db_pool, org_prefix):
-        """Owner can transfer ownership to another member."""
+        """Owner can transfer ownership to another member.
+
+        Regression: this used to promote the new owner before demoting the old
+        one, violating ``idx_one_owner_per_org``. The repository now performs
+        demote-then-promote in one transaction.
+        """
         from lucent.db import OrganizationRepository, UserRepository
 
         org_repo = OrganizationRepository(db_pool)

@@ -1649,9 +1649,11 @@ Returns all members of a group.
 
 ---
 
-## Team Mode Endpoints
+## Multi-User Endpoints
 
-The following endpoints are only available when `LUCENT_MODE=team`. Required roles vary by endpoint.
+These endpoints are always registered. Whether a call succeeds depends on the caller's role and
+permissions, never on `LUCENT_MODE` — that variable is reporting only (it drives a label in the UI
+and a log line). An instance with no organizations simply returns an empty list.
 
 Each user currently belongs to exactly one organization. Sessions, API keys, roles, groups, and
 resource access use that organization as the authenticated tenant context. A single identity cannot
@@ -1677,22 +1679,53 @@ Base path: `/api/users`
 
 Base path: `/api/organizations`
 
+Always registered. Access is enforced per endpoint by role (`hyperadmin`, `owner`, `admin`) and
+permission; there is no mode-based mounting, so a missing permission yields `403`, never a `404`.
+
 | Method | Path | Role | Description |
 |--------|------|------|-------------|
 | `GET` | `/current` | member+ | Get your organization |
 | `PATCH` | `/current` | owner | Update organization name |
-| `POST` | `/` | hyperadmin | Create and seed a new organization |
-| `GET` | `/{organization_id}` | member+ | Get own organization; hyperadmins can get any organization |
-| `GET` | `/` | hyperadmin | List all organizations |
+| `POST` | `/` | hyperadmin | Create an empty organization shell (no members) and seed its built-ins |
+| `POST` | `/provision` | hyperadmin | **Create a complete tenant**: org + first admin + default API key + seeded built-ins (+ optional model) |
+| `GET` | `/{organization_id}` | member+ | Get own organization; hyperadmins can get any organization (`?include_stats=true`) |
+| `GET` | `/` | hyperadmin | List all organizations. Filters: `?search=`, `?status=active\|suspended`, `?include_stats=` |
 | `PATCH` | `/{organization_id}` | hyperadmin | Update any organization's name |
+| `DELETE` | `/{organization_id}` | hyperadmin | Permanently delete any organization. Requires `?confirm_name=<exact name>` |
 | `POST` | `/{organization_id}/suspend` | hyperadmin | Suspend an organization without deleting its data |
 | `POST` | `/{organization_id}/resume` | hyperadmin | Reactivate a suspended organization |
+| `GET` | `/{organization_id}/users` | hyperadmin | List members (daemon identity hidden unless `?include_daemon=true`) |
+| `POST` | `/{organization_id}/users` | hyperadmin | Add a member (`?mint_api_key=true` to also mint a key) |
+| `PATCH` | `/{organization_id}/users/{user_id}/role` | hyperadmin | Change a member's role |
+| `POST` | `/{organization_id}/users/{user_id}/reset-password` | hyperadmin | Temporary password, returned once |
+| `POST` | `/{organization_id}/users/{user_id}/api-keys` | hyperadmin | Mint an API key for that member |
+| `DELETE` | `/{organization_id}/users/{user_id}` | hyperadmin | Remove a member (refuses the last owner) |
+| `GET` | `/{organization_id}/settings` | hyperadmin | Editable runtime settings for that tenant |
+| `PUT` | `/{organization_id}/settings/{key}` | hyperadmin | Set (`{"value": ...}`) or reset (`{"reset": true}`) one setting |
+| `GET` | `/{organization_id}/audit` | hyperadmin | That tenant's admin audit log |
+| `GET` | `/instance/audit` | hyperadmin | Operator trail across all tenants. Filters: `?organization_id=`, `?action=` |
 | `DELETE` | `/current` | owner | Delete organization (irreversible) |
-| `POST` | `/current/transfer` | owner | Transfer ownership to another user |
+| `POST` | `/current/transfer` | owner | Transfer ownership to another member |
 
 Organization responses include `status` (`active` or `suspended`) and `suspended_at`.
+With `include_stats=true` they also carry `user_count` (daemon identities excluded),
+`admin_count`, `owner_names`, and `api_key_count`.
+
 Suspended organizations cannot authenticate through sessions or API keys. Hyperadmins remain
 authorized so they can inspect and reactivate a suspended organization.
+
+Constraints the API enforces and reports as `4xx` rather than `500`:
+
+- **One owner per organization** (`idx_one_owner_per_org`). Adding or promoting a second
+  `owner` returns `409`; ownership must be *transferred* by the current owner. Removing the
+  last owner returns `400`.
+- **Unique names**, case-insensitive (migration 149). A duplicate returns `409`.
+- **Tenant members never get `hyperadmin`.** Instance-wide access is granted only by
+  `python -m lucent.hyperadmin`, never through a tenant route.
+
+Instance-operator mutations are audit-logged twice: in the operator's own organization
+(the durable trail, which survives tenant deletion) and in the affected tenant's log, so that
+tenant's admins can see what changed. See `docs/instance-administration.md`.
 
 ### Audit Logs
 

@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Instance audit{% endblock %}
+
+{% block content %}
+<div class="mb-5">
+    <h1 class="text-xl font-semibold">Instance audit</h1>
+    <p class="mt-1 text-sm text-[#a7a3a0]">
+        Every operator action against a tenant, newest first. This trail is stored in the operator's
+        own organization, so it survives a tenant being deleted.
+    </p>
+</div>
+
+<form method="get" action="/audit" class="panel mb-4 flex flex-wrap items-end gap-3 rounded-xl p-3">
+    <div class="min-w-[16rem] flex-1">
+        <label for="organization_id" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+            Organization id
+        </label>
+        <input id="organization_id" name="organization_id" value="{{ organization_id or '' }}"
+               class="mono field w-full rounded-lg px-3 py-2 text-xs" placeholder="all tenants">
+    </div>
+    <div class="min-w-[12rem]">
+        <label for="action" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">Action</label>
+        <input id="action" name="action" value="{{ action or '' }}"
+               class="mono field w-full rounded-lg px-3 py-2 text-xs" placeholder="org.provision">
+    </div>
+    <button class="btn btn-quiet" type="submit">Filter</button>
+    {% if organization_id or action %}
+    <a href="/audit" class="text-xs text-[#8f8b87] underline-offset-2 hover:underline">Clear</a>
+    {% endif %}
+</form>
+
+{% if entries %}
+<div class="panel overflow-hidden rounded-xl">
+    <table class="w-full text-sm">
+        <thead class="border-b border-[#262626] text-left text-xs uppercase tracking-wide text-[#8f8b87]">
+            <tr>
+                <th class="px-4 py-3 font-medium">When</th>
+                <th class="px-4 py-3 font-medium">Action</th>
+                <th class="px-4 py-3 font-medium">Target</th>
+                <th class="px-4 py-3 font-medium">Actor</th>
+                <th class="px-4 py-3 font-medium">Notes</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-[#1f1f1f]">
+            {% for entry in entries %}
+            <tr class="align-top hover:bg-[#171717]">
+                <td class="whitespace-nowrap px-4 py-3 text-xs text-[#8f8b87]">{{ entry.created_at | shortdate }}</td>
+                <td class="px-4 py-3">
+                    <span class="mono text-xs">{{ entry.action }}</span>
+                </td>
+                <td class="px-4 py-3">
+                    <div>{{ entry.entity_label or '—' }}</div>
+                    {% if entry.target_organization_id %}
+                    <a href="/organizations/{{ entry.target_organization_id }}"
+                       class="mono text-[11px] text-[#6f6b68] hover:text-[#3ee0d6]">
+                        {{ entry.target_organization_id }}
+                    </a>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-xs text-[#a7a3a0]">{{ entry.actor_display_name or '—' }}</td>
+                <td class="px-4 py-3 text-xs text-[#8f8b87]">{{ entry.notes or '' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if total_pages > 1 %}
+<div class="mt-4 flex items-center justify-between text-sm text-[#8f8b87]">
+    <div>Page {{ page }} of {{ total_pages }} · {{ total_count }} event{{ '' if total_count == 1 else 's' }}</div>
+    <div class="flex gap-2">
+        {% if page > 1 %}<a class="btn btn-quiet" href="{{ page_url(page - 1) }}">Previous</a>{% endif %}
+        {% if page < total_pages %}<a class="btn btn-quiet" href="{{ page_url(page + 1) }}">Next</a>{% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% else %}
+<div class="panel rounded-xl px-6 py-10 text-center text-sm text-[#a7a3a0]">
+    No instance-operator events recorded{% if organization_id or action %} for this filter{% endif %}.
+</div>
+{% endif %}
+{% endblock %}

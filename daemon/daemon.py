@@ -1959,8 +1959,6 @@ class LucentDaemon(
         # right asyncio task, and _cancelled_sessions records *why* a session
         # ended so run_session can distinguish a requested interrupt from a
         # genuine provider failure.
-        self._task_cancel_ready = asyncio.Event()
-        self._cancel_requested_task_ids: set[str] = set()
         self._active_task_sessions: dict[str, str] = {}
         self._active_session_tasks: dict[str, asyncio.Task] = {}
         self._cancelled_sessions: set[str] = set()
@@ -5525,7 +5523,6 @@ class LucentDaemon(
                 # the request beyond the cancel itself.
                 self._active_task_sessions.pop(task_id, None)
                 self._cancelled_sessions.discard(session_name)
-                self._cancel_requested_task_ids.discard(task_id)
                 if sandbox_keepalive_task:
                     sandbox_keepalive_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

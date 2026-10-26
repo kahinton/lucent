@@ -43,8 +43,10 @@ from lucent.db import (
     UserRepository,
     get_pool,
 )
-from lucent.db.pool import scoped_acquire_on
 from lucent.db import admin_audit as audit_actions
+from lucent.db.organization import OrganizationNameConflictError
+from lucent.db.pool import scoped_acquire_on
+from lucent.rbac import is_admin_role, is_owner_role
 
 from ._shared import _check_csrf, _set_csrf_cookie, get_user_context, templates
 
@@ -63,7 +65,7 @@ def _role_value(user) -> str:
 
 async def _require_admin_or_owner(request: Request):
     user = await get_user_context(request)
-    if _role_value(user) not in ("admin", "owner"):
+    if not is_admin_role(_role_value(user)):
         raise HTTPException(status_code=403, detail="Admin access required.")
     return user
 
@@ -585,7 +587,7 @@ async def settings_organization(
 
     org = await org_repo.get_by_id(user.organization_id)
     members = await user_repo.get_by_organization(user.organization_id)
-    admin_count = sum(1 for m in members if m.get("role") in ("admin", "owner"))
+    admin_count = sum(1 for m in members if is_admin_role(m.get("role")))
     api_keys_total = 0
     try:
         # Count total active keys for the org. ApiKeyRepository doesn't have an
@@ -623,7 +625,7 @@ async def settings_organization_update(request: Request, name: str = Form(...)):
     """Owner-only: rename the workspace."""
     user = await get_user_context(request)
     await _check_csrf(request)
-    if _role_value(user) != "owner":
+    if not is_owner_role(_role_value(user)):
         raise HTTPException(status_code=403, detail="Only the workspace owner can change this.")
 
     pool = await get_pool()
@@ -641,7 +643,16 @@ async def settings_organization_update(request: Request, name: str = Form(...)):
     if new_name == old_name:
         return RedirectResponse("/settings/organization", status_code=303)
 
-    await org_repo.update(organization_id=user.organization_id, name=new_name)
+    try:
+        # Positional: the repository signature is update(org_id, name). This
+        # call previously passed ``organization_id=`` (no such parameter) and
+        # raised TypeError, so renaming a workspace from Settings 500'd.
+        await org_repo.update(user.organization_id, new_name)
+    except OrganizationNameConflictError:
+        return RedirectResponse(
+            f"/settings/organization?error={quote('That workspace name is already taken.')}",
+            status_code=303,
+        )
     await audit_repo.log_for_user(
         user, request,
         action=audit_actions.ORG_UPDATE,
@@ -844,7 +855,7 @@ async def settings_danger(
     success: str | None = Query(default=None),
 ):
     user = await get_user_context(request)
-    if _role_value(user) != "owner":
+    if not is_owner_role(_role_value(user)):
         raise HTTPException(status_code=403, detail="Owner access required.")
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
@@ -902,7 +913,7 @@ async def settings_transfer_ownership(
     """Owner-only: transfer the owner role to another admin."""
     user = await get_user_context(request)
     await _check_csrf(request)
-    if _role_value(user) != "owner":
+    if not is_owner_role(_role_value(user)):
         raise HTTPException(status_code=403, detail="Owner access required.")
     if new_owner_id == user.id:
         return RedirectResponse(
@@ -925,14 +936,17 @@ async def settings_transfer_ownership(
             status_code=303,
         )
 
-    # Promote target, demote self. The unique-owner constraint requires we do
-    # the demotion first to avoid a partial-index conflict.
-    await user_repo.update_role(user.id, "admin")
-    try:
-        await user_repo.update_role(new_owner_id, "owner")
-    except Exception:
-        # Rollback: restore self as owner.
-        await user_repo.update_role(user.id, "owner")
+    # Demote-then-promote inside one transaction. idx_one_owner_per_org allows a
+    # single owner row per organization, so the two updates cannot be applied
+    # independently; the shared repository method guarantees neither half is
+    # left behind.
+    promoted, _demoted = await user_repo.transfer_ownership(
+        organization_id=user.organization_id,
+        from_user_id=user.id,
+        to_user_id=new_owner_id,
+        demote_to="admin",
+    )
+    if promoted is None:
         return RedirectResponse(
             f"/settings/danger?error={quote('Transfer failed; ownership unchanged.')}",
             status_code=303,
@@ -958,7 +972,7 @@ async def settings_delete_org(request: Request, confirm_name: str = Form(...)):
     """Owner-only: permanently delete the workspace (irreversible)."""
     user = await get_user_context(request)
     await _check_csrf(request)
-    if _role_value(user) != "owner":
+    if not is_owner_role(_role_value(user)):
         raise HTTPException(status_code=403, detail="Owner access required.")
 
     pool = await get_pool()

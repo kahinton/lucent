@@ -91,12 +91,19 @@ lucent-daemon = "daemon.daemon:main"
 # so a fresh instance can be provisioned without a browser.
 lucent-migrate = "lucent.migrate:main"
 lucent-bootstrap = "lucent.bootstrap:main"
+# Instance-operator (hyperadmin) account management. Needs direct DB access;
+# it is the only way to grant the cross-tenant operator role.
+lucent-hyperadmin = "lucent.hyperadmin:main"
+# Standalone local org-admin console (a client of the hyperadmin API).
+lucent-ops-console = "ops_console.app:main"
 
 [tool.hatch.build.targets.wheel]
 # The daemon is a top-level package (not under src/). It must be listed
 # explicitly or it is silently omitted from the wheel — which is what made the
 # production image unable to run a daemon at all. Keep both entries.
-packages = ["src/lucent", "daemon"]
+# ``ops_console`` is the standalone local org-admin console: also a top-level
+# package, and deliberately *not* part of the server image's runtime surface.
+packages = ["src/lucent", "daemon", "ops_console"]
 
 [tool.ruff]
 target-version = "py312"

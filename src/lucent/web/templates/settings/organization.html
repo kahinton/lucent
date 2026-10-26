@@ -74,12 +74,12 @@
         </div>
         <div class="rounded-lg bg-gray-50 p-4">
             <p class="text-xs uppercase tracking-wider text-gray-500">Mode</p>
-            <p class="mt-1 text-lg font-semibold text-gray-900">{{ 'Team' if team_mode() else 'Personal' }}</p>
+            <p class="mt-1 text-lg font-semibold text-gray-900">{{ deployment_label() }}</p>
         </div>
     </div>
 </div>
 
-{% if is_admin and team_mode() %}
+{% if is_admin %}
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
     <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
         <h3 class="text-base font-semibold text-gray-900">Quick links</h3>

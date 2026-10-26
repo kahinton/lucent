@@ -204,7 +204,7 @@ docker run --rm -v lucent_data:/data -v $(pwd):/backup alpine \
 | `DATABASE_URL` | *(required)* | PostgreSQL connection string |
 | `LUCENT_HOST` | `0.0.0.0` | Server bind address |
 | `LUCENT_PORT` | `8766` | Server port |
-| `LUCENT_MODE` | `personal` | `personal` or `team` (team requires license key) |
+| `LUCENT_MODE` | `personal` | `personal` or `team` — reporting only; does not gate features |
 | `LUCENT_LICENSE_KEY` | — | License key for team mode |
 
 ### Authentication

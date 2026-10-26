@@ -11,6 +11,7 @@ from lucent.api.deps import AuthenticatedUser
 from lucent.db import get_pool
 from lucent.db.models import ModelRepository
 from lucent.llm.model_engine_validation import normalize_engine, validate_engine_override
+from lucent.rbac import is_admin_role
 
 router = APIRouter()
 
@@ -109,7 +110,7 @@ def _normalize_reasoning_efforts(value: Any) -> list[str]:
 
 def _require_admin_user(user: AuthenticatedUser) -> None:
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
-    if role not in ("admin", "owner"):
+    if not is_admin_role(role):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 

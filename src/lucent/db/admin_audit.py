@@ -20,6 +20,44 @@ from lucent.db.pool import scoped_acquire_on
 if TYPE_CHECKING:
     from lucent.api.deps import CurrentUser
 
+
+def _decode_json_object(value: Any) -> dict[str, Any]:
+    """Normalize a JSONB column that may hold a double-encoded object.
+
+    ``AdminAuditRepository.log`` used to pass ``json.dumps(...)`` while the pool
+    already registers a ``jsonb`` codec, so historical rows stored ``context``
+    (and ``old_values``/``new_values``) as a JSON *string* rather than an object.
+    Every read path normalizes both shapes here, so callers never have to know
+    which era a row came from.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (str, bytes)):
+        try:
+            decoded = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _normalize_row(row: Any) -> dict[str, Any]:
+    """Return an audit row as a dict with its JSON columns decoded."""
+    entry = dict(row)
+    for column in ("context", "old_values", "new_values"):
+        if column not in entry:
+            continue
+        decoded = _decode_json_object(entry[column])
+        if column == "context":
+            entry[column] = decoded
+        else:
+            # NULL and "{}" are different for these two: NULL means the action
+            # carried no delta at all.
+            entry[column] = decoded or None
+    return entry
+
 # ---------------------------------------------------------------------------
 # Action constants — keep in one place so call sites stay consistent.
 # ---------------------------------------------------------------------------
@@ -47,6 +85,31 @@ SESSION_REVOKE_ALL = "session.revoke_all"
 ORG_UPDATE = "org.update"
 ORG_DELETE = "org.delete"
 ORG_TRANSFER_OWNERSHIP = "org.transfer_ownership"
+# Instance-operator lifecycle (hyperadmin). These are written twice: once into
+# the operator's own organization (the durable instance trail) and once into the
+# target organization (so a tenant admin can see the change).
+ORG_PROVISION = "org.provision"
+ORG_SUSPEND = "org.suspend"
+ORG_RESUME = "org.resume"
+ORG_SETTING_UPDATE = "org.setting_update"
+ORG_USER_CREATE = "org.user_create"
+ORG_USER_ROLE_CHANGE = "org.user_role_change"
+ORG_API_KEY_CREATE = "org.api_key_create"
+
+#: Actions that are only ever produced by an instance operator acting on
+#: another tenant. The instance audit view filters on this set so routine
+#: tenant administration does not drown the operator signal.
+INSTANCE_OPERATOR_ACTIONS: frozenset[str] = frozenset(
+    {
+        ORG_PROVISION,
+        ORG_SUSPEND,
+        ORG_RESUME,
+        ORG_SETTING_UPDATE,
+        ORG_USER_CREATE,
+        ORG_USER_ROLE_CHANGE,
+        ORG_API_KEY_CREATE,
+    }
+)
 
 # Groups
 GROUP_CREATE = "group.create"
@@ -181,6 +244,14 @@ class AdminAuditRepository:
 
         Most callers should prefer :meth:`log_for_user`, which extracts the
         actor/impersonator/context bits from a ``CurrentUser`` and ``Request``.
+
+        Note on the JSON columns: the pool registers a ``jsonb`` codec
+        (``json.dumps``/``json.loads``), so values must be passed as *Python
+        objects*. Passing ``json.dumps(...)`` here encoded them twice, which
+        stored ``context`` as a JSON *string* — ``context ->> 'instance_level'``
+        then returned NULL for every row, silently breaking any query that
+        filtered on a context key. Rows written before this fix still hold
+        strings; :meth:`list_instance_events` normalizes them on read.
         """
         if outcome not in {"success", "denied", "failed"}:
             outcome = "success"
@@ -210,13 +281,13 @@ class AdminAuditRepository:
                 entity_label,
                 action,
                 changed_fields,
-                json.dumps(old_values) if old_values is not None else None,
-                json.dumps(new_values) if new_values is not None else None,
-                json.dumps(context or {}),
+                old_values,
+                new_values,
+                context or {},
                 notes,
                 outcome,
             )
-        return dict(row) if row else {}
+        return _normalize_row(row) if row else {}
 
     async def log_definition_event(
         self,
@@ -339,6 +410,11 @@ class AdminAuditRepository:
     ) -> dict[str, Any]:
         """Browse audit entries with optional filters.
 
+        Instance-operator actions are mirrored into the affected organization by
+        ``lucent.services.org_provisioning.log_instance_event``, so they appear
+        here alongside ordinary tenant administration and a tenant admin can
+        always see who changed their workspace.
+
         Returns ``{"entries": [...], "total_count": N, "page_size": L, "offset": O}``.
         """
         where = ["a.organization_id = $1"]
@@ -382,7 +458,7 @@ class AdminAuditRepository:
             rows = await conn.fetch(list_q, *params, limit, offset)
 
         return {
-            "entries": [dict(r) for r in rows],
+            "entries": [_normalize_row(r) for r in rows],
             "total_count": (total_row["total"] if total_row else 0),
             "page_size": limit,
             "offset": offset,
@@ -399,3 +475,77 @@ class AdminAuditRepository:
                 str(organization_id),
             )
         return [r["action"] for r in rows]
+
+    async def list_instance_events(
+        self,
+        *,
+        operator_org_id: UUID,
+        target_organization_id: UUID | str | None = None,
+        action: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Browse the instance-operator trail recorded in one organization.
+
+        Instance actions are written into the operator's own organization with
+        ``context.instance_level = true``, which is what distinguishes them from
+        ordinary tenant administration. Reading them from a single org keeps the
+        query inside one tenant's rows; no cross-tenant scan is needed.
+
+        Args:
+            operator_org_id: The organization whose audit log holds the trail
+                (normally the operator's own).
+            target_organization_id: Only events that touched this tenant.
+            action: Only this action type.
+
+        Returns:
+            ``{"entries", "total_count", "offset", "limit", "has_more"}``.
+        """
+        where = ["a.organization_id = $1", "(a.context ->> 'instance_level') = 'true'"]
+        params: list[Any] = [str(operator_org_id)]
+        idx = 2
+
+        if target_organization_id:
+            where.append(f"(a.context ->> 'target_organization_id') = ${idx}")
+            params.append(str(target_organization_id))
+            idx += 1
+        if action:
+            where.append(f"a.action = ${idx}")
+            params.append(action)
+            idx += 1
+
+        where_sql = " AND ".join(where)
+        list_q = f"""
+            SELECT a.id, a.organization_id, a.actor_user_id, a.impersonator_user_id,
+                   a.entity_type, a.entity_id, a.entity_label, a.action,
+                   a.changed_fields, a.old_values, a.new_values,
+                   a.context, a.notes, a.outcome, a.created_at,
+                   au.display_name AS actor_display_name,
+                   au.email        AS actor_email
+            FROM admin_audit_log a
+            LEFT JOIN users au ON au.id = a.actor_user_id
+            WHERE {where_sql}
+            ORDER BY a.created_at DESC
+            LIMIT ${idx} OFFSET ${idx + 1}
+        """
+        count_q = f"SELECT COUNT(*) AS total FROM admin_audit_log a WHERE {where_sql}"
+
+        async with scoped_acquire_on(self.pool, organization_id=operator_org_id) as conn:
+            total_row = await conn.fetchrow(count_q, *params)
+            rows = await conn.fetch(list_q, *params, limit, offset)
+
+        entries = []
+        for row in rows:
+            entry = _normalize_row(row)
+            context = entry.get("context") or {}
+            entry["target_organization_id"] = context.get("target_organization_id")
+            entries.append(entry)
+
+        total_count = int(total_row["total"] if total_row else 0)
+        return {
+            "entries": entries,
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(entries) < total_count,
+        }

@@ -12,6 +12,8 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
+import asyncpg
+
 from lucent.db import get_pool
 from lucent.db.memory import MemoryRepository
 from lucent.db.pool import runner_guc_preamble, tenant_guc_scrub
@@ -36,6 +38,16 @@ STALE_TASK_REAPER_TITLE = "Stale Task Reaper"
 VITALITY_SCORING_TITLE = "Memory Vitality Scoring"
 STALE_TASK_REAPER_INTERVAL_SECONDS = int(
     os.environ.get("LUCENT_STALE_REAPER_INTERVAL_SECONDS", "120")
+)
+
+#: Grace period before an expired API key row is deleted. Recent lapses stay
+#: visible for debugging; the historical backlog is what needs clearing.
+API_KEY_PURGE_GRACE_DAYS = int(os.environ.get("LUCENT_API_KEY_PURGE_GRACE_DAYS", "30"))
+
+#: How often the loop reaps expired keys. The table grows by tens of rows a
+#: day, so hourly is plenty and keeps each run trivial.
+API_KEY_PURGE_INTERVAL_SECONDS = int(
+    os.environ.get("LUCENT_API_KEY_PURGE_INTERVAL_SECONDS", "3600")
 )
 STALE_TASK_REAPER_STALE_MINUTES = int(
     os.environ.get("LUCENT_STALE_HEARTBEAT_MINUTES", "30")
@@ -70,6 +82,7 @@ STALE_TASK_REAPER_ACTION = {
 
 _system_schedule_runner_task: asyncio.Task | None = None
 _last_vitality_scoring_at_by_org: dict[str, datetime] = {}
+_last_api_key_purge_at: datetime | None = None
 
 
 async def retire_vitality_scoring_workflow_schedules() -> int:
@@ -130,38 +143,51 @@ async def ensure_server_system_schedules() -> int:
 
     for row in rows:
         for spec in schedule_specs:
-            existing = await repo.get_system_schedule_id(
-                spec["title"], row["organization_id"]
-            )
-            sched = await repo.ensure_system_schedule(
-                title=spec["title"],
-                org_id=row["organization_id"],
-                description=spec["description"],
-                agent_type=spec["agent_type"],
-                schedule_type="interval",
-                interval_seconds=spec["interval_seconds"],
-                priority="low",
-                prompt="",
-                trigger_config={
-                    "schedule_type": "interval",
-                    "interval_seconds": spec["interval_seconds"],
-                    "timezone": "UTC",
-                    "execution_mode": "server_side",
-                    "runner": "api_process",
-                    "preflight": spec["preflight"],
-                },
-                request_template={
-                    "title_prefix": "[Server Workflow]",
-                    "title": spec["title"],
-                    "description": (
-                        "Server-side maintenance workflow. No request is created; "
-                        "results are recorded on schedule_runs."
-                    ),
-                },
-                actions=spec["actions"],
-                review_instructions=spec["review_instructions"],
-                created_by=row["daemon_user_id"],
-            )
+            try:
+                existing = await repo.get_system_schedule_id(
+                    spec["title"], row["organization_id"]
+                )
+                sched = await repo.ensure_system_schedule(
+                    title=spec["title"],
+                    org_id=row["organization_id"],
+                    description=spec["description"],
+                    agent_type=spec["agent_type"],
+                    schedule_type="interval",
+                    interval_seconds=spec["interval_seconds"],
+                    priority="low",
+                    prompt="",
+                    trigger_config={
+                        "schedule_type": "interval",
+                        "interval_seconds": spec["interval_seconds"],
+                        "timezone": "UTC",
+                        "execution_mode": "server_side",
+                        "runner": "api_process",
+                        "preflight": spec["preflight"],
+                    },
+                    request_template={
+                        "title_prefix": "[Server Workflow]",
+                        "title": spec["title"],
+                        "description": (
+                            "Server-side maintenance workflow. No request is created; "
+                            "results are recorded on schedule_runs."
+                        ),
+                    },
+                    actions=spec["actions"],
+                    review_instructions=spec["review_instructions"],
+                    created_by=row["daemon_user_id"],
+                )
+            except asyncpg.ForeignKeyViolationError:
+                # The organization was deleted between the org listing above and
+                # this insert. Since hyperadmins can purge a tenant at any moment
+                # while this runner loops every 30s, that is a normal race rather
+                # than an error: skip the departed tenant and keep seeding the
+                # rest. Without this, one deletion aborts the whole sweep and
+                # leaves every other org without its system schedules.
+                logger.info(
+                    "Skipping system schedule seeding for deleted organization %s",
+                    row["organization_id"],
+                )
+                break
             if not existing and sched:
                 created += 1
 
@@ -321,6 +347,39 @@ async def run_vitality_scoring_background_once(*, force: bool = False) -> int:
     return executed
 
 
+async def reap_expired_api_keys_once() -> dict[str, Any]:
+    """Delete API keys whose expiry has passed, keeping a grace window.
+
+    Scoped keys for task agents are minted with a 60-minute TTL, and nothing
+    used to reap them: expiry was only enforced at verification time, so the
+    row stayed ``is_active = true`` forever. On this instance that accumulated
+    22,435 permanently-dead rows, all counted as "active API keys".
+
+    Deleting them is safe: an expired key cannot authenticate, and
+    ``tool_call_audit_log.api_key_id`` is ``ON DELETE SET NULL`` so history is
+    preserved (in practice no audit row referenced an expired key anyway).
+
+    The grace window keeps a *recently* lapsed key visible when debugging;
+    only keys expired longer ago than ``API_KEY_PURGE_GRACE_DAYS`` are removed.
+    """
+    pool = await get_pool()
+    if pool is None:
+        return {"deleted": 0, "candidates": 0}
+
+    from lucent.db.api_key import ApiKeyRepository
+
+    result = await ApiKeyRepository(pool).purge_expired(
+        older_than_days=API_KEY_PURGE_GRACE_DAYS
+    )
+    if result.get("deleted"):
+        logger.info(
+            "Reaped %d expired API key(s) (grace %sd)",
+            result["deleted"],
+            API_KEY_PURGE_GRACE_DAYS,
+        )
+    return result
+
+
 async def run_server_system_schedules_once() -> int:
     """Execute due server-side built-in schedules once."""
     pool = await get_pool()
@@ -351,6 +410,24 @@ async def run_server_system_schedules_once() -> int:
     return executed
 
 
+async def _maybe_reap_expired_api_keys() -> None:
+    """Reap expired API keys at most once per interval. Never raises."""
+    global _last_api_key_purge_at
+
+    now = datetime.now(UTC)
+    if (
+        _last_api_key_purge_at is not None
+        and (now - _last_api_key_purge_at).total_seconds() < API_KEY_PURGE_INTERVAL_SECONDS
+    ):
+        return
+
+    _last_api_key_purge_at = now
+    try:
+        await reap_expired_api_keys_once()
+    except Exception:  # noqa: BLE001 — housekeeping must not kill the loop
+        logger.exception("Expired API key reap failed")
+
+
 async def _server_system_schedule_loop() -> None:
     """Poll and execute due server-side built-in schedules."""
     from lucent.db.pool import clear_tenant_scope, set_tenant_scope
@@ -371,6 +448,7 @@ async def _server_system_schedule_loop() -> None:
             set_tenant_scope(role="system")
             try:
                 await run_server_system_schedules_once()
+                await _maybe_reap_expired_api_keys()
             finally:
                 clear_tenant_scope()
             await run_vitality_scoring_background_once()

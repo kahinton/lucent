@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Created: {{ result.organization.name }}{% endblock %}
+
+{% block content %}
+<div class="mb-5">
+    <a href="/organizations/{{ result.organization.id }}" class="text-xs text-[#8f8b87] hover:underline">
+        &larr; {{ result.organization.name }}
+    </a>
+    <h1 class="mt-2 text-xl font-semibold">Organization created</h1>
+    <p class="mt-1 text-sm text-[#a7a3a0]">
+        Give these credentials to the new owner. They are shown once and cannot be retrieved again.
+    </p>
+</div>
+
+<div class="panel mb-4 rounded-xl p-5">
+    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Workspace</h2>
+    <dl class="grid gap-2 text-sm sm:grid-cols-2">
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Name</dt>
+            <dd>{{ result.organization.name }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Organization id</dt>
+            <dd class="mono text-xs">{{ result.organization.id }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Status</dt>
+            <dd><span class="chip chip-{{ result.organization.status }}">{{ result.organization.status }}</span></dd>
+        </div>
+        {% if result.model_id %}
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Model enabled</dt>
+            <dd class="mono text-xs">{{ result.model_id }}</dd>
+        </div>
+        {% endif %}
+    </dl>
+</div>
+
+<div class="panel mb-4 rounded-xl p-5">
+    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">First admin</h2>
+    <dl class="grid gap-2 text-sm sm:grid-cols-2">
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Login</dt>
+            <dd>{{ result.user.email or '(no email)' }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Role</dt>
+            <dd>{{ result.user.role }}</dd>
+        </div>
+    </dl>
+
+    {% if result.temporary_password %}
+    <div class="mt-4">
+        <div class="mb-1 text-xs uppercase tracking-wide text-[#6f6b68]">Temporary password</div>
+        <div class="flex items-center gap-2">
+            <code id="temp-password" class="mono flex-1 break-all rounded-lg border border-[#2e2e2e] bg-[#0b0b0b] px-3 py-2 text-sm">{{ result.temporary_password }}</code>
+            <button type="button" class="btn btn-quiet"
+                    onclick="navigator.clipboard.writeText(document.getElementById('temp-password').textContent); this.textContent='Copied';">Copy</button>
+        </div>
+        <p class="mt-1 text-xs text-[#6f6b68]">They must change this on first sign-in.</p>
+    </div>
+    {% endif %}
+
+    {% if result.api_key %}
+    <div class="mt-4">
+        <div class="mb-1 text-xs uppercase tracking-wide text-[#6f6b68]">Default API key</div>
+        <div class="flex items-center gap-2">
+            <code id="api-key" class="mono flex-1 break-all rounded-lg border border-[#2e2e2e] bg-[#0b0b0b] px-3 py-2 text-sm">{{ result.api_key }}</code>
+            <button type="button" class="btn btn-quiet"
+                    onclick="navigator.clipboard.writeText(document.getElementById('api-key').textContent); this.textContent='Copied';">Copy</button>
+        </div>
+        <p class="mt-1 text-xs text-[#6f6b68]">
+            Treat this like a password: it authenticates as the admin above.
+        </p>
+    </div>
+    {% endif %}
+</div>
+
+{% if result.seeded %}
+<div class="panel mb-4 rounded-xl p-5">
+    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Seeded</h2>
+    <div class="flex flex-wrap gap-2 text-xs">
+        {% for kind, count in result.seeded.items() %}
+        <span class="chip bg-[#1a1a1a] text-[#a7a3a0]">{{ kind }}: {{ count }}</span>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if result.warnings %}
+<div class="mb-4 rounded-lg border border-[#45201f] bg-[#2a1313] px-4 py-3 text-sm text-[#ffb4b4]">
+    <div class="mb-1 font-semibold">Provisioning completed with warnings</div>
+    <ul class="list-disc pl-5">
+        {% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<div class="flex items-center gap-3">
+    <a href="/organizations/{{ result.organization.id }}" class="btn btn-primary">Open organization</a>
+    <a href="/organizations/new" class="btn btn-quiet">Create another</a>
+    <a href="/" class="btn btn-quiet">All organizations</a>
+</div>
+{% endblock %}

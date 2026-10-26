@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Status{% endblock %}
+
+{% block content %}
+<div class="mb-5">
+    <h1 class="text-xl font-semibold">Connection status</h1>
+    <p class="mt-1 text-sm text-[#a7a3a0]">
+        What this console can see and do against the Lucent instance it is pointed at.
+    </p>
+</div>
+
+<div class="panel mb-4 rounded-xl p-5">
+    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Lucent</h2>
+    <dl class="grid gap-3 text-sm sm:grid-cols-2">
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">API base URL</dt>
+            <dd class="mono text-xs">{{ base_url }}</dd>
+        </div>
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Health</dt>
+            <dd>
+                {% if health_ok %}
+                <span class="chip chip-active">reachable</span>
+                {% else %}
+                <span class="chip chip-suspended">unreachable</span>
+                {% endif %}
+            </dd>
+        </div>
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">API key</dt>
+            <dd>
+                {% if key_ok %}
+                <span class="chip chip-active">valid</span>
+                {% elif key_error %}
+                <span class="chip chip-suspended">rejected</span>
+                {% else %}
+                <span class="chip bg-[#1a1a1a] text-[#8f8b87]">unknown</span>
+                {% endif %}
+            </dd>
+        </div>
+        {% if identity %}
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Operator</dt>
+            <dd>
+                {{ identity.display_name or identity.email or identity.id }}
+                <span class="chip bg-[#1a1a1a] text-[#a7a3a0]">{{ identity.role }}</span>
+            </dd>
+        </div>
+        <div>
+            <dt class="text-xs uppercase tracking-wide text-[#6f6b68]">Home organization</dt>
+            <dd class="mono text-xs">{{ identity.organization_id or '—' }}</dd>
+        </div>
+        {% endif %}
+    </dl>
+
+    {% if key_error %}
+    <div class="mt-4 rounded-lg border border-[#45201f] bg-[#2a1313] px-4 py-3 text-sm text-[#ffb4b4]">
+        {{ key_error }}
+    </div>
+    {% endif %}
+
+    {% if mode_warning %}
+    <div class="mt-4 rounded-lg border border-[#45201f] bg-[#2a1313] px-4 py-3 text-sm text-[#ffb4b4]">
+        {{ mode_warning }}
+    </div>
+    {% endif %}
+</div>
+
+<div class="panel rounded-xl p-5">
+    <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Checklist</h2>
+    <ul class="space-y-2 text-sm">
+        <li class="flex items-start gap-2">
+            <span class="{% if health_ok %}text-[#6ee7b7]{% else %}text-[#c2564f]{% endif %}">●</span>
+            <span>Server reachable at <span class="mono text-xs">{{ base_url }}</span></span>
+        </li>
+        <li class="flex items-start gap-2">
+            <span class="{% if key_ok %}text-[#6ee7b7]{% else %}text-[#c2564f]{% endif %}">●</span>
+            <span>
+                API key authenticates
+                {% if key_error %}<span class="block text-xs text-[#8f8b87]">{{ key_error }}</span>{% endif %}
+            </span>
+        </li>
+        <li class="flex items-start gap-2">
+            <span class="{% if identity and identity.role == 'hyperadmin' %}text-[#6ee7b7]{% else %}text-[#c2564f]{% endif %}">●</span>
+            <span>
+                Key belongs to a hyperadmin
+                {% if identity and identity.role != 'hyperadmin' %}
+                <span class="block text-xs text-[#8f8b87]">
+                    Role is <span class="mono">{{ identity.role }}</span>. Instance routes will return 403.
+                    Promote it with <span class="mono">python -m lucent.hyperadmin grant --email …</span>
+                </span>
+                {% endif %}
+            </span>
+        </li>
+        <li class="flex items-start gap-2">
+            <span class="{% if org_api_ok %}text-[#6ee7b7]{% else %}text-[#c2564f]{% endif %}">●</span>
+            <span>
+                Organization API reachable
+                {% if not org_api_ok %}
+                <span class="block text-xs text-[#8f8b87]">
+                    The <span class="mono">/api/organizations</span> router is not registered on
+                    this server, which means it is an older build. It is always mounted now, so
+                    upgrading Lucent resolves this.
+                </span>
+                {% endif %}
+            </span>
+        </li>
+    </ul>
+</div>
+{% endblock %}

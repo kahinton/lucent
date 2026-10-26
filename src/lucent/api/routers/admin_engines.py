@@ -13,13 +13,14 @@ from fastapi import APIRouter, HTTPException
 
 from lucent.api.deps import AuthenticatedUser
 from lucent.llm.engine_registry import ENGINE_REGISTRY, engine_availability
+from lucent.rbac import is_admin_role
 
 router = APIRouter()
 
 
 def _require_admin_user(user: AuthenticatedUser) -> None:
     role = user.role.value if hasattr(user.role, "value") else str(user.role)
-    if role not in ("admin", "owner"):
+    if not is_admin_role(role):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 

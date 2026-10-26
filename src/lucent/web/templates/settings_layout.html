@@ -27,7 +27,6 @@
 {% set role_value = (user.role.value if user.role.__class__.__name__ == 'Role' else user.role) %}
 {% set is_admin = role_value in ('admin', 'owner') %}
 {% set is_owner = role_value == 'owner' %}
-{% set tm = team_mode() %}
 
 <div class="mb-4">
     <h1 class="text-xl font-semibold text-gray-900">Settings</h1>

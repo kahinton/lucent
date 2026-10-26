@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in · Lucent ops console</title>
+    <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
+    <style>
+        :root { color-scheme: dark; }
+        body { background: #080808; }
+        .field { background: #0b0b0b; border: 1px solid #2e2e2e; color: #f7f5f1; }
+        .field:focus { outline: none; border-color: #00b8ad; box-shadow: 0 0 0 1px #00b8ad; }
+        .btn-primary { background: #00b8ad; color: #04211f; }
+        .btn-primary:hover { background: #00d4c7; }
+    </style>
+</head>
+<body class="min-h-full text-[#f7f5f1] antialiased">
+<div class="mx-auto flex min-h-[80vh] max-w-md flex-col justify-center px-5">
+    <div class="mb-6 flex items-center gap-2">
+        <img src="/static/lucent_logo_v2.svg" alt="" class="h-8 w-8">
+        <div>
+            <div class="text-sm font-semibold">Lucent</div>
+            <div class="text-xs uppercase tracking-widest text-[#8f8b87]">Ops console</div>
+        </div>
+    </div>
+
+    <div class="rounded-xl border border-[#262626] bg-[#121212] p-6">
+        <h1 class="mb-1 text-lg font-semibold">Operator sign-in</h1>
+        <p class="mb-5 text-sm text-[#a7a3a0]">
+            Enter the console passphrase to administer this instance.
+        </p>
+
+        {% if error %}
+        <div class="mb-4 rounded-lg border border-[#45201f] bg-[#2a1313] px-3 py-2 text-sm text-[#ffb4b4]">
+            {{ error }}
+        </div>
+        {% endif %}
+
+        <form method="post" action="/login" class="space-y-4">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div>
+                <label for="token" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Passphrase
+                </label>
+                <input id="token" name="token" type="password" required autofocus
+                       autocomplete="current-password"
+                       class="field w-full rounded-lg px-3 py-2 text-sm">
+            </div>
+            <button type="submit" class="btn-primary w-full rounded-lg px-3 py-2 text-sm font-semibold">
+                Sign in
+            </button>
+        </form>
+    </div>
+
+    <p class="mt-5 text-xs leading-relaxed text-[#6f6b68]">
+        The passphrase is <span class="mono">LUCENT_OPS_CONSOLE_TOKEN</span>. It guards this UI only —
+        the console's API key stays on the server. Binding is
+        <span class="mono">127.0.0.1</span> by default, so this page is only reachable from this machine.
+    </p>
+</div>
+</body>
+</html>

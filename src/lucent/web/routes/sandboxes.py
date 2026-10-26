@@ -14,6 +14,7 @@ from lucent.db import get_pool
 from lucent.db.groups import GroupRepository
 from lucent.db.user import UserRepository
 from lucent.logging import get_logger
+from lucent.rbac import is_admin_role
 from lucent.sandbox.models import validate_extra_hosts
 from lucent.secrets import SecretRegistry, resolve_env_vars
 
@@ -138,7 +139,7 @@ async def _resolve_owner_scope(form_data, user, pool) -> tuple[str | None, str |
 def _require_admin_or_owner(user) -> None:
     """Raise 403 if user is not admin or owner."""
     role_value = user.role if isinstance(user.role, str) else user.role.value
-    if role_value not in ("admin", "owner"):
+    if not is_admin_role(role_value):
         raise HTTPException(status_code=403, detail="Permission denied")
 
 
@@ -189,7 +190,7 @@ async def sandboxes_page(
     total_count = 0
     try:
         if org_id:
-            if role_value in ("admin", "owner"):
+            if is_admin_role(role_value):
                 # Management view: admins/owners see every org template.
                 tpl_repo = SandboxTemplateRepository(pool)
                 limit = per_page if active_tab == "templates" else 1000
@@ -238,7 +239,7 @@ async def sandboxes_page(
 
         manager = get_sandbox_manager()
         try:
-            if role_value in ("admin", "owner"):
+            if is_admin_role(role_value):
                 if show == "active":
                     sb_result = await manager.list_active(
                         org_id, limit=per_page, offset=offset
@@ -282,7 +283,7 @@ async def sandboxes_page(
     # arbitrary work, so the list is not exposed to members.
     remote_list: list[dict] = []
     remote_token: str | None = None
-    if active_tab == "remotes" and org_id and role_value in ("admin", "owner"):
+    if active_tab == "remotes" and org_id and is_admin_role(role_value):
         from lucent.db.remotes import RemoteRepository
 
         try:
@@ -721,7 +722,7 @@ async def _get_sandbox_for_user_web(manager, user, sandbox_id: str) -> dict:
         raise HTTPException(404, "Sandbox not found")
     role_value = user.role if isinstance(user.role, str) else user.role.value
     created_by = sandbox.get("created_by")
-    if role_value not in ("admin", "owner") and (
+    if not is_admin_role(role_value) and (
         not created_by or str(created_by) != str(user.id)
     ):
         raise HTTPException(404, "Sandbox not found")

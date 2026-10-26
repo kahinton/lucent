@@ -32,6 +32,17 @@ logger = get_logger(__name__)
 API_KEY_PREFIXES = ("hs_", "lr_")
 
 
+def _affected(status: str | None) -> int:
+    """Extract the row count from an asyncpg command tag (e.g. ``DELETE 42``)."""
+    if not status:
+        return 0
+    _, _, count = str(status).partition(" ")
+    try:
+        return int(count)
+    except (TypeError, ValueError):
+        return 0
+
+
 class ApiKeyRepository:
     """Repository for API key CRUD operations."""
 
@@ -316,6 +327,92 @@ class ApiKeyRepository:
             return None
 
         return self._row_to_dict(row)
+
+    async def purge_expired(
+        self,
+        *,
+        older_than_days: int = 0,
+        organization_id: UUID | str | None = None,
+        dry_run: bool = False,
+        batch_size: int = 1000,
+    ) -> dict[str, Any]:
+        """Delete keys whose ``expires_at`` has already passed.
+
+        Nothing else in the system reaps these. Expiry is enforced at
+        verification time (``verify`` refuses a lapsed key), but the row stays
+        ``is_active = true`` forever, so any count filtered on
+        ``is_active AND revoked_at IS NULL`` grows without bound. On this
+        instance that produced 22,435 permanently-dead rows being reported as
+        "active API keys".
+
+        Only *expired* keys are eligible — a key with ``expires_at IS NULL``
+        never expires and is never touched, and neither is a key that is still
+        live.
+
+        Deletion is batched. ``api_keys`` carries an ``AFTER DELETE`` trigger
+        per row that deletes the key's ``auth_clearances`` entry, so a single
+        statement over tens of thousands of rows runs long enough to hit
+        asyncpg's command timeout and roll back the whole thing.
+
+        Args:
+            older_than_days: Keep expired keys for this long past expiry, so a
+                recent lapse is still visible when debugging. 0 deletes all.
+            organization_id: Restrict to one tenant (system-wide when omitted).
+            dry_run: Report what would be deleted without deleting.
+            batch_size: Rows per statement.
+
+        Returns:
+            ``{"deleted": n, "candidates": n, "older_than_days": d}``.
+        """
+        where = [
+            "expires_at IS NOT NULL",
+            "expires_at < NOW() - make_interval(days => $1)",
+        ]
+        params: list[Any] = [older_than_days]
+        if organization_id:
+            params.append(str(organization_id))
+            where.append(f"organization_id = ${len(params)}::uuid")
+        where_sql = " AND ".join(where)
+
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, role="system"
+        ) as conn:
+            candidates = await conn.fetchval(
+                f"SELECT COUNT(*) FROM api_keys WHERE {where_sql}", *params
+            )
+            candidates = int(candidates or 0)
+            if dry_run or candidates == 0:
+                return {
+                    "deleted": 0,
+                    "candidates": candidates,
+                    "older_than_days": older_than_days,
+                }
+
+            deleted = 0
+            while True:
+                # ``ctid`` keeps each batch a single pass; re-running the
+                # predicate each time is what shrinks the result set.
+                status = await conn.execute(
+                    f"""
+                    DELETE FROM api_keys
+                    WHERE ctid IN (
+                        SELECT ctid FROM api_keys
+                        WHERE {where_sql}
+                        LIMIT {int(batch_size)}
+                    )
+                    """,
+                    *params,
+                )
+                count = _affected(status)
+                deleted += count
+                if count < batch_size:
+                    break
+
+        return {
+            "deleted": deleted,
+            "candidates": candidates,
+            "older_than_days": older_than_days,
+        }
 
     async def revoke_any(
         self, key_id: UUID, *, organization_id: UUID | str | None

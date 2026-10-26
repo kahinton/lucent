@@ -74,6 +74,126 @@ def test_cancel_channel_and_sweep_exist():
     assert "task_cancel" in inspect.getsource(loops.RuntimeLoopsMixin._setup_listen)
 
 
+class _CancelTarget:
+    """Minimal stand-in exposing the instance state the cancel paths touch.
+
+    The bug this guards against is *which handle* the code uses, not the logic:
+    the coordination dicts live on the daemon instance, but the code reached for
+    them through the module proxy (which resolves to the ``__main__`` module and
+    so has none of them). Passing a plain object with those attributes makes the
+    difference observable — if the code goes back to ``runtime._active_...`` the
+    attribute simply is not there and the test fails.
+    """
+
+    def __init__(self, sessions: dict[str, str]):
+        self._active_task_sessions = dict(sessions)
+        self._active_session_tasks: dict[str, object] = {}
+        self._cancelled_sessions: set[str] = set()
+
+
+def test_cancel_notification_interrupts_only_the_owning_session():
+    """A cancel must reach the provider task for *that* task and no other."""
+    import asyncio
+    import json
+
+    from daemon.runtime import loops
+
+    async def scenario():
+        target = _CancelTarget({"task-abc": "session-1"})
+
+        cancelled: list[str] = []
+
+        class _ProviderTask:
+            def __init__(self, name):
+                self.name = name
+
+            def done(self):
+                return False
+
+            def cancel(self):
+                cancelled.append(self.name)
+
+        target._active_session_tasks["session-1"] = _ProviderTask("session-1")
+        target._active_session_tasks["session-2"] = _ProviderTask("session-2")
+
+        loops.RuntimeLoopsMixin._on_task_cancel(
+            target, None, None, "task_cancel", json.dumps({"task_id": "task-abc"})
+        )
+        return target, cancelled
+
+    target, cancelled = asyncio.run(scenario())
+    assert cancelled == ["session-1"], "only the owning session may be interrupted"
+    assert target._cancelled_sessions == {"session-1"}
+
+
+def test_cancel_notification_for_unknown_task_is_a_noop():
+    """A cancel for a task this instance is not running must not raise."""
+    import asyncio
+    import json
+
+    from daemon.runtime import loops
+
+    async def scenario():
+        target = _CancelTarget({})
+        loops.RuntimeLoopsMixin._on_task_cancel(
+            target, None, None, "task_cancel", json.dumps({"task_id": "not-ours"})
+        )
+        return target
+
+    target = asyncio.run(scenario())
+    assert target._cancelled_sessions == set()
+
+
+def test_sweep_interrupts_sessions_for_outstanding_cancels():
+    """The durable sweep must act on DB-reported cancels, not raise.
+
+    This is the half that covers a dropped LISTEN connection, so it is the
+    guarantee that a cancel survives a reconnect. It used to raise on its first
+    statement and skip the query entirely.
+    """
+    import asyncio
+
+    from daemon.runtime import loops
+
+    async def scenario():
+        target = _CancelTarget({"task-abc": "session-1"})
+        cancelled: list[str] = []
+
+        class _ProviderTask:
+            def done(self):
+                return False
+
+            def cancel(self):
+                cancelled.append("session-1")
+
+        target._active_session_tasks["session-1"] = _ProviderTask()
+
+        async def _org_id():
+            return "org-1"
+
+        target._get_daemon_org_id = _org_id
+
+        class _API:
+            @staticmethod
+            async def list_requested_cancels(org_id, task_ids):
+                assert task_ids == ["task-abc"]
+                return [{"id": "task-abc"}]
+
+        from daemon.runtime.module_proxy import runtime
+
+        original = runtime.RequestAPI
+        runtime.RequestAPI = _API
+        try:
+            await loops.RuntimeLoopsMixin._sweep_requested_cancels(target)
+        finally:
+            runtime.RequestAPI = original
+        return target, cancelled
+
+    target, cancelled = asyncio.run(scenario())
+    assert cancelled == ["session-1"]
+    assert target._cancelled_sessions == {"session-1"}
+
+
 def test_dispatch_predicate_skips_cancelled_tasks():
     from lucent.db.requests import (
         DISPATCHABLE_TASK_PREDICATE,

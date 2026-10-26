@@ -29,7 +29,7 @@ from lucent.db import (
     UserRepository,
     get_pool,
 )
-from lucent.mode import is_team_mode
+from lucent.mode import deployment_label
 from lucent.rbac import Role
 
 logger = logging.getLogger(__name__)
@@ -80,8 +80,10 @@ def _static_asset_version(relative_path: str) -> str:
         return "0"
 
 
-# Make deployment mode and CSRF available to all templates
-templates.env.globals["team_mode"] = is_team_mode
+# Deployment label for display only. There is deliberately no `team_mode()`
+# predicate in templates: capability is decided by permissions, not by mode, so
+# templates must not branch on it.
+templates.env.globals["deployment_label"] = deployment_label
 templates.env.globals["csrf_field_name"] = CSRF_FIELD_NAME
 templates.env.globals["static_version"] = _static_asset_version
 

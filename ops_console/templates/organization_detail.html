@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% block title %}{{ organization.name }}{% endblock %}
+
+{% block content %}
+<div class="mb-5">
+    <a href="/" class="text-xs text-[#8f8b87] hover:underline">&larr; Organizations</a>
+    <div class="mt-2 flex flex-wrap items-center gap-3">
+        <h1 class="text-xl font-semibold">{{ organization.name }}</h1>
+        <span class="chip chip-{{ organization.status }}">{{ organization.status }}</span>
+    </div>
+    <div class="mono mt-1 text-[11px] text-[#6f6b68]">{{ organization.id }}</div>
+</div>
+
+<div class="mb-5 grid gap-3 sm:grid-cols-4">
+    <div class="panel rounded-xl px-4 py-3">
+        <div class="text-xs uppercase tracking-wide text-[#8f8b87]">Members</div>
+        <div class="mt-1 text-2xl font-semibold">{{ organization.user_count if organization.user_count is not none else '—' }}</div>
+    </div>
+    <div class="panel rounded-xl px-4 py-3">
+        <div class="text-xs uppercase tracking-wide text-[#8f8b87]">Admins</div>
+        <div class="mt-1 text-2xl font-semibold">{{ organization.admin_count if organization.admin_count is not none else '—' }}</div>
+    </div>
+    <div class="panel rounded-xl px-4 py-3">
+        <div class="text-xs uppercase tracking-wide text-[#8f8b87]">API keys</div>
+        <div class="mt-1 text-2xl font-semibold">{{ organization.api_key_count if organization.api_key_count is not none else '—' }}</div>
+    </div>
+    <div class="panel rounded-xl px-4 py-3">
+        <div class="text-xs uppercase tracking-wide text-[#8f8b87]">Created</div>
+        <div class="mt-2 text-sm text-[#d6d2ce]">{{ organization.created_at | shortdate }}</div>
+    </div>
+</div>
+
+{% if not organization.owner_names and organization.owner_names is not none %}
+<div class="mb-5 rounded-lg border border-[#45201f] bg-[#2a1313] px-4 py-3 text-sm text-[#ffb4b4]">
+    This organization has no active owner. Nobody can change its settings, manage billing, or
+    transfer ownership until one exists.
+</div>
+{% endif %}
+
+<!-- Lifecycle ---------------------------------------------------------- -->
+<div class="panel mb-5 rounded-xl p-5">
+    <h2 class="mb-4 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Lifecycle</h2>
+    <div class="flex flex-wrap items-center gap-3">
+        {% if organization.status == 'active' %}
+        <form method="post" action="/organizations/{{ organization.id }}/suspend"
+              onsubmit="return confirm('Suspend {{ organization.name }}? Members will be signed out and API keys will stop working. All data is retained.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-quiet" type="submit">Suspend</button>
+        </form>
+        <p class="text-xs text-[#6f6b68]">Blocks sign-in and API keys. Nothing is deleted.</p>
+        {% else %}
+        <form method="post" action="/organizations/{{ organization.id }}/resume">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-primary" type="submit">Resume</button>
+        </form>
+        <p class="text-xs text-[#6f6b68]">
+            Suspended {{ organization.suspended_at | shortdate if organization.suspended_at else '' }}.
+        </p>
+        {% endif %}
+    </div>
+
+    <div class="mt-5 border-t border-[#1f1f1f] pt-4">
+        <form method="post" action="/organizations/{{ organization.id }}/rename" class="flex flex-wrap items-end gap-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="min-w-[16rem] flex-1">
+                <label for="name" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">
+                    Rename
+                </label>
+                <input id="name" name="name" value="{{ organization.name }}" required maxlength="255"
+                       class="field w-full rounded-lg px-3 py-2 text-sm">
+            </div>
+            <button class="btn btn-quiet" type="submit">Save name</button>
+        </form>
+    </div>
+</div>
+
+<!-- Members ------------------------------------------------------------ -->
+<div class="panel mb-5 rounded-xl p-5">
+    <div class="mb-4 flex items-center justify-between">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Members</h2>
+    </div>
+
+    {% if users %}
+    <table class="w-full text-sm">
+        <thead class="border-b border-[#262626] text-left text-xs uppercase tracking-wide text-[#8f8b87]">
+            <tr>
+                <th class="py-2 font-medium">Member</th>
+                <th class="py-2 font-medium">Role</th>
+                <th class="py-2 font-medium">State</th>
+                <th class="py-2 font-medium">Last login</th>
+                <th class="py-2"></th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-[#1f1f1f]">
+            {% for member in users %}
+            <tr>
+                <td class="py-2.5">
+                    <div class="font-medium">{{ member.display_name or member.email or member.external_id }}</div>
+                    {% if member.email and member.display_name %}
+                    <div class="text-xs text-[#8f8b87]">{{ member.email }}</div>
+                    {% endif %}
+                </td>
+                <td class="py-2.5">
+                    <form method="post" action="/organizations/{{ organization.id }}/users/{{ member.id }}/role"
+                          class="flex items-center gap-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <select name="role" class="field rounded-lg px-2 py-1 text-xs">
+                            {% for role in ['member', 'admin', 'owner'] %}
+                            <option value="{{ role }}" {% if member.role == role %}selected{% endif %}>{{ role }}</option>
+                            {% endfor %}
+                        </select>
+                        <button class="text-xs text-[#8f8b87] underline-offset-2 hover:underline" type="submit">set</button>
+                    </form>
+                </td>
+                <td class="py-2.5">
+                    {% if member.is_active %}
+                    <span class="chip chip-active">active</span>
+                    {% else %}
+                    <span class="chip chip-suspended">inactive</span>
+                    {% endif %}
+                </td>
+                <td class="py-2.5 text-xs text-[#8f8b87]">{{ member.last_login_at | shortdate }}</td>
+                <td class="py-2.5 text-right">
+                    <div class="flex justify-end gap-2">
+                        <form method="post" action="/organizations/{{ organization.id }}/users/{{ member.id }}/reset-password"
+                              onsubmit="return confirm('Reset {{ member.email or member.display_name or member.id }} password? They will be signed out everywhere and must change it at next login.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button class="text-xs text-[#a7a3a0] underline-offset-2 hover:underline" type="submit">reset password</button>
+                        </form>
+                        <form method="post" action="/organizations/{{ organization.id }}/users/{{ member.id }}/api-key">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button class="text-xs text-[#a7a3a0] underline-offset-2 hover:underline" type="submit">new key</button>
+                        </form>
+                        <form method="post" action="/organizations/{{ organization.id }}/users/{{ member.id }}/delete"
+                              onsubmit="return confirm('Remove {{ member.email or member.display_name or member.id }}? Their memories and API keys are deleted too.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button class="text-xs text-[#c2564f] underline-offset-2 hover:underline" type="submit">remove</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="rounded-lg border border-[#45201f] bg-[#2a1313] px-4 py-3 text-sm text-[#ffb4b4]">
+        No human members. This workspace cannot be signed into or administered by a customer.
+        Add an owner below.
+    </p>
+    {% endif %}
+
+    <div class="mt-5 border-t border-[#1f1f1f] pt-4">
+        <h3 class="mb-3 text-xs font-semibold uppercase tracking-wide text-[#8f8b87]">Add a member</h3>
+        <form method="post" action="/organizations/{{ organization.id }}/users" class="flex flex-wrap items-end gap-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="min-w-[12rem] flex-1">
+                <label for="email" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">Email</label>
+                <input id="email" name="email" type="email" class="field w-full rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div class="min-w-[10rem] flex-1">
+                <label for="display_name" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">Display name</label>
+                <input id="display_name" name="display_name" class="field w-full rounded-lg px-3 py-2 text-sm">
+            </div>
+            <div>
+                <label for="role" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#8f8b87]">Role</label>
+                <select id="role" name="role" class="field rounded-lg px-3 py-2 text-sm">
+                    <option value="owner">owner</option>
+                    <option value="admin">admin</option>
+                    <option value="member">member</option>
+                </select>
+            </div>
+            <label class="flex items-center gap-2 pb-2 text-xs text-[#a7a3a0]">
+                <input type="checkbox" name="mint_api_key" value="true" class="h-3.5 w-3.5">
+                mint a key
+            </label>
+            <button class="btn btn-primary" type="submit">Add member</button>
+        </form>
+        <p class="mt-2 text-xs text-[#6f6b68]">
+            A temporary password is generated and shown once after the member is created.
+        </p>
+    </div>
+</div>
+
+<!-- Settings ----------------------------------------------------------- -->
+<div class="panel mb-5 rounded-xl p-5">
+    <h2 class="mb-1 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Runtime settings</h2>
+    <p class="mb-4 text-xs text-[#6f6b68]">
+        Applied to this organization immediately. <span class="mono">DB</span> means an explicit override;
+        <span class="mono">env</span>/<span class="mono">default</span> mean it inherits the instance value.
+    </p>
+
+    {% if settings_sections %}
+        {% for section, entries in settings_sections.items() %}
+        <details class="mb-2 rounded-lg border border-[#242424] bg-[#0e0e0e]" {% if loop.index == 1 %}open{% endif %}>
+            <summary class="cursor-pointer select-none px-4 py-2.5 text-sm font-medium">
+                {{ section }}
+                <span class="ml-1 text-xs text-[#6f6b68]">({{ entries | length }})</span>
+            </summary>
+            <div class="divide-y divide-[#1c1c1c] border-t border-[#1c1c1c]">
+                {% for setting in entries %}
+                <form method="post" action="/organizations/{{ organization.id }}/settings/{{ setting.key }}"
+                      class="flex flex-wrap items-center gap-3 px-4 py-2.5">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <div class="min-w-[14rem] flex-1">
+                        <div class="text-sm">{{ setting.title }}</div>
+                        <div class="mono text-[11px] text-[#6f6b68]">{{ setting.key }}</div>
+                    </div>
+                    <span class="chip {% if setting.source == 'database' %}chip-active{% else %}bg-[#1a1a1a] text-[#8f8b87]{% endif %}">
+                        {{ setting.source }}
+                    </span>
+                    <div class="w-[16rem]">
+                        {% if setting.value_type == 'boolean' %}
+                        <select name="value" class="field w-full rounded-lg px-2 py-1.5 text-sm">
+                            <option value="true" {% if setting.value %}selected{% endif %}>true</option>
+                            <option value="false" {% if not setting.value %}selected{% endif %}>false</option>
+                        </select>
+                        {% else %}
+                        <input name="value" value="{{ setting.value }}"
+                               class="field w-full rounded-lg px-2 py-1.5 text-sm"
+                               placeholder="{{ setting.value_type }}">
+                        {% endif %}
+                    </div>
+                    <button class="btn btn-quiet" type="submit">Save</button>
+                    {% if setting.source == 'database' %}
+                    <button class="text-xs text-[#c2564f] underline-offset-2 hover:underline"
+                            type="submit" name="reset" value="true"
+                            formaction="/organizations/{{ organization.id }}/settings/{{ setting.key }}?reset=true">reset</button>
+                    {% endif %}
+                </form>
+                {% endfor %}
+            </div>
+        </details>
+        {% endfor %}
+    {% else %}
+    <p class="text-sm text-[#a7a3a0]">No runtime settings were returned for this organization.</p>
+    {% endif %}
+</div>
+
+<!-- Audit -------------------------------------------------------------- -->
+<div class="panel mb-5 rounded-xl p-5">
+    <div class="mb-4 flex items-center justify-between">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Recent activity</h2>
+        <a href="/audit?organization_id={{ organization.id }}"
+           class="text-xs text-[#8f8b87] underline-offset-2 hover:underline">Full instance audit</a>
+    </div>
+    {% if audit %}
+    <ul class="space-y-2 text-sm">
+        {% for entry in audit %}
+        <li class="flex flex-wrap items-baseline gap-2 border-b border-[#1c1c1c] pb-2 last:border-0">
+            <span class="mono text-[11px] text-[#6f6b68]">{{ entry.created_at | shortdate }}</span>
+            <span class="chip bg-[#1a1a1a] text-[#a7a3a0]">{{ entry.action }}</span>
+            <span class="text-[#d6d2ce]">{{ entry.entity_label or entry.entity_type }}</span>
+            {% if entry.actor_display_name %}
+            <span class="text-xs text-[#6f6b68]">by {{ entry.actor_display_name }}</span>
+            {% endif %}
+            {% if entry.notes %}
+            <span class="text-xs text-[#8f8b87]">— {{ entry.notes }}</span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-sm text-[#a7a3a0]">No audit entries recorded for this organization yet.</p>
+    {% endif %}
+</div>
+
+<!-- Danger ------------------------------------------------------------- -->
+<div class="rounded-xl border border-[#3a1c1a] bg-[#170d0d] p-5">
+    <h2 class="mb-1 text-sm font-semibold uppercase tracking-wide text-[#c2564f]">Delete organization</h2>
+    <p class="mb-4 text-xs text-[#a7a3a0]">
+        Permanently deletes every member, memory, request, definition, and file belonging to this
+        workspace. There is no undo and no backup made by this tool.
+    </p>
+    <form method="post" action="/organizations/{{ organization.id }}/delete" class="flex flex-wrap items-end gap-3"
+          onsubmit="return confirm('Permanently delete {{ organization.name }} and all of its data?');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="min-w-[16rem] flex-1">
+            <label for="confirm_name" class="mb-1 block text-xs font-medium uppercase tracking-wide text-[#c2564f]">
+                Type the organization name to confirm
+            </label>
+            <input id="confirm_name" name="confirm_name" required autocomplete="off"
+                   placeholder="{{ organization.name }}"
+                   class="field w-full rounded-lg px-3 py-2 text-sm">
+        </div>
+        <button class="btn btn-danger" type="submit">Delete permanently</button>
+    </form>
+</div>
+{% endblock %}

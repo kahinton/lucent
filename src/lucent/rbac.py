@@ -227,6 +227,41 @@ ROLE_PERMISSIONS[Role.HYPERADMIN] = ROLE_PERMISSIONS[Role.OWNER] | {
 }
 
 
+# ---------------------------------------------------------------------------
+# Role groups
+# ---------------------------------------------------------------------------
+#
+# Route guards used to spell role sets out as literal tuples — ("admin",
+# "owner") — which silently excluded the instance operator from every tenant
+# screen even though ``ROLE_PERMISSIONS`` grants hyperadmin a superset of owner.
+# The role hierarchy means hyperadmin >= owner > admin, so these groups are the
+# correct membership test anywhere a coarse role check is still used. Prefer a
+# ``Permission`` check in new code.
+
+#: Roles allowed wherever an "admin" is required.
+ADMIN_ROLES: frozenset[str] = frozenset({"admin", "owner", "hyperadmin"})
+
+#: Roles allowed wherever an "owner" is required (tenant-controlling roles).
+OWNER_ROLES: frozenset[str] = frozenset({"owner", "hyperadmin"})
+
+
+def role_name(role: Role | str | None) -> str:
+    """Normalize a role (enum or string) to its string value."""
+    if isinstance(role, Role):
+        return role.value
+    return str(role or "")
+
+
+def is_admin_role(role: Role | str | None) -> bool:
+    """True when ``role`` is an admin, owner, or instance operator."""
+    return role_name(role) in ADMIN_ROLES
+
+
+def is_owner_role(role: Role | str | None) -> bool:
+    """True when ``role`` is an owner or instance operator."""
+    return role_name(role) in OWNER_ROLES
+
+
 def has_permission(role: Role | str, permission: Permission) -> bool:
     """Check if a role has a specific permission.
 
