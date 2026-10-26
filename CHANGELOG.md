@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The bare `daemon-service` identity is retired (migration 150).** Migration
+  017 created one instance-wide daemon account; multi-tenancy replaced it with
+  one per organization (`daemon-service:{org_id}`), but nine code paths kept
+  accepting either form. That left a dormant privilege path: the legacy account
+  could not authenticate (no password, zero API keys) yet still held 1,248 memory
+  read clearances and owner clearances on 40 definitions, and an unscoped daemon
+  key is documented as "acting as the org's first owner" for memory visibility —
+  so access was determined by a **name prefix** rather than by role or
+  clearance. Clearances were reassigned (built-in definitions to the
+  organization's own daemon, everything else to the human owner) and the account
+  deactivated. Every `external_id = 'daemon-service'` check is now the
+  `daemon-service:` prefix form only.
+  The row itself is kept, deactivated: ~19,200 rows reference it through
+  `NO ACTION` foreign keys (9,801 task requesters, 4,632 request creators, 4,614
+  audit rows), and deleting it would mean rewriting years of authorship and
+  audit provenance. With no credentials it cannot authenticate, so the security
+  objective is met without falsifying history.
 - **`LUCENT_MODE` no longer gates anything.** It is now reporting only: it sets
   a UI label (`Team` / `Personal`) and a startup log line. The organization,
   users, groups, audit, and access routers are mounted unconditionally, so an

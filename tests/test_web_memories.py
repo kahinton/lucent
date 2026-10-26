@@ -565,8 +565,10 @@ class TestMemoryDetail:
         resp = await admin_client.get(f"/memories/{scoped_daemon_memory['id']}")
         assert resp.status_code == 200
         assert f'href="/memories/{scoped_daemon_memory["id"]}/edit"' in resp.text
-        assert f'action="/memories/{scoped_daemon_memory["id"]}/delete"' not in resp.text
-        assert "Read-only" not in resp.text
+        # An admin may delete a daemon-authored memory (they hold
+        # MEMORY_DELETE_ANY); what matters is that the owner-only share
+        # control is absent, because the admin does not own the row.
+        assert f'action="/memories/{scoped_daemon_memory["id"]}/share"' not in resp.text
 
     async def test_detail_does_not_show_legacy_feedback_for_daemon_tag(
         self, client, db_pool, web_user, web_prefix
@@ -834,14 +836,22 @@ class TestMemoryEditSubmit:
 
 
 class TestMemoryShare:
-    async def test_share_returns_404_in_non_team_mode(self, client, web_memory):
-        """Default test env is not team mode, so share returns 404."""
+    async def test_share_is_not_gated_by_deployment_mode(self, client, web_memory):
+        """Sharing is a permission, not a mode.
+
+        This used to return 404 unless ``LUCENT_MODE=team``; capability is now
+        decided by ``Permission.MEMORY_SHARE`` and the access-control layer, so
+        a signed-in owner may share in any mode.
+        """
         resp = await client.post(
             f"/memories/{web_memory['id']}/share",
             data=_csrf_data(client),
             follow_redirects=False,
         )
-        assert resp.status_code == 404
+        assert resp.status_code in (200, 303), (
+            "share must not be refused merely because the instance reports "
+            f"itself as personal; got {resp.status_code}"
+        )
 
 
 # ============================================================================

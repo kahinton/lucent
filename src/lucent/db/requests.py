@@ -1374,7 +1374,6 @@ class RequestRepository:
                         WHERE request_creator.id = {request_alias}.created_by
                           AND (
                               request_creator.role = 'daemon'
-                              OR request_creator.external_id = 'daemon-service'
                               OR request_creator.external_id LIKE 'daemon-service:%'
                           )
                     )

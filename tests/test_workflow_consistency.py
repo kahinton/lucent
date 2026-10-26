@@ -63,15 +63,22 @@ async def wf_user_b(db_pool, wf_org, wf_prefix):
 
 
 @pytest_asyncio.fixture
-async def wf_daemon_user(db_pool, wf_org, wf_prefix):
-    repo = UserRepository(db_pool)
-    return await repo.create(
-        external_id=f"{wf_prefix}daemon-service",
-        provider="local",
-        organization_id=wf_org["id"],
-        email=f"{wf_prefix}daemon@test.com",
-        display_name="Lucent Daemon",
+async def wf_daemon_user(db_pool, wf_org):
+    """The organization's own daemon identity.
+
+    Every organization is provisioned with exactly one `daemon-service:{org_id}`
+    user by `OrganizationRepository.create()`, so this reuses it rather than
+    inventing a second one. (The bare legacy `daemon-service` account is retired
+    and is no longer recognized anywhere.)
+    """
+    row = await db_pool.fetchrow(
+        "SELECT id, external_id, provider, organization_id, email, display_name, "
+        "       role, is_active, created_at, updated_at, last_login_at "
+        "FROM users WHERE external_id = $1",
+        f"daemon-service:{wf_org['id']}",
     )
+    assert row is not None, "organization should have been provisioned with a daemon user"
+    return dict(row)
 
 
 async def _make_client(user, scopes=None, external_id_override=None):
@@ -114,7 +121,10 @@ async def wf_client_b(wf_user_b):
 
 @pytest_asyncio.fixture
 async def wf_daemon_client(wf_daemon_user):
-    client, app = await _make_client(wf_daemon_user, external_id_override="daemon-service")
+    client, app = await _make_client(
+        wf_daemon_user,
+        external_id_override=f"daemon-service:{wf_daemon_user['organization_id']}",
+    )
     async with client:
         yield client
     app.dependency_overrides.clear()

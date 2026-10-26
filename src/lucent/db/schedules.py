@@ -463,8 +463,7 @@ class ScheduleRepository:
                     FROM organizations o
                     LEFT JOIN users u
                       ON u.organization_id = o.id
-                     AND (u.external_id = 'daemon-service'
-                          OR u.external_id = 'daemon-service:' || o.id::text)
+                     AND u.external_id = 'daemon-service:' || o.id::text
                      AND u.is_active = true
                     """
                 )
@@ -796,7 +795,6 @@ class ScheduleRepository:
                                 WHERE creator.id = schedules.created_by
                                   AND (
                                       creator.role = 'daemon'
-                                      OR creator.external_id = 'daemon-service'
                                       OR creator.external_id LIKE 'daemon-service:%'
                                   )
                             )
@@ -905,7 +903,6 @@ class ScheduleRepository:
                                 WHERE creator.id = schedules.created_by
                                   AND (
                                       creator.role = 'daemon'
-                                      OR creator.external_id = 'daemon-service'
                                       OR creator.external_id LIKE 'daemon-service:%'
                                   )
                             )
@@ -958,7 +955,6 @@ class ScheduleRepository:
                                WHERE creator.id = schedules.created_by
                                  AND (
                                      creator.role = 'daemon'
-                                     OR creator.external_id = 'daemon-service'
                                      OR creator.external_id LIKE 'daemon-service:%'
                                  )
                            ) AS is_daemon_created
@@ -1604,7 +1600,6 @@ class ScheduleRepository:
                                 WHERE creator.id = schedules.created_by
                                   AND (
                                       creator.role = 'daemon'
-                                      OR creator.external_id = 'daemon-service'
                                       OR creator.external_id LIKE 'daemon-service:%'
                                   )
                             )

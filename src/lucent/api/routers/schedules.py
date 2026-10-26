@@ -100,7 +100,6 @@ async def _schedule_owner_context(
             owner_ext = owner.get("external_id") or ""
             owner_is_daemon = (
                 owner.get("role") == "daemon"
-                or owner_ext == "daemon-service"
                 or owner_ext.startswith("daemon-service:")
             )
             if not sched.get("is_system") and owner_is_daemon:

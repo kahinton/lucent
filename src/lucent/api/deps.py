@@ -79,10 +79,11 @@ class CurrentUser:
 
         Daemon-service users are provisioned per organization with an
         ``external_id`` of ``daemon-service:{org_id}``. The bare legacy
-        ``daemon-service`` id (from migration 017) is still recognized.
+        ``daemon-service`` id (migration 017) has been retired; it is no longer
+        recognized anywhere and its account has been removed.
         """
         ext = self.external_id or ""
-        return ext == "daemon-service" or ext.startswith("daemon-service:")
+        return ext.startswith("daemon-service:")
 
     def has_permission(self, permission: Permission) -> bool:
         """Check if this user has a specific permission."""

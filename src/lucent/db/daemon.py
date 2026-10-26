@@ -490,7 +490,7 @@ class DaemonRepository:
             "WHERE organization_id = $1::uuid "
             "  AND is_active = true "
             "  AND role IN ('owner', 'admin') "
-            "  AND COALESCE(external_id, '') <> 'daemon-service' "
+            "  AND COALESCE(external_id, '') NOT LIKE 'daemon-service:%' "
             "ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at "
             "LIMIT 1",
             org_id,

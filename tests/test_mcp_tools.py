@@ -286,7 +286,7 @@ class TestCreateMemory:
                 "role": "member",
                 "display_name": "Lucent Daemon",
                 "email": "daemon@test.com",
-                "external_id": "daemon-service",
+                "external_id": f"daemon-service:{test_user['organization_id']}",
             }
         )
         try:
@@ -332,7 +332,7 @@ class TestCreateMemory:
                 "role": "daemon",
                 "display_name": "Lucent Daemon",
                 "email": "daemon@test.com",
-                "external_id": "daemon-service",
+                "external_id": f"daemon-service:{test_user['organization_id']}",
                 "memory_scope": "user",
                 "memory_scope_user_id": scoped_user["id"],
             }
@@ -1085,13 +1085,14 @@ class TestUpdateMemory:
         from lucent.db import MemoryRepository, UserRepository
 
         user_repo = UserRepository(db_pool)
-        daemon = await user_repo.create(
-            external_id=f"{clean_test_data}daemon-service",
-            provider="local",
-            organization_id=test_organization["id"],
-            email=f"{clean_test_data}daemon@test.com",
-            role="daemon",
+        # OrganizationRepository.create() already provisions this org's daemon
+        # identity; reuse it rather than inserting a duplicate.
+        daemon_row = await db_pool.fetchrow(
+            "SELECT * FROM users WHERE external_id = $1",
+            f"daemon-service:{test_organization['id']}",
         )
+        assert daemon_row is not None
+        daemon = dict(daemon_row)
         admin = await user_repo.create(
             external_id=f"{clean_test_data}admin",
             provider="local",
@@ -2367,36 +2368,20 @@ class TestLifecycleToolsNotExposed:
 
 @pytest_asyncio.fixture
 async def team_mcp_tools(db_pool):
-    """Create a FastMCP instance with team mode enabled (registers share/unshare tools)."""
-    import lucent.mode as mode_module
+    """A FastMCP instance carrying the share/unshare tools.
 
-    old_mode = os.environ.get("LUCENT_MODE")
-    old_license = os.environ.get("LUCENT_LICENSE_KEY")
-    os.environ["LUCENT_MODE"] = "team"
-    os.environ["LUCENT_LICENSE_KEY"] = "test-license-key"
-    mode_module.get_mode.cache_clear()
-
-    with patch("lucent.mode._validate_license", return_value=True):
-        mode_module.get_mode.cache_clear()
-        mcp = FastMCP("test-team")
-        register_tools(mcp)
-
+    Sharing tools are registered unconditionally now — capability is decided by
+    ``Permission.MEMORY_SHARE``, not by the deployment mode — so this fixture no
+    longer has to fake a team licence. It keeps its name because the tests below
+    are about the sharing surface as a unit.
+    """
+    mcp = FastMCP("test-sharing")
+    register_tools(mcp)
     yield mcp
-
-    # Restore original env
-    if old_mode is None:
-        os.environ.pop("LUCENT_MODE", None)
-    else:
-        os.environ["LUCENT_MODE"] = old_mode
-    if old_license is None:
-        os.environ.pop("LUCENT_LICENSE_KEY", None)
-    else:
-        os.environ["LUCENT_LICENSE_KEY"] = old_license
-    mode_module.get_mode.cache_clear()
 
 
 class TestShareMemory:
-    """Tests for the share_memory MCP tool (team mode only)."""
+    """Tests for the share_memory MCP tool."""
 
     async def test_share_memory_success(
         self, team_mcp_tools, db_pool, auth_user, clean_test_data

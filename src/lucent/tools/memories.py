@@ -341,7 +341,7 @@ Returns:
             _ext_id = (current_user or {}).get("external_id") or ""
             is_daemon_key_owner = bool(
                 current_user
-                and (_ext_id == "daemon-service" or _ext_id.startswith("daemon-service:"))
+                and _ext_id.startswith("daemon-service:")
             )
             is_scoped_to_human = bool(
                 memory_scope == "user"

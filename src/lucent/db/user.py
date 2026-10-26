@@ -654,7 +654,7 @@ class UserRepository:
                    FROM users
                    WHERE organization_id = $1
                      AND role <> 'daemon'
-                     AND COALESCE(external_id, '') NOT LIKE 'daemon-service%'
+                     AND COALESCE(external_id, '') NOT LIKE 'daemon-service:%'
                    ORDER BY CASE role
                        WHEN 'owner' THEN 0
                        WHEN 'admin' THEN 1

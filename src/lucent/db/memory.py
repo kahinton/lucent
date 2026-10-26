@@ -47,10 +47,10 @@ logger = logging.getLogger(__name__)
 # path.
 #
 # Principal mapping for scoped daemon keys lives in the repo methods via
-# `_usage_pool`: an `org_shared_only` daemon key acts as the daemon-service
-# identity (it holds no owner clearances, so it matches only org read
-# clearances); an unscoped daemon-service key acts as the org's first owner
-# — the daemon works for the owner.
+# `_usage_pool`: an `org_shared_only` daemon key acts as the org's
+# daemon-service identity (it holds no owner clearances, so it matches only org
+# read clearances); an unscoped daemon-service:{org_id} key acts as the org's
+# first owner — the daemon works for the owner.
 
 MEMORY_AUTH_POLICY: Final[AuthTablePolicy] = AuthTablePolicy(
     "memories", direct_columns=()
@@ -204,7 +204,6 @@ class MemoryRepository:
                            WHERE id = $1::uuid
                              AND (
                                  role = 'daemon'
-                                 OR external_id = 'daemon-service'
                                  OR external_id LIKE 'daemon-service:%'
                              )
                        )""",
@@ -241,10 +240,10 @@ class MemoryRepository:
         authorized on the fly from the requesting identity:
 
         - a normal user or a human-scoped key acts as itself,
-        - an `org_shared_only` daemon key acts as the daemon-service identity
-          (clearance reads only; it owns nothing),
-        - an unscoped daemon-service key acts as the org's first owner —
-          the daemon works for the owner.
+        - an `org_shared_only` daemon key acts as the org's daemon-service
+          identity (clearance reads only; it owns nothing),
+        - an unscoped daemon-service:{org_id} key acts as the org's first
+          owner — the daemon works for the owner.
         """
         if isinstance(self.pool, AuthorizedDatabasePool):
             if "memories" not in self.pool.table_names:
@@ -268,9 +267,12 @@ class MemoryRepository:
         external_id = (
             identity["external_id"] if identity and identity["external_id"] else ""
         )
+        # Only the per-org identity is recognized. The bare legacy
+        # 'daemon-service' account was retired: it had no credentials, yet held
+        # 1,248 memory clearances, so recognizing it by name kept a dormant
+        # privilege path alive.
         daemon_like = identity is not None and (
             identity["role"] == "daemon"
-            or external_id == "daemon-service"
             or external_id.startswith("daemon-service:")
         )
 
