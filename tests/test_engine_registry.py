@@ -89,8 +89,8 @@ class TestFactoryRegistryDriven:
 
         monkeypatch.delenv("LUCENT_LLM_ENGINE", raising=False)
         reset_engine()
-        assert get_engine_name() == "copilot"
-        assert get_engine().name == "copilot"
+        assert get_engine_name() == "langchain"
+        assert get_engine().name == "langchain"
 
     def test_unknown_default_engine_raises(self, monkeypatch):
         from lucent.llm.factory import get_engine, reset_engine

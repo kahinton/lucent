@@ -716,10 +716,12 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         key="models.llm_engine",
         env_var="LUCENT_LLM_ENGINE",
         value_type="string",
-        default="copilot",
+        default="langchain",
         title="LLM engine",
         section="Models & LLM",
-        description="Default engine for model execution when a model does not override it.",
+        description=(
+            "Default engine for model execution when a model does not override it."
+        ),
         choices=_LLM_ENGINE_CHOICES,
         requires_restart=True,
     ),

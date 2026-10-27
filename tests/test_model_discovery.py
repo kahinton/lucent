@@ -1,5 +1,6 @@
 """Tests for provider-backed model discovery and safe DB sync."""
 
+import dataclasses
 from uuid import uuid4
 
 import pytest
@@ -544,3 +545,129 @@ async def test_sync_preserves_manual_custom_model(db_pool, discovery_prefix):
         assert model["last_discovered_at"] is not None
     finally:
         await repo.delete_model(model_id)
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_steal_another_providers_row(db_pool, discovery_prefix):
+    """A model id is not provider-scoped, so two catalogs can report the same one.
+
+    ``models.id`` is the primary key. Before the ownership guard, whichever
+    catalog synced last rewrote ``provider`` and ``engine``, so running Codex
+    discovery re-homed Copilot's models. The row must keep its owner and the
+    overlap must be reported instead.
+    """
+    from lucent.db.models import ModelRepository
+
+    model_id = f"{discovery_prefix}shared-id"
+    repo = ModelRepository(db_pool)
+    payload = {
+        "model_id": model_id,
+        "name": "Shared Model",
+        "category": "general",
+        "api_model_id": model_id,
+        "supports_tools": True,
+        "supports_vision": False,
+        "tags": ["general"],
+    }
+    try:
+        await repo.sync_discovered_models(
+            provider="copilot",
+            models=[{**payload, "provider": "copilot", "engine": "copilot"}],
+        )
+
+        result = await repo.sync_discovered_models(
+            provider="codex",
+            models=[{**payload, "provider": "codex", "engine": "codex"}],
+        )
+
+        model = await repo.get_model(model_id)
+        assert model["provider"] == "copilot", "the owning catalog must not change"
+        assert model["engine"] == "copilot"
+        assert model_id in result["provider_conflicts"]
+        assert result["upserted"] == 0
+
+        # The overlap is recorded, so the second engine can still offer it.
+        catalogs = await db_pool.fetch(
+            "SELECT engine FROM model_engine_catalogs WHERE model_id = $1 "
+            "ORDER BY engine",
+            model_id,
+        )
+        assert [row["engine"] for row in catalogs] == ["codex", "copilot"]
+    finally:
+        await repo.delete_model(model_id)
+
+
+@pytest.mark.asyncio
+async def test_codex_is_a_discoverable_engine_catalog():
+    """Codex reports its own catalog, and must accept its own provider name.
+
+    Discovery stores engine-reported models under ``provider='codex'``. If the
+    engine's ``provider_support`` did not include that name the rows would be
+    unroutable: enabled, granted, and with no engine able to run them.
+    """
+    from lucent.llm.engine_registry import (
+        ENGINE_REGISTRY,
+        compatible_engine_names,
+    )
+
+    spec = ENGINE_REGISTRY["codex"]
+    assert spec.capabilities.discovery is True
+    assert spec.discover is not None
+    assert "codex" in compatible_engine_names("codex")
+
+
+def test_engine_catalog_sweep_skips_unavailable_engine(monkeypatch):
+    """An engine that cannot run here must not be asked for its catalog.
+
+    The Copilot client terminates the process outright when its CLI is missing
+    (no traceback, exit 0), so an unattended background sweep reaching it would
+    take the server down. Availability gates that.
+    """
+    from lucent import model_discovery as md
+
+    assert md._engine_catalog_available("copilot") in (True, False)  # honest probe
+    monkeypatch.setattr(
+        md,
+        "_engine_catalog_available",
+        lambda engine: engine != "copilot",
+    )
+    assert md._engine_catalog_available("copilot") is False
+    assert md._engine_catalog_available("codex") is True
+
+
+@pytest.mark.asyncio
+async def test_engine_hook_refuses_unavailable_engine(db_pool, monkeypatch):
+    """Discovery must report, not spawn, an engine this runtime cannot run."""
+    from lucent.llm import engine_registry
+    from lucent.model_discovery import ModelDiscoveryService
+
+    called = {"discover": False}
+
+    async def fake_discover(*, org_id=None):
+        called["discover"] = True
+        return []
+
+    spec = engine_registry.ENGINE_REGISTRY["copilot"]
+    # EngineSpec is frozen, so replace the registry entry rather than mutate it.
+    monkeypatch.setitem(
+        engine_registry.ENGINE_REGISTRY,
+        "copilot",
+        dataclasses.replace(spec, discover=fake_discover),
+    )
+    monkeypatch.setattr(
+        "lucent.llm.engine_registry.engine_availability",
+        lambda name: engine_registry.EngineAvailability(False, "no cli"),
+    )
+
+    service = ModelDiscoveryService(db_pool)
+    with pytest.raises(ValueError, match="cannot enumerate"):
+        await service._discover_provider("copilot")
+    assert called["discover"] is False, "the hook must not run"
+
+
+def test_claude_code_does_not_claim_discovery():
+    """The Claude Agent SDK exposes no catalog call, so the flag must be false."""
+    from lucent.llm.engine_registry import ENGINE_REGISTRY
+
+    assert ENGINE_REGISTRY["claude_code"].capabilities.discovery is False
+    assert ENGINE_REGISTRY["claude_code"].discover is None

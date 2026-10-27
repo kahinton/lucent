@@ -1004,3 +1004,141 @@ class CopilotEngine(LLMEngine):
                 await client.force_stop()
             except Exception:
                 logger.debug("Failed to force-stop Copilot client", exc_info=True)
+
+
+def copilot_cli_status() -> tuple[bool, str]:
+    """Whether the Copilot CLI can be launched here, and why not if it cannot.
+
+    Resolution has three layers and only the last is a problem:
+
+    1. ``COPILOT_CLI_PATH`` or a CLI on ``PATH`` — ready.
+    2. A runtime bundle already cached by the SDK — ready.
+    3. Nothing yet: the SDK would download a pinned bundle. That works, but it
+       buffers the whole ~87 MB archive in memory, so in a memory-constrained
+       container the process is simply killed mid-download with no traceback.
+       Probing the free memory is the only way to tell "it will work" from "it
+       will die", since the failure is a SIGKILL rather than an exception.
+
+    Returns ``(ready, detail)``.
+    """
+    external = resolve_copilot_cli_path()
+    if external is not None:
+        return True, "Copilot CLI available"
+
+    try:
+        from copilot._cli_download import get_cached_cli_path, get_or_download_cli
+    except ImportError:  # pragma: no cover - SDK changed shape
+        return True, "github-copilot-sdk installed"
+
+    cached = get_cached_cli_path()
+    if cached is not None:
+        return True, "Copilot CLI cached"
+
+    needed = _COPILOT_DOWNLOAD_INFLATED_BYTES
+    available = _available_memory_bytes()
+    if available is not None and available < needed:
+        return False, (
+            f"Copilot CLI is not installed and downloading it needs about "
+            f"{needed // (1024 * 1024)} MB free; this host has "
+            f"{available // (1024 * 1024)} MB. Pre-provision the CLI or free memory."
+        )
+    return True, "Copilot CLI will be downloaded on first use"
+
+
+#: Headroom needed to provision the Copilot CLI. The release archive is ~87 MB
+#: and the SDK reads it fully into memory before extracting it, so a host with
+#: less than this free will be OOM-killed mid-download (silently).
+_COPILOT_DOWNLOAD_INFLATED_BYTES = 320 * 1024 * 1024
+
+
+def _available_memory_bytes() -> int | None:
+    """Free memory available to this process, or ``None`` when unknown."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def ensure_copilot_cli() -> str | None:
+    """Provision the Copilot CLI, returning its path (``None`` = SDK default).
+
+    Safe to call repeatedly: the SDK returns the cached bundle immediately. This
+    exists so the server can warm the cache at startup, before any request needs
+    it, instead of a user's first chat paying for the download.
+    """
+    external = resolve_copilot_cli_path()
+    if external is not None:
+        return external
+    from copilot._cli_download import get_or_download_cli
+
+    return get_or_download_cli()
+
+
+async def discover_copilot_models(*, org_id: str | None = None) -> list[dict[str, Any]]:
+    """Ask the Copilot SDK which models this engine can run.
+
+    Copilot is a coding-engine harness: its catalog is whatever the SDK reports,
+    including the hosted families it proxies and any BYOK/local models. Returning
+    plain dicts keeps this module free of an import on ``model_discovery`` (which
+    imports this package), so discovery can call it from anywhere.
+
+    Raises ``ValueError`` when the SDK is missing or the catalog cannot be read;
+    callers record that per-provider rather than failing the whole run.
+    """
+    from lucent.model_discovery import resolve_provider_credential
+
+    try:
+        github_token = await resolve_provider_credential("copilot", org_id=org_id)
+    except Exception:  # noqa: BLE001 — an unreadable credential is a discovery error
+        github_token = ""
+
+    try:
+        client = create_copilot_client(github_token=github_token or None)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
+
+    try:
+        await client.start()
+        rows = await client.list_models()
+    except Exception as exc:  # noqa: BLE001 — surface as a discovery error
+        raise ValueError(f"Copilot model catalog unavailable: {exc}") from exc
+    finally:
+        try:
+            await client.stop()
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to stop Copilot client after discovery", exc_info=True)
+
+    models: list[dict[str, Any]] = []
+    for row in rows or []:
+        model_id = getattr(row, "id", None)
+        if not model_id:
+            continue
+        capabilities = getattr(row, "capabilities", None)
+        limits = getattr(capabilities, "limits", None)
+        supports = getattr(capabilities, "supports", None)
+        metadata = row.to_dict() if hasattr(row, "to_dict") else {}
+        models.append(
+            {
+                "id": str(model_id),
+                "provider": "copilot",
+                "name": str(getattr(row, "name", None) or model_id),
+                "api_model_id": str(model_id),
+                "context_window": int(
+                    getattr(limits, "max_context_window_tokens", 0)
+                    or getattr(limits, "max_prompt_tokens", 0)
+                    or 0
+                ),
+                "supports_tools": True,
+                "supports_vision": bool(getattr(supports, "vision", False)),
+                "supports_reasoning_effort": bool(
+                    getattr(supports, "reasoning_effort", False)
+                ),
+                "notes": "Discovered from the GitHub Copilot SDK model list.",
+                "discovery_metadata": metadata,
+            }
+        )
+    return models

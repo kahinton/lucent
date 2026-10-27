@@ -79,6 +79,9 @@ class ProvisionedOrganization:
     temporary_password: str | None = None
     seeded: dict[str, int] = field(default_factory=dict)
     model_id: str | None = None
+    providers_configured: list[str] = field(default_factory=list)
+    models_discovered: int = 0
+    settings_applied: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -348,6 +351,8 @@ async def provision_organization(
     admin_external_id: str | None = None,
     api_key_name: str | None = DEFAULT_API_KEY_NAME,
     model_id: str | None = None,
+    providers: list[dict[str, str]] | None = None,
+    settings: dict[str, Any] | None = None,
     operator_org_id: UUID | str | None = None,
     operator_user_id: UUID | str | None = None,
 ) -> ProvisionedOrganization:
@@ -363,6 +368,12 @@ async def provision_organization(
         admin_external_id: Override the identity id (defaults to the email).
         api_key_name: Name for the minted key, or ``None`` to skip minting.
         model_id: Model to enable + grant if the tenant has none usable yet.
+        providers: Provider API keys to store for the tenant, as
+            ``[{"provider": "openai", "api_key": "..."}]``. Stored encrypted at
+            the canonical provider secret so the engines can use them.
+        settings: Runtime settings to apply, keyed by setting key. An invalid key
+            raises ``InvalidProvisioningRequest`` so a tenant is never left
+            half-configured.
         operator_org_id: Organization to attribute the audit trail to. When
             omitted the new organization is used (self-service signup).
         operator_user_id: Acting operator, for the audit trail.
@@ -432,21 +443,96 @@ async def provision_organization(
         result.warnings.append(f"Built-in definitions were not seeded: {exc}")
         logger.warning("Failed to seed built-ins for org %s", org_id, exc_info=True)
 
+    for entry in providers or []:
+        provider_key = str(entry.get("provider") or "").strip()
+        api_key = str(entry.get("api_key") or "").strip()
+        if not provider_key or not api_key:
+            continue
+        try:
+            from lucent.services import org_providers as provider_service
+
+            await provider_service.set_credential(
+                pool, org_id, provider=provider_key, value=api_key
+            )
+            result.providers_configured.append(provider_key)
+        except Exception as exc:  # noqa: BLE001 — record, do not orphan the org
+            result.warnings.append(
+                f"Provider {provider_key} was not configured: {exc}"
+            )
+            logger.warning(
+                "Failed to store %s credential for org %s", provider_key, org_id, exc_info=True
+            )
+
+    # A stored credential is not yet a usable model: discovery is what turns
+    # "the tenant has an OpenAI key" into "the tenant can pick gpt-5.4". Without
+    # this step a provisioned tenant looks configured while having an empty model
+    # list, which is exactly the half-done state the create form exists to avoid.
+    if result.providers_configured:
+        try:
+            from lucent.services import org_providers as provider_service
+
+            discovered = await provider_service.discover_models(
+                pool, org_id, providers=result.providers_configured
+            )
+            result.models_discovered = int(discovered.get("created") or 0)
+        except Exception as exc:  # noqa: BLE001 — credentials are still stored
+            result.warnings.append(f"Model discovery did not run: {exc}")
+            logger.warning(
+                "Failed to discover models for org %s", org_id, exc_info=True
+            )
+
+    if settings:
+        from lucent.services import org_settings as instance_settings
+
+        for key, value in settings.items():
+            try:
+                applied = await instance_settings.update_setting(
+                    pool, org_id, key, value=value, actor_user_id=user["id"]
+                )
+                result.settings_applied[key] = applied["value"]
+            except Exception as exc:  # noqa: BLE001
+                # Settings are validated up-front by the caller, so a failure
+                # here is a real problem worth surfacing rather than skipping.
+                result.warnings.append(f"Setting {key} was not applied: {exc}")
+                logger.warning(
+                    "Failed to apply setting %s to org %s", key, org_id, exc_info=True
+                )
+
     if model_id:
         try:
-            from lucent.bootstrap import ensure_usable_model
+            from lucent.services import org_providers as provider_service
 
-            setup = await ensure_usable_model(
-                pool,
-                org_id=str(org_id),
-                granted_by=str(user["id"]),
-                model_id=model_id,
-                dry_run=False,
+            # Clones a shared registry row into the tenant rather than promoting
+            # it: ``models.id`` is the primary key, so promoting would take the
+            # model away from every other tenant. The tenant's own owner is used
+            # as grantor because an operator is not a member of the tenant.
+            granted = await provider_service.grant_model_to_org(
+                pool, org_id, model_id, granted_by=user["id"]
             )
-            result.model_id = setup.model_id
+            result.model_id = granted["model_id"]
         except Exception as exc:  # noqa: BLE001
             result.warnings.append(f"Model was not enabled: {exc}")
             logger.warning("Failed to enable model for org %s", org_id, exc_info=True)
+
+        # Enabling and granting a model makes it *usable*; it does not make it
+        # the one the tenant starts with. Without this the new workspace would
+        # fall back to the instance default model — which the tenant probably
+        # has no credential for — so a freshly provisioned org could log in and
+        # still fail its first chat. An explicit settings entry wins, since the
+        # caller said what it wanted.
+        if result.model_id and "models.default_model" not in (settings or {}):
+            try:
+                from lucent.services import org_settings as instance_settings
+
+                applied = await instance_settings.update_setting(
+                    pool, org_id, "models.default_model", value=result.model_id
+                )
+                result.settings_applied["models.default_model"] = applied["value"]
+            except Exception as exc:  # noqa: BLE001 — the model is still usable
+                result.warnings.append(f"Default model was not set: {exc}")
+                logger.warning(
+                    "Failed to set default model for org %s", org_id, exc_info=True
+                )
 
     await log_instance_event(
         pool,

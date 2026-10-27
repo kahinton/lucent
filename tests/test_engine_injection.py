@@ -91,7 +91,11 @@ def test_compatible_providers_claude_code_excludes_unsupported():
 
 def test_compatible_providers_codex():
     names = {o["name"] for o in ei.compatible_provider_options("codex")}
-    assert names == {"openai", "ollama", "lmstudio"}
+    # ``codex`` is included because Codex reports a catalog of its own (the
+    # models its SDK lists, authenticated with ChatGPT), exactly as ``copilot``
+    # reports its own. Discovery stores those rows with provider='codex', so the
+    # engine must accept that name or the rows would be unroutable.
+    assert names == {"codex", "openai", "ollama", "lmstudio"}
 
 
 def test_compatible_providers_copilot():
@@ -123,3 +127,75 @@ def test_provider_allowed_for_engine():
     assert not ei.provider_allowed_for_engine("claude_code", "google")
     assert not ei.provider_allowed_for_engine("codex", "anthropic")
     assert ei.provider_allowed_for_engine("codex", "openai")
+
+
+def test_copilot_cli_status_reports_ready_when_cli_resolves(monkeypatch):
+    """A resolvable CLI means ready; the SDK-download fallback is memory-gated.
+
+    The Copilot SDK downloads its runtime bundle on first use, buffering the ~87
+    MB archive in memory. On a memory-tight host the process is SIGKILLed
+    mid-download with no traceback, so the probe has to answer "would that
+    succeed here" rather than "is the package importable".
+    """
+    from lucent.llm import copilot_engine
+
+    monkeypatch.setattr(
+        copilot_engine, "resolve_copilot_cli_path", lambda: "/usr/local/bin/copilot"
+    )
+    ready, detail = copilot_engine.copilot_cli_status()
+    assert ready is True
+    assert "available" in detail.lower()
+
+
+def test_copilot_cli_status_reports_memory_shortfall(monkeypatch):
+    """Without a CLI or a cached bundle, free memory decides."""
+    from lucent.llm import copilot_engine
+
+    monkeypatch.setattr(copilot_engine, "resolve_copilot_cli_path", lambda: None)
+    monkeypatch.setattr(copilot_engine, "_available_memory_bytes", lambda: 10 * 1024 * 1024)
+
+    class FakeDownload:
+        @staticmethod
+        def get_cached_cli_path():
+            return None
+
+        @staticmethod
+        def get_or_download_cli():
+            return "/fake/copilot"
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "copilot._cli_download", FakeDownload)
+    monkeypatch.setattr(
+        copilot_engine,
+        "resolve_copilot_cli_path",
+        lambda: None,
+    )
+
+    ready, detail = copilot_engine.copilot_cli_status()
+    assert ready is False
+    assert "MB free" in detail
+
+
+def test_copilot_cli_status_ready_when_bundle_cached(monkeypatch):
+    """A cached bundle needs no download, so memory is irrelevant."""
+    from lucent.llm import copilot_engine
+
+    class FakeDownload:
+        @staticmethod
+        def get_cached_cli_path():
+            return "/root/.cache/github-copilot-sdk/cli/1.0.103/prebuilds/x/copilot"
+
+        @staticmethod
+        def get_or_download_cli():
+            raise AssertionError("must not download when cached")
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "copilot._cli_download", FakeDownload)
+    monkeypatch.setattr(copilot_engine, "resolve_copilot_cli_path", lambda: None)
+    monkeypatch.setattr(copilot_engine, "_available_memory_bytes", lambda: 1024)
+
+    ready, detail = copilot_engine.copilot_cli_status()
+    assert ready is True
+    assert "cached" in detail.lower()

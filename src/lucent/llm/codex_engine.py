@@ -382,6 +382,57 @@ class CodexEngine(LLMEngine):
         return None
 
 
+async def discover_codex_models(*, org_id: str | None = None) -> list[dict[str, Any]]:
+    """Ask the Codex app-server which models it can run.
+
+    Codex is a coding-engine harness: the models it accepts are whatever its own
+    catalog reports, not a provider list Lucent guessed. Returning plain dicts
+    keeps this module free of an import on ``model_discovery`` (which imports
+    this package), so discovery can call it from anywhere.
+
+    Raises ``ValueError`` when the SDK is missing or the catalog cannot be read;
+    callers record that per-provider rather than failing the whole run.
+    """
+    if not _ensure_sdk():
+        raise ValueError("openai-codex is not installed")
+
+    env = await CodexEngine._native_env(None)
+    try:
+        async with _AsyncCodex(_CodexConfig(env=env) if env else None) as codex:
+            response = await codex.models()
+    except Exception as exc:  # noqa: BLE001 — surface as a discovery error
+        raise ValueError(f"Codex model catalog unavailable: {exc}") from exc
+
+    models: list[dict[str, Any]] = []
+    for row in _attr(response, "data") or []:
+        model_id = _attr(row, "id") or _attr(row, "model")
+        if not model_id:
+            continue
+        efforts = [
+            str(_attr(effort, "reasoning_effort") or _attr(effort, "reasoningEffort") or "")
+            for effort in (_attr(row, "supported_reasoning_efforts") or [])
+        ]
+        modalities = _attr(row, "input_modalities") or []
+        models.append(
+            {
+                "id": str(model_id),
+                "provider": "codex",
+                "engine": "codex",
+                "name": str(_attr(row, "display_name") or _attr(row, "displayName") or model_id),
+                "api_model_id": str(_attr(row, "model") or model_id),
+                "supports_vision": "image" in modalities,
+                "supports_reasoning_effort": bool([e for e in efforts if e]),
+                "reasoning_efforts": [e for e in efforts if e],
+                "notes": str(_attr(row, "description") or ""),
+                "discovery_metadata": {
+                    "is_default": bool(_attr(row, "is_default")),
+                    "hidden": bool(_attr(row, "hidden")),
+                },
+            }
+        )
+    return models
+
+
 def _combine_prompt(
     system_message: str, prompt: str, attachments: list[dict[str, Any]] | None
 ) -> str:

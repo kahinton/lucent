@@ -317,50 +317,110 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
     @app.get("/organizations/new", response_class=HTMLResponse)
     async def organization_new_page(request: Request):
         auth.require(request)
-        models: list[dict[str, Any]] = []
-        model_warning = None
+        api = client()
+        runtime: dict[str, Any] = {"configured_engine": "", "provider_names": []}
+        providers: list[dict[str, Any]] = []
+        schema: dict[str, Any] = {"sections": [], "count": 0}
+        warning = None
+
+        def note(message: str) -> None:
+            nonlocal warning
+            warning = f"{warning + '; ' if warning else ''}{message}"
+
         try:
-            models = await client().available_models()
+            runtime = await api.instance_runtime()
         except LucentAPIError as exc:
-            model_warning = f"Model list unavailable: {exc.detail}"
+            note(f"Runtime info unavailable: {exc.detail}")
+        try:
+            providers = await api.available_providers()
+        except LucentAPIError as exc:
+            note(f"Provider list unavailable: {exc.detail}")
+        try:
+            schema = await api.settings_schema()
+        except LucentAPIError as exc:
+            note(f"Settings metadata unavailable: {exc.detail}")
+
         return render(
             request,
             "organization_new.html",
-            {"models": models, "form": {}, "model_warning": model_warning},
+            {
+                "configured_engine": runtime.get("configured_engine") or "",
+                "runnable_providers": set(runtime.get("provider_names") or []),
+                "providers": providers,
+                "settings_schema": schema,
+                "form": {},
+                "warning": warning,
+            },
         )
 
     @app.post("/organizations/new")
-    async def organization_new_submit(
-        request: Request,
-        name: str = Form(...),
-        admin_email: str = Form(default=""),
-        admin_display_name: str = Form(default=""),
-        admin_role: str = Form(default="owner"),
-        admin_password: str = Form(default=""),
-        api_key_name: str = Form(default="Default API key"),
-        model_id: str = Form(default=""),
-        csrf_token: str = Form(default=""),
-    ):
+    async def organization_new_submit(request: Request):
         auth.require(request)
-        auth.require_csrf(request, csrf_token)
+        form = await request.form()
+        auth.require_csrf(request, str(form.get("csrf_token") or ""))
+
+        name = str(form.get("name") or "")
+        admin_email = str(form.get("admin_email") or "")
+        admin_display_name = str(form.get("admin_display_name") or "")
+        admin_role = str(form.get("admin_role") or "owner")
+        admin_password = str(form.get("admin_password") or "")
 
         cleaned_name = name.strip()
+
+        # Credentials and settings are dynamic ("provider__<name>",
+        # "setting__<key>"), so they cannot be declared as form parameters.
+        providers = [
+            {"provider": field[len("provider__") :], "api_key": str(value).strip()}
+            for field, value in form.items()
+            if field.startswith("provider__") and str(value).strip()
+        ]
+        settings = {
+            field[len("setting__") :]: str(value).strip()
+            for field, value in form.items()
+            if field.startswith("setting__") and str(value).strip() != ""
+        }
+
         form_state = {
             "name": cleaned_name,
             "admin_email": admin_email,
             "admin_display_name": admin_display_name,
             "admin_role": admin_role,
-            "api_key_name": api_key_name,
-            "model_id": model_id,
         }
 
-        if not cleaned_name:
+        async def rerender(error: str, status_code: int):
+            api = client()
+            runtime: dict[str, Any] = {"configured_engine": "", "provider_names": []}
+            providers_catalog: list[dict[str, Any]] = []
+            schema: dict[str, Any] = {"sections": [], "count": 0}
+            try:
+                runtime = await api.instance_runtime()
+            except LucentAPIError:
+                pass
+            try:
+                providers_catalog = await api.available_providers()
+            except LucentAPIError:
+                pass
+            try:
+                schema = await api.settings_schema()
+            except LucentAPIError:
+                pass
             return render(
                 request,
                 "organization_new.html",
-                {"models": [], "form": form_state, "error": "Organization name is required."},
-                status_code=400,
+                {
+                    "configured_engine": runtime.get("configured_engine") or "",
+                    "runnable_providers": set(runtime.get("provider_names") or []),
+                    "providers": providers_catalog,
+                    "settings_schema": schema,
+                    "form": form_state,
+                    "submitted_settings": settings,
+                    "error": error,
+                },
+                status_code=status_code,
             )
+
+        if not cleaned_name:
+            return await rerender("Organization name is required.", 400)
 
         try:
             result = await client().provision_organization(
@@ -369,21 +429,11 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
                 admin_display_name=admin_display_name.strip() or None,
                 admin_password=admin_password or None,
                 admin_role=admin_role if admin_role in ("owner", "admin") else "owner",
-                api_key_name=api_key_name.strip() or None,
-                model_id=model_id or None,
+                providers=providers or None,
+                settings=settings or None,
             )
         except LucentAPIError as exc:
-            models: list[dict[str, Any]] = []
-            try:
-                models = await client().available_models()
-            except LucentAPIError:
-                pass
-            return render(
-                request,
-                "organization_new.html",
-                {"models": models, "form": form_state, "error": exc.detail},
-                status_code=400,
-            )
+            return await rerender(exc.detail, 400)
 
         # Credentials are shown once, on the next page load, then dropped.
         ref = _stash_secret(result)
@@ -447,6 +497,9 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
         settings_sections: dict[str, list[dict[str, Any]]] = {}
         audit_entries: list[dict[str, Any]] = []
         warnings: list[str] = []
+        provider_catalog: list[dict[str, Any]] = []
+        credentials: list[dict[str, Any]] = []
+        org_models: list[dict[str, Any]] = []
 
         try:
             users = await api.list_users(organization_id)
@@ -462,6 +515,45 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
             audit_entries = audit_payload.get("entries") or []
         except LucentAPIError as exc:
             warnings.append(f"Audit unavailable: {exc.detail}")
+        try:
+            provider_catalog = await api.available_providers()
+        except LucentAPIError as exc:
+            warnings.append(f"Provider catalogue unavailable: {exc.detail}")
+        try:
+            credentials = await api.list_credentials(organization_id)
+        except LucentAPIError as exc:
+            warnings.append(f"Credentials unavailable: {exc.detail}")
+        try:
+            org_models = await api.list_org_models(organization_id)
+        except LucentAPIError as exc:
+            warnings.append(f"Models unavailable: {exc.detail}")
+
+        # ``list_credentials`` returns the whole provider catalogue with a
+        # ``configured`` flag, but only the catalogue endpoint knows which
+        # engines accept each provider. Merge on that so the row can say what a
+        # credential actually unlocks.
+        engine_catalog = {item["provider"]: item for item in provider_catalog}
+        provider_rows = [
+            {
+                **row,
+                "engines": (engine_catalog.get(row["provider"]) or {}).get(
+                    "engines", []
+                ),
+                "needs_api_key": (engine_catalog.get(row["provider"]) or {}).get(
+                    "needs_api_key", True
+                ),
+            }
+            for row in credentials
+        ]
+        # A provider the catalogue knows about but the credentials endpoint did
+        # not return is still worth showing, greyed out, so an operator can see
+        # the full set of options.
+        listed = {row["provider"] for row in provider_rows}
+        provider_rows += [
+            {**item, "configured": False}
+            for item in provider_catalog
+            if item["provider"] not in listed
+        ]
 
         return render(
             request,
@@ -472,6 +564,8 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
                 "settings_sections": settings_sections,
                 "audit": audit_entries,
                 "warnings": warnings,
+                "provider_rows": provider_rows,
+                "org_models": org_models,
             },
         )
 
@@ -670,6 +764,113 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
         except LucentAPIError as exc:
             return fail(exc, f"/organizations/{organization_id}")
         return back(f"/organizations/{organization_id}", success=message)
+
+    # -- provider credentials ---------------------------------------------
+
+    @app.post("/organizations/{organization_id}/credentials/{provider}")
+    async def organization_credential_set(
+        request: Request,
+        organization_id: str,
+        provider: str,
+        value: str = Form(default=""),
+        csrf_token: str = Form(default=""),
+    ):
+        auth.require(request)
+        auth.require_csrf(request, csrf_token)
+        if not value.strip():
+            return fail(
+                LucentAPIError(400, "Enter a credential value before saving."),
+                f"/organizations/{organization_id}",
+            )
+        try:
+            await client().set_credential(organization_id, provider, value.strip())
+        except LucentAPIError as exc:
+            return fail(exc, f"/organizations/{organization_id}")
+        return back(
+            f"/organizations/{organization_id}",
+            success=f"{provider} credential saved. Run discovery to register its models.",
+        )
+
+    @app.post("/organizations/{organization_id}/credentials/{provider}/clear")
+    async def organization_credential_clear(
+        request: Request,
+        organization_id: str,
+        provider: str,
+        csrf_token: str = Form(default=""),
+    ):
+        auth.require(request)
+        auth.require_csrf(request, csrf_token)
+        try:
+            await client().clear_credential(organization_id, provider)
+        except LucentAPIError as exc:
+            return fail(exc, f"/organizations/{organization_id}")
+        return back(
+            f"/organizations/{organization_id}",
+            success=f"{provider} credential cleared. The tenant falls back to the instance credential.",
+        )
+
+    # -- models -----------------------------------------------------------
+
+    @app.post("/organizations/{organization_id}/models/discover")
+    async def organization_models_discover(
+        request: Request,
+        organization_id: str,
+        csrf_token: str = Form(default=""),
+    ):
+        auth.require(request)
+        auth.require_csrf(request, csrf_token)
+        try:
+            result = await client().discover_models(organization_id)
+        except LucentAPIError as exc:
+            return fail(exc, f"/organizations/{organization_id}")
+        created = (result or {}).get("created") or 0
+        updated = (result or {}).get("updated") or 0
+        return back(
+            f"/organizations/{organization_id}",
+            success=f"Model discovery finished: {created} added, {updated} refreshed.",
+        )
+
+    @app.post("/organizations/{organization_id}/models/{model_id:path}/toggle")
+    async def organization_model_toggle(
+        request: Request,
+        organization_id: str,
+        model_id: str,
+        enabled: str = Form(default=""),
+        csrf_token: str = Form(default=""),
+    ):
+        auth.require(request)
+        auth.require_csrf(request, csrf_token)
+        turn_on = enabled == "true"
+        try:
+            await client().toggle_org_model(
+                organization_id, model_id, enabled=turn_on
+            )
+        except LucentAPIError as exc:
+            return fail(exc, f"/organizations/{organization_id}")
+        return back(
+            f"/organizations/{organization_id}",
+            success=(
+                f"{model_id} {'enabled' if turn_on else 'disabled'} for this tenant."
+            ),
+        )
+
+    @app.post("/organizations/{organization_id}/models/{model_id:path}/grant")
+    async def organization_model_grant(
+        request: Request,
+        organization_id: str,
+        model_id: str,
+        csrf_token: str = Form(default=""),
+    ):
+        auth.require(request)
+        auth.require_csrf(request, csrf_token)
+        try:
+            result = await client().grant_org_model(organization_id, model_id)
+        except LucentAPIError as exc:
+            return fail(exc, f"/organizations/{organization_id}")
+        return back(
+            f"/organizations/{organization_id}",
+            success=(result or {}).get("message") or f"{model_id} granted.",
+        )
 
     # -- instance audit ---------------------------------------------------
 

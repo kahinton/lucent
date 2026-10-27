@@ -99,8 +99,9 @@ registry (`lucent.llm.engine_registry`); every other surface derives from it.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_LLM_ENGINE` | `copilot` | Configured default engine (`copilot`, `claude_code`, `codex`, or `langchain`). Used for a provider when it is compatible; Ollama always defaults to `langchain`. A model's own `engine` overrides it. |
+| `LUCENT_LLM_ENGINE` | `langchain` | Configured default engine (`langchain`, `copilot`, `claude_code`, or `codex`). Used for a provider when it is compatible; Ollama always defaults to `langchain`. A model's own `engine` overrides it. |
 | `LUCENT_ENGINE_AUTO_ROUTE` | `false` | When enabled, code/agentic work prefers a `coding_agent` engine and plain chat uses the general `llm_access` engine. Off keeps the configured default engine for every model. |
+| `COPILOT_CLI_PATH` | auto-resolved | Path to the Copilot CLI; `bundled` opts into the SDK's own binary. When unset, the SDK resolves a CLI from `PATH` / the VS Code install and otherwise downloads a pinned runtime bundle into `~/.cache/github-copilot-sdk` on first use. The server warms that cache at startup so a user's first chat does not pay for it. |
 | `LUCENT_CHAT_MODEL` | *(model registry default)* | Optional override for chat sessions |
 | `LUCENT_MODEL_VALIDATION` | `strict` | Model validation mode: `strict` rejects unknown models, `lenient` allows them |
 | `LUCENT_CHAT_MCP_URL` | `http://localhost:8766/mcp` | MCP URL for chat-initiated tool calls |

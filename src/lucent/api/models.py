@@ -539,8 +539,42 @@ class OrganizationProvisionRequest(BaseModel):
     )
     model_id: str | None = Field(
         default=None,
-        description="Model to enable and grant so the tenant can chat immediately.",
+        description=(
+            "Model to enable and grant so the tenant can chat immediately. Also "
+            "applied as the tenant's models.default_model. Only meaningful when "
+            "the tenant has (or is given) a credential for that model's provider: "
+            "a model id alone does not grant access to a provider."
+        ),
     )
+    providers: list["OrganizationProvisionProvider"] = Field(
+        default_factory=list,
+        description=(
+            "Provider API keys to store for the new tenant, so it can call a "
+            "model provider on first login. Values are stored encrypted and "
+            "never returned."
+        ),
+    )
+    settings: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Runtime settings to apply, keyed by setting key. Validated by the "
+            "same rules the settings UI uses; an unappliable key is reported "
+            "in `warnings` rather than aborting the tenant."
+        ),
+    )
+
+
+class OrganizationProvisionProvider(BaseModel):
+    """One provider credential to create with a new organization."""
+
+    provider: str = Field(..., min_length=1, max_length=32)
+    api_key: str = Field(..., min_length=1)
+
+
+class OrganizationProvisionSettingsUpdate(BaseModel):
+    """Apply runtime settings to an existing organization in one call."""
+
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProvisionedUserResponse(BaseModel):
@@ -566,6 +600,12 @@ class OrganizationProvisionResponse(BaseModel):
     )
     seeded: dict[str, int] = Field(default_factory=dict)
     model_id: str | None = None
+    providers_configured: list[str] = Field(default_factory=list)
+    models_discovered: int = Field(
+        default=0,
+        description="Models registered by discovery for the supplied provider credentials.",
+    )
+    settings_applied: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -851,3 +891,90 @@ class SuccessResponse(BaseModel):
 
     success: bool
     message: str
+# =============================================================================
+# Organization Providers & Models (hyperadmin)
+# =============================================================================
+
+
+class OrganizationCredentialUpdate(BaseModel):
+    """Store one provider API key for an organization."""
+
+    value: str = Field(
+        ..., min_length=1, description="Provider API key. Stored encrypted, never returned."
+    )
+
+
+class OrganizationBackendCreate(BaseModel):
+    """Create an engine backend (routing override) for an organization."""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    engine: str = Field(..., description="langchain, copilot, claude_code, or codex")
+    provider: str = Field(..., min_length=1, max_length=32)
+    config: dict[str, Any] = Field(default_factory=dict)
+    secrets: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Engine secret fields keyed by field name (gateway token etc.). "
+            "Provider API keys are set on the credential endpoint instead."
+        ),
+    )
+    is_enabled: bool = True
+
+
+class OrganizationModelCreate(BaseModel):
+    """Define a model for a specific organization and entitle the org to it."""
+
+    model_id: str = Field(..., min_length=1, max_length=128)
+    provider: str = Field(..., min_length=1, max_length=32)
+    name: str = Field(default="", max_length=128)
+    engine: str | None = Field(
+        default=None, description="Pin this model to one engine, or leave unset"
+    )
+    category: str = "general"
+    model_class: str = Field(default="language", description="language or decision")
+    context_window: int = Field(default=0, ge=0)
+    supports_tools: bool = True
+    supports_vision: bool = False
+    notes: str = ""
+    is_enabled: bool = True
+    grant_to_org: bool = Field(
+        default=True,
+        description=(
+            "Grant the organization read clearance. An enabled model without a "
+            "grant is not usable."
+        ),
+    )
+
+
+class OrganizationModelToggle(BaseModel):
+    """Enable or disable one model."""
+
+    enabled: bool
+
+
+class EngineProviderOption(BaseModel):
+    """One provider an engine can be configured with."""
+
+    name: str
+    label: str
+
+
+class EngineCatalogEntry(BaseModel):
+    """An engine, the providers it accepts, and its config fields."""
+
+    engine: str
+    providers: list[EngineProviderOption]
+    fields: list["CredentialFieldSpec"] = Field(default_factory=list)
+    availability: Any = None
+
+
+class CredentialFieldSpec(BaseModel):
+    """One configurable field on an engine backend."""
+
+    key: str
+    label: str
+    field_type: str
+    required: bool = False
+    is_secret: bool = False
+    choices: list[str] = Field(default_factory=list)
+    help_text: str = ""

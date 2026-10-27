@@ -79,6 +79,18 @@ All routes are under `/api/organizations`. Every route listed here requires
 | `DELETE` | `/{id}/users/{uid}` | Remove a member |
 | `GET` | `/{id}/settings` | Editable runtime settings for that tenant |
 | `PUT` | `/{id}/settings/{key}` | Set (`{"value": ...}`) or reset (`{"reset": true}`) |
+| `GET` | `/instance/settings-schema` | Key/type/default/bounds for every editable setting |
+| `GET` | `/instance/runtime` | Configured LLM engine and the providers it can run |
+| `GET` | `/instance/providers` | Provider catalogue, with the engines using each |
+| `GET` | `/instance/engines` | Engines, accepted providers, config fields |
+| `GET` | `/{id}/credentials` | Which providers that tenant has a key for |
+| `PUT` | `/{id}/credentials/{provider}` | Store a provider API key (`{"value": ...}`) |
+| `DELETE` | `/{id}/credentials/{provider}` | Remove it, falling back to the instance key |
+| `POST` | `/{id}/providers/discover` | Register the models those keys expose |
+| `GET` | `/{id}/models` | Models visible to the tenant (owned and shared) |
+| `POST` | `/{id}/models` | Define a model for that tenant and grant it |
+| `POST` | `/{id}/models/{model_id}/grant` | Grant a model, adopting it if instance-shared |
+| `PATCH` | `/{id}/models/{model_id}` | Enable/disable an **org-owned** model |
 | `GET` | `/{id}/audit` | That tenant's admin audit log |
 | `GET` | `/instance/audit` | Operator trail across all tenants |
 
@@ -98,7 +110,14 @@ Content-Type: application/json
     "display_name": "Acme Owner"
   },
   "api_key_name": "Default API key",
-  "model_id": "claude-sonnet-4.6"
+  "model_id": "claude-sonnet-4.6",
+  "providers": [
+    {"provider": "openai", "api_key": "sk-..."}
+  ],
+  "settings": {
+    "features.sandboxes_enabled": false,
+    "memory.inject_max_memories": 2
+  }
 }
 ```
 
@@ -113,6 +132,9 @@ Response (`201`):
   "temporary_password": "...",
   "seeded": {"skills": 38, "agents": 14, "hooks": 2, "sandbox_templates": 3},
   "model_id": "claude-sonnet-4.6",
+  "providers_configured": ["openai"],
+  "settings_applied": {"features.sandboxes_enabled": false,
+                       "memory.inject_max_memories": 2},
   "warnings": []
 }
 ```
@@ -129,11 +151,40 @@ What it guarantees:
 * **Secrets are one-time.** `api_key` and `temporary_password` are returned in
   this response only. Both are stored hashed (the password) or hashed (the key);
   neither can be retrieved again.
+* **Providers and settings are applied, not queued.** Each entry in `providers`
+  is stored at the canonical `model_providers.<provider>.api_key` secret for that
+  organization — the key the engines actually read — and each entry in `settings`
+  goes through the same validator the settings UI uses. A setting that cannot be
+  applied is reported in `warnings` rather than aborting the tenant; the
+  organization still exists and is usable.
 * **Auditable.** See below.
 
 Omitting `first_admin` is a `400`. Use `POST /api/organizations` (no suffix) if
 you genuinely want a headless shell — that endpoint predates `/provision` and is
 kept for compatibility.
+
+### Configuring an existing tenant's models
+
+`/provision` is the fast path, but an operator also needs to change a tenant that
+already exists. Three concepts matter, and conflating them is the most common way
+to end up with a tenant whose chat does not work:
+
+* **Provider credentials** are API keys, stored per organization at
+  `model_providers.<provider>.api_key`. `PUT /{id}/credentials/{provider}` writes
+  one; `DELETE` removes it so the instance credential applies again. Values are
+  write-only — the API reports `configured: true`, never the key.
+* **Engine backends** are optional routing overrides (base URL, gateway, pinned
+  model). A backend alone does **not** make a provider usable.
+* **Models** must be enabled *and* granted. Usage is clearance-driven and a
+  clearance can only point at a row the organization owns, so a shared
+  (instance-wide) model has to be **copied** into the tenant before it can be
+  granted. `POST /{id}/models/{model_id}/grant` does that copy (id
+  `<model>@<org-prefix>`) and leaves the shared row in place, so any number of
+  tenants can grant the same model. `PATCH /{id}/models/{model_id}` refuses
+  shared rows with `409` — flipping one would change every tenant.
+
+After storing a key, run `POST /{id}/providers/discover` to register the models
+that provider exposes, then grant the ones the tenant should use.
 
 ### Visibility of operator changes
 
@@ -272,11 +323,18 @@ anything is worse than one that tells you which variable is missing.
 * **Organizations list** — search, filter by status, member/owner/key counts.
   The internal `__lucent_system__` organization is never listed.
 * **New organization** — the `/provision` flow: name, first admin, role, optional
-  password, optional model. Shows the generated password and API key once.
+  password, a key field per provider (7 today, each labelled with the engine that
+  will run it), and **all 82 operator-editable settings** grouped by their 15
+  sections. Blank means "inherit the instance value", so a tenant can inherit
+  everything and be configured later. There is no model picker: a new tenant has
+  no models of its own, and its list comes from its own credentials once
+  discovery runs. Shows the generated password and API key once.
 * **Organization detail** — lifecycle (suspend/resume/rename), members (add,
-  change role, reset password, mint key, remove), runtime settings grouped by
-  section with each value's source (`DB` / `env` / `default`), recent activity,
-  and a name-confirmed delete.
+  change role, reset password, mint key, remove), model providers (save or clear a
+  per-tenant key, run discovery), models (grant a shared model into the tenant,
+  enable/disable an owned one), runtime settings grouped by section with each
+  value's source (`DB` / `env` / `default`), recent activity, and a name-confirmed
+  delete.
 * **Instance audit** — the operator trail, filterable by tenant and action.
 * **Status** — reachability, key validity, and whether the key belongs to a
   hyperadmin.

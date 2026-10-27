@@ -149,6 +149,20 @@ async def list_models(user: AuthenticatedUser, limit: int = 100, offset: int = 0
     from lucent.settings import llm_engine_name
 
     configured_default = llm_engine_name()
+
+    # Engines that reported a model in their own catalog (migration 151). A model
+    # id is not provider-scoped, so Copilot and Codex can both offer the same row;
+    # provider support alone would hide that overlap from the UI.
+    try:
+        catalog_rows = await pool.fetch(
+            "SELECT model_id, engine, source FROM model_engine_catalogs"
+        )
+    except Exception:  # noqa: BLE001 — pre-151 database has no such table
+        catalog_rows = []
+    reported: dict[str, dict[str, str]] = {}
+    for row in catalog_rows:
+        reported.setdefault(row["model_id"], {})[row["engine"]] = row["source"]
+
     for item in result.get("items", []):
         item["provider_label"] = provider_label(item.get("provider") or "")
         if item.get("model_class") == "decision":
@@ -158,6 +172,24 @@ async def list_models(user: AuthenticatedUser, limit: int = 100, offset: int = 0
         item["compatible_engines"] = compatible_engines(
             item.get("provider") or "", configured_default=configured_default
         )
+        # Fold in engines that advertised this model even though their provider
+        # support would not have predicted it, so the list shows every harness
+        # that can actually run the model.
+        known = {entry["engine"] for entry in item["compatible_engines"]}
+        for engine_name in sorted(reported.get(item["id"], {})):
+            if engine_name in known:
+                continue
+            item["compatible_engines"].append(
+                {
+                    "engine": engine_name,
+                    "display_name": engine_name,
+                    "default": False,
+                    "available": True,
+                    "availability_detail": "advertised in this engine's catalog",
+                    "kind": "coding_agent" if engine_name != "langchain" else "llm_access",
+                }
+            )
+            known.add(engine_name)
         item["default_engine"] = item.get("engine") or default_engine_for_provider(
             item.get("provider") or "", configured_default=configured_default
         )

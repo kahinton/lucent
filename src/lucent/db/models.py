@@ -367,6 +367,10 @@ class ModelRepository:
         now = datetime.now(timezone.utc)
         upserted = 0
         discovered_ids = [m["model_id"] for m in models]
+        # Ids this catalog also lists but that another provider already owns.
+        # Not an error: the same model id can appear in several catalogs, and
+        # the existing row stays with its current owner.
+        provider_conflicts: list[str] = []
         async with scoped_acquire(organization_id=org_id) as conn:
             async with conn.transaction():
                 for m in models:
@@ -408,7 +412,7 @@ class ModelRepository:
                         now,
                         _jsonb_param(m.get("discovery_metadata")),
                     )
-                    await conn.execute(
+                    row = await conn.fetchrow(
                         """
                         UPDATE models SET
                             provider = CASE
@@ -485,6 +489,18 @@ class ModelRepository:
                             discovery_metadata = $15::jsonb,
                             updated_at = $14
                         WHERE id = $1
+                          -- Never let one catalog rewrite another's row. Model
+                          -- ids are not namespaced by provider, so the same id
+                          -- legitimately appears in several catalogs (Copilot
+                          -- and Codex both report "gpt-5.6-terra"). Without
+                          -- this, whichever provider discovered last would take
+                          -- ownership of the row and move its engine.
+                          AND (
+                              provider = $2
+                              OR models.discovery_source = 'manual'
+                              OR models.is_custom
+                          )
+                        RETURNING id
                         """,
                         m["model_id"],
                         m["provider"],
@@ -502,7 +518,29 @@ class ModelRepository:
                         now,
                         _jsonb_param(m.get("discovery_metadata")),
                     )
-                    upserted += 1
+                    if row is not None:
+                        upserted += 1
+                        await self._record_engine_catalog(
+                            conn,
+                            model_id=m["model_id"],
+                            engine=m.get("engine") or provider,
+                            provenance={"api_model_id": m.get("api_model_id")},
+                        )
+                    else:
+                        # The id exists but belongs to a different provider: this
+                        # catalog also offers it, but the row keeps its current
+                        # owner and engine. Record the overlap so the engine-first
+                        # views can show it as available here too.
+                        provider_conflicts.append(m["model_id"])
+                        await self._record_engine_catalog(
+                            conn,
+                            model_id=m["model_id"],
+                            engine=m.get("engine") or provider,
+                            provenance={
+                                "api_model_id": m.get("api_model_id"),
+                                "also_offered_by": provider,
+                            },
+                        )
 
                 disabled_missing = 0
                 if disable_missing:
@@ -524,8 +562,45 @@ class ModelRepository:
 
         return {
             "upserted": upserted,
+            "provider_conflicts": provider_conflicts,
             "disabled_missing": disabled_missing if disable_missing else 0,
         }
+
+    async def _record_engine_catalog(
+        self,
+        conn: Any,
+        *,
+        model_id: str,
+        engine: str,
+        provenance: dict | None = None,
+    ) -> None:
+        """Record that ``engine`` offers ``model_id`` (migration 151).
+
+        A model id is not provider-scoped, so the same row can legitimately be
+        reported by several catalogs. ``models.provider`` records the owning
+        catalog; this table records the overlap so an engine-first view can list
+        a model once and say which harnesses can run it.
+        """
+        try:
+            await conn.execute(
+                """
+                INSERT INTO model_engine_catalogs (model_id, engine, source, provenance)
+                VALUES ($1, $2, 'catalog', $3::jsonb)
+                ON CONFLICT (model_id, engine) DO UPDATE
+                    SET last_seen_at = NOW(),
+                        provenance = EXCLUDED.provenance
+                """,
+                model_id,
+                engine,
+                _jsonb_param(provenance or {}),
+            )
+        except Exception:  # noqa: BLE001 — overlap bookkeeping must not fail a sync
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "Could not record engine catalog entry %s/%s", model_id, engine,
+                exc_info=True,
+            )
 
     async def list_discovery_state(self) -> dict[str, dict]:
         """Return ``{model_id: discovery_metadata}`` for digest change detection.

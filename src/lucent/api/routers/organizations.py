@@ -34,6 +34,9 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from lucent.api.deps import AuthenticatedUser, HyperadminUser, OwnerUser
 from lucent.api.models import (
+    CredentialFieldSpec,
+    EngineCatalogEntry,
+    EngineProviderOption,
     ErrorResponse,
     InstanceAuditEntry,
     InstanceAuditResponse,
@@ -41,8 +44,12 @@ from lucent.api.models import (
     OrganizationAdminCreated,
     OrganizationApiKeyCreate,
     OrganizationApiKeyCreated,
+    OrganizationBackendCreate,
     OrganizationCreate,
+    OrganizationCredentialUpdate,
     OrganizationListResponse,
+    OrganizationModelCreate,
+    OrganizationModelToggle,
     OrganizationProvisionRequest,
     OrganizationProvisionResponse,
     OrganizationResponse,
@@ -65,8 +72,10 @@ from lucent.db import admin_audit as audit_actions
 from lucent.db.organization import OrganizationNameConflictError
 from lucent.logging import get_logger
 from lucent.rbac import Permission, can_assign_role, can_manage_user
+from lucent.services import org_providers as instance_providers
 from lucent.services import org_provisioning
 from lucent.services import org_settings as instance_settings
+from lucent import settings as runtime_settings
 
 logger = get_logger(__name__)
 
@@ -450,6 +459,10 @@ async def provision_organization(
             admin_external_id=first.external_id if first else None,
             api_key_name=data.api_key_name,
             model_id=data.model_id,
+            providers=[
+                {"provider": p.provider, "api_key": p.api_key} for p in data.providers
+            ],
+            settings=data.settings or None,
             operator_org_id=user.organization_id,
             operator_user_id=user.id,
         )
@@ -475,6 +488,9 @@ async def provision_organization(
         temporary_password=result.temporary_password,
         seeded=result.seeded,
         model_id=result.model_id,
+        providers_configured=result.providers_configured,
+        models_discovered=result.models_discovered,
+        settings_applied=result.settings_applied,
         warnings=result.warnings,
     )
 
@@ -1278,3 +1294,518 @@ async def delete_organization_user(
     )
 
     return SuccessResponse(success=True, message=f"User {user_id} removed")
+
+
+# ===========================================================================
+# Per-organization LLM providers and models
+#
+# The tenant-facing admin API (/api/admin/backends, /api/admin/models) resolves
+# the organization from the *caller's* session. An instance operator configuring
+# someone else's workspace needs to name the target explicitly, which is what
+# these routes do. Everything is written with the target organization_id, so a
+# credential or model can never leak into another tenant.
+#
+# Two separate concepts live here, deliberately:
+#   * provider CREDENTIALS — the API key the engines actually read, stored at the
+#     canonical secret key for that provider;
+#   * engine BACKENDS — optional routing overrides (base URL, gateway, pinned
+#     model). A backend alone does not make a provider usable.
+# ===========================================================================
+
+
+@router.get("/instance/providers")
+async def list_available_providers(user: HyperadminUser) -> dict[str, Any]:
+    """Providers an operator can configure a credential for."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    return {"items": instance_providers.available_providers()}
+
+
+@router.get("/instance/runtime")
+async def get_instance_runtime(user: HyperadminUser) -> dict[str, Any]:
+    """The instance's LLM engine and the providers it can actually run.
+
+    A new tenant has no models of its own, and a *shared* model row cannot be
+    granted to one: ``models`` is keyed by ``id`` alone, so "make this row
+    usable by one tenant" is not expressible without moving the row, which
+    would take it away from every other tenant. That is why a create-time model
+    picker over the shared catalogue is wrong, and why this endpoint answers
+    the question that can honestly be answered instead: **which providers will
+    this instance's engine run**.
+
+    Given that, the tenant's model list comes from its own credentials plus a
+    discovery run — i.e. from what it actually has, which is exactly what its
+    owner can see and change from Settings → Models.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+
+    from lucent.llm.engine_injection import compatible_provider_options
+    from lucent.llm.engine_registry import default_engine_for_provider
+    from lucent.settings import llm_engine_name
+
+    configured_engine = llm_engine_name()
+
+    providers: list[dict[str, Any]] = []
+    for option in compatible_provider_options(configured_engine):
+        name = option.get("name") or ""
+        providers.append(
+            {
+                "provider": name,
+                "label": option.get("label") or name,
+                "engine": default_engine_for_provider(
+                    name, configured_default=configured_engine
+                ),
+            }
+        )
+
+    return {
+        "configured_engine": configured_engine,
+        "providers": providers,
+        "provider_names": [p["provider"] for p in providers],
+    }
+
+
+@router.get("/instance/engines", response_model=list[EngineCatalogEntry])
+async def list_engines(user: HyperadminUser) -> list[EngineCatalogEntry]:
+    """Engines, the providers each accepts, and their config fields."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    return [
+        EngineCatalogEntry(
+            engine=item["engine"],
+            providers=[
+                EngineProviderOption(name=p["name"], label=p["label"])
+                for p in item["providers"]
+            ],
+            fields=[CredentialFieldSpec(**f) for f in item["fields"]],
+            availability=item["availability"],
+        )
+        for item in instance_providers.available_engines()
+    ]
+
+
+@router.get("/instance/settings-schema")
+async def get_instance_settings_schema(user: HyperadminUser) -> dict[str, Any]:
+    """Every operator-editable setting, for provisioning a tenant that has none.
+
+    The tenant settings endpoint reads an organization's *values*, so it cannot
+    describe a workspace that does not exist yet. This returns the shape only —
+    key, type, default, bounds, choices — which is all the create form needs.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+
+    sections: dict[str, list[dict[str, Any]]] = {}
+    for definition in runtime_settings.runtime_setting_definitions():
+        if not definition.editable:
+            continue
+        sections.setdefault(definition.section, []).append(
+            {
+                "key": definition.key,
+                "title": definition.title,
+                "value_type": definition.value_type,
+                "default": definition.default,
+                "choices": list(definition.choices),
+                "min_value": definition.min_value,
+                "max_value": definition.max_value,
+                "description": definition.description,
+                # A model-backed setting can be filled in now, but a brand new
+                # workspace has no models installed yet, so the console renders
+                # it as free text rather than an empty dropdown.
+                "option_source": definition.option_source,
+            }
+        )
+
+    return {
+        "sections": [
+            {"section": section, "settings": entries}
+            for section, entries in sections.items()
+        ],
+        "count": sum(len(entries) for entries in sections.values()),
+    }
+
+
+@router.get("/{organization_id}/credentials")
+async def list_organization_credentials(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> dict[str, Any]:
+    """Which provider credentials a tenant has. Values are never returned."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+    pool = await get_pool()
+    return {
+        "items": await instance_providers.list_credentials(pool, organization_id)
+    }
+
+
+@router.put("/{organization_id}/credentials/{provider}")
+async def set_organization_credential(
+    organization_id: UUID,
+    provider: str,
+    data: OrganizationCredentialUpdate,
+    user: HyperadminUser,
+) -> dict[str, Any]:
+    """Store a provider API key for a tenant.
+
+    This writes the canonical secret the engines read, which is what makes the
+    provider usable by that tenant.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    org = await _require_org(organization_id)
+    pool = await get_pool()
+
+    try:
+        result = await instance_providers.set_credential(
+            pool, organization_id, provider=provider, value=data.value
+        )
+    except instance_providers.ProviderConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from None
+
+    await _audit(
+        user,
+        action="org.provider_credential_set",
+        entity_type="provider_credential",
+        entity_id=None,
+        entity_label=provider,
+        target_org_id=organization_id,
+        changed_fields=[f"{provider}.api_key"],
+        new_values={"provider": provider, "organization": org["name"], "configured": True},
+        notes="Provider credential stored by an instance operator (value not logged).",
+    )
+    return result
+
+
+@router.delete("/{organization_id}/credentials/{provider}")
+async def clear_organization_credential(
+    organization_id: UUID,
+    provider: str,
+    user: HyperadminUser,
+) -> SuccessResponse:
+    """Remove a tenant's provider API key so an env fallback can apply."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+    pool = await get_pool()
+
+    try:
+        await instance_providers.clear_credential(
+            pool, organization_id, provider=provider
+        )
+    except instance_providers.ProviderConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from None
+
+    await _audit(
+        user,
+        action="org.provider_credential_clear",
+        entity_type="provider_credential",
+        entity_label=provider,
+        target_org_id=organization_id,
+        changed_fields=[f"{provider}.api_key"],
+        new_values={"provider": provider, "configured": False},
+        notes="Provider credential cleared by an instance operator.",
+    )
+    return SuccessResponse(success=True, message=f"{provider} credential cleared")
+
+
+@router.post("/{organization_id}/providers/discover")
+async def discover_organization_models(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> dict[str, Any]:
+    """Register the models a tenant's configured providers expose.
+
+    This is the step that turns a stored credential into selectable models.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    org = await _require_org(organization_id)
+    pool = await get_pool()
+
+    try:
+        result = await instance_providers.discover_models(pool, organization_id)
+    except Exception as exc:  # noqa: BLE001 — provider-side failure
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Model discovery failed: {exc}",
+        ) from None
+
+    await _audit(
+        user,
+        action="org.model_discover",
+        entity_type="model",
+        entity_label=org["name"],
+        target_org_id=organization_id,
+        changed_fields=["models"],
+        new_values={"discovered": result if isinstance(result, dict) else None},
+        notes="Model discovery run by an instance operator.",
+    )
+    return result
+
+
+@router.get("/{organization_id}/backends")
+async def list_organization_backends(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> dict[str, Any]:
+    """Engine backends owned by a tenant (routing overrides)."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+    pool = await get_pool()
+    return {"items": await instance_providers.list_backends(pool, organization_id)}
+
+
+@router.post(
+    "/{organization_id}/backends",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_organization_backend(
+    organization_id: UUID,
+    data: OrganizationBackendCreate,
+    user: HyperadminUser,
+) -> dict[str, Any]:
+    """Create an engine backend (base URL / gateway / pinned model) for a tenant."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    org = await _require_org(organization_id)
+    pool = await get_pool()
+
+    try:
+        backend = await instance_providers.create_backend(
+            pool,
+            organization_id,
+            name=data.name,
+            engine=data.engine,
+            provider=data.provider,
+            config=data.config,
+            secrets=data.secrets,
+            is_enabled=data.is_enabled,
+        )
+    except instance_providers.ProviderConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from None
+
+    await _audit(
+        user,
+        action="org.backend_create",
+        entity_type="engine_backend",
+        entity_id=backend["id"],
+        entity_label=backend["name"],
+        target_org_id=organization_id,
+        changed_fields=["backend"],
+        new_values={
+            "engine": backend["engine"],
+            "provider": backend["provider"],
+            "organization": org["name"],
+        },
+        notes="Engine backend created by an instance operator.",
+    )
+    return backend
+
+
+@router.delete("/{organization_id}/backends/{backend_id}")
+async def delete_organization_backend(
+    organization_id: UUID,
+    backend_id: str,
+    user: HyperadminUser,
+) -> SuccessResponse:
+    """Delete a tenant-owned engine backend."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+    pool = await get_pool()
+
+    if not await instance_providers.delete_backend(pool, organization_id, backend_id):
+        raise HTTPException(status_code=404, detail="Backend not found for this organization")
+
+    await _audit(
+        user,
+        action="org.backend_delete",
+        entity_type="engine_backend",
+        entity_id=backend_id,
+        target_org_id=organization_id,
+        changed_fields=["backend"],
+        notes="Engine backend removed by an instance operator.",
+    )
+    return SuccessResponse(success=True, message="Backend removed")
+
+
+@router.get("/{organization_id}/models")
+async def list_organization_models(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> dict[str, Any]:
+    """Models defined for or granted to a tenant."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+    pool = await get_pool()
+    items = await instance_providers.list_models(pool, organization_id)
+    return {"items": items, "total_count": len(items)}
+
+
+@router.post("/{organization_id}/models/{model_id:path}/grant")
+async def grant_organization_model(
+    organization_id: UUID,
+    model_id: str,
+    user: HyperadminUser,
+) -> SuccessResponse:
+    """Make a model usable by one tenant, copying it if it is instance-shared.
+
+    Enabling a shared model is not enough: the clearance that actually permits
+    use has to point at an org-owned row. Copying the shared row into the
+    organization achieves that without removing it from the catalogue every
+    other tenant draws from.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+    pool = await get_pool()
+
+    try:
+        result = await instance_providers.grant_model_to_org(
+            pool, organization_id, model_id, granted_by=user.id
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced to the operator verbatim
+        raise HTTPException(
+            status_code=400, detail=f"{model_id} could not be granted: {exc}"
+        ) from exc
+
+    await _audit(
+        user,
+        action="org.model_grant",
+        entity_type="model",
+        entity_id=None,
+        entity_label=model_id,
+        target_org_id=organization_id,
+        changed_fields=["granted"],
+        new_values={"granted": True, "cloned": result.get("cloned", False)},
+        notes="Model granted to the tenant by an instance operator.",
+    )
+    return SuccessResponse(
+        success=True,
+        message=(
+            f"{model_id} granted to this tenant"
+            + (
+                f" as {result['model_id']} (copied from the shared registry)"
+                if result.get("cloned")
+                else ""
+            )
+        ),
+    )
+
+
+@router.post(
+    "/{organization_id}/models",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_organization_model(
+    organization_id: UUID,
+    data: OrganizationModelCreate,
+    user: HyperadminUser,
+) -> dict[str, Any]:
+    """Define a model for a tenant and (by default) grant the org read access.
+
+    An enabled model without an org grant is not usable, so the grant defaults on.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    org = await _require_org(organization_id)
+    pool = await get_pool()
+
+    try:
+        model = await instance_providers.create_model(
+            pool,
+            organization_id,
+            model_id=data.model_id,
+            provider=data.provider,
+            name=data.name or data.model_id,
+            engine=data.engine,
+            category=data.category,
+            model_class=data.model_class,
+            context_window=data.context_window,
+            supports_tools=data.supports_tools,
+            supports_vision=data.supports_vision,
+            notes=data.notes,
+            is_enabled=data.is_enabled,
+            grant_to_org=data.grant_to_org,
+            granted_by=user.id,
+        )
+    except instance_providers.ModelConfigError as exc:
+        detail = str(exc)
+        code = (
+            status.HTTP_409_CONFLICT
+            if "already exists" in detail
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=code, detail=detail) from None
+
+    await _audit(
+        user,
+        action="org.model_create",
+        entity_type="model",
+        # ``admin_audit_log.entity_id`` is a UUID column, but model ids are
+        # free-form strings ("gpt-4.1"), so the id belongs in the label and
+        # entity_id stays null.
+        entity_id=None,
+        entity_label=model["id"],
+        target_org_id=organization_id,
+        changed_fields=["model"],
+        new_values={
+            "provider": model.get("provider"),
+            "engine": model.get("engine"),
+            "organization": org["name"],
+            "org_granted": model.get("org_granted"),
+        },
+        notes="Model defined by an instance operator.",
+    )
+    return model
+
+
+@router.patch("/{organization_id}/models/{model_id:path}")
+async def toggle_organization_model(
+    organization_id: UUID,
+    model_id: str,
+    data: OrganizationModelToggle,
+    user: HyperadminUser,
+) -> SuccessResponse:
+    """Enable or disable one model for a tenant."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+    pool = await get_pool()
+
+    updated = await instance_providers.set_model_enabled(
+        pool, organization_id, model_id, enabled=data.enabled
+    )
+    if not updated:
+        # Distinguish "this is a shared registry row" from "no such model", since
+        # the operator's next step differs: the former needs granting (which
+        # adopts it), the latter needs discovery run first.
+        visible = await instance_providers.list_models(pool, organization_id)
+        shared = any(
+            item["id"] == model_id and not item.get("owned", True)
+            for item in visible
+        )
+        if shared:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{model_id} is shared across the instance, not owned by this "
+                    "organization. Grant it to this tenant instead — that adopts "
+                    "it into the organization and leaves other tenants alone."
+                ),
+            )
+        raise HTTPException(
+            status_code=404, detail="Model not found for this organization"
+        )
+
+    await _audit(
+        user,
+        action="org.model_update",
+        entity_type="model",
+        entity_id=None,
+        entity_label=model_id,
+        target_org_id=organization_id,
+        changed_fields=["is_enabled"],
+        new_values={"is_enabled": data.enabled},
+        notes="Model enabled/disabled by an instance operator.",
+    )
+    return SuccessResponse(
+        success=True,
+        message=f"Model {model_id} {'enabled' if data.enabled else 'disabled'}",
+    )

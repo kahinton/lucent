@@ -146,6 +146,7 @@ async def _start_model_discovery_task(pool) -> None:
 
         set_tenant_scope(role="system")
         try:
+            await _provision_coding_engine_clis()
             await _sync_configured_model_providers(pool)
             try:
                 from lucent.model_registry import load_models_from_db
@@ -158,6 +159,28 @@ async def _start_model_discovery_task(pool) -> None:
         logger.info("Background model discovery complete")
 
     _model_discovery_task = asyncio.create_task(_run())
+
+
+async def _provision_coding_engine_clis() -> None:
+    """Fetch a coding engine's CLI at startup instead of on a user's first turn.
+
+    The Copilot SDK downloads its runtime bundle on first use, buffering the ~87
+    MB archive in memory. Doing that inside a request makes the first chat slow
+    and, on a memory-constrained host, gets the process killed mid-download.
+    Warming the cache here keeps it off the request path; a failure is logged and
+    ignored, because the engine is simply unavailable until it succeeds.
+    """
+    try:
+        from lucent.llm.copilot_engine import copilot_cli_status, ensure_copilot_cli
+
+        ready, detail = copilot_cli_status()
+        if ready:
+            await asyncio.to_thread(ensure_copilot_cli)
+            logger.info("Copilot CLI ready: %s", detail)
+        else:
+            logger.warning("Copilot CLI unavailable: %s", detail)
+    except Exception as exc:  # noqa: BLE001 — never block startup on this
+        logger.warning("Copilot CLI provisioning skipped: %s", exc)
 
 
 # Known insecure default values that must not be used in production.

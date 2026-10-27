@@ -191,18 +191,78 @@ module.
 | Declarative hooks | yes | no (accepted and ignored) | no | no |
 | Managed tools | yes | no | no | no |
 | Reasoning effort | yes | yes | no | yes |
-| Catalog discovery | yes | yes | yes | no |
+| Catalog discovery | yes | yes | **no** | yes |
+
+`claude_code` reports `discovery: false` because the Claude Agent SDK exposes no
+catalog call — only a `model` option you pass in. Its providers therefore come
+from `provider_support` alone. Claiming discovery there would advertise a
+capability the engine cannot deliver.
+
+### How catalog discovery is dispatched
+
+A provider is discovered in one of two ways, and the choice is now consistent:
+
+- **Vendor APIs** (`openai`, `anthropic`, `google`, `ollama`) are discovered in
+  `ModelDiscoveryService` with plain HTTP against each vendor's catalog endpoint.
+  There is nothing engine-specific about them.
+- **Engine harnesses** (`copilot`, `codex`) report their own lists through
+  `EngineSpec.discover`. Discovery never learns an engine name: a provider that
+  matches an engine with a hook is asked for its catalog.
+
+The hook returns plain dicts, so engine modules never import `model_discovery`
+(which imports them). Discovery gates the call on `engine_availability`, because
+some engines can fail in ways an unattended sweep must not trigger.
+
+#### Copilot's CLI
+
+The Copilot SDK resolves its CLI in three steps: `COPILOT_CLI_PATH` or `PATH`, a
+bundle already cached under `~/.cache/github-copilot-sdk`, and finally a download
+of the pinned runtime archive. That last step buffers the whole ~87 MB package in
+memory before extracting it, so on a memory-constrained host the process is
+SIGKILLed mid-download **with no traceback** — indistinguishable from a crash, and
+the container simply restarts.
+
+Two things follow, both implemented in `lucent/llm/copilot_engine.py`:
+
+- `copilot_cli_status()` answers "would provisioning work here" by checking the
+  cache and, if empty, the available memory, instead of assuming an importable SDK
+  means a runnable engine. Availability and the discovery sweep are gated on it.
+- `_provision_coding_engine_clis()` warms the cache during startup, so the
+  download happens off the request path.
+
 
 ### Model → provider → engines
 
-Every model record carries a `provider`. The `engine` stored on the model
-(`models.engine`) is only that model's **default engine** — it does not restrict
-which engines can run it. Compatibility is derived from each engine spec's
-`provider_support` and exposed as the controlled map:
+Every model record carries a `provider`, which names the catalog that owns the
+row. The `engine` stored on the model (`models.engine`) is only that model's
+**preferred default engine** — it does not restrict which engines can run it.
+
+A model id is **not** provider-scoped, and that has a consequence: the same
+model legitimately appears in several catalogs. Copilot and Codex both report
+`gpt-5.6-terra`; OpenAI and Copilot both report `gpt-5.1`. Because `models.id`
+is the primary key, those are one row, and `provider` can only name one owner.
+
+So engine compatibility comes from two places, both reported in the API as a
+model's `engines` / `compatible_engines`:
+
+1. the engine's declared `provider_support` (derived — LangChain covers the
+   native APIs), and
+2. `model_engine_catalogs` (migration 151) — engines that enumerated the model
+   in their *own* catalog.
+
+The second is what an engine-first view needs. Discovery writes it on every
+sync, so a Copilot-owned row also records that Codex offered it. A coding
+engine's own catalog is discovered through its `EngineSpec.discover` hook; the
+same write path refuses to reassign a row owned by another provider (the overlap
+is reported as `provider_conflicts` instead of silently re-homing the model).
+
+Compatibility is derived from each engine spec's `provider_support` and exposed
+as the controlled map:
 
 | Provider | Compatible engines |
 |---|---|
 | `anthropic` | `langchain`, `copilot`, `claude_code` |
+| `codex` | `codex` |
 | `copilot` | `copilot` |
 | `google` | `langchain`, `copilot` |
 | `lmstudio` | `copilot`, `codex` |
@@ -214,8 +274,14 @@ which engines can run it. Compatibility is derived from each engine spec's
 with `include_unsupported=True` to see it with an empty list).
 
 Default engine resolution: an explicit default entry (`ollama` → `langchain`),
-then the deployment's configured default engine (`LUCENT_LLM_ENGINE`, currently
-`copilot`) when compatible, then `langchain`, then the first compatible engine.
+then the deployment's configured default engine (`LUCENT_LLM_ENGINE`, `langchain`
+by default) when compatible, then `langchain`, then the first compatible engine.
+
+Engines are **drivers**; backends are **composition**. `langchain` is the general
+driver and the default. `copilot`, `claude_code`, and `codex` are coding-agent
+harnesses that bring their own loop and can enumerate their own catalogs. The
+overlap between them (running Claude Code against a local Ollama server, say) is
+expressed as a backend, not by teaching model rows about engines.
 
 `model_execution_catalog` (`lucent.llm.backend_selection`) builds the
 model-centric presentation shared by MCP and admin surfaces:

@@ -215,6 +215,91 @@ class TestProvisionOrganization:
         assert set(result.seeded) == {"skills", "agents", "hooks", "sandbox_templates"}
 
 
+class TestProvisionWithProvidersAndSettings:
+    """A tenant created in one call should be usable without a follow-up visit.
+
+    These guard the console's "create org" form, which posts credentials and
+    runtime settings alongside the name. Each part fails independently, so each
+    is asserted separately — a tenant with a key but no settings is exactly the
+    half-configured state that made the old form useless.
+    """
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def secret_provider(self, db_pool):
+        from lucent.secrets.builtin import BuiltinSecretProvider
+        from lucent.secrets.registry import SecretRegistry
+
+        SecretRegistry.register("builtin", BuiltinSecretProvider(db_pool))
+        SecretRegistry.set_default("builtin")
+        yield
+        SecretRegistry.reset()
+
+    async def test_providers_are_stored(self, db_pool, operator, clean_test_data):
+        from lucent.services import org_providers
+
+        prefix = clean_test_data
+        operator_org, operator_user = operator
+
+        result = await org_provisioning.provision_organization(
+            db_pool,
+            name=f"{prefix}withprovider",
+            admin_email=f"{prefix}prov@tenant.test",
+            providers=[{"provider": "openai", "api_key": "sk-test-xyz"}],
+            operator_org_id=operator_org["id"],
+            operator_user_id=operator_user["id"],
+        )
+
+        assert result.providers_configured == ["openai"]
+        assert result.warnings == []
+
+        credentials = await org_providers.list_credentials(
+            db_pool, result.organization["id"]
+        )
+        openai_row = next(c for c in credentials if c["provider"] == "openai")
+        assert openai_row["configured"] is True
+
+    async def test_settings_are_applied(self, db_pool, operator, clean_test_data):
+        prefix = clean_test_data
+        operator_org, operator_user = operator
+
+        result = await org_provisioning.provision_organization(
+            db_pool,
+            name=f"{prefix}withsettings",
+            admin_email=f"{prefix}settings@tenant.test",
+            settings={
+                "features.sandboxes_enabled": False,
+                "memory.inject_max_memories": 2,
+            },
+            operator_org_id=operator_org["id"],
+            operator_user_id=operator_user["id"],
+        )
+
+        assert result.settings_applied == {
+            "features.sandboxes_enabled": False,
+            "memory.inject_max_memories": 2,
+        }
+
+    async def test_unknown_setting_is_a_warning_not_a_failure(
+        self, db_pool, operator, clean_test_data
+    ):
+        """An unappliable setting must not prevent the tenant from existing."""
+        prefix = clean_test_data
+        operator_org, operator_user = operator
+
+        result = await org_provisioning.provision_organization(
+            db_pool,
+            name=f"{prefix}badsetting",
+            admin_email=f"{prefix}bad@tenant.test",
+            settings={"features.sandboxes_enabled": False, "nope.not_a_setting": 1},
+            operator_org_id=operator_org["id"],
+            operator_user_id=operator_user["id"],
+        )
+
+        assert result.organization["status"] == "active"
+        assert result.settings_applied == {"features.sandboxes_enabled": False}
+        assert any("nope.not_a_setting" in w for w in result.warnings)
+
+
 class TestProvisioningAudit:
     async def test_writes_operator_and_tenant_rows(
         self, db_pool, operator, clean_test_data

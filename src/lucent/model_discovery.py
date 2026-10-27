@@ -147,6 +147,32 @@ class ProviderDiscoveryResult:
     error: str | None = None
 
 
+#: Providers whose catalog comes from a coding engine rather than a vendor HTTP
+#: endpoint. Their discovery is gated on engine availability, because asking an
+#: engine that cannot run here may terminate the process rather than raise.
+_ENGINE_CATALOG_PROVIDERS: frozenset[str] = frozenset({"copilot", "codex"})
+
+
+def _engine_catalog_available(engine: str) -> bool:
+    """Whether an engine advertises a catalog it can enumerate right now.
+
+    Used so discovery asks a coding engine for its models only when the engine
+    can actually answer — an uninstalled SDK should not make every run log a
+    provider failure.
+    """
+    try:
+        from lucent.llm.engine_registry import engine_availability, engine_spec
+
+        spec = engine_spec(engine)
+        if not spec.implemented or spec.discover is None:
+            return False
+        if not spec.capabilities.discovery:
+            return False
+        return engine_availability(engine).available
+    except Exception:  # noqa: BLE001 — unknown or unprobeable engine
+        return False
+
+
 def _clean_model_id(model_id: str) -> str:
     """Normalize provider model IDs into Lucent model IDs."""
     model_id = model_id.strip()
@@ -384,12 +410,25 @@ class ModelDiscoveryService:
 
         out: list[str] = []
         for definition in MODEL_PROVIDER_CREDENTIALS:
-            if await self._provider_credential(definition.provider, org_id=org_id):
-                out.append(definition.provider)
+            if not await self._provider_credential(definition.provider, org_id=org_id):
+                continue
+            # A coding engine's catalog is only worth asking for when the engine
+            # can actually run here. `copilot` in particular terminates the
+            # process when its CLI is missing, so an unattended background sweep
+            # must not reach it.
+            if definition.provider in _ENGINE_CATALOG_PROVIDERS:
+                if not _engine_catalog_available(definition.provider):
+                    continue
+            out.append(definition.provider)
         if os.environ.get("COPILOT_CLI_PATH") and "copilot" not in out:
             out.append("copilot")
         if os.environ.get("OLLAMA_HOST"):
             out.append("ollama")
+        # Coding engines that report their own catalogs. Codex is discovered
+        # through the SDK's own list, so it only appears when the SDK is
+        # installed; a failure there is reported per-provider, not fatally.
+        if "codex" not in out and _engine_catalog_available("codex"):
+            out.append("codex")
         return out
 
     async def provider_configuration_statuses(
@@ -576,6 +615,15 @@ class ModelDiscoveryService:
         *,
         org_id: str | None = None,
     ) -> list[DiscoveredModel]:
+        # API providers are discovered here because the calls are plain HTTP
+        # against each vendor's catalog endpoint and have nothing to do with an
+        # engine. Everything that *is* an engine harness (Copilot, Claude Code,
+        # Codex) reports its own list through the registry hook below, so this
+        # module never has to learn another engine name.
+        if provider in ("copilot", "github"):
+            # Historical alias: `github` was the provider name before the
+            # Copilot engine existed. Normalize it rather than branch twice.
+            provider = "copilot"
         if provider == "openai":
             return await self._discover_openai(org_id=org_id)
         if provider == "anthropic":
@@ -584,9 +632,75 @@ class ModelDiscoveryService:
             return await self._discover_google(org_id=org_id)
         if provider == "ollama":
             return await self._discover_ollama()
-        if provider in ("copilot", "github"):
-            return await self._discover_copilot(org_id=org_id)
+
+        engine_models = await self._discover_via_engine_hook(provider, org_id=org_id)
+        if engine_models is not None:
+            return engine_models
         raise ValueError(f"Unsupported model provider: {provider}")
+
+    async def _discover_via_engine_hook(
+        self,
+        provider: str,
+        *,
+        org_id: str | None = None,
+    ) -> list[DiscoveredModel] | None:
+        """Discover a provider through its engine's hook, or ``None`` if none.
+
+        A provider name that matches an engine name with a ``discover`` hook is
+        that engine's own catalog (Codex reports Codex models). Returning
+        ``None`` means "not an engine catalog", so the caller can report the
+        provider as unsupported.
+        """
+        from lucent.llm.engine_registry import ENGINE_REGISTRY, engine_availability
+
+        spec = ENGINE_REGISTRY.get(provider)
+        if spec is None or spec.discover is None:
+            return None
+        # Never invoke a hook for an engine this runtime cannot run. Some SDKs
+        # fail by terminating the process instead of raising (the Copilot client
+        # does exactly that when the CLI is missing), and a background sweep must
+        # not take the server down with it.
+        availability = engine_availability(provider)
+        if not availability.available:
+            raise ValueError(
+                f"{provider} cannot enumerate its catalog: {availability.detail}"
+            )
+        rows = await spec.discover(org_id=org_id)
+        models: list[DiscoveredModel] = []
+        for row in rows or []:
+            model_id = _clean_model_id(str(row["id"]))
+            name = str(row.get("name") or model_id)
+            category = _infer_category(model_id, name)
+            tags = set(_infer_tags(model_id, category))
+            if row.get("supports_vision"):
+                tags.add("vision")
+            if row.get("supports_reasoning_effort"):
+                tags.add("reasoning-effort")
+            metadata = dict(row.get("discovery_metadata") or {})
+            reasoning_efforts = list(row.get("reasoning_efforts") or [])
+            if not reasoning_efforts and metadata:
+                # Engines report reasoning support in their own shapes; reuse the
+                # provider-agnostic extractor rather than requiring each one to
+                # normalize.
+                reasoning_efforts = _extract_reasoning_efforts_from_metadata(metadata)
+            models.append(
+                DiscoveredModel(
+                    id=model_id,
+                    provider=provider,
+                    name=name,
+                    category=category,
+                    api_model_id=str(row.get("api_model_id") or model_id),
+                    context_window=int(row.get("context_window") or 0),
+                    supports_tools=bool(row.get("supports_tools", True)),
+                    supports_vision=bool(row.get("supports_vision", False)),
+                    notes=str(row.get("notes") or ""),
+                    tags=sorted(tags),
+                    reasoning_efforts=reasoning_efforts,
+                    engine=str(row.get("engine") or provider),
+                    discovery_metadata=metadata,
+                )
+            )
+        return models
 
     async def _discover_provider_safe(
         self,
@@ -961,50 +1075,3 @@ class ModelDiscoveryService:
                 models.append(result)
         return models
 
-    async def _discover_copilot(self, *, org_id: str | None = None) -> list[DiscoveredModel]:
-        try:
-            from lucent.llm.copilot_engine import create_copilot_client
-        except ImportError as exc:
-            raise ValueError("github-copilot-sdk is not installed") from exc
-
-        github_token = await self._provider_credential("copilot", org_id=org_id)
-        client = create_copilot_client(github_token=github_token)
-        try:
-            await client.start()
-            rows = await client.list_models()
-        finally:
-            await client.stop()
-
-        models: list[DiscoveredModel] = []
-        for row in rows:
-            model_id = row.id
-            category = _infer_category(model_id, row.name)
-            capabilities = row.capabilities
-            limits = capabilities.limits
-            supports = capabilities.supports
-            metadata = row.to_dict()
-            tags = _infer_tags(model_id, category)
-            if supports.reasoning_effort:
-                tags.append("reasoning-effort")
-            tags = sorted(set(tags))
-            reasoning_efforts = _extract_reasoning_efforts_from_metadata(metadata)
-            models.append(
-                DiscoveredModel(
-                    id=model_id,
-                    provider="copilot",
-                    name=row.name,
-                    category=category,
-                    api_model_id=model_id,
-                    context_window=int(
-                        limits.max_context_window_tokens or limits.max_prompt_tokens or 0
-                    ),
-                    supports_tools=True,
-                    supports_vision=bool(supports.vision),
-                    notes="Discovered from GitHub Copilot SDK model list.",
-                    tags=tags,
-                    reasoning_efforts=reasoning_efforts,
-                    engine="copilot",
-                    discovery_metadata=metadata,
-                )
-            )
-        return models

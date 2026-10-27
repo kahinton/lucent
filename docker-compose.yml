@@ -154,8 +154,8 @@ services:
       # headers with HTTP 421; the daemon reaches the server as http://lucent:8766/mcp,
       # so the in-network service name must be allowed. Override for custom hostnames/ingress.
       LUCENT_MCP_ALLOWED_HOSTS: ${LUCENT_MCP_ALLOWED_HOSTS:-lucent}
-      # LLM Engine: "copilot" (default, uses GitHub Copilot SDK) or "langchain"
-      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      # LLM Engine: "langchain" (default), "copilot", "claude_code", or "codex"
+      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-langchain}
       # Provider API keys (only needed when LUCENT_LLM_ENGINE=langchain)
       # ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -281,7 +281,7 @@ services:
       LUCENT_DAEMON_INTERVAL: ${LUCENT_DAEMON_INTERVAL:-15}
       LUCENT_DAEMON_MODEL: ${LUCENT_DAEMON_MODEL:-}
       LUCENT_MCP_URL_ALLOWLIST: ${LUCENT_MCP_URL_ALLOWLIST:-}
-      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-copilot}
+      LUCENT_LLM_ENGINE: ${LUCENT_LLM_ENGINE:-langchain}
       LUCENT_MAX_SESSIONS: ${LUCENT_MAX_SESSIONS:-3}
       LUCENT_STALE_HEARTBEAT_MINUTES: ${LUCENT_STALE_HEARTBEAT_MINUTES:-30}
       LUCENT_DAEMON_SOURCE_RELOAD: ${LUCENT_DAEMON_SOURCE_RELOAD:-false}

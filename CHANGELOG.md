@@ -40,6 +40,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+#### Engine-owned model catalogs
+- **Engines report their own model lists.** `EngineSpec.discover` was declared on
+  every engine from the start and called by nothing — discovery dispatched through
+  a hardcoded `if provider == ...` chain instead. It is now wired: a provider name
+  that matches an engine with a `discover` hook is asked for its catalog. Codex
+  gained `discover_codex_models`, which reads the SDK's `models()` call, so Codex
+  is a discoverable provider rather than a dead `discovery=False` flag. Copilot's
+  catalog moved onto its engine too, leaving one dispatch rule instead of a
+  growing if-chain.
+- **`claude_code` no longer claims catalog discovery.** The Claude Agent SDK
+  exposes no catalog call — only a `model` option you pass in — so the capability
+  flag was advertising something the engine cannot do.
+- **`model_engine_catalogs` (migration 151)** records which engines offer which
+  models. A model id is not provider-scoped, so Copilot and Codex both report
+  `gpt-5.6-terra` and `gpt-5.1` appears in several catalogs. That overlap was
+  previously unrepresentable; it now shows in the API (`engines` on org models,
+  `compatible_engines` on admin models) and in the console, which renders
+  "runs on codex, copilot · catalogued by copilot".
+
 #### Instance administration (hyperadmin + local ops console)
 - **`POST /api/organizations/provision`** — create a complete, immediately usable
   tenant in one call: the organization, its first admin (generated password
@@ -77,9 +96,80 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   queries, and the internal `__lucent_system__` organization is now excluded from
   operator-facing listings.
 - **`docs/instance-administration.md`** — the operator-facing guide.
+- **Provider credentials and models per tenant** — an instance operator can now
+  configure *another* workspace's LLM access end to end:
+  `GET /api/organizations/instance/providers` (catalogue with engines),
+  `GET|PUT|DELETE /api/organizations/{id}/credentials[/{provider}]` (keys stored
+  at the canonical `model_providers.<provider>.api_key` secret the engines
+  actually read), `POST /api/organizations/{id}/providers/discover` (register the
+  models those credentials expose), `GET|POST /api/organizations/{id}/models`,
+  `POST /api/organizations/{id}/models/{model_id}/grant`, and
+  `PATCH /api/organizations/{id}/models/{model_id}`.
+  Credentials and engine backends are deliberately separate: a backend is a
+  routing override and does not make a provider usable, so writing one used to
+  look like it worked while the engines still had no key.
+- **`GET /api/organizations/instance/settings-schema`** — key, type, default,
+  bounds, and choices for every operator-editable setting, so a form can describe
+  a tenant that does not exist yet. The per-organization settings endpoint
+  returns *values* and therefore cannot.
+- **`POST /api/organizations/provision` accepts `providers` and `settings`** —
+  one call can now leave a tenant with credentials, a granted model, and its
+  runtime settings applied, instead of returning a workspace the owner has to
+  finish configuring. Unappliable settings are reported as warnings; the tenant
+  is still created.
+- **Ops console: create-org and org-detail provisioning UI** — the create page
+  offers a key field per provider and all 82 editable settings grouped by their
+  15 sections (progressive disclosure, blank = inherit the instance value). The
+  detail page manages credentials (save/clear), runs discovery, and grants or
+  enables models per tenant.
+
+### Changed
+
+- **`langchain` is now the default LLM engine, not `copilot`.** The setting
+  default, the compose files, and the Helm values all said `copilot`, which made
+  Copilot the implied provider for every new workspace. Copilot remains a
+  supported engine and is still selectable, but it is now opt-in. `Ollama` still
+  forces `langchain`.
+- **Granting a shared model copies it instead of stealing it.** `models.id` is
+  the primary key, so promoting a shared row into one organization
+  (`UPDATE models SET organization_id = ...`) **removed that model from every
+  other tenant** — the first workspace to claim `gpt-5.1` took it out of the
+  shared catalogue and every later claim failed with "Resource not found in
+  organization". `grant_model_to_org` now clones the row into the tenant as
+  `<model>@<org-prefix>` and leaves the shared row untouched, so any number of
+  tenants can grant the same model. `/provision`'s `model_id` uses the same
+  path.
+- **`/provision` also sets the tenant's default model** when `model_id` is
+  given. Enabling and granting a model made it usable but not chosen, so a new
+  workspace fell back to the instance default — which it usually had no
+  credential for — and could fail its first chat.
+- **The create-org page has no model picker.** A new tenant has no models, and a
+  model list sourced from the operator's own organization (`/api/admin/models`)
+  showed rows the tenant neither owned nor could use. The page now states which
+  providers the configured engine can run and leaves the model list to the
+  tenant, whose credentials determine it. Two fields that didn't mean what they
+  looked like are gone: the API-key **name** (a key is minted and named
+  automatically) and the **default model** dropdown.
 
 ### Fixed
 
+- **Model discovery could terminate the server process.** The Copilot SDK
+  provisions its CLI by downloading a pinned runtime bundle, buffering the whole
+  ~87 MB archive in memory before extracting it. On a memory-constrained host the
+  kernel SIGKILLs the process mid-download **with no traceback** — so the server
+  appeared to "restart for no reason" whenever discovery reached Copilot, and the
+  probe reported the engine as available because the SDK package imported.
+  `copilot_cli_status()` now answers "would provisioning work here" by checking
+  the CLI cache and, when it is empty, available memory; engine availability and
+  the discovery sweep are gated on it, and `_provision_coding_engine_clis()` warms
+  the cache at startup so the download happens off the request path. Copilot is
+  now a first-class engine: discovery returns its full catalog and chat works.
+- **One catalog's discovery could re-home another's models.** `models.id` is the
+  primary key and `sync_discovered_models` upserted on `id` alone, rewriting
+  `provider` and `engine` unconditionally for non-manual rows. Running Codex
+  discovery reassigned 8 Copilot models to `codex`. The write path now refuses to
+  touch a row owned by another provider and reports it as `provider_conflicts`,
+  recording the overlap in `model_engine_catalogs` instead.
 - **Expired API keys were never reaped, and were counted as active.** Expiry was
   enforced only when a key was *used* (`ApiKeyRepository.verify` refuses a lapsed
   key), but the row kept `is_active = true` and `revoked_at IS NULL` forever.

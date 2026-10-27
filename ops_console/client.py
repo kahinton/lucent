@@ -184,11 +184,21 @@ class LucentClient:
         admin_role: str = "owner",
         api_key_name: str | None = "Default API key",
         model_id: str | None = None,
+        providers: list[dict[str, str]] | None = None,
+        settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create a tenant, its first admin, and a default API key."""
+        """Create a tenant, its first admin, its API key, providers, and settings.
+
+        Everything after the name is optional; a single call can leave the tenant
+        fully configured so its owner never has to finish the setup by hand.
+        """
         body: dict[str, Any] = {"name": name, "api_key_name": api_key_name}
         if model_id:
             body["model_id"] = model_id
+        if providers:
+            body["providers"] = providers
+        if settings:
+            body["settings"] = settings
         if admin_email or admin_display_name or admin_password:
             first: dict[str, Any] = {"role": admin_role}
             if admin_email:
@@ -370,6 +380,163 @@ class LucentClient:
         if isinstance(payload, dict):
             return payload.get("items") or payload.get("models") or []
         return payload or []
+
+    async def instance_runtime(self) -> dict[str, Any]:
+        """The instance's LLM engine and the providers that engine can run."""
+        return await self._request(
+            "GET", "/api/organizations/instance/runtime", retry=True
+        ) or {"configured_engine": "", "providers": [], "provider_names": []}
+
+    # -- providers, credentials, models (per tenant) -----------------------
+
+    async def available_providers(self) -> list[dict[str, Any]]:
+        """Providers that can be given a credential, with the engines using them."""
+        payload = await self._request(
+            "GET", "/api/organizations/instance/providers", retry=True
+        )
+        return (payload or {}).get("items") or []
+
+    async def engine_catalog(self) -> list[dict[str, Any]]:
+        """Engines, their allowed providers, and their config fields."""
+        return await self._request(
+            "GET", "/api/organizations/instance/engines", retry=True
+        ) or []
+
+    async def settings_schema(self) -> dict[str, Any]:
+        """Keys, types, defaults, and bounds for every editable setting."""
+        return await self._request(
+            "GET", "/api/organizations/instance/settings-schema", retry=True
+        ) or {"sections": [], "count": 0}
+
+    async def list_credentials(self, organization_id: str) -> list[dict[str, Any]]:
+        """Which provider credentials a tenant has (values never returned)."""
+        payload = await self._request(
+            "GET",
+            f"/api/organizations/{organization_id}/credentials",
+            retry=True,
+        )
+        return (payload or {}).get("items") or []
+
+    async def set_credential(
+        self, organization_id: str, provider: str, value: str
+    ) -> dict[str, Any]:
+        """Store a provider API key for a tenant.
+
+        This is the credential the engines actually read, so it is what makes a
+        provider usable by that tenant.
+        """
+        return await self._request(
+            "PUT",
+            f"/api/organizations/{organization_id}/credentials/{provider}",
+            json={"value": value},
+        )
+
+    async def clear_credential(
+        self, organization_id: str, provider: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "DELETE",
+            f"/api/organizations/{organization_id}/credentials/{provider}",
+        )
+
+    async def discover_models(self, organization_id: str) -> dict[str, Any]:
+        """Register the models the tenant's configured providers expose."""
+        return await self._request(
+            "POST", f"/api/organizations/{organization_id}/providers/discover"
+        )
+
+    async def list_backends(self, organization_id: str) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET",
+            f"/api/organizations/{organization_id}/backends",
+            retry=True,
+        )
+        return (payload or {}).get("items") or []
+
+    async def create_backend(
+        self,
+        organization_id: str,
+        *,
+        name: str,
+        engine: str,
+        provider: str,
+        config: dict[str, Any] | None = None,
+        secrets: dict[str, str] | None = None,
+        is_enabled: bool = True,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/api/organizations/{organization_id}/backends",
+            json={
+                "name": name,
+                "engine": engine,
+                "provider": provider,
+                "config": config or {},
+                "secrets": secrets or {},
+                "is_enabled": is_enabled,
+            },
+        )
+
+    async def delete_backend(
+        self, organization_id: str, backend_id: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "DELETE", f"/api/organizations/{organization_id}/backends/{backend_id}"
+        )
+
+    async def list_org_models(self, organization_id: str) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET", f"/api/organizations/{organization_id}/models", retry=True
+        )
+        return (payload or {}).get("items") or []
+
+    async def create_model(
+        self,
+        organization_id: str,
+        *,
+        model_id: str,
+        provider: str,
+        name: str = "",
+        engine: str | None = None,
+        category: str = "general",
+        model_class: str = "language",
+        context_window: int = 0,
+        is_enabled: bool = True,
+        grant_to_org: bool = True,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/api/organizations/{organization_id}/models",
+            json={
+                "model_id": model_id,
+                "provider": provider,
+                "name": name or model_id,
+                "engine": engine or None,
+                "category": category,
+                "model_class": model_class,
+                "context_window": context_window,
+                "is_enabled": is_enabled,
+                "grant_to_org": grant_to_org,
+            },
+        )
+
+    async def toggle_org_model(
+        self, organization_id: str, model_id: str, *, enabled: bool
+    ) -> dict[str, Any]:
+        return await self._request(
+            "PATCH",
+            f"/api/organizations/{organization_id}/models/{model_id}",
+            json={"enabled": enabled},
+        )
+
+    async def grant_org_model(
+        self, organization_id: str, model_id: str
+    ) -> dict[str, Any]:
+        """Grant a model to a tenant, adopting it if it is instance-shared."""
+        return await self._request(
+            "POST",
+            f"/api/organizations/{organization_id}/models/{model_id}/grant",
+        )
 
 
 def _extract_detail(response: httpx.Response) -> str:

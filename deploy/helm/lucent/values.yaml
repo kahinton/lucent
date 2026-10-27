@@ -27,7 +27,7 @@ server:
     LUCENT_HOST: "0.0.0.0"
     LUCENT_PORT: "8766"
     LUCENT_MODE: personal
-    LUCENT_LLM_ENGINE: copilot
+    LUCENT_LLM_ENGINE: langchain
     LUCENT_CHAT_MODEL: ""
     LUCENT_RATE_LIMIT_PER_MINUTE: "100"
     LUCENT_LOGIN_RATE_LIMIT: "5"

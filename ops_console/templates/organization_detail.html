@@ -181,6 +181,115 @@
     </div>
 </div>
 
+<!-- Providers & models -------------------------------------------------- -->
+<div class="panel mb-5 rounded-xl p-5">
+    <div class="mb-1 flex items-center justify-between">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Model providers</h2>
+        <form method="post" action="/organizations/{{ organization.id }}/models/discover">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-quiet" type="submit">Discover models</button>
+        </form>
+    </div>
+    <p class="mb-4 text-xs text-[#6f6b68]">
+        A key stored here belongs to this tenant and overrides the instance credential for every
+        engine that uses that provider. Values are write-only — the server never returns them.
+        Discovery registers the models the configured providers expose so they can be enabled below.
+    </p>
+
+    {% if provider_rows %}
+    <div class="divide-y divide-[#1c1c1c]">
+        {% for provider in provider_rows %}
+        <div class="flex flex-wrap items-center gap-3 py-2.5">
+            <div class="min-w-[13rem] flex-1">
+                <div class="flex items-center gap-2 text-sm">
+                    {{ provider.name }}
+                    {% if provider.configured %}
+                    <span class="chip chip-active">configured</span>
+                    {% else %}
+                    <span class="chip bg-[#1a1a1a] text-[#8f8b87]">inherited</span>
+                    {% endif %}
+                </div>
+                <div class="mono text-[11px] text-[#6f6b68]">
+                    {{ provider.provider }}{% if provider.engines %} &middot; {{ provider.engines | join(', ') }}{% endif %}
+                </div>
+            </div>
+            <form method="post" action="/organizations/{{ organization.id }}/credentials/{{ provider.provider }}"
+                  class="flex items-center gap-2">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input name="value" type="password" autocomplete="off" spellcheck="false"
+                       placeholder="{% if not provider.needs_api_key %}base URL (optional){% elif provider.configured %}replace {{ provider.credential_label or 'credential' }}{% else %}{{ provider.credential_label or 'credential' }}{% endif %}"
+                       class="field w-[15rem] rounded-lg px-2 py-1.5 text-sm mono">
+                <button class="btn btn-quiet" type="submit">Save</button>
+            </form>
+            {% if provider.configured %}
+            <form method="post" action="/organizations/{{ organization.id }}/credentials/{{ provider.provider }}/clear"
+                  onsubmit="return confirm('Clear the {{ provider.provider }} credential for this tenant?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="text-xs text-[#c2564f] underline-offset-2 hover:underline" type="submit">clear</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-sm text-[#a7a3a0]">No providers are available to configure.</p>
+    {% endif %}
+
+    <div class="mt-5 border-t border-[#1f1f1f] pt-4">
+        <div class="mb-2 flex items-center justify-between">
+            <h3 class="text-xs font-semibold uppercase tracking-wide text-[#8f8b87]">
+                Models <span class="text-[#6f6b68]">({{ org_models | length }})</span>
+            </h3>
+            <span class="text-xs text-[#6f6b68]">Enabled models must also be granted to the tenant.</span>
+        </div>
+        {% if org_models %}
+        <div class="divide-y divide-[#1c1c1c]">
+            {% for model in org_models %}
+            <div class="flex flex-wrap items-center gap-3 py-2">
+                <div class="min-w-[13rem] flex-1">
+                    <div class="text-sm">{{ model.name }}</div>
+                    <div class="mono text-[11px] text-[#6f6b68]">
+                        {{ model.id }}
+                        {% if model.engines %}
+                        &middot; runs on
+                        {% for engine in model.engines %}{{ engine }}{% if not loop.last %}, {% endif %}{% endfor %}
+                        {% endif %}
+                        {% if model.provider and model.provider != 'codex' %}
+                        &middot; catalogued by {{ model.provider }}
+                        {% endif %}
+                    </div>
+                </div>
+                <span class="chip {% if model.is_enabled %}chip-active{% else %}bg-[#1a1a1a] text-[#8f8b87]{% endif %}">
+                    {{ 'enabled' if model.is_enabled else 'disabled' }}
+                </span>
+                {% if model.owned %}
+                <form method="post" action="/organizations/{{ organization.id }}/models/{{ model.id }}/toggle">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="enabled" value="{{ 'false' if model.is_enabled else 'true' }}">
+                    <button class="text-xs text-[#8f8b87] underline-offset-2 hover:underline" type="submit">
+                        {{ 'disable' if model.is_enabled else 'enable' }}
+                    </button>
+                </form>
+                {% else %}
+                <form method="post" action="/organizations/{{ organization.id }}/models/{{ model.id }}/grant">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="text-xs text-[#8f8b87] underline-offset-2 hover:underline" type="submit"
+                            title="Shared registry row: granting copies it into this tenant and entitles it. The shared row is left intact for other tenants.">
+                        grant to tenant
+                    </button>
+                </form>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-sm text-[#a7a3a0]">
+            No models registered for this tenant yet. Save a provider credential, then run discovery.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
 <!-- Settings ----------------------------------------------------------- -->
 <div class="panel mb-5 rounded-xl p-5">
     <h2 class="mb-1 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Runtime settings</h2>

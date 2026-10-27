@@ -101,13 +101,13 @@ class TestEngineFactory:
     def teardown_method(self):
         reset_engine()
 
-    def test_default_engine_is_copilot(self):
+    def test_default_engine_is_langchain(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("LUCENT_LLM_ENGINE", None)
             reset_engine()
-            assert get_engine_name() == "copilot"
+            assert get_engine_name() == "langchain"
             engine = get_engine()
-            assert engine.name == "copilot"
+            assert engine.name == "langchain"
 
     def test_copilot_engine_explicit(self):
         with patch.dict(os.environ, {"LUCENT_LLM_ENGINE": "copilot"}):

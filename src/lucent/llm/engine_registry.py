@@ -19,6 +19,7 @@ else in the codebase needs to learn a new engine name.
 from __future__ import annotations
 
 import importlib.util
+import os
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
@@ -94,14 +95,27 @@ def _langchain_availability() -> EngineAvailability:
 
 
 def _copilot_availability() -> EngineAvailability:
-    # The Copilot SDK ships a bundled CLI, so the SDK package alone is enough.
-    if _module_present("copilot"):
+    # The Copilot SDK provisions its CLI itself: when no external binary
+    # resolves, it downloads a pinned runtime bundle into a per-user cache on
+    # first use. So the SDK package alone really is enough — but only if that
+    # cache is already populated or can be. A download needs roughly one and a
+    # half times the ~87 MB package free in RAM (the SDK buffers the archive),
+    # and in a constrained container that shows up as the process being killed
+    # mid-download with no traceback. Report that state honestly rather than
+    # discovering it during a request.
+    if not _module_present("copilot"):
+        return EngineAvailability(
+            False,
+            "github-copilot-sdk is not installed",
+            missing=("github-copilot-sdk",),
+        )
+    try:
+        from lucent.llm.copilot_engine import copilot_cli_status
+
+        ready, detail = copilot_cli_status()
+    except Exception:  # noqa: BLE001 — a probe must never break the registry
         return EngineAvailability(True, "github-copilot-sdk installed")
-    return EngineAvailability(
-        False,
-        "github-copilot-sdk is not installed",
-        missing=("github-copilot-sdk",),
-    )
+    return EngineAvailability(ready, detail)
 
 
 def _claude_code_availability() -> EngineAvailability:
@@ -156,6 +170,20 @@ def _make_codex() -> "LLMEngine":
     return CodexEngine()
 
 
+async def _discover_codex(*, org_id: str | None = None) -> list[dict[str, Any]]:
+    """Lazy indirection so the registry never imports an engine module eagerly."""
+    from lucent.llm.codex_engine import discover_codex_models
+
+    return await discover_codex_models(org_id=org_id)
+
+
+async def _discover_copilot(*, org_id: str | None = None) -> list[dict[str, Any]]:
+    """Lazy indirection so the registry never imports an engine module eagerly."""
+    from lucent.llm.copilot_engine import discover_copilot_models
+
+    return await discover_copilot_models(org_id=org_id)
+
+
 # ── Capability sets ────────────────────────────────────────────────────────
 
 _LANGCHAIN_CAPS = EngineCapabilities(
@@ -194,7 +222,11 @@ _CLAUDE_CODE_CAPS = EngineCapabilities(
     expected_surface=False,
     reasoning_effort=False,
     injection=frozenset({"gateway"}),
-    discovery=True,
+    # The Claude Agent SDK exposes no catalog call — only a ``model`` option you
+    # pass in. Claiming discovery here would advertise capabilities the engine
+    # cannot deliver, so it stays false and its providers come from
+    # ``provider_support``.
+    discovery=False,
 )
 
 _CODEX_CAPS = EngineCapabilities(
@@ -207,7 +239,7 @@ _CODEX_CAPS = EngineCapabilities(
     expected_surface=False,
     reasoning_effort=True,
     injection=frozenset({"oss", "gateway"}),
-    discovery=False,
+    discovery=True,
 )
 
 
@@ -244,6 +276,7 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
             {"anthropic", "copilot", "google", "lmstudio", "ollama", "openai", "xai"}
         ),
         availability=_copilot_availability,
+        discover=_discover_copilot,
         notes="GitHub Copilot SDK harness (its own agent loop and tools).",
     ),
     EngineSpec(
@@ -262,8 +295,12 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
         kind="coding_agent",
         capabilities=_CODEX_CAPS,
         factory=_make_codex,
-        provider_support=frozenset({"openai", "lmstudio", "ollama"}),
+        # ``codex`` is both an engine and the name of its own catalog: the SDK
+        # reports models that exist only inside Codex, so the engine must accept
+        # its own provider name or those rows would be unroutable.
+        provider_support=frozenset({"codex", "openai", "lmstudio", "ollama"}),
         availability=_codex_availability,
+        discover=_discover_codex,
         notes="OpenAI Codex SDK harness; native OpenAI models or a local OSS server.",
     ),
 )

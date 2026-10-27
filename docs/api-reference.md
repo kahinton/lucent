@@ -1702,6 +1702,18 @@ permission; there is no mode-based mounting, so a missing permission yields `403
 | `DELETE` | `/{organization_id}/users/{user_id}` | hyperadmin | Remove a member (refuses the last owner) |
 | `GET` | `/{organization_id}/settings` | hyperadmin | Editable runtime settings for that tenant |
 | `PUT` | `/{organization_id}/settings/{key}` | hyperadmin | Set (`{"value": ...}`) or reset (`{"reset": true}`) one setting |
+| `GET` | `/instance/settings-schema` | hyperadmin | Key, type, default, bounds, and choices for every editable setting (describes a tenant that does not exist yet) |
+| `GET` | `/instance/runtime` | hyperadmin | Configured LLM engine and the providers it can run |
+| `GET` | `/instance/providers` | hyperadmin | Provider catalogue with the engines using each (`needs_api_key` flags the ones that take a key) |
+| `GET` | `/instance/engines` | hyperadmin | Engines, accepted providers, and config fields |
+| `GET` | `/{organization_id}/credentials` | hyperadmin | Which providers that tenant has a key for (values never returned) |
+| `PUT` | `/{organization_id}/credentials/{provider}` | hyperadmin | Store a provider API key (`{"value": ...}`) under that tenant's scope |
+| `DELETE` | `/{organization_id}/credentials/{provider}` | hyperadmin | Remove it so the instance credential applies again |
+| `POST` | `/{organization_id}/providers/discover` | hyperadmin | Register the models the tenant's credentials expose |
+| `GET` | `/{organization_id}/models` | hyperadmin | Models visible to the tenant, each flagged `owned` (org-scoped) |
+| `POST` | `/{organization_id}/models` | hyperadmin | Define a model for that tenant and grant it |
+| `POST` | `/{organization_id}/models/{model_id}/grant` | hyperadmin | Grant a model, copying it into the tenant if it is instance-shared |
+| `PATCH` | `/{organization_id}/models/{model_id}` | hyperadmin | Enable/disable an **org-owned** model; shared rows return `409` |
 | `GET` | `/{organization_id}/audit` | hyperadmin | That tenant's admin audit log |
 | `GET` | `/instance/audit` | hyperadmin | Operator trail across all tenants. Filters: `?organization_id=`, `?action=` |
 | `DELETE` | `/current` | owner | Delete organization (irreversible) |
@@ -1726,6 +1738,20 @@ Constraints the API enforces and reports as `4xx` rather than `500`:
 Instance-operator mutations are audit-logged twice: in the operator's own organization
 (the durable trail, which survives tenant deletion) and in the affected tenant's log, so that
 tenant's admins can see what changed. See `docs/instance-administration.md`.
+
+Three concepts are deliberately separate, and conflating them is the usual cause of a tenant
+whose chat does not work:
+
+- **Provider credentials** are API keys stored per organization at the canonical
+  `model_providers.<provider>.api_key` secret that the engines read.
+- **Engine backends** (`/{organization_id}/backends`) are optional routing overrides
+  (base URL, gateway, pinned model). A backend alone does not make a provider usable.
+- **Models** must be enabled *and* granted. Usage is clearance-driven and a clearance can only
+  point at an org-owned row, so a shared model is **copied** into the tenant by
+  `POST /{organization_id}/models/{model_id}/grant` (id `<model>@<org-prefix>`) and then
+  granted. Copying rather than moving matters: `models.id` is the primary key, so promoting the
+  shared row would take the model away from every other tenant. `PATCH` refuses shared rows
+  rather than silently changing every tenant.
 
 ### Audit Logs
 
