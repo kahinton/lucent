@@ -184,6 +184,246 @@ def _task_activity_line(task: dict) -> str:
     return "Waiting for its turn"
 
 
+# Fusion tasks do not run on one model, so `tasks.model` (the author's pick,
+# which becomes the first candidate) is a half-truth on the detail page. These
+# build the panel's view of what actually ran: the mode, every candidate that
+# produced output, the arbiter that scored them, and any extra synthesised or
+# refined session. The event log is the source of truth because it survives a
+# failed dispatch — `result_structured` only exists when the task completed.
+_FUSION_MODE_LABELS: dict[str, str] = {
+    "best_of_n": "Best of N",
+    "synthesize": "Synthesis",
+}
+
+_FUSION_FALLBACK_LABELS: dict[str, str] = {
+    "fusion_disabled": "Fusion was off when this ran, so one model answered",
+    "fusion_unsupported": "This step cannot use fusion, so one model answered",
+}
+
+
+def _fusion_is_configured(task: dict) -> bool:
+    """Whether this task was authored as a fusion task."""
+    if str(task.get("task_kind") or "") == "fusion":
+        return True
+    return _as_dict(task.get("fusion_config")) is not None
+
+
+def _as_dict(value) -> dict | None:
+    """Coerce a jsonb column to a dict, tolerating a JSON string.
+
+    The connection pool registers a ``jsonb`` codec whose encoder is
+    ``json.dumps``, while several write paths also serialise the value before
+    handing it to asyncpg. The result is a jsonb *string* wrapping the object.
+    Consumers across the codebase already ``json.loads`` defensively; this is
+    the same guard so the detail page reads either shape.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        import json as _json
+
+        try:
+            decoded = _json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        return decoded if isinstance(decoded, dict) else None
+    return None
+
+
+def _fusion_view(task: dict) -> dict | None:
+    """Describe how a fusion task was configured and how it actually ran.
+
+    Returns ``None`` for non-fusion tasks so the template can fall back to the
+    plain single-model row.
+    """
+    if not _fusion_is_configured(task):
+        return None
+
+    config = _as_dict(task.get("fusion_config")) or _as_dict(
+        task.get("execution_config")
+    ) or {}
+
+    mode = str(config.get("mode") or "")
+    candidates_cfg = _as_dict(config.get("candidates")) or {}
+    arbiter_cfg = _as_dict(config.get("arbiter")) or {}
+    synthesis_cfg = _as_dict(config.get("synthesis")) or {}
+    refine_cfg = _as_dict(config.get("refine")) or {}
+
+    view: dict = {
+        "configured": bool(config),
+        "mode": mode or None,
+        "mode_label": _FUSION_MODE_LABELS.get(mode, "Fusion"),
+        "configured_models": [
+            str(model) for model in (candidates_cfg.get("models") or []) if model
+        ],
+        "configured_count": candidates_cfg.get("count"),
+        "arbiter_model": arbiter_cfg.get("model") or None,
+        "arbiter_question_count": len(arbiter_cfg.get("questions") or []),
+        "synthesis_model": synthesis_cfg.get("model") or None,
+        "refine_model": refine_cfg.get("model") or None,
+        "ran": False,
+        "fallback": None,
+        "fallback_label": None,
+        "winner_model": None,
+        "winner_index": None,
+        "candidates": [],
+        "candidate_count": 0,
+        "degraded": False,
+        "threshold_failed": False,
+        "refine_taken": None,
+        "total_tokens": None,
+    }
+
+    # A task can be retried or reworked many times, and each attempt records
+    # its own events. Only the most recent attempt describes what the step
+    # actually did, so any run-marker event resets the picture: a task whose
+    # first attempt fell back to one model and whose last attempt ran fusion
+    # must not show "fusion was off" next to a scored candidate table.
+    last_completed: dict | None = None
+    for event in task.get("events") or []:
+        event_type = str(event.get("event_type") or "")
+        metadata = _as_dict(event.get("metadata")) or {}
+
+        if event_type == "fusion_dispatched":
+            view.update(
+                ran=True,
+                fallback=None,
+                fallback_label=None,
+                winner_model=None,
+                winner_index=None,
+                candidates=[],
+                candidate_count=0,
+                degraded=False,
+                threshold_failed=False,
+            )
+            last_completed = None
+        elif event_type in _FUSION_FALLBACK_LABELS:
+            view.update(
+                ran=False,
+                fallback=event_type,
+                fallback_label=_FUSION_FALLBACK_LABELS[event_type],
+                winner_model=None,
+                winner_index=None,
+                candidates=[],
+                candidate_count=0,
+                degraded=False,
+                threshold_failed=False,
+            )
+            last_completed = None
+        elif event_type == "fusion_completed":
+            view["ran"] = True
+            last_completed = metadata
+
+    if last_completed:
+        winner = _as_dict(last_completed.get("winner")) or {}
+        view["winner_model"] = winner.get("model")
+        view["winner_index"] = winner.get("index")
+        view["degraded"] = bool(last_completed.get("degraded"))
+        view["threshold_failed"] = bool(last_completed.get("threshold_failed"))
+
+        arbiter = _as_dict(last_completed.get("arbiter")) or {}
+        if arbiter.get("model"):
+            view["arbiter_model"] = arbiter.get("model")
+
+        totals = _as_dict(last_completed.get("totals")) or {}
+        if totals:
+            view["total_tokens"] = totals.get("total_tokens")
+
+        refine = _as_dict(last_completed.get("refine")) or {}
+        if refine.get("passes"):
+            view["refine_taken"] = bool(refine.get("taken"))
+
+        # `all_candidates` lists every attempt (including failures and the
+        # derived synth/refine session); `candidates` is the ranked list and
+        # carries the scores. Key by index, because a refine/synthesis run
+        # reuses the same model id as a candidate.
+        attempts: dict = {}
+        for row in last_completed.get("all_candidates") or []:
+            row = _as_dict(row)
+            if not row or row.get("index") is None:
+                continue
+            attempts[row["index"]] = {
+                "index": row["index"],
+                "model": row.get("model"),
+                "status": row.get("status"),
+                "aggregate": None,
+                "scores": {},
+            }
+        for row in last_completed.get("candidates") or []:
+            row = _as_dict(row)
+            if not row or row.get("index") is None:
+                continue
+            entry = attempts.setdefault(
+                row["index"],
+                {
+                    "index": row["index"],
+                    "model": row.get("model"),
+                    "status": row.get("status"),
+                },
+            )
+            entry["model"] = row.get("model") or entry.get("model")
+            entry["status"] = row.get("status") or entry.get("status")
+            entry["aggregate"] = row.get("aggregate")
+            entry["scores"] = _as_dict(row.get("scores")) or {}
+
+        candidates: list[dict] = []
+        for index in sorted(attempts):
+            entry = attempts[index]
+            # Authored candidates run as 1..N; the executor inserts any derived
+            # session at index 0, so a zero index identifies it.
+            if index == 0:
+                role = "synthesis" if mode == "synthesize" else "refine"
+            else:
+                role = "candidate"
+            candidates.append(
+                {
+                    **entry,
+                    "role": role,
+                    "role_label": (
+                        "synthesized"
+                        if role == "synthesis"
+                        else "refined"
+                        if role == "refine"
+                        else None
+                    ),
+                    # Match by index: a refine pass reuses a candidate's model,
+                    # so comparing model ids would mark two rows as winners.
+                    "winner": (
+                        view["winner_index"] is not None
+                        and index == view["winner_index"]
+                    ),
+                }
+            )
+        view["candidates"] = candidates
+        view["candidate_count"] = sum(1 for c in candidates if c["role"] == "candidate")
+
+    # When nothing ran yet (a queued task), fall back to the authored models so
+    # the panel still says what was meant to run rather than showing an empty
+    # list. Deliberately not done after a fallback: that attempt genuinely ran
+    # one model, so listing the others as "not run" would imply they were
+    # skipped rather than never configured to run.
+    if not view["candidates"] and view["configured_models"] and not view["fallback"]:
+        view["candidates"] = [
+            {
+                "index": position,
+                "model": model,
+                "status": "not run",
+                "aggregate": None,
+                "scores": {},
+                "role": "candidate",
+                "role_label": None,
+                "winner": False,
+            }
+            for position, model in enumerate(view["configured_models"], start=1)
+        ]
+        view["candidate_count"] = len(view["candidates"])
+
+    # A fusion-kind task always keeps its panel: even when the config cannot be
+    # read, "this did not run on one model" is the useful fact.
+    is_fusion_kind = str(task.get("task_kind") or "") == "fusion"
+    return view if (is_fusion_kind or view["configured"] or view["ran"] or view["fallback"]) else None
+
+
 # =============================================================================
 # Request Tracking
 # =============================================================================
@@ -571,6 +811,7 @@ async def request_detail(request: Request, request_id: str):
     def _decorate(task: dict) -> None:
         """Attach the view-model fields the detail page renders."""
         task["activity_line"] = _task_activity_line(task)
+        task["fusion"] = _fusion_view(task)
         task["live_output"] = (live_output.get(str(task["id"])) or {}).get("content")
         started = task.get("claimed_at")
         ended = task.get("completed_at")

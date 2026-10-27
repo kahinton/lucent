@@ -276,8 +276,20 @@
                         {% endif %}
                         <dt class="text-gray-400">Agent</dt>
                         <dd>{{ task.agent_type or '—' }}</dd>
+                        {% if task.fusion %}
+                        <dt class="text-gray-400">Models</dt>
+                        <dd>
+                            <span class="rounded bg-indigo-50 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700">Fusion · {{ task.fusion.mode_label }}</span>
+                            {% if task.fusion.mode == 'synthesize' %}
+                            <span class="ml-1 text-gray-500">merges {{ task.fusion.candidate_count }} answer{% if task.fusion.candidate_count != 1 %}s{% endif %} into one</span>
+                            {% else %}
+                            <span class="ml-1 text-gray-500">picks the best of {{ task.fusion.candidate_count }} answer{% if task.fusion.candidate_count != 1 %}s{% endif %}</span>
+                            {% endif %}
+                        </dd>
+                        {% else %}
                         <dt class="text-gray-400">Model</dt>
                         <dd class="font-mono">{{ task.model or 'default' }}</dd>
+                        {% endif %}
                         {% if task.reasoning_effort %}
                         <dt class="text-gray-400">Reasoning</dt>
                         <dd class="font-mono">{{ task.reasoning_effort }}</dd>
@@ -311,6 +323,80 @@
                         </dd>
                         {% endif %}
                     </dl>
+
+                    {% if task.fusion %}
+                    <div class="border-t border-gray-200 pt-2">
+                        <h4 class="mb-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                            Fusion · {{ task.fusion.mode_label }}
+                        </h4>
+
+                        {% if task.fusion.fallback_label %}
+                        <p class="mb-2 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700">{{ task.fusion.fallback_label }}</p>
+                        {% endif %}
+
+                        {% if task.fusion.candidates %}
+                        <table class="w-full text-left text-[11px]">
+                            <thead>
+                                <tr class="text-gray-400">
+                                    <th class="pb-1 pr-2 font-medium">Model</th>
+                                    <th class="pb-1 pr-2 font-medium">Role</th>
+                                    <th class="pb-1 pr-2 font-medium">Status</th>
+                                    <th class="pb-1 text-right font-medium">Score</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for cand in task.fusion.candidates %}
+                                <tr class="border-t border-gray-100 {% if cand.winner %}bg-emerald-50{% endif %}">
+                                    <td class="py-1 pr-2 font-mono text-gray-700 break-all">
+                                        {{ cand.model or '—' }}
+                                        {% if cand.winner %}<span class="ml-1 rounded bg-emerald-100 px-1 text-[10px] font-medium text-emerald-700">winner</span>{% endif %}
+                                    </td>
+                                    <td class="py-1 pr-2 text-gray-500">{{ cand.role_label or 'candidate' }}</td>
+                                    <td class="py-1 pr-2 {% if cand.status == 'completed' %}text-gray-500{% else %}text-red-600{% endif %}">{{ cand.status or '—' }}</td>
+                                    <td class="py-1 text-right font-mono text-gray-500">{% if cand.aggregate is not none %}{{ '%.2f'|format(cand.aggregate) }}{% else %}—{% endif %}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                        {% elif task.fusion.configured_models %}
+                        <p class="text-[11px] text-gray-500 font-mono">{{ task.fusion.configured_models | join(', ') }}</p>
+                        {% endif %}
+
+                        <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px] text-gray-700">
+                            {% if task.fusion.arbiter_model %}
+                            <dt class="text-gray-400">Arbiter</dt>
+                            <dd class="font-mono">{{ task.fusion.arbiter_model }}{% if task.fusion.arbiter_question_count %} · scored {{ task.fusion.arbiter_question_count }} question{% if task.fusion.arbiter_question_count != 1 %}s{% endif %}{% endif %}</dd>
+                            {% elif task.fusion.ran and task.fusion.mode == 'synthesize' %}
+                            <dt class="text-gray-400">Arbiter</dt>
+                            <dd class="text-gray-500">none — synthesis was not scored against a rubric</dd>
+                            {% endif %}
+                            {% if task.fusion.synthesis_model %}
+                            <dt class="text-gray-400">Synthesis</dt>
+                            <dd class="font-mono">{{ task.fusion.synthesis_model }}</dd>
+                            {% endif %}
+                            {% if task.fusion.refine_model %}
+                            <dt class="text-gray-400">Refine</dt>
+                            <dd class="font-mono">
+                                {{ task.fusion.refine_model }}
+                                {% if task.fusion.refine_taken is true %}<span class="ml-1 rounded bg-emerald-100 px-1 text-[10px] font-medium text-emerald-700">kept</span>
+                                {% elif task.fusion.refine_taken is false %}<span class="ml-1 text-gray-400">discarded — original scored as well or better</span>
+                                {% endif %}
+                            </dd>
+                            {% endif %}
+                            {% if task.fusion.total_tokens %}
+                            <dt class="text-gray-400">Tokens</dt>
+                            <dd class="font-mono text-gray-500">{{ '{:,}'.format(task.fusion.total_tokens) }}</dd>
+                            {% endif %}
+                        </dl>
+
+                        {% if task.fusion.degraded %}
+                        <p class="mt-1 text-[11px] text-amber-700">Only one candidate produced output, so the run was degraded.</p>
+                        {% endif %}
+                        {% if task.fusion.threshold_failed %}
+                        <p class="mt-1 text-[11px] text-red-600">The winner scored below its required threshold.</p>
+                        {% endif %}
+                    </div>
+                    {% endif %}
 
                     {% if task.sandbox_template_id or task.sandbox_config %}
                     {% set sb = task.sandbox_config or {} %}

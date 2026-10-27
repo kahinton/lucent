@@ -472,12 +472,13 @@ async def run_decision_step(
         response=response,
     )
 
-    # Free-form audit event (task event names need no migration); lazily
-    # imported so this module never pulls daemon.daemon at import time.
+    # Free-form audit event (task event names need no migration). Resolved
+    # through the runtime proxy: under ``python -m daemon.daemon`` the
+    # canonical module is ``__main__``, so importing ``daemon.daemon`` here
+    # would load a SECOND copy whose module-level API_HEADERS never got the
+    # provisioned key and every event would 401.
     try:
-        from daemon.daemon import RequestAPI
-
-        await RequestAPI.add_event(
+        await runtime.RequestAPI.add_event(
             task_id,
             "decision_completed",
             f"model={model_id}, questions={len(response.answers or {})}",

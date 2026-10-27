@@ -2770,6 +2770,11 @@ class RequestRepository:
                 "output_contract",
                 "result_structured",
                 "validation_errors",
+                # The detail page describes how a task ran, not just its
+                # output: a fusion task's candidate list and arbiter come from
+                # these, and an unparsed JSON string renders as one blob.
+                "fusion_config",
+                "execution_config",
             )
 
         # Batch-load events, memory links, and outputs for ALL tasks (avoids N+1)

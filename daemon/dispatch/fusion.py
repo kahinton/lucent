@@ -151,11 +151,17 @@ def _fusion_max_candidates() -> int:
 async def _emit_event(
     task_id: str, kind: str, detail: str, metadata: dict[str, Any] | None = None
 ) -> None:
-    """Task event fire-and-forget (observability never aborts a dispatch)."""
-    try:
-        from daemon.daemon import RequestAPI
+    """Task event fire-and-forget (observability never aborts a dispatch).
 
-        await RequestAPI.add_event(task_id, kind, detail, metadata)
+    Resolved through the runtime proxy on purpose: ``daemon.daemon`` is
+    ``__main__`` under ``python -m daemon.daemon``, so a direct
+    ``from daemon.daemon import RequestAPI`` imports a SECOND, uninitialized
+    copy of the module whose module-level ``API_HEADERS`` never received the
+    provisioned key — every event then 401s and the fusion progress trail
+    silently disappears.
+    """
+    try:
+        await runtime.RequestAPI.add_event(task_id, kind, detail, metadata)
     except Exception as error:
         runtime.log(f"Fusion event {kind} failed: {error}", "WARN")
 
@@ -695,6 +701,10 @@ def _absorb_bookkeeping(
     elif not candidate.error:
         candidate.status = "empty"
         candidate.error = "session produced no result"
+    # Pops this session's aggregate so the tracker dict does not grow per
+    # dispatch; refine/synthesis callers read the values back off the
+    # candidate rather than popping a second time (a second pop yields None
+    # and silently zeroes their telemetry).
     usage = (daemon._session_usage_totals or {}).pop(session_name, None)
     if isinstance(usage, dict):
         candidate.input_tokens = usage.get("input_tokens")
@@ -1113,10 +1123,8 @@ async def _maybe_refine(
             break
         state["passes"] += 1
         _absorb_bookkeeping(daemon, session_name, refined, result)
-        usage = (daemon._session_usage_totals or {}).pop(session_name, None)
-        if isinstance(usage, dict):
-            refine_usage["input_tokens"] += usage.get("input_tokens") or 0
-            refine_usage["output_tokens"] += usage.get("output_tokens") or 0
+        refine_usage["input_tokens"] += refined.input_tokens or 0
+        refine_usage["output_tokens"] += refined.output_tokens or 0
         if refined.status != "completed" or not refined.result_text:
             state.setdefault("error", refined.error or f"refine pass {pass_i} produced no text")
             break
@@ -1289,10 +1297,8 @@ async def _maybe_synthesize(
         state["error"] = f"synthesis session error: {exc}"
         return state
     _absorb_bookkeeping(daemon, session_name, synthesized, result)
-    usage = (daemon._session_usage_totals or {}).pop(session_name, None)
-    if isinstance(usage, dict):
-        state["input_tokens"] = usage.get("input_tokens")
-        state["output_tokens"] = usage.get("output_tokens")
+    state["input_tokens"] = synthesized.input_tokens
+    state["output_tokens"] = synthesized.output_tokens
     state["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     if synthesized.status != "completed" or not synthesized.result_text:
         state["error"] = synthesized.error or "synthesis produced no usable result"

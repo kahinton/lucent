@@ -153,6 +153,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The request detail page described a Fusion task as a single-model run.** A
+  fusion task's `tasks.model` column holds only the author's first candidate, so
+  the Technical detail panel listed that one model — a two-candidate arbitrated
+  run read as "one gemma call" even though the event log proved otherwise.
+  The panel now renders a Fusion section from the task's configuration and its
+  event log: the mode, every candidate with its role, status and arbiter score,
+  which row won, the arbiter model and how many questions scored it, any
+  synthesis or refine session (and whether a refine pass was kept), total tokens,
+  and the degraded / threshold-failed notices. The run is read from the **last**
+  attempt only, so a task retried out of a `fusion_disabled` fallback no longer
+  shows the fallback banner beside a scored candidate table. A `fusion_config`
+  that cannot be decoded, or a queued task that has not run yet, still gets a
+  truthful panel instead of falling back to a single model name.
+  `task.fusion_config` / `task.execution_config` are now JSON-decoded alongside
+  the other jsonb columns in `get_request_with_tasks`.
+- **Fusion dispatch could strip the daemon's own API credentials.** The Fusion
+  executor and the decision-step completion event both did a lazy
+  `from daemon.daemon import RequestAPI`. Under `python -m daemon.daemon` the
+  entrypoint runs as `__main__` and is *not* registered under its canonical
+  name, so that import built a second, freshly-initialized copy of the module.
+  The copy's `API_HEADERS` never received the provisioned key, so every
+  `add_event` returned `401 API key required` — the entire `fusion_candidate_done`
+  / `fusion_refine_done` trail silently disappeared and only the final
+  `fusion_completed` survived. Worse, `RuntimeModuleProxy` preferred the
+  registered module over `__main__`, so the shadow copy then answered every
+  subsequent `runtime.*` lookup: `MCP_API_KEY` read as empty, the key-recovery
+  path concluded the live key was rejected, and it re-provisioned (revoking) it
+  mid-dispatch. The proxy now resolves the running entrypoint first, and both
+  call sites go through `runtime.RequestAPI`.
+- **Fusion refine and synthesis reported zero tokens.** `_absorb_bookkeeping`
+  already pops the session's usage total into the candidate, so the refine and
+  synthesis callers were popping the same key a second time and always getting
+  `None`. Their `input_tokens`/`output_tokens` telemetry was permanently 0,
+  hiding the most expensive parts of a fusion run from the `fusion_completed`
+  totals. Both now read the values off the candidate.
 - **Model discovery could terminate the server process.** The Copilot SDK
   provisions its CLI by downloading a pinned runtime bundle, buffering the whole
   ~87 MB archive in memory before extracting it. On a memory-constrained host the
