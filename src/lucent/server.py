@@ -205,7 +205,11 @@ class MCPAuthMiddleware:
                         if key_info:
                             # Check rate limit before proceeding
                             rate_limiter = get_rate_limiter()
-                            rate_result = rate_limiter.check_rate_limit(key_info["id"])
+                            # Pass the key's scopes so per-scope limits (e.g. the
+                            # documented 300 rpm for `daemon-tasks` keys) apply.
+                            rate_result = rate_limiter.check_rate_limit(
+                                key_info["id"], scopes=key_info.get("scopes")
+                            )
 
                             if not rate_result.allowed:
                                 # Rate limited - return 429

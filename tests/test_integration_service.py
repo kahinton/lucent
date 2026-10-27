@@ -16,7 +16,7 @@ import pytest
 from lucent.integrations.identity import (
     IdentityResult,
 )
-from lucent.integrations.models import VerificationMethod
+from lucent.db.integrations_models import VerificationMethod
 from lucent.integrations.service import IntegrationService
 
 # ---------------------------------------------------------------------------
@@ -465,7 +465,7 @@ def _make_event(
     thread_id: str | None = None,
     external_workspace_id: str | None = None,
 ) -> "IntegrationEvent":  # noqa: F821
-    from lucent.integrations.models import EventType, IntegrationEvent
+    from lucent.db.integrations_models import EventType, IntegrationEvent
 
     et = EventType(event_type) if isinstance(event_type, str) else event_type
     return IntegrationEvent(

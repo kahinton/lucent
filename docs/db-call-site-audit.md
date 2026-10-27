@@ -71,11 +71,9 @@ and `src/lucent/llm/langchain_engine.py`.
 2 src/lucent/llm/project_context.py
 2 src/lucent/integrations/slack_adapter.py
 2 src/lucent/api/app.py
-1 src/lucent/web/routes/usage_analytics.py
 1 src/lucent/web/routes/usage.py
 1 src/lucent/web/routes/audit.py
 1 src/lucent/web/routes/_shared.py
-1 src/lucent/startup/tenant_chain.py
 1 src/lucent/services/chat_intro.py
 1 src/lucent/secrets/registry.py
 1 src/lucent/log_context.py

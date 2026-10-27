@@ -257,9 +257,9 @@ Explain:
 
 Ask: **"Ready to see the review queue?"**
 
-#### 5f: Review Queue (`/daemon/review`)
+#### 5f: Review Queue (`/activity`)
 
-Navigate to `http://localhost:8766/daemon/review` and take a screenshot.
+Navigate to `http://localhost:8766/activity` and take a screenshot.
 
 Explain:
 > This is the Review Queue — work I've completed that needs your sign-off.

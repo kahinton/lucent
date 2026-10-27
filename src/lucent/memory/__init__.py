@@ -9,7 +9,6 @@ from lucent.memory.decay import (
     MemoryDecayInput,
     ShadowGcpAction,
     ShadowScoreResult,
-    classify_decay_action,
     classify_gcp_action,
     classify_vitality_action,
     compute_graph_connectedness,
@@ -17,7 +16,6 @@ from lucent.memory.decay import (
     dry_run_decay_report,
     run_memory_decay_maintenance_cycle,
     score_memories_batch,
-    score_memory_decay,
 )
 
 __all__ = [
@@ -33,9 +31,7 @@ __all__ = [
     "classify_vitality_action",
     "compute_graph_connectedness",
     "compute_memory_vitality",
-    "classify_decay_action",
     "dry_run_decay_report",
     "run_memory_decay_maintenance_cycle",
     "score_memories_batch",
-    "score_memory_decay",
 ]

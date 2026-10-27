@@ -7,7 +7,6 @@ This is the default engine and preserves all existing behavior.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import os
 import re
 import shutil
@@ -61,7 +60,6 @@ _sdk_available: bool | None = None
 # the `is` check.
 _UNRESOLVED = object()
 _cli_path_cache: str | None | object = _UNRESOLVED
-_permission_compat_installed = False
 _session_event_compat_installed = False
 
 
@@ -114,107 +112,6 @@ def _copilot_prompt(prompt: str, attachments: list[dict[str, Any]] | None) -> st
 
     return inline_text_documents(prompt, attachments)
 
-
-
-def _permission_compat_mode() -> str:
-    return os.environ.get("LUCENT_COPILOT_MCP_PERMISSION_COMPAT", "auto").strip().lower()
-
-
-def _legacy_permission_kind(result_kind: str) -> str | None:
-    """Map SDK final permission result kinds to newer CLI UI-response kinds."""
-    if result_kind == "approved":
-        return "approve-once"
-    if result_kind == "denied-no-approval-rule-and-could-not-request-from-user":
-        return "user-not-available"
-    if result_kind.startswith("denied"):
-        return "reject"
-    return None
-
-
-def _should_use_legacy_permission_response(permission_request: Any, result: Any) -> bool:
-    """Return True when the SDK/CLI permission compatibility shim should run.
-
-    VS Code-managed Copilot CLI 1.0.4x currently routes some tool permission
-    approvals through a UI-response converter that expects values such as
-    ``approve-once``. The Python SDK sends final permission values such as
-    ``approved``, which the CLI accepts for the permission-completed event but
-    later rejects when executing the tool with ``unexpected user permission
-    response``. This has been observed for mutable MCP tools and built-in
-    bash/view tool calls in daemon SDK sessions.
-    """
-    mode = _permission_compat_mode()
-    if mode in {"0", "false", "off", "disabled"}:
-        return False
-    if mode not in {"auto", "legacy-ui-result", "on", "true", "1"}:
-        return False
-    result_kind = _value(getattr(result, "kind", "")).lower()
-    return _legacy_permission_kind(result_kind) is not None
-
-
-async def _send_legacy_permission_response(session: Any, request_id: str, result: Any) -> None:
-    result_kind = _value(getattr(result, "kind", "")).lower()
-    legacy_kind = _legacy_permission_kind(result_kind)
-    if not legacy_kind:
-        raise ValueError(f"Unsupported permission result kind: {result_kind}")
-    payload_result: dict[str, Any] = {"kind": legacy_kind}
-    for attr in ("feedback", "message", "path"):
-        value = getattr(result, attr, None)
-        if value is not None:
-            payload_result[attr] = value
-    payload = {
-        "requestId": request_id,
-        "result": payload_result,
-        "sessionId": session.session_id,
-    }
-    await session.rpc.permissions._client.request(  # noqa: SLF001 - SDK compat shim
-        "session.permissions.handlePendingPermissionRequest",
-        payload,
-    )
-
-
-def _install_copilot_permission_compat() -> None:
-    """Install mutable-MCP permission compatibility for newer Copilot CLIs."""
-    global _permission_compat_installed
-    if _permission_compat_installed:
-        return
-    if _permission_compat_mode() in {"0", "false", "off", "disabled"}:
-        _permission_compat_installed = True
-        return
-    try:
-        import copilot.session as _session_mod
-    except Exception:
-        return
-
-    session_cls = getattr(_session_mod, "CopilotSession", None)
-    if session_cls is None:
-        return
-    original = getattr(session_cls, "_lucent_original_execute_permission_and_respond", None)
-    if original is None:
-        original = session_cls._execute_permission_and_respond
-        setattr(session_cls, "_lucent_original_execute_permission_and_respond", original)
-
-    async def _patched_execute_permission_and_respond(
-        self, request_id, permission_request, handler
-    ):
-        try:
-            result = handler(permission_request, {"session_id": self.session_id})
-            if inspect.isawaitable(result):
-                result = await result
-            if _value(getattr(result, "kind", "")).lower() == "no-result":
-                return
-            if _should_use_legacy_permission_response(permission_request, result):
-                await _send_legacy_permission_response(self, request_id, result)
-                return
-
-            async def _constant_handler(_request, _invocation):
-                return result
-
-            return await original(self, request_id, permission_request, _constant_handler)
-        except Exception:
-            return await original(self, request_id, permission_request, handler)
-
-    session_cls._execute_permission_and_respond = _patched_execute_permission_and_respond
-    _permission_compat_installed = True
 
 
 def _install_copilot_session_event_compat() -> None:
@@ -444,7 +341,6 @@ def _ensure_sdk() -> bool:
 
         _PermissionHandler = PermissionHandler
         _SystemMessageReplaceConfig = SystemMessageReplaceConfig
-        _install_copilot_permission_compat()
         _install_copilot_session_event_compat()
         _sdk_available = True
     except ImportError:

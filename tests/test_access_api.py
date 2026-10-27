@@ -5,7 +5,6 @@ Tests /api/access endpoints (team-mode only):
 - GET /api/access/memory/{memory_id}/searches (search history)
 - GET /api/access/user/{user_id} (user activity)
 - GET /api/access/most-accessed (most accessed memories)
-- GET /api/access/organization/activity (org activity — 501)
 - GET/PUT/DELETE /api/access/resources/{type}/{id}/grants (clearance management)
 """
 
@@ -249,68 +248,6 @@ class TestMostAccessed:
         assert resp.status_code == 200
 
 
-class TestLeastAccessed:
-    async def test_least_accessed_personal(self, member_client):
-        resp = await member_client.get("/api/access/least-accessed")
-        assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
-
-    async def test_least_accessed_org_wide_member_forbidden(self, member_client):
-        resp = await member_client.get(
-            "/api/access/least-accessed", params={"organization_wide": "true"}
-        )
-        assert resp.status_code == 403
-
-    async def test_least_accessed_org_wide_admin(self, admin_client):
-        resp = await admin_client.get(
-            "/api/access/least-accessed", params={"organization_wide": "true"}
-        )
-        assert resp.status_code == 200
-
-
-class TestAccessFrequency:
-    async def test_access_frequency_personal(self, member_client):
-        resp = await member_client.get("/api/access/frequency")
-        assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
-
-    async def test_access_frequency_with_bucket(self, member_client):
-        resp = await member_client.get(
-            "/api/access/frequency",
-            params={"bucket": "hour", "limit": 10},
-        )
-        assert resp.status_code == 200
-
-    async def test_access_frequency_org_wide_member_forbidden(self, member_client):
-        resp = await member_client.get(
-            "/api/access/frequency",
-            params={"organization_wide": "true"},
-        )
-        assert resp.status_code == 403
-
-    async def test_access_frequency_org_wide_admin(self, admin_client):
-        resp = await admin_client.get("/api/access/frequency", params={"organization_wide": "true"})
-        assert resp.status_code == 200
-
-
-# ============================================================================
-# GET /api/access/organization/activity — org activity (not implemented)
-# ============================================================================
-
-
-class TestOrgActivity:
-    async def test_org_activity_returns_501(self, admin_client):
-        """Organization activity endpoint is not yet implemented."""
-        resp = await admin_client.get("/api/access/organization/activity")
-        assert resp.status_code == 501
-
-    async def test_org_activity_member_forbidden(self, member_client):
-        """Members cannot access org activity (should fail before 501)."""
-        resp = await member_client.get("/api/access/organization/activity")
-        assert resp.status_code == 403
-
-
-# ============================================================================
 # /api/access/resources/{type}/{id}/grants — clearance management
 # ============================================================================
 

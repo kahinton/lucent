@@ -10,6 +10,7 @@ import pytest
 import daemon.daemon as daemon_module
 from daemon.daemon import (
     LucentDaemon,
+    RequestAPI,
     _apply_sandbox_template_overrides,
     _build_mcp_tool_summary,
     _is_operational_tool_call,
@@ -855,7 +856,9 @@ async def test_request_review_approved_auto_completes(monkeypatch):
 
     monkeypatch.setattr("daemon.daemon.RequestAPI.get_request", _get_request)
     monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _add_event)
-    monkeypatch.setattr("daemon.daemon.RequestAPI.create_review", _forbidden)
+    # The legacy `RequestAPI.create_review` client is retired; the review
+    # flow must settle through update_request_status instead.
+    assert not hasattr(RequestAPI, "create_review")
     monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _update_status)
     monkeypatch.setattr("daemon.daemon.RequestAPI.retry_task", _forbidden)
     monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _forbidden)
@@ -906,7 +909,9 @@ async def test_request_review_needs_rework_auto_transitions(monkeypatch):
 
     monkeypatch.setattr("daemon.daemon.RequestAPI.get_request", _get_request)
     monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _add_event)
-    monkeypatch.setattr("daemon.daemon.RequestAPI.create_review", _forbidden)
+    # The legacy `RequestAPI.create_review` client is retired; the review
+    # flow must settle through update_request_status instead.
+    assert not hasattr(RequestAPI, "create_review")
     monkeypatch.setattr("daemon.daemon.RequestAPI.update_request_status", _update_status)
     monkeypatch.setattr("daemon.daemon.RequestAPI.retry_task", _forbidden)
     monkeypatch.setattr("daemon.daemon.RequestAPI.create_task", _forbidden)

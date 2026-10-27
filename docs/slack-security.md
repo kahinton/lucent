@@ -55,7 +55,7 @@ Slack signs every webhook request with HMAC-SHA256 using your app's signing secr
 
 The verification flow:
 
-1. `WebhookSignatureMiddleware` intercepts requests to `/integrations/webhook/slack`
+1. `SignatureVerificationMiddleware` intercepts requests to `/integrations/webhook/slack`
 2. Raw body is buffered **before** any JSON parsing
 3. The `SlackAdapter.verify_signature()` method checks:
    - `X-Slack-Request-Timestamp` is within 5 minutes (replay attack protection)

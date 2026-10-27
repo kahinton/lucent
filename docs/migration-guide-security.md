@@ -96,7 +96,7 @@ migration files are:
 ### Running Migrations
 
 Migrations run **automatically** when the Lucent server starts. The server
-uses a `_migrations` tracking table to skip previously-applied files.
+uses a `schema_migrations` tracking table to skip previously-applied files.
 
 To upgrade, simply restart the server:
 
@@ -115,7 +115,7 @@ To verify migrations were applied:
 docker compose exec postgres psql -U lucent -d lucent
 
 # Check the migrations table
-SELECT name, applied_at FROM _migrations WHERE name LIKE '03%' OR name LIKE '04%' ORDER BY name;
+SELECT name, applied_at FROM schema_migrations WHERE name LIKE '03%' OR name LIKE '04%' ORDER BY name;
 ```
 
 Expected output should include all five files (`037_groups.sql` through
@@ -159,7 +159,7 @@ DROP TABLE IF EXISTS user_groups;
 DROP TABLE IF EXISTS groups;
 
 -- Remove migration tracking entries
-DELETE FROM _migrations WHERE name IN (
+DELETE FROM schema_migrations WHERE name IN (
     '037_groups.sql', '038_resource_ownership.sql',
     '039_requesting_user_id.sql', '040_secrets.sql',
     '041_secret_audit_types.sql'
@@ -328,7 +328,7 @@ LUCENT_SECRET_KEY=<your-strong-random-key>
 
 Run through these steps after upgrading to confirm everything is working.
 
-- [ ] Migrations applied successfully (037–041 in `_migrations` table)
+- [ ] Migrations applied successfully (037–041 in `schema_migrations` table)
 - [ ] New tables exist (`groups`, `user_groups`, `secrets`)
 - [ ] Ownership columns present on definition tables
 - [ ] Ownership backfill completed for existing resources
@@ -344,7 +344,7 @@ Run through these steps after upgrading to confirm everything is working.
 
 ```bash
 docker compose exec postgres psql -U lucent -d lucent -c \
-  "SELECT name, applied_at FROM _migrations ORDER BY name;"
+  "SELECT name, applied_at FROM schema_migrations ORDER BY name;"
 ```
 
 Confirm `037_groups.sql` through `041_secret_audit_types.sql` appear in the

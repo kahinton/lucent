@@ -129,13 +129,12 @@ Once running, the web UI at http://localhost:8766 provides:
 |------|---------|
 | `/` | Dashboard overview |
 | `/memories` | Context you choose to keep and share |
-| `/activity` | Work in progress: requests, tasks, status, and timeline |
+| `/activity` | Work in progress: requests, tasks, status, timeline, and the review queue |
 | `/handoffs` | Questions, clarifications, decisions, and outputs between people and agents |
 | `/definitions` | Your agents, skills, tools, hooks, and external providers |
 | `/workflows` | Workflow builder, triggers, actions, and run monitoring |
 | `/sandboxes` | Sandbox template and instance management |
-| `/daemon/review` | Review queue for daemon-generated content |
-| `/audit` | Audit log viewer |
+| `/settings/audit` | Audit log viewer |
 | `/users` | User management (admin) |
 | `/settings` | API keys, password, profile |
 

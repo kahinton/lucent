@@ -69,7 +69,9 @@ def _uuid(value: str | UUID | None) -> UUID | None:
     return UUID(str(value))
 
 
-def _title_from_message(content: str | None) -> str | None:
+def title_from_message(content: str | None) -> str | None:
+    """Derive a session title from the first line of a message."""
+
     if not content:
         return None
     first_line = " ".join(content.strip().splitlines()[0:1]).strip()
@@ -502,7 +504,7 @@ class LLMSessionRepository:
                 title_update = ""
                 title_params: list[Any] = []
                 if role == "user" and not session.get("title"):
-                    generated_title = _title_from_message(content)
+                    generated_title = title_from_message(content)
                     if generated_title:
                         title_update = ", title = $3"
                         title_params.append(generated_title)

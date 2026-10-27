@@ -213,15 +213,11 @@ async def test_chat_stream_usage_event_is_persisted(
     async def allow_model(*_args):
         return True
 
-    async def system_prompt(*_args):
-        return "system"
-
     async def skip_experience(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(chat, "_get_session_user", fake_user)
     monkeypatch.setattr(chat, "_can_user_access_model", allow_model)
-    monkeypatch.setattr(chat, "_build_system_prompt", system_prompt)
     monkeypatch.setattr(chat, "_maybe_capture_session_experience", skip_experience)
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
     monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: UsageEngine())
@@ -247,58 +243,3 @@ async def test_chat_stream_usage_event_is_persisted(
     assert report["summary"]["input_tokens"] == 75
     assert report["summary"]["output_tokens"] == 15
     assert report["by_model"][0]["model"] == "model-a"
-
-
-@pytest.mark.asyncio
-async def test_legacy_chat_stream_usage_event_is_persisted(
-    db_pool, test_user, test_organization, monkeypatch
-):
-    class UsageEngine:
-        name = "langchain"
-
-        async def run_session_streaming(self, **kwargs):
-            kwargs["on_event"](
-                SessionEvent(
-                    type=SessionEventType.USAGE,
-                    usage={"input_tokens": 60, "output_tokens": 12},
-                )
-            )
-            return "done"
-
-    async def fake_user(_request):
-        return test_user, db_pool
-
-    async def allow_model(*_args):
-        return True
-
-    async def system_prompt(*_args):
-        return "system"
-
-    async def skip_experience(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(chat, "_get_session_user", fake_user)
-    monkeypatch.setattr(chat, "_can_user_access_model", allow_model)
-    monkeypatch.setattr(chat, "_build_system_prompt", system_prompt)
-    monkeypatch.setattr(chat, "_maybe_capture_session_experience", skip_experience)
-    monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
-    monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: UsageEngine())
-    try:
-        await chat.chat_stream(
-            type("Request", (), {"cookies": {}})(),
-            chat.ChatRequest(
-                messages=[chat.ChatMessage(role="user", content="hello")],
-                model="model-a",
-            ),
-        )
-        report = await TokenUsageRepository(db_pool).get_report(
-            test_organization["id"], user_id=test_user["id"]
-        )
-    finally:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM llm_token_usage WHERE organization_id = $1", test_organization["id"]
-            )
-
-    assert report["summary"]["input_tokens"] == 60
-    assert report["summary"]["output_tokens"] == 12

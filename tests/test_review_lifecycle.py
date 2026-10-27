@@ -33,6 +33,7 @@ from lucent.constants import (
 from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.memory import MemoryRepository
 from lucent.db.requests import RequestRepository
+from lucent.db.reviews import ReviewRepository
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -666,121 +667,85 @@ class TestReviewAPIEndpoints:
         data = resp.json()
         assert isinstance(data["items"], list)
 
-    async def test_approve_request(self, repo, org_id, admin_client):
-        """POST /api/requests/{id}/review/approve transitions review → completed."""
+    async def test_mark_request_completed_transitions_review_to_completed(
+        self, repo, org_id
+    ):
+        """The review→completed transition now lives on ReviewRepository."""
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
 
-        resp = await admin_client.post(f"/api/requests/{req['id']}/review/approve")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "completed"
-        assert data["completed_at"] is not None
-
-    async def test_approve_non_review_fails(self, repo, org_id, admin_client):
-        """Approving a request not in 'review' returns 409."""
-        req = await _make_request(repo, org_id)
-        resp = await admin_client.post(f"/api/requests/{req['id']}/review/approve")
-        assert resp.status_code == 409
-
-    async def test_approve_nonexistent_fails(self, admin_client):
-        """Approving a nonexistent request returns 404."""
-        fake_id = str(uuid4())
-        resp = await admin_client.post(f"/api/requests/{fake_id}/review/approve")
-        assert resp.status_code == 404
-
-    async def test_approve_requires_admin(self, repo, org_id, api_client):
-        """Deprecated approve endpoint rejects non-admin users with 403."""
-        req = await _make_request(repo, org_id)
-        task = await _make_task(repo, str(req["id"]), org_id)
-        await _complete_task_flow(repo, task)
-
-        resp = await api_client.post(f"/api/requests/{req['id']}/review/approve")
-        assert resp.status_code == 403
-
-    async def test_reject_request(self, repo, org_id, admin_client):
-        """POST /api/requests/{id}/review/reject transitions review → needs_rework."""
-        req = await _make_request(repo, org_id)
-        task = await _make_task(repo, str(req["id"]), org_id)
-        await _complete_task_flow(repo, task)
-
-        resp = await admin_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={"feedback": "The output is incomplete"},
+        review_repo = ReviewRepository(repo.pool)
+        updated = await review_repo.mark_request_completed(
+            request_id=str(req["id"]), organization_id=str(org_id)
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "needs_rework"
-        assert data["review_feedback"] == "The output is incomplete"
-        assert data["review_count"] == 1
 
-    async def test_reject_increments_review_count(self, repo, org_id, admin_client):
+        assert updated is not None
+        assert updated["status"] == "completed"
+        assert updated["completed_at"] is not None
+
+    async def test_mark_request_completed_requires_review_state(self, repo, org_id):
+        """Completing a request that is not in 'review' changes nothing."""
+        req = await _make_request(repo, org_id)
+
+        review_repo = ReviewRepository(repo.pool)
+        assert (
+            await review_repo.mark_request_completed(
+                request_id=str(req["id"]), organization_id=str(org_id)
+            )
+            is None
+        )
+
+    async def test_mark_request_needs_rework_sets_feedback_and_count(self, repo, org_id):
+        """The review→needs_rework transition records feedback and increments count."""
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id)
+        await _complete_task_flow(repo, task)
+
+        review_repo = ReviewRepository(repo.pool)
+        updated = await review_repo.mark_request_needs_rework(
+            request_id=str(req["id"]),
+            organization_id=str(org_id),
+            feedback="The output is incomplete",
+        )
+
+        assert updated["status"] == "needs_rework"
+        assert updated["review_feedback"] == "The output is incomplete"
+        assert updated["review_count"] == 1
+
+    async def test_needs_rework_increments_review_count(self, repo, org_id):
         """Each rejection increments review_count."""
         req = await _make_request(repo, org_id)
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
 
-        # First rejection
-        resp1 = await admin_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={"feedback": "Round 1"},
+        review_repo = ReviewRepository(repo.pool)
+        first = await review_repo.mark_request_needs_rework(
+            request_id=str(req["id"]), organization_id=str(org_id), feedback="Round 1"
         )
-        assert resp1.json()["review_count"] == 1
+        assert first["review_count"] == 1
 
-        # Move back to review for second rejection
+        # Move back to review for a second rejection.
         await repo.update_request_status(str(req["id"]), "review", org_id=org_id)
 
-        resp2 = await admin_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={"feedback": "Round 2"},
+        second = await review_repo.mark_request_needs_rework(
+            request_id=str(req["id"]), organization_id=str(org_id), feedback="Round 2"
         )
-        assert resp2.json()["review_count"] == 2
+        assert second["review_count"] == 2
 
-    async def test_reject_non_review_fails(self, repo, org_id, admin_client):
-        """Rejecting a request not in 'review' returns 409."""
+    async def test_mark_request_needs_rework_requires_review_state(self, repo, org_id):
+        """Rejecting a request that is not in 'review' changes nothing."""
         req = await _make_request(repo, org_id)
-        resp = await admin_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={"feedback": "nope"},
+
+        review_repo = ReviewRepository(repo.pool)
+        assert (
+            await review_repo.mark_request_needs_rework(
+                request_id=str(req["id"]),
+                organization_id=str(org_id),
+                feedback="nope",
+            )
+            is None
         )
-        assert resp.status_code == 409
-
-    async def test_reject_requires_admin(self, repo, org_id, api_client):
-        """Deprecated reject endpoint rejects non-admin users with 403."""
-        req = await _make_request(repo, org_id)
-        task = await _make_task(repo, str(req["id"]), org_id)
-        await _complete_task_flow(repo, task)
-
-        resp = await api_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={"feedback": "nope"},
-        )
-        assert resp.status_code == 403
-
-    async def test_reject_missing_feedback_fails(self, repo, org_id, admin_client):
-        """Rejecting without feedback returns 422."""
-        req = await _make_request(repo, org_id)
-        task = await _make_task(repo, str(req["id"]), org_id)
-        await _complete_task_flow(repo, task)
-
-        resp = await admin_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={},
-        )
-        assert resp.status_code == 422
-
-    async def test_reject_empty_feedback_fails(self, repo, org_id, api_client):
-        """Rejecting with empty string feedback returns 422."""
-        req = await _make_request(repo, org_id)
-        task = await _make_task(repo, str(req["id"]), org_id)
-        await _complete_task_flow(repo, task)
-
-        resp = await api_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={"feedback": ""},
-        )
-        assert resp.status_code == 422
 
     async def test_retry_with_feedback_endpoint(self, repo, org_id, api_client):
         """POST /api/requests/tasks/{id}/retry-with-feedback retries a failed task."""
@@ -860,9 +825,10 @@ class TestResponseModels:
         task = await _make_task(repo, str(req["id"]), org_id)
         await _complete_task_flow(repo, task)
 
-        await admin_client.post(
-            f"/api/requests/{req['id']}/review/reject",
-            json={"feedback": "Needs more detail"},
+        await ReviewRepository(repo.pool).mark_request_needs_rework(
+            request_id=str(req["id"]),
+            organization_id=str(org_id),
+            feedback="Needs more detail",
         )
 
         resp = await api_client.get(f"/api/requests/{req['id']}")

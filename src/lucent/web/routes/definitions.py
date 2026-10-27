@@ -132,12 +132,6 @@ def _require_admin_or_owner(user) -> None:
         raise HTTPException(status_code=403, detail="Permission denied")
 
 
-def _require_admin(user: object) -> None:
-    """Raise 403 if user is not admin or owner."""
-    if user.role not in (Role.ADMIN, Role.OWNER):
-        raise HTTPException(status_code=403, detail="Permission denied")
-
-
 def _is_admin_or_owner(user) -> bool:
     role_value = user.role if isinstance(user.role, str) else user.role.value
     return is_admin_role(role_value)

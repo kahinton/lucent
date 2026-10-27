@@ -87,8 +87,7 @@ src/lucent/
 │   │   ├── auth.py          # Login/setup pages
 │   │   ├── chat.py          # Chat interface
 │   │   ├── settings.py      # User settings
-│   │   ├── audit.py         # Audit log viewer
-│   │   └── usage_analytics.py # Usage analytics
+│   │   └── audit.py         # Audit log viewer
 │   ├── static/         # CSS, JavaScript, and vendor assets
 │   └── templates/      # Jinja2 templates
 ├── db/

@@ -25,7 +25,7 @@ from lucent.integrations.identity import (
     PairingChallengeService,
     VerifyResult,
 )
-from lucent.integrations.models import (
+from lucent.db.integrations_models import (
     PairingChallengeStatus,
     VerificationMethod,
 )

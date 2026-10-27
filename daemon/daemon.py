@@ -1352,61 +1352,6 @@ class RequestAPI(InstanceAPI, TaskAPI):
         return None
 
     @staticmethod
-    async def reject_request_review(request_id: str, feedback: str) -> dict | None:
-        try:
-            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{API_BASE}/requests/{request_id}/review/reject",
-                    json={"feedback": feedback[:10000]},
-                    headers=API_HEADERS,
-                )
-                if resp.status_code == 200:
-                    return resp.json()
-                log(
-                    f"API reject_request_review returned {resp.status_code}: {resp.text[:200]}",
-                    "WARN",
-                )
-        except Exception as e:
-            log(f"API reject_request_review failed: {e}", "WARN")
-        return None
-
-    @staticmethod
-    async def create_review(
-        request_id: str,
-        status: str,
-        *,
-        task_id: str | None = None,
-        comments: str | None = None,
-        source: str = "daemon",
-    ) -> dict | None:
-        """Create a first-class review record via the reviews API."""
-        payload: dict = {
-            "request_id": request_id,
-            "status": status,
-            "source": source,
-        }
-        if task_id:
-            payload["task_id"] = task_id
-        if comments:
-            payload["comments"] = comments[:10000]
-        try:
-            async with httpx.AsyncClient(timeout=RequestAPI.API_TIMEOUT) as client:
-                resp = await client.post(
-                    f"{API_BASE}/reviews",
-                    json=payload,
-                    headers=API_HEADERS,
-                )
-                if resp.status_code in (200, 201):
-                    return resp.json()
-                log(
-                    f"API create_review returned {resp.status_code}: {resp.text[:200]}",
-                    "WARN",
-                )
-        except Exception as e:
-            log(f"API create_review failed: {e}", "WARN")
-        return None
-
-    @staticmethod
     async def get_request_context(request_id: str) -> tuple[str, str]:
         """Fetch parent request description and completed sibling task results.
 

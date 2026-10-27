@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from lucent.db import get_pool
 from lucent.db.token_usage import TokenUsageRepository
@@ -50,10 +50,3 @@ async def token_usage(
             "can_view_organization": can_view_organization,
         },
     )
-
-
-@router.get("/usage", include_in_schema=False)
-async def legacy_token_usage_redirect(request: Request):
-    """Redirect the former standalone usage page into Settings."""
-    query = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(f"/settings/usage{query}", status_code=303)

@@ -1,4 +1,4 @@
-"""Tests for lucent.integrations.models — enums, dataclasses, Pydantic schemas."""
+"""Tests for lucent.db.integrations_models — enums, dataclasses, Pydantic schemas."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from lucent.integrations.models import (
+from lucent.db.integrations_models import (
     EventType,
     IntegrationCreate,
     IntegrationEvent,

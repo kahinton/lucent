@@ -94,6 +94,7 @@ def _memory_to_task(memory: dict[str, Any]) -> DaemonTaskResponse:
 
 @router.post(
     "",
+    deprecated=True,
     response_model=DaemonTaskResponse,
     status_code=status.HTTP_201_CREATED,
     responses={400: {"model": ErrorResponse}},
@@ -160,6 +161,7 @@ async def create_task(
 
 @router.get(
     "",
+    deprecated=True,
     response_model=DaemonTaskListResponse,
 )
 async def list_tasks(
@@ -213,6 +215,7 @@ async def list_tasks(
 
 @router.get(
     "/{task_id}",
+    deprecated=True,
     response_model=DaemonTaskResponse,
     responses={404: {"model": ErrorResponse}},
 )
@@ -241,6 +244,7 @@ async def get_task(
 
 @router.get(
     "/{task_id}/result",
+    deprecated=True,
     response_model=DaemonTaskResponse,
     responses={404: {"model": ErrorResponse}, 202: {"model": DaemonTaskResponse}},
 )
@@ -282,6 +286,7 @@ async def get_task_result(
 
 @router.delete(
     "/{task_id}",
+    deprecated=True,
     response_model=SuccessResponse,
     responses={404: {"model": ErrorResponse}},
 )

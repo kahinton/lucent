@@ -38,6 +38,106 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `personal`.
 
 
+### Removed
+
+#### One chat path: `POST /api/chat/stream` (v1) is gone
+- **`POST /api/chat/stream` is removed; `POST /api/chat/stream-v2` is the only
+  chat endpoint.** The v1 handler composed **no agent capabilities at all** — no
+  agent definition, skills, managed tools, or consent-gated hooks — so the
+  floating chat drawer in the shared shell (its last remaining client, present on
+  every page) was quietly running the weakest chat path in the product. The
+  drawer now calls `/stream-v2` and renders `text_delta`, `message`, and `error`
+  events; every other event type is ignored rather than misread.
+- **Page awareness is now shared, not v1-only.** `page_context` moved onto
+  `ChatStreamRequest`, and the page-context/recent-memory grounding block was
+  extracted into `_render_page_context_sections` so no chat surface can drift.
+  The clearance-driven, fail-closed detail-page reads (memory, workflow, request,
+  handoff) are unchanged.
+- **`GET /api/sandboxes/templates` works again.** It was registered *after*
+  `GET /api/sandboxes/{sandbox_id}`, so Starlette matched the literal path against
+  the parameterised route and every request 404'd on a nonexistent sandbox called
+  `templates`. The template block now registers first; a regression test pins the
+  ordering.
+- **`chat.session_experience_*` Runtime Settings apply per organization.** The
+  summarizer read three module-level constants evaluated once at import with no
+  `organization_id`, so per-org overrides were ignored and changes needed a
+  restart. They are now resolved per call from the settings helpers.
+- **Rate-limit scopes and bucket cleanup are real.** API-key requests now pass the
+  key's `scopes`, so the documented 300 req/min for `daemon-tasks` keys actually
+  applies; previously no production caller passed scopes, making `SCOPE_LIMITS`
+  unreachable. A lifespan task sweeps expired buckets every five minutes, which
+  `docs/troubleshooting.md` already claimed happened.
+- **`templates/audit.html` filter no longer 404s.** Its `data-redirect-prefix`
+  pointed at the unmounted `/audit` path instead of `/settings/audit`.
+- **The Copilot permission shim is retired.** Under the pinned
+  `github-copilot-sdk>=1.0.9` it was unreachable — `approve_all()` yields
+  `approve-once`, which the shim's mapping did not recognise — and it dropped
+  `managed_settings_enabled` when invoking handlers, silently disabling the SDK's
+  managed-settings guard. `LUCENT_COPILOT_MCP_PERMISSION_COMPAT` is gone.
+
+Deprecated API surface removed (`POST /api/reviews` and the existing web review
+action replace them):
+
+| Removed | Replacement |
+|---|---|
+| `POST /api/requests/{id}/review/approve` | `POST /api/reviews` (`status: approved`) |
+| `POST /api/requests/{id}/review/reject` | `POST /api/reviews` (`status: rejected`) |
+| `GET /api/access/organization/activity` | none — always returned `501` |
+| `GET /api/access/least-accessed` | none |
+| `GET /api/access/frequency` | none |
+
+Retired web routes (all were bookmark-only redirects with no inbound link):
+
+| Removed | Replacement |
+|---|---|
+| `GET /usage` | `/settings/usage` |
+| `GET /daemon` | `/activity?source=cognitive` |
+| `GET /daemon/review` | `/activity` |
+| `GET /daemon/tasks`, `/daemon/tasks/new`, `/daemon/tasks/{id}` | `/activity` |
+| `POST /daemon/messages`, `POST /daemon/feedback/{id}` | `/api/reviews`, `/daemon/review/{id}/action` |
+
+The two `POST` routes above rendered partials no template included, and nothing
+in `src/` or `daemon/` read the `daemon-message` memories or `metadata.feedback`
+they wrote. Their partials (`message_thread.html`, `feedback_actions.html`) are
+deleted with them.
+
+Dead modules and shims deleted: `db/scoping.py`, `db/bootstrap.py`, `db/types.py`
+(18 `TypedDict`s that no repository annotated with), `startup/` (empty package),
+`models/{audit,user,organization}.py`, the `integrations/{models,repositories,
+credential_repository}.py` re-export facades, `integrations/{webhooks,adapters}.py`
+(`webhooks.py` was never mounted — `middleware.py` is the live path — and
+`DiscordAdapter` was a `NotImplementedError` stub), `web/routes/usage_analytics.py`
+(never registered), `access_control.RESOURCE_TABLE_MAP` (a `__globals__`
+introspection with no readers), `AccessControlService._get_user_role`,
+`ModelDiscoveryService.configured_providers`, the `score_memory_decay` /
+`classify_decay_action` wrappers, `RateLimiter`'s unreachable convenience methods,
+`RequestAPI.reject_request_review` / `RequestAPI.create_review`,
+`DashboardRepository`'s five dashboard-only methods, and `_chat_allowed_tools_for_agent`,
+`_load_agent_hooks`, `_build_system_prompt`, `_require_admin`, `_memory_to_task_view`.
+
+Also deleted: 245 unreachable lines after an early `return` in
+`web/routes/dashboard.py`, six orphaned templates (`dashboard.html`,
+`settings.html`, and the four `daemon_*` pages), and seven unreferenced static
+assets (raster logos and PNG favicons — the SVG logo is the live one).
+
+**Deliberately kept** despite "legacy" wording, each verified live: `/api/schedules/*`
+(the daemon polls `/api/schedules/due` on its hot path), the `/schedules` web aliases,
+the `tool_call` hook event alias (it is the persisted DB default), the `decision-step`
+task-kind alias and `decision_config`/`fusion_config` fields, the `memory_ids`
+request field, the `local` storage provider, and the `_migrations` bootstrap shim.
+
+### Deprecated
+
+- **The legacy `/api/daemon/tasks` and `/api/daemon/messages` API is deprecated.**
+  Both are documented as legacy in `docs/agent-integration.md` and have no caller
+  inside Lucent — the daemon uses the Request/Task API — but they are a published
+  integration contract with their own `daemon-tasks` scope, so they are marked
+  `deprecated: true` in OpenAPI rather than deleted outright. Migrate to
+  `POST /api/requests` with `POST /api/requests/{id}/tasks`, and use
+  `POST /api/handoffs` for human questions. Removal is planned for the next
+  minor release.
+
+
 ### Added
 
 #### Engine-owned model catalogs

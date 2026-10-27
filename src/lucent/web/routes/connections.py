@@ -301,34 +301,12 @@ async def connections_page(request: Request):
     # Check if encryption is available (Vault transit) — kept for the
     # template's existing banner; orthogonal to the read model.
     encryption_available = False
-    encryption_method = None
     try:
         from lucent.integrations.encryption import get_encryption_backend
-        backend = get_encryption_backend()
+        get_encryption_backend()
         encryption_available = True
-        encryption_method = type(backend).__name__
     except Exception as exc:
         logger.warning("Credential encryption unavailable: %s", exc)
-
-    # Back-compat aliases for the existing template (UI rewrite happens
-    # in a follow-up task — do not touch connections.html here). The new
-    # explicit fields are added alongside the legacy keys.
-    flags = view_model["feature_flags"]
-    legacy_connected = {
-        a["provider"]: a for a in view_model["your_connected_accounts"]  # type: ignore[index]
-    }
-    legacy_providers = [
-        {
-            "id": p["id"],
-            "name": p["name"],
-            "description": p["description"],
-            "icon": p["icon"],
-            "scopes": p["default_scopes"],
-            "pat_url": p["pat_url"],
-            "pat_prefix": p["pat_prefix"],
-        }
-        for p in view_model["provider_capabilities"]  # type: ignore[union-attr]
-    ]
 
     return templates.TemplateResponse(
         request,
@@ -344,24 +322,7 @@ async def connections_page(request: Request):
             "workspace_connections": view_model["workspace_connections"],
             "your_connected_accounts": view_model["your_connected_accounts"],
             "env_detected": view_model["env_detected"],
-            # Legacy keys preserved so older templates keep rendering
-            # until any remaining call sites migrate.
-            "providers": legacy_providers,
-            "connected": legacy_connected,
-            "credentials": [
-                {
-                    "id": a["id"],
-                    "integration_type": a["provider"],
-                    "display_name": a["display_name"],
-                    "credential_kind": a["credential_kind"],
-                    "scopes": a["scopes"],
-                    "status": a["status"],
-                }
-                for a in view_model["your_connected_accounts"]  # type: ignore[union-attr]
-            ],
-            "env_connections": view_model["env_detected"],
             "encryption_available": encryption_available,
-            "oauth_configured": flags["provider_oauth_configured"],  # type: ignore[index]
         },
     )
 

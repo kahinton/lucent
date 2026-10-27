@@ -106,10 +106,6 @@ async def _fake_session_user(_request):
     }, object()
 
 
-async def _fake_system_prompt(_user, _pool, _page_context):
-    return "system"
-
-
 async def _allow_model(_user, _pool, _model_id):
     return True
 
@@ -201,14 +197,13 @@ async def test_chat_stream_uses_engine_for_selected_model(monkeypatch):
         return _FakeEngine()
 
     monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
-    monkeypatch.setattr(chat, "_build_system_prompt", _fake_system_prompt)
     monkeypatch.setattr(chat, "_can_user_access_model", _allow_model)
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
     monkeypatch.setattr("lucent.llm.get_engine_for_model", _fake_get_engine_for_model)
 
-    response = await chat.chat_stream(
+    response = await chat.chat_stream_v2(
         _FakeRequest(),
-        chat.ChatRequest(
+        chat.ChatStreamRequest(
             messages=[chat.ChatMessage(role="user", content="hello")],
             model="local-ollama",
         ),
@@ -229,9 +224,9 @@ async def test_chat_stream_rejects_disabled_model(monkeypatch):
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: "disabled")
 
     with pytest.raises(HTTPException) as exc:
-        await chat.chat_stream(
+        await chat.chat_stream_v2(
             _FakeRequest(),
-            chat.ChatRequest(
+            chat.ChatStreamRequest(
                 messages=[chat.ChatMessage(role="user", content="hello")],
                 model="disabled-model",
             ),
@@ -251,9 +246,9 @@ async def test_chat_stream_rejects_inaccessible_model(monkeypatch):
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
 
     with pytest.raises(HTTPException) as exc:
-        await chat.chat_stream(
+        await chat.chat_stream_v2(
             _FakeRequest(),
-            chat.ChatRequest(
+            chat.ChatStreamRequest(
                 messages=[chat.ChatMessage(role="user", content="hello")],
                 model="private-model",
             ),
@@ -392,13 +387,13 @@ def test_chat_mcp_config_exposes_all_lucent_tools():
 
 
 def test_definition_engineer_chat_gets_all_lucent_tools():
-    tools = chat._chat_allowed_tools_for_agent("definition-engineer", [])
+    tools = chat.chat_allowed_tools_for_agent("definition-engineer", [])
 
     assert tools == ["*"]
 
 
 def test_workflow_composer_chat_gets_all_lucent_tools():
-    tools = chat._chat_allowed_tools_for_agent("workflow-composer", [])
+    tools = chat.chat_allowed_tools_for_agent("workflow-composer", [])
 
     assert tools == ["*"]
 
@@ -465,7 +460,9 @@ def test_chat_history_supports_soft_deleting_sessions():
 
 
 def test_session_experience_summary_defaults_and_context_not_capped():
-    assert chat.SESSION_EXPERIENCE_TIMEOUT == 180
+    from lucent.settings import session_experience_timeout_seconds
+
+    assert session_experience_timeout_seconds() == 180
 
     long_content = "x" * 20000
     formatted = chat._format_session_experience_context(
@@ -488,8 +485,9 @@ def test_session_experience_summary_defaults_and_context_not_capped():
 async def test_session_experience_summary_uses_skill_and_no_tools(monkeypatch):
     seen: dict = {}
 
-    monkeypatch.setattr(chat, "SESSION_EXPERIENCE_SUMMARY_ENABLED", True)
-    monkeypatch.setattr(chat, "SESSION_EXPERIENCE_MODEL", "summary-model")
+    monkeypatch.setattr(chat, "session_experience_summary_enabled", lambda **_kw: True)
+    monkeypatch.setattr(chat, "session_experience_model_id", lambda **_kw: "summary-model")
+    monkeypatch.setattr(chat, "session_experience_timeout_seconds", lambda **_kw: 180)
     monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
     monkeypatch.setattr(
         "lucent.llm.get_engine_for_model",
@@ -520,7 +518,7 @@ async def test_session_experience_summary_uses_skill_and_no_tools(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_session_experience_summary_can_be_disabled(monkeypatch):
-    monkeypatch.setattr(chat, "SESSION_EXPERIENCE_SUMMARY_ENABLED", False)
+    monkeypatch.setattr(chat, "session_experience_summary_enabled", lambda **_kw: False)
 
     content, model, error = await chat._summarize_session_experience(
         session={"id": "session-id", "messages": [], "events": [], "requests": []},
@@ -578,7 +576,6 @@ async def _fake_auto_choice(**kwargs):
 def _patch_stream_base(monkeypatch):
     """Common patches so chat_stream runs without the DB."""
     monkeypatch.setattr(chat, "_get_session_user", _fake_session_user)
-    monkeypatch.setattr(chat, "_build_system_prompt", _fake_system_prompt)
     monkeypatch.setattr(chat, "_can_user_access_model", _allow_model)
     monkeypatch.setattr(
         "lucent.model_registry.validate_model", lambda _model: None
@@ -592,9 +589,9 @@ async def test_chat_stream_flag_off_auto_sentinel_is_a_400(monkeypatch):
     monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: False)
 
     with pytest.raises(HTTPException) as exc:
-        await chat.chat_stream(
+        await chat.chat_stream_v2(
             _FakeRequest(),
-            chat.ChatRequest(
+            chat.ChatStreamRequest(
                 messages=[chat.ChatMessage(role="user", content="hello")],
                 model="auto",
             ),
@@ -613,9 +610,9 @@ async def test_chat_stream_flag_read_failure_fails_open_to_400(monkeypatch):
     monkeypatch.setattr("lucent.settings.auto_selection_enabled", _broken_flag)
 
     with pytest.raises(HTTPException) as exc:
-        await chat.chat_stream(
+        await chat.chat_stream_v2(
             _FakeRequest(),
-            chat.ChatRequest(
+            chat.ChatStreamRequest(
                 messages=[chat.ChatMessage(role="user", content="hello")],
                 model="Auto",
             ),
@@ -662,9 +659,9 @@ async def test_chat_stream_flag_on_auto_flows_arbiter_pick(monkeypatch):
     monkeypatch.setattr("lucent.llm.get_engine_for_model", fake_engine)
     monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
 
-    response = await chat.chat_stream(
+    response = await chat.chat_stream_v2(
         _FakeRequest(),
-        chat.ChatRequest(
+        chat.ChatStreamRequest(
             messages=[chat.ChatMessage(role="user", content="hello")],
             model="auto",
         ),
@@ -695,9 +692,9 @@ async def test_chat_unset_model_flag_on_consults_arbiter(monkeypatch):
     monkeypatch.setattr(chat, "_auto_chat_model_choice", fake_auto)
     monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
 
-    response = await chat.chat_stream(
+    response = await chat.chat_stream_v2(
         _FakeRequest(),
-        chat.ChatRequest(messages=[chat.ChatMessage(role="user", content="hello")]),
+        chat.ChatStreamRequest(messages=[chat.ChatMessage(role="user", content="hello")]),
     )
     async for _chunk in response.body_iterator:
         pass
@@ -724,9 +721,9 @@ async def test_chat_unset_model_flag_off_keeps_the_chain(monkeypatch):
     monkeypatch.setattr("lucent.llm.get_engine_for_model", fake_engine)
     monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: False)
 
-    response = await chat.chat_stream(
+    response = await chat.chat_stream_v2(
         _FakeRequest(),
-        chat.ChatRequest(messages=[chat.ChatMessage(role="user", content="hello")]),
+        chat.ChatStreamRequest(messages=[chat.ChatMessage(role="user", content="hello")]),
     )
     async for _chunk in response.body_iterator:
         pass
@@ -854,9 +851,9 @@ async def test_chat_stream_auto_turn_metadata_reaches_message_and_sse(monkeypatc
     monkeypatch.setattr(chat, "_prepare_persistent_chat_session", fake_prepare)
     monkeypatch.setattr("lucent.settings.auto_selection_enabled", lambda **_kw: True)
 
-    response = await chat.chat_stream(
+    response = await chat.chat_stream_v2(
         _FakeRequest(),
-        chat.ChatRequest(
+        chat.ChatStreamRequest(
             messages=[chat.ChatMessage(role="user", content="hello")],
             model="auto",
         ),

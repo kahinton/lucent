@@ -76,7 +76,8 @@ async def test_composer_prompt_includes_callers_accessible_memories(
     try:
         user = dict(ctx["member"])
         user["role"] = "member"
-        prompt = await chat._build_system_prompt(user, db_pool, None)
+        sections = await chat._render_page_context_sections(user, db_pool, None)
+        prompt = "\n".join(sections)
         assert f"{ctx['prefix']} member sees this latest memory" in prompt
         assert f"{ctx['prefix']} other member private memory" not in prompt
         assert "Recent Memories" in prompt
@@ -87,7 +88,8 @@ async def test_composer_prompt_includes_callers_accessible_memories(
 @pytest.mark.asyncio
 async def test_composer_prompt_shows_org_shared_other_member_memory(db_pool, chat_ctx):
     """Another member's memory reaches a caller's prompt once it is shared
-    with the org — the prompt is tested through the real ``_build_system_prompt``
+    with the org — the prompt is tested through the real
+    ``_render_page_context_sections``
     call with an admin caller (``is_admin`` does not widen the search; the
     dashboard composer's precedent gives every caller their clearance view)."""
     ctx = chat_ctx
@@ -111,7 +113,8 @@ async def test_composer_prompt_shows_org_shared_other_member_memory(db_pool, cha
         )
         user = dict(ctx["member"])
         user["role"] = "admin"
-        prompt = await chat._build_system_prompt(user, db_pool, None)
+        sections = await chat._render_page_context_sections(user, db_pool, None)
+        prompt = "\n".join(sections)
         assert f"{ctx['prefix']} other member org-shared memory" in prompt
     finally:
         await repo.delete(shared["id"], organization_id=ctx["org"]["id"])
@@ -122,5 +125,6 @@ async def test_composer_prompt_does_not_crash_without_org(db_pool, chat_ctx):
     """A user with no org degrades gracefully (no memories block added)."""
     user = {"id": str(uuid4()), "organization_id": None, "role": "member",
             "display_name": "ChatCtx Orgless"}
-    prompt = await chat._build_system_prompt(user, db_pool, None)
+    sections = await chat._render_page_context_sections(user, db_pool, None)
+    prompt = "\n".join(sections)
     assert "Recent Memories" not in prompt

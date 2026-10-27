@@ -2,9 +2,7 @@
 
 Tests:
 - GET  /daemon                          (redirect to activity)
-- POST /daemon/messages                 (send message to daemon)
 - GET  /daemon/review                   (review queue)
-- POST /daemon/feedback/{memory_id}     (approve/reject/comment)
 - GET  /daemon/tasks                    (legacy redirect)
 - GET  /daemon/tasks/new                (legacy redirect)
 - GET  /daemon/tasks/{task_id}          (legacy redirect)
@@ -142,59 +140,25 @@ def _csrf_data(client: httpx.AsyncClient, extra: dict | None = None) -> dict:
 
 
 # ============================================================================
-# GET /daemon — redirect to activity
+# Retired bookmark routes — /activity is the only entry point now
 # ============================================================================
 
 
 @pytest.mark.asyncio
-async def test_daemon_redirects_to_activity(client):
+async def test_daemon_bookmark_route_is_retired(client):
     resp = await client.get("/daemon", follow_redirects=False)
-    assert resp.status_code == 301
-    assert resp.headers["location"] == "/activity?source=cognitive"
+    assert resp.status_code == 404
 
 
 # ============================================================================
-# POST /daemon/messages — send message to daemon
-# ============================================================================
-
-
-@pytest.mark.asyncio
-async def test_send_daemon_message(client):
-    resp = await client.post(
-        "/daemon/messages",
-        data=_csrf_data(client, {"content": "Hello daemon"}),
-    )
-    assert resp.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_send_daemon_message_empty_content_returns_400(client):
-    resp = await client.post(
-        "/daemon/messages",
-        data=_csrf_data(client, {"content": ""}),
-    )
-    assert resp.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_send_daemon_message_without_csrf_fails(client):
-    resp = await client.post(
-        "/daemon/messages",
-        data={"content": "Hello daemon"},
-    )
-    assert resp.status_code == 403
-
-
-# ============================================================================
-# GET /daemon/review — review queue
+# GET /daemon/review — retired bookmark route
 # ============================================================================
 
 
 @pytest.mark.asyncio
-async def test_daemon_review_queue_redirects_to_activity(client):
+async def test_daemon_review_bookmark_route_is_retired(client):
     resp = await client.get("/daemon/review", follow_redirects=False)
-    assert resp.status_code == 301
-    assert resp.headers["location"] == "/activity"
+    assert resp.status_code == 404
 
 
 # ============================================================================
@@ -235,235 +199,3 @@ async def test_daemon_review_reject_escapes_comment_html(client, db_pool, web_us
     assert resp.status_code == 200
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in resp.text
     assert "<script>alert(1)</script>" not in resp.text
-
-
-# ============================================================================
-# POST /daemon/feedback/{memory_id} — approve / reject / comment
-# ============================================================================
-
-
-@pytest.mark.asyncio
-async def test_daemon_feedback_approve(client, review_memory):
-    memory_id = review_memory["id"]
-    resp = await client.post(
-        f"/daemon/feedback/{memory_id}",
-        data=_csrf_data(client, {"action": "approve", "comment": ""}),
-    )
-    assert resp.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_daemon_feedback_reject(client, review_memory):
-    memory_id = review_memory["id"]
-    resp = await client.post(
-        f"/daemon/feedback/{memory_id}",
-        data=_csrf_data(client, {"action": "reject", "comment": "Needs rework"}),
-    )
-    assert resp.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_daemon_feedback_nonexistent_memory_returns_404(client):
-    fake_id = str(uuid4())
-    resp = await client.post(
-        f"/daemon/feedback/{fake_id}",
-        data=_csrf_data(client, {"action": "approve", "comment": ""}),
-    )
-    assert resp.status_code == 404
-
-
-# ============================================================================
-# POST /daemon/feedback/{memory_id} — pg_notify on approve / reject
-# ============================================================================
-
-
-@pytest.mark.asyncio
-async def test_feedback_approve_fires_pg_notify(client, review_memory, db_pool):
-    """Approve must fire pg_notify('request_ready') so daemon wakes immediately."""
-    import asyncio
-    import json
-
-    memory_id = review_memory["id"]
-    notifications: list[tuple[str, str]] = []
-
-    def _on_notify(_conn, _pid, channel, payload):
-        notifications.append((channel, payload))
-
-    def _feedback_wakes():
-        """The channel is shared with live-system triggers (request inserts,
-        review creation), so select this memory's feedback wake by payload."""
-        wakes = []
-        for _channel, payload_text in notifications:
-            try:
-                payload = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if payload.get("type") == "feedback" and payload.get("memory_id") == str(memory_id):
-                wakes.append(payload)
-        return wakes
-
-    async with db_pool.acquire() as listener:
-        await listener.add_listener("request_ready", _on_notify)
-        try:
-            resp = await client.post(
-                f"/daemon/feedback/{memory_id}",
-                data=_csrf_data(client, {"action": "approve", "comment": ""}),
-            )
-            assert resp.status_code == 200
-            # Give PG notification time to propagate
-            await asyncio.sleep(0.2)
-        finally:
-            await listener.remove_listener("request_ready", _on_notify)
-
-    wakes = _feedback_wakes()
-    assert len(wakes) >= 1
-    payload = wakes[0]
-    assert payload["action"] == "approve"
-
-
-@pytest.mark.asyncio
-async def test_feedback_reject_fires_pg_notify(client, review_memory, db_pool):
-    """Reject must fire pg_notify('request_ready') so daemon wakes immediately."""
-    import asyncio
-    import json
-
-    memory_id = review_memory["id"]
-    notifications: list[tuple[str, str]] = []
-
-    def _on_notify(_conn, _pid, channel, payload):
-        notifications.append((channel, payload))
-
-    def _feedback_wakes():
-        """The channel is shared with live-system triggers (request inserts,
-        review creation), so select this memory's feedback wake by payload."""
-        wakes = []
-        for _channel, payload_text in notifications:
-            try:
-                payload = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if payload.get("type") == "feedback" and payload.get("memory_id") == str(memory_id):
-                wakes.append(payload)
-        return wakes
-
-    async with db_pool.acquire() as listener:
-        await listener.add_listener("request_ready", _on_notify)
-        try:
-            resp = await client.post(
-                f"/daemon/feedback/{memory_id}",
-                data=_csrf_data(client, {"action": "reject", "comment": "Rework"}),
-            )
-            assert resp.status_code == 200
-            await asyncio.sleep(0.2)
-        finally:
-            await listener.remove_listener("request_ready", _on_notify)
-
-    wakes = _feedback_wakes()
-    assert len(wakes) >= 1
-    payload = wakes[0]
-    assert payload["action"] == "reject"
-
-
-@pytest.mark.asyncio
-async def test_feedback_comment_does_not_fire_pg_notify(client, review_memory, db_pool):
-    """Comment action should NOT fire pg_notify — it relies on polling."""
-    import asyncio
-    import json
-
-    memory_id = review_memory["id"]
-    notifications: list[tuple[str, str]] = []
-
-    def _on_notify(_conn, _pid, channel, payload):
-        notifications.append((channel, payload))
-
-    async with db_pool.acquire() as listener:
-        await listener.add_listener("request_ready", _on_notify)
-        try:
-            resp = await client.post(
-                f"/daemon/feedback/{memory_id}",
-                data=_csrf_data(client, {"action": "comment", "comment": "Nice work"}),
-            )
-            assert resp.status_code == 200
-            await asyncio.sleep(0.2)
-        finally:
-            await listener.remove_listener("request_ready", _on_notify)
-
-    # The channel is shared with live-system traffic (request-insert triggers,
-    # review-creation notifies), so assert on feedback wakes for THIS memory
-    # rather than channel silence.
-    for payload_text in notifications:
-        try:
-            payload = json.loads(payload_text)
-        except json.JSONDecodeError:
-            continue
-        assert not (
-            payload.get("type") == "feedback"
-            and payload.get("memory_id") == str(memory_id)
-        ), "comment should not trigger wake notify"
-
-
-@pytest.mark.asyncio
-async def test_feedback_notify_failure_is_logged(client, review_memory, caplog):
-    """When pg_notify fails, the error is logged (not silently swallowed)."""
-    import logging
-
-    memory_id = review_memory["id"]
-
-    # Patch get_pool to return a pool whose acquire() raises on the notify call.
-    # The route acquires the pool early for MemoryRepository, so we need a
-    # targeted patch: replace only the pg_notify execution.
-
-    class _FailNotifyConn:
-        """Connection proxy that fails on pg_notify but works otherwise."""
-
-        def __init__(self, real_conn):
-            self._real = real_conn
-
-        async def execute(self, query, *args, **kwargs):
-            if "pg_notify" in query:
-                raise ConnectionError("test: simulated notify failure")
-            return await self._real.execute(query, *args, **kwargs)
-
-        def __getattr__(self, name):
-            return getattr(self._real, name)
-
-    # We patch the pool.acquire context manager used INSIDE the notify block.
-    # The route calls `pool = await get_pool()` once, then uses `pool.acquire()`
-    # multiple times. We intercept only the notify acquire by patching after the
-    # initial repo operations succeed (which they do with the real pool).
-    # Simplest: patch asyncpg pool's acquire to return our failing conn for
-    # the second+ calls only.
-    #
-    # Actually simpler: just ensure we see the warning in logs.
-    with caplog.at_level(logging.WARNING, logger="lucent.web.routes.daemon"):
-        # We can't easily fail just the notify without a complex mock, but we
-        # CAN verify the logging path exists by checking that a successful
-        # approve does NOT produce warning logs (baseline check).
-        resp = await client.post(
-            f"/daemon/feedback/{memory_id}",
-            data=_csrf_data(client, {"action": "approve", "comment": ""}),
-        )
-        assert resp.status_code == 200
-
-    # On success, there should be no "pg_notify failed" warning
-    notify_warnings = [r for r in caplog.records if "pg_notify failed" in r.message]
-    assert len(notify_warnings) == 0, "Successful notify should not log warnings"
-
-
-@pytest.mark.asyncio
-async def test_legacy_task_redirects(client):
-    # GET /daemon/tasks
-    resp = await client.get("/daemon/tasks", follow_redirects=False)
-    assert resp.status_code == 301
-    assert resp.headers["location"] == "/activity"
-
-    # GET /daemon/tasks/new
-    resp = await client.get("/daemon/tasks/new", follow_redirects=False)
-    assert resp.status_code == 301
-    assert resp.headers["location"] == "/activity"
-
-    # GET /daemon/tasks/{uuid}
-    task_id = str(uuid4())
-    resp = await client.get(f"/daemon/tasks/{task_id}", follow_redirects=False)
-    assert resp.status_code == 301
-    assert resp.headers["location"] == "/activity"

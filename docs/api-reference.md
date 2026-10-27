@@ -565,27 +565,13 @@ GET /api/requests/review?limit=50&offset=0
 
 Returns requests with status `review` or `needs_rework`.
 
-#### Approve Request
+#### Approve or Reject a Request
 
-```
-POST /api/requests/{request_id}/review/approve
-```
+Approvals and rejections are recorded as first-class reviews; use
+[`POST /api/reviews`](#reviews) with `status: "approved"` or `"rejected"`.
 
-Transitions a request from `review` → `completed`. Returns `409` if the request is not in `review` status.
-
-#### Reject Request
-
-```
-POST /api/requests/{request_id}/review/reject
-```
-
-```json
-{
-  "feedback": "The security audit missed the session fixation vulnerability in auth.py"
-}
-```
-
-Transitions from `review` → `needs_rework`. The `feedback` field is required (min 1 char). Increments `review_count` and sets `reviewed_at`.
+The former `POST /api/requests/{request_id}/review/approve` and
+`POST /api/requests/{request_id}/review/reject` endpoints have been removed.
 
 ### Create Task (under a Request)
 
@@ -1828,7 +1814,6 @@ The chat API provides streaming LLM responses with MCP tool access.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/stream` | Stream a chat response via Server-Sent Events |
-| `POST` | `/stream-v2` | Enhanced streaming with agent-scoped SSE events |
+| `POST` | `/stream-v2` | Stream a chat response via Server-Sent Events (agent-scoped events, page context) |
 | `GET` | `/models` | List available chat models |
 | `GET` | `/status` | Check chat availability and configured model |

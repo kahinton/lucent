@@ -52,6 +52,7 @@ def _memory_to_message(memory: dict[str, Any]) -> DaemonMessageResponse:
 
 @router.get(
     "",
+    deprecated=True,
     response_model=DaemonMessageListResponse,
 )
 async def list_messages(
@@ -89,6 +90,7 @@ async def list_messages(
 
 @router.post(
     "",
+    deprecated=True,
     response_model=DaemonMessageResponse,
     status_code=status.HTTP_201_CREATED,
     responses={400: {"model": ErrorResponse}},
@@ -135,6 +137,7 @@ async def send_daemon_message(
 
 @router.post(
     "/{message_id}/acknowledge",
+    deprecated=True,
     response_model=SuccessResponse,
     responses={404: {"model": ErrorResponse}},
 )

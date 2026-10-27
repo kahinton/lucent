@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from lucent.integrations.base import IntegrationAdapter, IntegrationError
-from lucent.integrations.models import EventType
+from lucent.db.integrations_models import EventType
 from lucent.integrations.slack_adapter import (
     SlackAdapter,
     _chunk_text,

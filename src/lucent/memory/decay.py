@@ -5,8 +5,6 @@ cycles. It currently reports candidates only; it does not archive, delete, or
 mutate memory records.
 
 Backward-compatibility note:
-- Historical names (`score_memory_decay`, `classify_decay_action`) are retained
-  as wrappers around vitality-first implementations.
 - Existing `LUCENT_MEMORY_DECAY_*` environment variable prefixes are preserved.
 """
 
@@ -349,22 +347,6 @@ def compute_memory_vitality(
     )
 
 
-def score_memory_decay(
-    profile: MemoryDecayInput,
-    *,
-    config: DecayConfig | None = None,
-    now: datetime | None = None,
-    frequency_baseline: int | None = None,
-) -> DecayScoreResult:
-    """Backward-compatible wrapper for vitality scoring."""
-    return compute_memory_vitality(
-        profile,
-        config=config,
-        now=now,
-        frequency_baseline=frequency_baseline,
-    )
-
-
 def classify_vitality_action(
     score: float,
     config: DecayConfig | None = None,
@@ -381,16 +363,6 @@ def classify_vitality_action(
     if score < cfg.suggest_threshold:
         return DecayAction.SUGGEST
     return DecayAction.LEAVE
-
-
-def classify_decay_action(
-    score: float,
-    config: DecayConfig | None = None,
-    *,
-    profile: MemoryDecayInput | None = None,
-) -> str:
-    """Backward-compatible wrapper for vitality-based classification."""
-    return classify_vitality_action(score, config=config, profile=profile)
 
 
 def score_memories_batch(

@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 
 from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import UserRepository, get_pool
+from lucent.db.llm_sessions import title_from_message
 from lucent.llm.engine_registry import capabilities_for
 from lucent.llm.engine_resolution import resolve_engine
 from lucent.logging import get_logger
@@ -101,12 +102,6 @@ COPILOT_BUILTIN_GITHUB_SERVER_TYPES = frozenset({
     "github-builtin",
 })
 
-# Compatibility constants for tests and older imports. Settings helpers remain
-# the source of the initial values, but callers can monkeypatch these module
-# attributes in unit tests.
-SESSION_EXPERIENCE_SUMMARY_ENABLED = session_experience_summary_enabled()
-SESSION_EXPERIENCE_MODEL = session_experience_model_id()
-SESSION_EXPERIENCE_TIMEOUT = session_experience_timeout_seconds()
 
 
 async def _can_user_access_model(user, pool, model_id: str) -> bool:
@@ -284,14 +279,6 @@ async def _stash_auto_selection_metadata(
         logger.warning("Auto-selection metadata stash failed", exc_info=True)
 
 
-def _chat_allowed_tools_for_agent(
-    agent_name: str | None = None,
-    skill_names: list[str] | None = None,
-) -> list[str]:
-    """Return the full Lucent MCP tool surface for every chat model."""
-    return chat_allowed_tools_for_agent(agent_name, skill_names)
-
-
 class ChatAttachment(BaseModel):
     """A multimodal attachment (image or document) on a user message.
 
@@ -312,17 +299,9 @@ class ChatMessage(BaseModel):
     attachments: list[ChatAttachment] | None = None
 
 
-class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
-    page_context: dict | None = None  # {url, title, type, data}
-    model: str | None = None  # override the default chat model
-    reasoning_effort: str | None = Field(default=None, max_length=64)
-    session_id: str | None = None
-    surface: str = Field(default="embedded_chat", pattern=r"^(chat|embedded_chat)$")
-
-
 class ChatStreamRequest(BaseModel):
     messages: list[ChatMessage]
+    page_context: dict | None = None  # {url, title, type, data}
     model: str | None = None
     reasoning_effort: str | None = Field(default=None, max_length=64)
     agent_id: str | None = None  # optional agent definition to use
@@ -498,13 +477,6 @@ async def _build_agent_mcp_config(
 
 
 
-def _title_from_message(content: str | None) -> str | None:
-    if not content:
-        return None
-    first_line = " ".join(content.strip().splitlines()[0:1]).strip()
-    return first_line[:80] if first_line else None
-
-
 def _history_prompt(history: list[dict[str, Any]], last_message: str) -> str:
     history_parts = []
     for m in history:
@@ -669,13 +641,18 @@ async def _summarize_session_experience(
     evaluation: dict[str, Any],
 ) -> tuple[str | None, str | None, str | None]:
     """Return model-written experience content, model id, and error if any."""
-    if not SESSION_EXPERIENCE_SUMMARY_ENABLED:
+    # Resolved per call (not at import) so per-organization Runtime Settings
+    # apply and changes take effect without a server restart.
+    org_id = session.get("organization_id")
+    if not session_experience_summary_enabled(organization_id=org_id):
         return None, None, "disabled"
+    experience_model = session_experience_model_id(organization_id=org_id)
+    experience_timeout = session_experience_timeout_seconds(organization_id=org_id)
     try:
         from lucent.llm import get_engine_for_model
         from lucent.model_registry import validate_model
 
-        model = _resolve_chat_model(SESSION_EXPERIENCE_MODEL)
+        model = _resolve_chat_model(experience_model)
         validation_error = validate_model(model)
         if validation_error:
             return None, model, validation_error
@@ -696,7 +673,7 @@ async def _summarize_session_experience(
             system_message=system_message,
             prompt=prompt,
             mcp_config={},
-            timeout=SESSION_EXPERIENCE_TIMEOUT,
+            timeout=experience_timeout,
             audit_context={
                 "source": "chat.session_experience_summary",
                 "organization_id": str(session.get("organization_id") or ""),
@@ -712,7 +689,7 @@ async def _summarize_session_experience(
         return content, model, None
     except Exception as exc:
         logger.warning("Session experience model summary failed", exc_info=True)
-        return None, SESSION_EXPERIENCE_MODEL, str(exc)[:500]
+        return None, experience_model, str(exc)[:500]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -923,7 +900,7 @@ async def _prepare_persistent_chat_session(
                     session_id,
                     org_id,
                     user_id=user_id,
-                    title=_title_from_message(last_message),
+                    title=title_from_message(last_message),
                 )
                 session = await repo.get_session(session_id, org_id, user_id=user_id) or session
             await repo.update_session(
@@ -942,7 +919,7 @@ async def _prepare_persistent_chat_session(
                 org_id=org_id,
                 user_id=user_id,
                 kind=kind,
-                title=_title_from_message(last_message),
+                title=title_from_message(last_message),
                 engine=engine_name,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -1212,27 +1189,17 @@ async def _render_active_user_context(user: dict, pool) -> str:
     return render_active_user_context(user, individual_memory)
 
 
-async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> str:
-    """Build a system prompt with page context and relevant memories."""
-    display_name = user.get("display_name", "a user")
+async def _render_page_context_sections(
+    user: dict, pool, page_context: dict | None
+) -> list[str]:
+    """Render page-context and recent-memory grounding for a chat turn.
+
+    Shared by every chat surface so page awareness cannot drift between them.
+    Detail-page grounding reads are clearance-driven and fail closed — the
+    model never sees more than the human driving the chat.
+    """
     org_id = str(user["organization_id"]) if user.get("organization_id") else None
-    parts = [
-        "You are Lucent, an AI assistant embedded in the Lucent Memory System web interface.",
-        f"You're talking with {display_name}.",
-        "Be helpful, concise, and knowledgeable about the system they're using.",
-        "You have access to context about what the user is currently viewing.",
-        "You also have access to the Lucent MCP server (memory-server) — "
-        "use it to search, create, update, and manage memories when the user asks, "
-        "and to create tracked requests when the user asks to queue daemon work.",
-        "When the user asks about their memories, use the MCP tools to search and "
-        "retrieve accurate information rather than relying only on the page context.",
-        _chat_tool_grounding_instructions(),
-        "Answer questions about their data, explain what they're seeing, "
-        "and help them use the system.",
-        "Format responses in markdown when helpful. Keep answers focused and practical.",
-        f"Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.",
-        await _render_active_user_context(user, pool),
-    ]
+    parts: list[str] = []
 
     # Add page context
     if page_context:
@@ -1421,7 +1388,8 @@ async def _build_system_prompt(user: dict, pool, page_context: dict | None) -> s
     except Exception:
         logger.debug("Failed to load memories for chat context", exc_info=True)
 
-    return "\n".join(parts)
+    return parts
+
 
 
 async def _load_default_chat_agent(pool, user: dict, org_id: str) -> dict | None:
@@ -1479,25 +1447,6 @@ async def _load_agent_capabilities(
     except Exception:
         logger.warning("Failed to resolve agent capabilities", exc_info=True)
         return ResolvedCapabilities(agent_id=agent_id)
-
-
-async def _load_agent_hooks(pool, agent_id: str | None) -> list[dict[str, Any]]:
-    """Load active hook definitions granted to an agent, if any.
-
-    Legacy v1 chat path only (it composes no capabilities at all, so there is no
-    user to gate against). ``/stream-v2`` resolves hooks through
-    :func:`_load_agent_capabilities` and must not call this.
-    """
-    if not agent_id:
-        return []
-    try:
-        from lucent.db.definitions import DefinitionRepository
-
-        repo = DefinitionRepository(pool)
-        return await repo.get_agent_hooks(agent_id)
-    except Exception:
-        logger.debug("Failed to load agent hooks", exc_info=True)
-        return []
 
 
 async def _load_project_chat_context(
@@ -1637,7 +1586,7 @@ async def create_chat_session(request: Request, body: CreateChatSession):
         org_id=str(user["organization_id"]),
         user_id=str(user["id"]),
         kind=body.kind,
-        title=body.title or _title_from_message(body.initial_message),
+        title=body.title or title_from_message(body.initial_message),
         model=body.model,
         reasoning_effort=body.reasoning_effort,
         agent_definition_id=body.agent_id,
@@ -1770,278 +1719,6 @@ async def get_chat_session_usage(request: Request, session_id: str):
     if not usage:
         raise HTTPException(status_code=404, detail="Chat session not found")
     return usage
-
-
-@router.post("/stream")
-async def chat_stream(
-    request: Request,
-    body: ChatRequest,
-):
-    """Stream a chat response. Model defaults to CHAT_MODEL but can be overridden per-request."""
-    user, pool = await _get_session_user(request)
-
-    import asyncio
-
-    from lucent.llm import get_engine_for_model, model_auto
-    from lucent.llm.engine import SessionEvent, SessionEventType
-    from lucent.model_registry import validate_model, validate_reasoning_effort
-
-    session_defaults = await _chat_session_defaults(
-        user=user,
-        pool=pool,
-        session_id=body.session_id,
-    )
-    raw_model = body.model or session_defaults.get("model")
-    auto_choice = None
-    # Trigger semantics mirror the daemon: an explicit sentinel engages the
-    # flag-gated arbiter (400 when off); an unset model engages only while
-    # the flag is on — otherwise today's default chain runs unchanged.
-    if model_auto.is_auto_model(raw_model) or (
-        not raw_model and _auto_selection_flag(user)
-    ):
-        # Sentinel: the flag-gated arbiter picks per message (400 when off);
-        # validate/ACL/effort then run against the RESOLVED id.
-        auto_choice = await _auto_chat_model_choice(
-            user=user,
-            pool=pool,
-            messages=body.messages,
-            session_id=body.session_id,
-        )
-        selected_model = auto_choice.model_id
-    else:
-        selected_model = _resolve_chat_model(raw_model)
-    reasoning_effort = (
-        body.reasoning_effort
-        if body.reasoning_effort is not None
-        else session_defaults.get("reasoning_effort")
-    )
-    validation_error = validate_model(selected_model)
-    if validation_error:
-        raise HTTPException(status_code=400, detail=validation_error)
-    if not await _can_user_access_model(user, pool, selected_model):
-        raise HTTPException(status_code=403, detail="Model is not available to this user")
-    effort_error = validate_reasoning_effort(selected_model, reasoning_effort)
-    if effort_error:
-        raise HTTPException(status_code=400, detail=effort_error)
-
-    engine_backend: dict[str, Any] | None = None
-    try:
-        resolution = await resolve_engine(
-            selected_model,
-            org_id=str(user["organization_id"]),
-            pool=pool,
-        )
-        engine = resolution.engine
-        # Engines consume the backend row (local provider base URL/auth,
-        # BYOK). Dropping it sends e.g. claude_code+ollama at the native API.
-        engine_backend = resolution.backend
-        logger.info(
-            "Chat engine resolved: %s (source=%s, backend=%s)",
-            engine.name,
-            resolution.source,
-            (resolution.backend or {}).get("name") or "-",
-        )
-    except Exception:
-        engine = get_engine_for_model(selected_model)
-
-    system_prompt = await _build_system_prompt(user, pool, body.page_context)
-    agent_hooks = await _load_agent_hooks(pool, None)
-    last_message = body.messages[-1].content if body.messages else ""
-    attachments = _normalize_last_attachments(body.messages)
-    chat_session = await _prepare_persistent_chat_session(
-        user=user,
-        pool=pool,
-        session_id=body.session_id,
-        kind=body.surface,
-        engine_name=engine.name,
-        model=selected_model,
-        reasoning_effort=reasoning_effort,
-        last_message=last_message,
-        attachments=attachments,
-    )
-    if auto_choice is not None:
-        await _stash_auto_selection_metadata(
-            chat_session=chat_session,
-            choice=auto_choice,
-            org_id=str(user["organization_id"]),
-        )
-    await _mirror_handoff_user_turn(
-        user=user,
-        pool=pool,
-        chat_session=chat_session,
-        content=last_message,
-    )
-
-    fallback_history = [_chat_message_to_dict(m) for m in body.messages[:-1]]
-    persisted_history = chat_session.previous_messages or fallback_history
-    resume_provider = bool(
-        capabilities_for(engine).resume
-        and chat_session.provider_session_id
-        and chat_session.provider_initialized
-    )
-    prompt = last_message if resume_provider else _history_prompt(persisted_history, last_message)
-    message_history = (
-        _message_history_for_engine(chat_session.previous_messages)
-        if not capabilities_for(engine).resume and chat_session.previous_messages
-        else None
-    )
-
-    # Build MCP config using the user's session token
-    session_token = request.cookies.get(SESSION_COOKIE_NAME)
-    mcp_config = (
-        _build_mcp_config(
-            session_token,
-            llm_session_id=chat_session.session_id,
-            llm_turn_id=chat_session.turn_id,
-            llm_message_id=chat_session.user_message_id,
-            agent_definition_id=session_defaults.get("agent_id"),
-        )
-        if session_token
-        else {}
-    )
-    # Projects: load the chat's project context (fail-closed repo read) so the
-    # engine can render the project's standing block into the system prompt
-    # this turn. Unfiled chats get None and everything no-ops.
-    project_chat_context = await _load_project_chat_context(
-        user, pool, chat_session.session_id
-    )
-    logger.info(
-        "Chat session: engine=%s, model=%s, mcp=%s",
-        engine.name,
-        selected_model,
-        "present" if session_token else "MISSING",
-    )
-    usage_persist_tasks: list[asyncio.Task] = []
-
-    def persist_usage(event: SessionEvent) -> None:
-        if event.type != SessionEventType.USAGE or not event.usage:
-            return
-
-        async def record_usage() -> None:
-            try:
-                from lucent.db.token_usage import TokenUsageRepository
-
-                await TokenUsageRepository(pool).record(
-                    organization_id=str(user["organization_id"]),
-                    user_id=str(user["id"]),
-                    session_id=chat_session.session_id,
-                    turn_id=chat_session.turn_id,
-                    message_id=chat_session.user_message_id,
-                    model=selected_model,
-                    engine=engine.name,
-                    usage=event.usage,
-                )
-            except Exception:
-                logger.debug("Failed to record chat token usage", exc_info=True)
-
-        usage_persist_tasks.append(asyncio.create_task(record_usage()))
-
-    # Thread the raw latest user text for the message-memory-lookup hook
-    # (living-memory M3): the prompt may be the flattened transcript
-    # (_history_prompt), so the hook must not re-derive the turn's topic
-    # from it. The hook falls back to prompt-derived extraction when the
-    # key is absent.
-    session_state_for_engine = (
-        _chat_session_state(chat_session.session_id)
-        if capabilities_for(engine).hooks
-        else None
-    )
-    if session_state_for_engine is not None:
-        session_state_for_engine["_latest_user_text"] = last_message
-        # Projects: the engine renders the project block into the system
-        # prompt from this fail-closed-loaded snapshot (re-read every turn).
-        if project_chat_context:
-            session_state_for_engine["_project_context"] = project_chat_context
-        else:
-            session_state_for_engine.pop("_project_context", None)
-
-    # Run the LLM session via the engine abstraction
-    try:
-        result_text = await engine.run_session_streaming(
-            model=selected_model,
-            system_message=system_prompt,
-            prompt=prompt,
-            mcp_config=mcp_config,
-            on_event=persist_usage,
-            timeout=chat_timeout_seconds(),
-            idle_timeout=chat_timeout_seconds(),
-            reasoning_effort=reasoning_effort,
-            provider_session_id=chat_session.provider_session_id,
-            resume=resume_provider,
-            message_history=message_history,
-            hooks=agent_hooks,
-            session_state=session_state_for_engine,
-            # Turn-anchoring (2026-09-11): the CURRENT user message reaches
-            # the hook explicitly every turn, not via session-state ordering.
-            current_user_text=last_message,
-            approve_permissions=False,
-            attachments=attachments,
-            audit_context={
-                "source": "chat.stream",
-                "organization_id": str(user["organization_id"]),
-                "user_id": str(user["id"]),
-                "session_id": chat_session.session_id,
-                "turn_id": chat_session.turn_id,
-                "message_id": chat_session.user_message_id,
-                "model": selected_model,
-                "reasoning_effort": reasoning_effort,
-                "engine": engine.name,
-                **({"engine_backend": engine_backend} if engine_backend else {}),
-            },
-        )
-        error = None if result_text else "No response received"
-        if result_text and chat_session.repo and chat_session.session_id:
-            await chat_session.repo.add_message(
-                chat_session.session_id,
-                role="assistant",
-                content=result_text,
-                org_id=str(user["organization_id"]),
-                user_id=str(user["id"]),
-                turn_id=chat_session.turn_id,
-                metadata=_assistant_turn_metadata(selected_model, engine, auto_choice),
-            )
-            if capabilities_for(engine).resume:
-                await chat_session.repo.mark_provider_initialized(
-                    chat_session.session_id,
-                    str(user["organization_id"]),
-                    user_id=str(user["id"]),
-                    provider_session_id=chat_session.provider_session_id,
-                )
-            await _maybe_capture_session_experience(user=user, chat_session=chat_session)
-    except Exception as e:
-        logger.error("Chat session failed: %s", e)
-        result_text = None
-        error = str(e)
-    if usage_persist_tasks:
-        await asyncio.gather(*usage_persist_tasks, return_exceptions=True)
-
-    # Return SSE response
-    async def generate():
-        if chat_session.session_id:
-            session_event = {"type": "session", "session_id": chat_session.session_id}
-            if auto_choice is not None:
-                # Live provenance badge: the client appends a quiet line under
-                # this turn as soon as the session handshake arrives.
-                session_event["model_selected"] = _auto_selection_turn_metadata(
-                    auto_choice
-                )
-            yield f"data: {json.dumps(session_event)}\n\n"
-        if error:
-            yield f"data: {json.dumps({'type': 'error', 'error': error})}\n\n"
-        elif result_text:
-            yield f"data: {json.dumps({'type': 'text', 'text': result_text})}\n\n"
-        else:
-            yield f"data: {json.dumps({'type': 'error', 'error': 'No response received'})}\n\n"
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 @router.get("/models")
@@ -2377,6 +2054,11 @@ async def chat_stream_v2(
             )
 
     system_prompt_parts.append(await _render_active_user_context(user, pool))
+    # Page awareness is shared with the (retired) v1 composer path via the same
+    # helper, so an embedded surface cannot silently lose grounding.
+    system_prompt_parts.extend(
+        await _render_page_context_sections(user, pool, body.page_context)
+    )
     system_prompt = "\n\n".join(system_prompt_parts)
     # Hooks were resolved with the rest of the capability chain above; an agent
     # whose hook the user never consented to runs without it.
@@ -2456,7 +2138,7 @@ async def chat_stream_v2(
     )
 
     session_token = request.cookies.get(SESSION_COOKIE_NAME)
-    allowed_tools = _chat_allowed_tools_for_agent(agent_name, agent_skill_names)
+    allowed_tools = chat_allowed_tools_for_agent(agent_name, agent_skill_names)
     ordinary_managed_tools = [
         tool for tool in agent_managed_tools
         if not (tool.get("runtime_config") or {}).get("mcp_proxy")

@@ -373,30 +373,6 @@ class ModelDiscoveryService:
         # catalog digest was unchanged this run (timestamp-only updates).
         self._last_unchanged_model_ids: set[str] = set()
 
-    def configured_providers(self, providers: list[str] | None = None) -> list[str]:
-        """Return env-configured providers.
-
-        This synchronous method is retained for legacy callers. Discovery itself
-        uses ``configured_providers_async`` so DB-backed provider credentials can
-        participate without requiring process environment variables.
-        """
-        requested = [p.strip().lower() for p in providers or [] if p.strip()]
-        if requested:
-            return requested
-
-        out: list[str] = []
-        if os.environ.get("OPENAI_API_KEY"):
-            out.append("openai")
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            out.append("anthropic")
-        if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
-            out.append("google")
-        if os.environ.get("OLLAMA_HOST"):
-            out.append("ollama")
-        if os.environ.get("GITHUB_TOKEN") or os.environ.get("COPILOT_CLI_PATH"):
-            out.append("copilot")
-        return out
-
     async def configured_providers_async(
         self,
         providers: list[str] | None = None,

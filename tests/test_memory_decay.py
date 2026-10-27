@@ -12,14 +12,13 @@ from lucent.memory.decay import (
     GraphConnectednessInput,
     MemoryDecayInput,
     ShadowGcpAction,
-    classify_decay_action,
     classify_gcp_action,
+    classify_vitality_action,
     compute_graph_connectedness,
     compute_memory_vitality,
     dry_run_decay_report,
     run_memory_decay_maintenance_cycle,
     score_memories_batch,
-    score_memory_decay,
 )
 
 
@@ -54,8 +53,8 @@ def test_frequently_accessed_scores_higher_than_never_accessed():
     old_frequent = _profile(access_count=20, age_days=400, updated_days=300, last_accessed_days=3)
     old_never = _profile(access_count=0, age_days=400, updated_days=300, last_accessed_days=None)
 
-    frequent_result = score_memory_decay(old_frequent)
-    never_result = score_memory_decay(old_never)
+    frequent_result = compute_memory_vitality(old_frequent)
+    never_result = compute_memory_vitality(old_never)
     assert frequent_result.score > never_result.score
 
 
@@ -67,7 +66,7 @@ def test_very_old_never_accessed_low_importance_is_low_vitality():
         updated_days=900,
         last_accessed_days=None,
     )
-    result = score_memory_decay(profile)
+    result = compute_memory_vitality(profile)
     assert result.action in (DecayAction.SUGGEST, DecayAction.ARCHIVE_CANDIDATE)
     assert result.score < 0.35
 
@@ -90,7 +89,7 @@ def test_individual_memory_hard_exempt_even_if_stale():
         last_accessed_days=2000,
         access_count=0,
     )
-    result = score_memory_decay(profile)
+    result = compute_memory_vitality(profile)
     assert result.protected is True
     assert result.action == DecayAction.EXEMPT
     assert "hard-exempt-individual" in result.reasons
@@ -106,7 +105,7 @@ def test_active_goal_memory_hard_exempt_even_if_stale():
         access_count=0,
         metadata={"status": "active"},
     )
-    result = score_memory_decay(profile)
+    result = compute_memory_vitality(profile)
     assert result.protected is True
     assert result.action == DecayAction.EXEMPT
     assert "hard-exempt-active-goal" in result.reasons
@@ -124,7 +123,7 @@ def test_pinned_memory_hard_exempt_even_if_stale():
         access_count=0,
     )
     profile.tags = ["pinned"]
-    result = score_memory_decay(profile)
+    result = compute_memory_vitality(profile)
     assert result.protected is True
     assert result.action == DecayAction.EXEMPT
     assert "hard-exempt-pinned" in result.reasons
@@ -163,10 +162,10 @@ def test_pinned_memory_excluded_from_consolidation_candidates():
     assert pinned_id in exempt_ids
 
 
-def test_classify_decay_action_short_circuits_for_exempt_profile():
+def test_classify_vitality_action_short_circuits_for_exempt_profile():
     profile = _profile(memory_type="individual", age_days=999, last_accessed_days=999, importance=1)
     # Even with a score that would otherwise archive, exemption should win.
-    assert classify_decay_action(0.0, profile=profile) == DecayAction.EXEMPT
+    assert classify_vitality_action(0.0, profile=profile) == DecayAction.EXEMPT
 
 
 def test_batch_results_sorted_by_score_asc():

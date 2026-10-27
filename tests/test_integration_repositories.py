@@ -1,4 +1,4 @@
-"""Tests for lucent.integrations.repositories — IntegrationRepo, UserLinkRepo, PairingChallengeRepo.
+"""Tests for lucent.db.integrations_repositories — IntegrationRepo, UserLinkRepo, PairingChallengeRepo.
 
 Uses mocked asyncpg pool. Tests CRUD, lifecycle transitions, and state machine logic.
 """
@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from lucent.db.pool import clear_tenant_scope, set_tenant_scope
-from lucent.integrations.repositories import (
+from lucent.db.integrations_repositories import (
     _INTEGRATION_TRANSITIONS,
     _USER_LINK_TRANSITIONS,
     IntegrationRepo,

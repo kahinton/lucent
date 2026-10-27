@@ -16,7 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 from lucent.api.deps import CurrentUser
-from lucent.integrations.models import (
+from lucent.db.integrations_models import (
     IntegrationCreate,
     IntegrationType,
     IntegrationUpdate,

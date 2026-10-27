@@ -3,7 +3,6 @@
 This module provides the database layer for Lucent, including:
 - Connection pool management (pool.py)
 - Repository classes for each entity type
-- TypedDict definitions for repository return values
 
 Repositories:
 - MemoryRepository: Memory CRUD and search operations
@@ -33,7 +32,6 @@ from lucent.db.pool import (
     AuthTablePolicy,
     get_authorized_pool,
 )
-from lucent.db.bootstrap import BootstrapRepository
 from lucent.db.credentials import CredentialRepository
 from lucent.db.dashboard import DashboardRepository
 from lucent.db.definitions import DefinitionRepository
@@ -56,27 +54,6 @@ from lucent.db.runtime_settings import RuntimeSettingsRepository
 from lucent.db.secrets import SecretMigrationRepository, SecretRepository
 from lucent.db.token_usage import TokenUsageRepository
 from lucent.db.tool_audit import ToolAuditRepository
-
-# TypedDict definitions for repository return values
-from lucent.db.types import (
-    AccessFrequencyRecord,
-    AccessLogRecord,
-    AccessLogResult,
-    ApiKeyRecord,
-    ApiKeyVerifyRecord,
-    AuditLogRecord,
-    AuditLogResult,
-    MemoryRecord,
-    MemorySearchRecord,
-    MemorySearchResult,
-    MemoryShadowScoreRecord,
-    MostAccessedRecord,
-    OrganizationListResult,
-    OrganizationRecord,
-    TagCount,
-    TagSuggestion,
-    UserRecord,
-)
 from lucent.db.user import UserRepository
 from lucent.db.user_interactions import UserInteractionRepository
 
@@ -113,7 +90,6 @@ __all__ = [
     "get_first_memory_owner",
     "AuditRepository",
     "AdminAuditRepository",
-    "BootstrapRepository",
     "DashboardRepository",
     "CredentialRepository",
     "AccessRepository",
@@ -124,22 +100,4 @@ __all__ = [
     "SecretRepository",
     "SecretMigrationRepository",
     "UserInteractionRepository",
-    # TypedDict definitions
-    "MemoryRecord",
-    "MemoryShadowScoreRecord",
-    "MemorySearchRecord",
-    "MemorySearchResult",
-    "TagCount",
-    "TagSuggestion",
-    "UserRecord",
-    "ApiKeyRecord",
-    "ApiKeyVerifyRecord",
-    "OrganizationRecord",
-    "OrganizationListResult",
-    "AuditLogRecord",
-    "AuditLogResult",
-    "AccessLogRecord",
-    "AccessLogResult",
-    "AccessFrequencyRecord",
-    "MostAccessedRecord",
 ]

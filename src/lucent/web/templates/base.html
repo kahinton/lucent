@@ -551,20 +551,6 @@
             });
             return;
         }
-        const feedbackAction = event.target.closest('[data-feedback-action]');
-        if (feedbackAction) {
-            const container = feedbackAction.closest('.feedback-actions');
-            if (!container) return;
-            if (feedbackAction.dataset.feedbackAction === 'reject') {
-                const form = container.querySelector('.reject-form');
-                form?.classList.remove('hidden');
-                form?.querySelector('input[name="comment"]')?.focus();
-            } else if (feedbackAction.dataset.feedbackAction === 'comment') {
-                container.querySelector('.comment-form')?.classList.toggle('hidden');
-            } else if (feedbackAction.dataset.feedbackAction === 'cancel-reject') {
-                feedbackAction.closest('.reject-form')?.classList.add('hidden');
-            }
-        }
     });
     document.addEventListener('change', function(event) {
         const redirect = event.target.closest('[data-redirect-prefix]');
@@ -968,8 +954,6 @@
             ctx.type = 'definitions_list';
         } else if (url.startsWith('/definitions/')) {
             ctx.type = 'definition_detail';
-        } else if (url.startsWith('/daemon')) {
-            ctx.type = 'daemon';
         } else if (url === '/settings') {
             ctx.type = 'settings';
         }
@@ -1114,7 +1098,7 @@
         try {
             const selectedModel = document.getElementById('chat-model-select').value;
             const selectedReasoning = document.getElementById('chat-reasoning-select').value;
-            const resp = await fetch('/api/chat/stream', {
+            const resp = await fetch('/api/chat/stream-v2', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1131,6 +1115,7 @@
             const reader = resp.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
+            let gotDeltas = false;
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -1144,17 +1129,36 @@
                     if (!line.startsWith('data: ')) continue;
                     try {
                         const data = JSON.parse(line.slice(6));
-                        if (data.type === 'session') {
-                            chatState.sessionId = data.session_id;
-                        } else if (data.type === 'text') {
-                            fullResponse += data.text;
-                            contentEl.innerHTML = renderMarkdown(fullResponse);
-                            scrollChat();
-                        } else if (data.type === 'error') {
-                            contentEl.innerHTML = `<p class="text-red-500">${escapeHtml(data.error)}</p>`;
-                            scrollChat();
-                        } else if (data.type === 'done') {
-                            break;
+                        // Event vocabulary mirrors /api/chat/stream-v2. The
+                        // drawer renders text only; every other event type
+                        // (tool_call, tool_result, reasoning, hook_context,
+                        // subagent_report, ...) is ignored rather than
+                        // treated as an error.
+                        switch (data.type) {
+                            case 'session':
+                                chatState.sessionId = data.session_id;
+                                break;
+                            case 'text_delta':
+                                gotDeltas = true;
+                                fullResponse += data.text;
+                                contentEl.innerHTML = renderMarkdown(fullResponse);
+                                scrollChat();
+                                break;
+                            case 'message':
+                                if (!gotDeltas) {
+                                    fullResponse = data.text;
+                                    contentEl.innerHTML = renderMarkdown(fullResponse);
+                                    scrollChat();
+                                }
+                                break;
+                            case 'error':
+                                contentEl.innerHTML = `<p class="text-red-500">${escapeHtml(data.error)}</p>`;
+                                scrollChat();
+                                break;
+                            case 'done':
+                                break;
+                            default:
+                                break;
                         }
                     } catch(e) {}
                 }

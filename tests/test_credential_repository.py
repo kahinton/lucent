@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from lucent.integrations.credential_repository import CredentialRepository
+from lucent.db.credentials import CredentialRepository
 
 
 class _FakeRecord(dict):

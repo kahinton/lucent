@@ -332,18 +332,6 @@ class MostAccessedItem(BaseModel):
     last_accessed: datetime | None
 
 
-class AccessFrequencyItem(BaseModel):
-    """Access frequency bucket item."""
-
-    bucket_start: datetime
-    access_count: int
-
-
-# =============================================================================
-# User Models
-# =============================================================================
-
-
 class UserCreate(BaseModel):
     """Request model for creating a user."""
 

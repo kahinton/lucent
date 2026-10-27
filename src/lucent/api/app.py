@@ -101,6 +101,25 @@ async def _sync_built_in_definitions():
 # Background task reference for the startup model-discovery sync. Kept at
 # module level so lifespan shutdown can await/cancel it if it is still running.
 _model_discovery_task: asyncio.Task | None = None
+# Background sweep that drops idle rate-limit buckets so the in-process
+# limiter cannot grow without bound on a long-running server.
+_rate_limit_cleanup_task: asyncio.Task | None = None
+_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = 300.0
+
+
+async def _rate_limit_cleanup_loop() -> None:
+    """Periodically drop expired rate-limit buckets."""
+    from lucent.rate_limit import get_login_limiter, get_rate_limiter
+
+    while True:
+        await asyncio.sleep(_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS)
+        try:
+            get_rate_limiter().cleanup_expired()
+            get_login_limiter().cleanup_expired()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Rate-limit bucket cleanup failed", exc_info=True)
 
 
 async def _sync_configured_model_providers(pool) -> None:
@@ -340,6 +359,9 @@ async def lifespan(app: FastAPI):
         await start_server_system_schedule_runner()
         started_system_schedule_runner = True
 
+    global _rate_limit_cleanup_task
+    _rate_limit_cleanup_task = asyncio.create_task(_rate_limit_cleanup_loop())
+
     try:
         # Start MCP session manager if configured
         if _mcp_session_manager:
@@ -354,6 +376,12 @@ async def lifespan(app: FastAPI):
             _model_discovery_task.cancel()
             try:
                 await _model_discovery_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if _rate_limit_cleanup_task is not None and not _rate_limit_cleanup_task.done():
+            _rate_limit_cleanup_task.cancel()
+            try:
+                await _rate_limit_cleanup_task
             except (asyncio.CancelledError, Exception):
                 pass
         if started_system_schedule_runner:

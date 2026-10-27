@@ -1,6 +1,5 @@
 """Integrations subsystem — platform adapters for Slack, Discord, etc."""
 
-from lucent.integrations.adapters import AdapterRegistry, AdapterResponse, DiscordAdapter
 from lucent.integrations.base import IntegrationAdapter, IntegrationError
 from lucent.integrations.encryption import (
     BackendCredentialEncryptor,
@@ -61,11 +60,8 @@ def __getattr__(name: str):
         return webhook_router
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 from lucent.integrations.slack_adapter import SlackAdapter  # noqa: E402
-from lucent.integrations.webhooks import WebhookSignatureMiddleware  # noqa: E402
 
 __all__ = [
-    "AdapterRegistry",
-    "AdapterResponse",
     "BackendCredentialEncryptor",
     "CredentialEncryptor",
     "EncryptionBackend",
@@ -89,9 +85,7 @@ __all__ = [
     "PairingChallengeService",
     "PairingChallengeRepo",
     "SignatureVerificationMiddleware",
-    "DiscordAdapter",
     "SlackAdapter",
-    "WebhookSignatureMiddleware",
     "PairingChallengeResponse",
     "PairingChallengeStatus",
     "PairingRedeemRequest",

@@ -269,113 +269,6 @@ async def list_sandboxes(user: AuthenticatedUser):
     return result
 
 
-@router.get("/{sandbox_id}", response_model=SandboxResponse)
-async def get_sandbox(
-    sandbox_id: str,
-    user: AuthenticatedUser,
-) -> SandboxResponse:
-    """Get sandbox status and details."""
-    info = await _get_sandbox_for_user(sandbox_id, user)
-    return _to_response(info)
-
-
-@router.post("/{sandbox_id}/exec", response_model=ExecResponse)
-async def exec_in_sandbox(
-    sandbox_id: str,
-    body: SandboxExecRequest,
-    user: AuthenticatedUser,
-) -> ExecResponse:
-    """Execute a command in a sandbox."""
-    await _get_sandbox_for_user(sandbox_id, user)
-
-    manager = get_sandbox_manager()
-    result = await manager.exec(
-        sandbox_id,
-        body.command,
-        cwd=body.cwd,
-        env=body.env,
-        timeout=body.timeout,
-    )
-    return ExecResponse(
-        exit_code=result.exit_code,
-        stdout=result.stdout,
-        stderr=result.stderr,
-        duration_ms=result.duration_ms,
-        timed_out=result.timed_out,
-    )
-
-
-@router.get("/{sandbox_id}/files", response_model=FileListResponse)
-async def list_sandbox_files(
-    sandbox_id: str,
-    path: str = "/workspace",
-    user: AuthenticatedUser = ...,
-) -> FileListResponse:
-    """List files in a sandbox directory."""
-    await _get_sandbox_for_user(sandbox_id, user)
-    safe_path = _validate_sandbox_path(path)
-    manager = get_sandbox_manager()
-    files = await manager.list_files(sandbox_id, safe_path)
-    return FileListResponse(files=files)
-
-
-@router.get("/{sandbox_id}/files/{file_path:path}")
-async def read_sandbox_file(
-    sandbox_id: str,
-    file_path: str,
-    user: AuthenticatedUser,
-) -> dict:
-    """Read a file from a sandbox."""
-    await _get_sandbox_for_user(sandbox_id, user)
-    safe_path = _validate_sandbox_path(f"/{file_path}")
-    manager = get_sandbox_manager()
-    try:
-        content = await manager.read_file(sandbox_id, safe_path)
-        return {"path": file_path, "content": content.decode("utf-8", errors="replace")}
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-
-
-@router.put("/{sandbox_id}/files/{file_path:path}")
-async def write_sandbox_file(
-    sandbox_id: str,
-    file_path: str,
-    body: SandboxWriteFileRequest,
-    user: AuthenticatedUser,
-) -> dict:
-    """Write a file to a sandbox."""
-    await _get_sandbox_for_user(sandbox_id, user)
-    safe_path = _validate_sandbox_path(f"/{file_path}")
-    manager = get_sandbox_manager()
-    await manager.write_file(sandbox_id, safe_path, body.content.encode("utf-8"))
-    return {"path": file_path, "written": True}
-
-
-@router.post("/{sandbox_id}/stop")
-async def stop_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
-    """Stop a sandbox and report what actually happened to it.
-
-    State is preserved only when the configured backend supports it. A
-    backend that cannot preserve state across a stop destroys the sandbox
-    instead (Azure Container Instances deletes the container group and its
-    workspace), in which case the returned status is ``destroyed`` rather
-    than ``stopped``.
-    """
-    await _get_sandbox_for_user(sandbox_id, user)
-    manager = get_sandbox_manager()
-    status = await manager.stop(sandbox_id)
-    return {"id": sandbox_id, "status": status}
-
-
-@router.delete("/{sandbox_id}")
-async def destroy_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
-    """Permanently destroy a sandbox."""
-    await _get_sandbox_for_user(sandbox_id, user)
-    manager = get_sandbox_manager()
-    await manager.destroy(sandbox_id)
-    return {"id": sandbox_id, "status": "destroyed"}
-
-
 # --- Sandbox Templates (reusable environment definitions) ---
 
 
@@ -643,3 +536,113 @@ async def launch_from_template(
     if info.status == SandboxStatus.FAILED:
         raise HTTPException(500, "Sandbox creation failed")
     return _to_response(info)
+
+
+
+@router.get("/{sandbox_id}", response_model=SandboxResponse)
+async def get_sandbox(
+    sandbox_id: str,
+    user: AuthenticatedUser,
+) -> SandboxResponse:
+    """Get sandbox status and details."""
+    info = await _get_sandbox_for_user(sandbox_id, user)
+    return _to_response(info)
+
+
+@router.post("/{sandbox_id}/exec", response_model=ExecResponse)
+async def exec_in_sandbox(
+    sandbox_id: str,
+    body: SandboxExecRequest,
+    user: AuthenticatedUser,
+) -> ExecResponse:
+    """Execute a command in a sandbox."""
+    await _get_sandbox_for_user(sandbox_id, user)
+
+    manager = get_sandbox_manager()
+    result = await manager.exec(
+        sandbox_id,
+        body.command,
+        cwd=body.cwd,
+        env=body.env,
+        timeout=body.timeout,
+    )
+    return ExecResponse(
+        exit_code=result.exit_code,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        duration_ms=result.duration_ms,
+        timed_out=result.timed_out,
+    )
+
+
+@router.get("/{sandbox_id}/files", response_model=FileListResponse)
+async def list_sandbox_files(
+    sandbox_id: str,
+    path: str = "/workspace",
+    user: AuthenticatedUser = ...,
+) -> FileListResponse:
+    """List files in a sandbox directory."""
+    await _get_sandbox_for_user(sandbox_id, user)
+    safe_path = _validate_sandbox_path(path)
+    manager = get_sandbox_manager()
+    files = await manager.list_files(sandbox_id, safe_path)
+    return FileListResponse(files=files)
+
+
+@router.get("/{sandbox_id}/files/{file_path:path}")
+async def read_sandbox_file(
+    sandbox_id: str,
+    file_path: str,
+    user: AuthenticatedUser,
+) -> dict:
+    """Read a file from a sandbox."""
+    await _get_sandbox_for_user(sandbox_id, user)
+    safe_path = _validate_sandbox_path(f"/{file_path}")
+    manager = get_sandbox_manager()
+    try:
+        content = await manager.read_file(sandbox_id, safe_path)
+        return {"path": file_path, "content": content.decode("utf-8", errors="replace")}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+
+
+@router.put("/{sandbox_id}/files/{file_path:path}")
+async def write_sandbox_file(
+    sandbox_id: str,
+    file_path: str,
+    body: SandboxWriteFileRequest,
+    user: AuthenticatedUser,
+) -> dict:
+    """Write a file to a sandbox."""
+    await _get_sandbox_for_user(sandbox_id, user)
+    safe_path = _validate_sandbox_path(f"/{file_path}")
+    manager = get_sandbox_manager()
+    await manager.write_file(sandbox_id, safe_path, body.content.encode("utf-8"))
+    return {"path": file_path, "written": True}
+
+
+@router.post("/{sandbox_id}/stop")
+async def stop_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
+    """Stop a sandbox and report what actually happened to it.
+
+    State is preserved only when the configured backend supports it. A
+    backend that cannot preserve state across a stop destroys the sandbox
+    instead (Azure Container Instances deletes the container group and its
+    workspace), in which case the returned status is ``destroyed`` rather
+    than ``stopped``.
+    """
+    await _get_sandbox_for_user(sandbox_id, user)
+    manager = get_sandbox_manager()
+    status = await manager.stop(sandbox_id)
+    return {"id": sandbox_id, "status": status}
+
+
+@router.delete("/{sandbox_id}")
+async def destroy_sandbox(sandbox_id: str, user: AuthenticatedUser) -> dict:
+    """Permanently destroy a sandbox."""
+    await _get_sandbox_for_user(sandbox_id, user)
+    manager = get_sandbox_manager()
+    await manager.destroy(sandbox_id)
+    return {"id": sandbox_id, "status": "destroyed"}
+
+
