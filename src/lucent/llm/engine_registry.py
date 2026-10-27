@@ -75,6 +75,11 @@ class EngineSpec:
     availability: Callable[[], EngineAvailability] | None = None
     discover: Callable[..., Awaitable[Any]] | None = None
     notes: str = ""
+    #: Providers this engine can serve that are discovered at call time rather
+    #: than declared statically — used by the general LLM layer, whose provider
+    #: set depends on which LangChain integration packages are installed. The
+    #: result is unioned with ``provider_support``.
+    extra_provider_support: Callable[[], frozenset[str]] | None = None
 
 
 # ── Availability probes ────────────────────────────────────────────────────
@@ -92,6 +97,24 @@ def _langchain_availability() -> EngineAvailability:
         "langchain is not installed",
         missing=("langchain",),
     )
+
+
+def _installed_langchain_providers() -> frozenset[str]:
+    """LangChain providers whose integration package is installed *right now*.
+
+    The declared catalog (:mod:`lucent.llm.langchain_providers`) is larger than
+    any one install. A provider nobody can instantiate must not be advertised as
+    a compatible provider, or every model created against it fails later at
+    session start. Probing the packages keeps the provider→engine map honest and
+    means installing ``langchain-groq`` + restarting is all it takes to support
+    Groq — no Lucent change.
+    """
+    try:
+        from lucent.llm.langchain_providers import installed_langchain_provider_names
+
+        return frozenset(installed_langchain_provider_names())
+    except Exception:  # noqa: BLE001 — a probe must never break the registry
+        return frozenset({"anthropic", "google", "ollama", "openai"})
 
 
 def _copilot_availability() -> EngineAvailability:
@@ -253,14 +276,23 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
         kind="llm_access",
         capabilities=_LANGCHAIN_CAPS,
         factory=_make_langchain,
-        # The authoritative provider→engine map. LangChain's integrations cover
-        # these four directly; everything else needs a coding-engine backend.
-        provider_support=frozenset({"anthropic", "google", "ollama", "openai"}),
-        default_for_providers=frozenset({"ollama"}),
+        # The authoritative provider→engine map. The general LLM layer's catalog
+        # lives in ``lucent.llm.langchain_providers``; these four are the ones
+        # Lucent installs an integration for by default, plus ``custom`` — any
+        # OpenAI-compatible endpoint the admin hosts (llama.cpp, vLLM, LM Studio),
+        # which runs on the default ``langchain-openai`` integration. Everything
+        # else is added by ``extra_provider_support`` once the matching
+        # ``langchain-*`` package is installed — no Lucent change required.
+        provider_support=frozenset(
+            {"anthropic", "custom", "google", "ollama", "openai"}
+        ),
+        default_for_providers=frozenset({"ollama", "custom"}),
         availability=_langchain_availability,
+        extra_provider_support=_installed_langchain_providers,
         notes=(
-            "General text/reasoning access for Ollama, OpenAI, Anthropic, and "
-            "Google models."
+            "General text/reasoning access for any provider with an installed "
+            "LangChain integration: Ollama, OpenAI, Anthropic, Google, and "
+            "self-hosted OpenAI-compatible endpoints such as llama.cpp."
         ),
     ),
     EngineSpec(
@@ -310,6 +342,11 @@ _BUILTIN_SPECS: tuple[EngineSpec, ...] = (
 
 ENGINE_REGISTRY: dict[str, EngineSpec] = {}
 _ENGINE_SINGLETONS: dict[str, "LLMEngine"] = {}
+#: Memoized ``extra_provider_support()`` results, keyed by engine name. Populated
+#: lazily on first compatibility query so a provider package installed after
+#: startup is picked up by ``reset_engines()`` (called on config reload) rather
+#: than requiring a process restart for the whole registry.
+_EXTRA_PROVIDER_CACHE: dict[str, frozenset[str]] = {}
 
 
 def register_engine(spec: EngineSpec) -> None:
@@ -437,34 +474,93 @@ PROVIDER_LABELS: dict[str, str] = {
 
 
 def provider_label(provider: str) -> str:
-    """Human label for a provider name."""
-    provider = (provider or "").strip().lower()
+    """Human label for a provider name.
+
+    Resolution order: the LangChain provider catalog (which covers every
+    integration, including ``custom``) → the local-provider registry (Ollama, LM
+    Studio) → the static labels above → a title-cased fallback.
+    """
+    key = (provider or "").strip().lower()
+    try:
+        from lucent.llm.langchain_providers import LANGCHAIN_PROVIDERS
+
+        spec = LANGCHAIN_PROVIDERS.get(key)
+        if spec is not None:
+            return spec.label
+    except Exception:  # pragma: no cover - registry import must not break labels
+        pass
     try:
         from lucent.llm.local_providers import LOCAL_PROVIDERS
 
-        local = LOCAL_PROVIDERS.get(provider)
+        local = LOCAL_PROVIDERS.get(key)
         if local is not None:
             return local.display_name
-    except Exception:  # pragma: no cover - registry import must not break labels
+    except Exception:  # pragma: no cover
         pass
-    return PROVIDER_LABELS.get(provider, provider.title() or provider)
+    return PROVIDER_LABELS.get(key, key.title() or key)
 
 
 def provider_group(provider: str) -> str:
-    """``local`` for self-hosted servers, ``native`` for hosted APIs."""
+    """``local`` for self-hosted servers, ``native`` for hosted APIs.
+
+    Self-hosted means the operator runs the server: every registered local
+    provider (Ollama, LM Studio) plus ``custom``, which is by definition an
+    endpoint the operator hosts. Anything with a vendor API is ``native``.
+    """
+    key = (provider or "").strip().lower()
+    if key == "custom":
+        return "local"
     try:
         from lucent.llm.local_providers import LOCAL_PROVIDERS
 
-        return "local" if (provider or "").strip().lower() in LOCAL_PROVIDERS else "native"
+        return "local" if key in LOCAL_PROVIDERS else "native"
     except Exception:  # pragma: no cover
         return "native"
 
 
+def _spec_declared_providers(spec: EngineSpec) -> frozenset[str] | None:
+    """The providers an engine declares. ``None`` means "any provider".
+
+    ``provider_support`` is the static declaration; ``extra_provider_support``
+    adds providers discovered at call time (the general LLM layer's set depends
+    on which LangChain integrations are installed). A spec with neither is
+    unrestricted.
+    """
+    if spec.provider_support is None and spec.extra_provider_support is None:
+        return None
+    return _engine_providers(spec)
+
+
+def _engine_providers(spec: EngineSpec) -> frozenset[str]:
+    """Union of the engine's static and dynamically-discovered providers."""
+    providers = set(spec.provider_support or frozenset())
+    if spec.extra_provider_support is not None:
+        cache = _EXTRA_PROVIDER_CACHE.get(spec.name)
+        if cache is None:
+            try:
+                cache = frozenset(spec.extra_provider_support())
+            except Exception:  # noqa: BLE001 — a probe must never break routing
+                cache = frozenset()
+            _EXTRA_PROVIDER_CACHE[spec.name] = cache
+        providers.update(cache)
+    return frozenset(providers)
+
+
 def _spec_supports_provider(spec: EngineSpec, provider: str) -> bool:
     """Whether an engine can run a provider. ``provider_support=None`` = any."""
-    if spec.provider_support is None:
+    declared = _spec_declared_providers(spec)
+    if declared is None:
         return True
-    return provider in spec.provider_support
+    return provider in declared
+
+
+def providers_for_engine(engine: str) -> frozenset[str]:
+    """Every provider an engine can serve in this runtime."""
+    try:
+        spec = engine_spec(engine)
+    except UnknownEngineError:
+        return frozenset()
+    return _engine_providers(spec)
 
 
 def engine_supports_provider(engine: str, provider: str) -> bool:
@@ -558,14 +654,29 @@ def provider_engine_map(
     Unsupported providers (no implemented engine) are omitted by default so
     callers do not present a dead choice; pass ``include_unsupported=True`` for
     diagnostics.
+
+    The provider set is *derived*: every provider some engine declares (statically
+    or via an installed LangChain integration) plus the catalog's own entries.
+    That keeps a freshly installed ``langchain-*`` package visible without a code
+    change, and keeps ``custom`` present because an OpenAI-compatible endpoint is
+    a first-class model source.
     """
     providers: set[str] = set(PROVIDER_LABELS)
+    try:
+        from lucent.llm.langchain_providers import langchain_provider_names
+
+        providers.update(langchain_provider_names())
+    except Exception:  # pragma: no cover
+        pass
     try:
         from lucent.llm.local_providers import LOCAL_PROVIDERS
 
         providers.update(LOCAL_PROVIDERS)
     except Exception:  # pragma: no cover
         pass
+    for spec in ENGINE_REGISTRY.values():
+        if spec.implemented:
+            providers.update(_engine_providers(spec))
     result = {
         provider: compatible_engine_names(provider)
         for provider in sorted(providers)
@@ -578,5 +689,6 @@ def provider_engine_map(
 
 
 def reset_engines() -> None:
-    """Drop cached engine singletons (for testing or config reload)."""
+    """Drop cached engine singletons and provider probes (config reload/test)."""
     _ENGINE_SINGLETONS.clear()
+    _EXTRA_PROVIDER_CACHE.clear()

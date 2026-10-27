@@ -17,9 +17,14 @@ def test_provider_engine_map_is_explicit_and_controlled():
     assert mapping["google"] == ["langchain", "copilot"]
     assert mapping["copilot"] == ["copilot"]
     assert mapping["lmstudio"] == ["copilot", "codex"]
+    # ``xai`` currently reaches Lucent only through Copilot's hosted catalog;
+    # the LangChain integration is not installed, so it is not advertised.
     assert mapping["xai"] == ["copilot"]
+    # A custom OpenAI-compatible endpoint (llama.cpp, vLLM, LM Studio, LiteLLM)
+    # is a first-class general-LLM source.
+    assert mapping["custom"] == ["langchain"]
     # Providers with no implemented engine are omitted rather than offered.
-    assert "custom" not in mapping
+    assert "mistralai" not in mapping
 
 
 def test_engine_supports_provider_uses_the_same_map():
@@ -28,6 +33,7 @@ def test_engine_supports_provider_uses_the_same_map():
     assert er.engine_supports_provider("codex", "lmstudio")
     assert not er.engine_supports_provider("langchain", "copilot")
     assert not er.engine_supports_provider("copilot", "custom")
+    assert er.engine_supports_provider("langchain", "custom")
 
 
 def test_default_engine_for_provider():
@@ -42,7 +48,7 @@ def test_default_engine_for_provider():
         er.default_engine_for_provider("openai", configured_default="claude_code")
         == "langchain"
     )
-    assert er.default_engine_for_provider("custom") is None
+    assert er.default_engine_for_provider("custom") == "langchain"
 
 
 def test_compatible_engines_marks_default_and_capabilities():

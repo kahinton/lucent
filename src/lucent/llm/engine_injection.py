@@ -144,25 +144,31 @@ def backend_local_injection(
 
 
 def compatible_provider_options(engine: str) -> list[dict[str, str]]:
-    """Providers an engine can use, as ``{name, label, group}`` options."""
+    """Providers an engine can use, as ``{name, label, group}`` options.
+
+    Grouping is what lets a UI separate vendor APIs ("native") from servers the
+    operator runs ("local"), so a custom OpenAI-compatible endpoint is offered
+    next to Ollama rather than hidden among cloud vendors.
+    """
     from lucent.llm.engine_registry import (
         PROVIDER_LABELS,
         UnknownEngineError,
         engine_spec,
         provider_group,
         provider_label,
+        providers_for_engine,
     )
 
     try:
         spec = engine_spec(engine)
     except UnknownEngineError:
         return []
-    if spec.provider_support is None:
+    if spec.provider_support is None and spec.extra_provider_support is None:
         from lucent.llm.local_providers import local_provider_names
 
         names = set(PROVIDER_LABELS) | set(local_provider_names())
     else:
-        names = set(spec.provider_support)
+        names = set(providers_for_engine(engine))
     return [
         {"name": name, "label": provider_label(name), "group": provider_group(name)}
         for name in sorted(names)

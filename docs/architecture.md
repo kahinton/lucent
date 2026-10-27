@@ -327,6 +327,14 @@ self-hosted provider (LM Studio, vLLM, a LiteLLM gateway) is a single spec with
 no engine changes. The resolved backend reaches the engine through
 `audit_context["engine_backend"]`.
 
+LangChain's own provider surface is described separately in
+`llm/langchain_providers.py`: one spec per integration (package to probe, whether
+it takes `api_key`/`base_url`, its base-URL env var). The engine registry unions
+the installed packages into its provider set, so `pip install langchain-groq`
+adds `groq` to every provider→engine answer without a code change, and the
+`custom` spec maps an operator's OpenAI-compatible endpoint onto LangChain's
+`openai` integration with a per-backend base URL.
+
 ## Memory System
 
 ### Memory Types

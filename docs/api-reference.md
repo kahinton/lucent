@@ -128,7 +128,27 @@ To assign work, pick an `available` row from `execution_targets` and pass its
 `model` and `backend_id` to `create_task` (or the request-level `requested_model`
 and `backend_id`). Naming a model without `backend_id` uses its `default_engine`.
 Local providers (Ollama, LM Studio) need a configured backend to run on a coding
-engine.
+engine. A `custom` provider model always needs one: it names an
+OpenAI-compatible endpoint (llama.cpp, vLLM, LiteLLM) that holds the server's
+address and key, and is never offered as an execution target without it.
+
+`POST /api/admin/backends` accepts `engine=langchain` for these endpoints:
+
+```json
+{
+  "name": "llama.cpp on gpu-box",
+  "engine": "langchain",
+  "provider": "custom",
+  "config": { "base_url": "http://gpu-box:8080", "model": "qwen2.5-coder-7b" }
+}
+```
+
+The base URL is required for `custom` (and for any provider with no vendor
+endpoint of its own) and is normalized to `<root>/v1/models` during discovery.
+A secret key, when the server demands one, is set with
+`POST /api/admin/backends/{id}/secrets` and `{"field": "api_key", "value": ...}`.
+Bind a model to the endpoint by setting its `backend_id` on
+`POST/PUT /api/admin/models`.
 
 ### Task kinds (MCP tool)
 

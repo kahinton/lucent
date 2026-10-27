@@ -637,6 +637,48 @@ def _validate_model_class_form(raw: str | None, default: str = "language") -> st
     return value if value in MODEL_CLASSES else None
 
 
+async def _validate_model_backend_form(
+    pool,
+    raw_backend_id: str | None,
+    *,
+    provider: str,
+    org_id: str,
+) -> tuple[str | None, str | None]:
+    """Validate a model→backend binding from the Models form.
+
+    Returns ``(backend_id, error)``. An empty submitted value clears the binding;
+    omitting the field entirely also clears it, because the form always renders
+    the control (a hidden "" option) — that is what makes "Auto" reachable after a
+    binding was set.
+    """
+    cleaned = str(raw_backend_id or "").strip()
+    from lucent.llm.langchain_providers import provider_requires_base_url
+
+    needs_endpoint = provider_requires_base_url(provider)
+    if not cleaned:
+        if needs_endpoint:
+            return None, (
+                f"Provider '{provider}' needs an endpoint: pick one under "
+                "Custom endpoints and select it here"
+            )
+        return None, None
+    from lucent.db.backends import BackendRepository
+
+    try:
+        backend = await BackendRepository(pool).get(cleaned, org_id=org_id)
+    except Exception:
+        return None, "Backend could not be read"
+    if not backend:
+        return None, "Unknown backend for this organization"
+    backend_provider = str(backend.get("provider") or "").strip().lower()
+    if backend_provider and backend_provider != (provider or "").strip().lower():
+        return None, (
+            f"Model provider '{provider}' cannot be bound to a "
+            f"'{backend_provider}' backend"
+        )
+    return cleaned, None
+
+
 def _models_redirect(success: str | None = None, error: str | None = None, warning: str | None = None):
     params: list[str] = []
     if success:
@@ -740,11 +782,20 @@ async def models_list(request: Request):
     from lucent.settings import llm_engine_name
 
     configured_default = llm_engine_name()
+    # Only a backend that names an endpoint is worth showing on a model row.
+    # Migration 136 backfilled auto-named shared backends ("copilot via copilot")
+    # for routing, and repeating those next to every cloud model is noise.
+    backend_names = {
+        str(backend["id"]): backend["name"]
+        for backend in backends
+        if str((backend.get("config") or {}).get("base_url") or "").strip()
+    }
     for model in models:
         if model.get("model_class") == "decision":
             model["compatible_engines"] = []
             model["default_engine"] = None
             model["default_engine_label"] = "decision model"
+            model["backend_name"] = None
             continue
         engines = compatible_engines(
             str(model.get("provider") or ""), configured_default=configured_default
@@ -764,6 +815,7 @@ async def models_list(request: Request):
         model["default_engine"] = model.get("engine") or default_engine_for_provider(
             str(model.get("provider") or ""), configured_default=configured_default
         )
+        model["backend_name"] = backend_names.get(str(model.get("backend_id") or ""))
         model["default_engine_label"] = next(
             (
                 engine["display_name"]
@@ -792,6 +844,39 @@ async def models_list(request: Request):
     llm_provider_statuses = [s for s in provider_statuses if s.get("provider") != "copilot"]
     from lucent.model_registry import list_models as _list_registry_models
 
+    # Endpoint backends: the LangChain engine's concrete model sources. A
+    # ``custom`` backend is an OpenAI-compatible server (llama.cpp, vLLM, LiteLLM);
+    # the same panel also shows provider-specific overrides for the general LLM
+    # layer. These are what a model is bound to when its provider has no global
+    # endpoint of its own.
+    from lucent.llm.engine_injection import compatible_provider_options
+    from lucent.llm.engine_registry import provider_label
+
+    endpoint_backends = [
+        {
+            "id": str(backend["id"]),
+            "name": backend["name"],
+            "provider": backend["provider"],
+            "provider_label": provider_label(backend["provider"]),
+            "base_url": (backend.get("config") or {}).get("base_url"),
+            "default_model": (backend.get("config") or {}).get("model"),
+            "is_enabled": backend.get("is_enabled", True),
+            "organization_id": (
+                str(backend["organization_id"])
+                if backend.get("organization_id")
+                else None
+            ),
+            "has_api_key": bool((backend.get("secret_refs") or {}).get("api_key")),
+        }
+        for backend in backends
+        if backend["engine"] == "langchain"
+        # Only an endpoint is an "endpoint". Migration 136 created auto-named
+        # shared routing backends ("ollama via langchain") with no address; listing
+        # those here would invent an endpoint the admin never configured.
+        and str((backend.get("config") or {}).get("base_url") or "").strip()
+    ]
+    langchain_provider_options = compatible_provider_options("langchain")
+    custom_provider_label = provider_label("custom")
     all_model_ids = [m.id for m in _list_registry_models(include_disabled=False)]
     engine_options = _engine_options()
     engine_labels = {option["name"]: option["label"] for option in engine_options}
@@ -814,6 +899,9 @@ async def models_list(request: Request):
             "provider_engine_map": provider_map,
             "engine_providers": engine_providers,
             "coding_engines": coding_engines,
+            "endpoint_backends": endpoint_backends,
+            "langchain_provider_options": langchain_provider_options,
+            "custom_provider_label": custom_provider_label,
             "all_model_ids": all_model_ids,
             "llm_provider_statuses": llm_provider_statuses,
             "owner_groups": owner_groups,
@@ -831,16 +919,13 @@ async def configure_model_provider_credential(request: Request, provider: str):
     user = await _require_admin(request)
     pool = await get_pool()
     from lucent.model_discovery import (
-        model_provider_credential_definitions,
+        model_provider_credential_definition,
         model_provider_secret_scope,
     )
     from lucent.secrets import SecretRegistry
 
     provider = provider.strip().lower()
-    definition = next(
-        (item for item in model_provider_credential_definitions() if item.provider == provider),
-        None,
-    )
+    definition = model_provider_credential_definition(provider)
     if not definition:
         return _models_redirect(error="Unsupported model provider")
 
@@ -881,16 +966,13 @@ async def clear_model_provider_credential(request: Request, provider: str):
     user = await _require_admin(request)
     pool = await get_pool()
     from lucent.model_discovery import (
-        model_provider_credential_definitions,
+        model_provider_credential_definition,
         model_provider_secret_scope,
     )
     from lucent.secrets import SecretRegistry
 
     provider = provider.strip().lower()
-    definition = next(
-        (item for item in model_provider_credential_definitions() if item.provider == provider),
-        None,
-    )
+    definition = model_provider_credential_definition(provider)
     if not definition:
         return _models_redirect(error="Unsupported model provider")
 
@@ -941,8 +1023,6 @@ async def create_engine_backend(request: Request):
         spec = engine_spec(engine)
     except UnknownEngineError:
         return _models_redirect(error=f"Unknown engine: {engine}")
-    if spec.kind != "coding_agent":
-        return _models_redirect(error=f"'{engine}' is not a coding engine")
     if not provider_allowed_for_engine(engine, provider):
         return _models_redirect(
             error=f"Provider '{provider}' is not supported by the {engine} engine"
@@ -956,7 +1036,42 @@ async def create_engine_backend(request: Request):
     config: dict = {}
     base_url = str(form.get("base_url", "")).strip()
     if base_url:
-        config["base_url"] = base_url
+        # Scheme check only. Deliberately NOT ``validate_url``: SSRF protection
+        # exists for URLs *untrusted users* supply (MCP servers, web fetch). A
+        # model endpoint is configured by an org admin and reaching a private or
+        # loopback server (llama.cpp on localhost, a vLLM pod on the cluster
+        # network) is the entire point of the feature — an RFC1918 block here
+        # would make it unusable. The endpoint is only ever contacted by the
+        # server/daemon with the org's own stored credential.
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return _models_redirect(
+                error="Endpoint must be an absolute http:// or https:// URL"
+            )
+        config["base_url"] = base_url.rstrip("/")
+    if spec.kind == "llm_access" and spec.name == "langchain":
+        # A LangChain backend is a model source. Without an address it can only
+        # mean a vendor API, which needs no backend at all — so refuse the empty
+        # one instead of creating a row that does nothing.
+        from lucent.llm.langchain_providers import (
+            provider_requires_base_url,
+            resolve_provider_base_url,
+        )
+
+        needs_url = provider_requires_base_url(provider)
+        if needs_url and not base_url:
+            return _models_redirect(
+                error=f"Provider '{provider}' requires an endpoint base URL"
+            )
+        if not needs_url and not base_url and not resolve_provider_base_url(provider):
+            return _models_redirect(
+                error=(
+                    f"Provider '{provider}' has no endpoint of its own; set a base URL "
+                    "or pick a provider with a hosted API"
+                )
+            )
     default_model = str(form.get("model", "")).strip()
     if default_model:
         config["model"] = default_model
@@ -1173,6 +1288,11 @@ async def edit_model(request: Request, model_id: str):
     model_class = _validate_model_class_form(form.get("model_class"), default=str(model.get("model_class", "language")))
     if model_class is None:
         return _models_redirect(error="Unsupported model class")
+    backend_id, backend_error = await _validate_model_backend_form(
+        pool, form.get("backend_id"), provider=provider, org_id=str(user.organization_id)
+    )
+    if backend_error:
+        return _models_redirect(error=backend_error)
     await repo.update_model(
         model_id,
         name=form.get("name", model["name"]),
@@ -1187,6 +1307,7 @@ async def edit_model(request: Request, model_id: str):
         supports_tools="supports_tools" in form,
         supports_vision="supports_vision" in form,
         engine=engine,
+        backend_id=backend_id,
         organization_id=str(user.organization_id),
         owner_user_id=owner_user_id,
         owner_group_id=owner_group_id,
@@ -1232,6 +1353,12 @@ async def add_model(request: Request):
     # owner — access comes only from explicit grants.
     owner_user_id, owner_group_id = None, None
 
+    backend_id, backend_error = await _validate_model_backend_form(
+        pool, form.get("backend_id"), provider=provider, org_id=str(user.organization_id)
+    )
+    if backend_error:
+        return _models_redirect(error=backend_error)
+
     await repo.create_model(
         model_id=model_id,
         provider=provider,
@@ -1247,6 +1374,7 @@ async def add_model(request: Request):
         supports_vision="supports_vision" in form,
         org_id=str(user.organization_id),
         engine=engine,
+        backend_id=backend_id,
         discovery_source="manual",
         is_custom=True,
         owner_user_id=owner_user_id,

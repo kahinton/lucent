@@ -33,6 +33,11 @@ class ModelUpsertRequest(BaseModel):
     reasoning_efforts: list[str] = Field(default_factory=list)
     is_enabled: bool = True
     engine: str | None = None
+    # Bind the model to a concrete engine backend (migration 136). This is what
+    # makes a self-hosted endpoint addressable: a ``custom`` model names the
+    # backend that holds its base URL and key, so several OpenAI-compatible
+    # servers can serve models side by side.
+    backend_id: str | None = None
     # Models belong to the organization (131): owner fields are retired, and
     # old payloads carrying them are rejected loudly rather than ignored.
     model_config = ConfigDict(extra="forbid")
@@ -62,6 +67,7 @@ class ModelPatchRequest(BaseModel):
     reasoning_efforts: list[str] | None = None
     is_enabled: bool | None = None
     engine: str | None = None
+    backend_id: str | None = None
     # See ModelUpsertRequest: owner fields are retired (131).
     model_config = ConfigDict(extra="forbid")
 
@@ -121,6 +127,66 @@ async def _refresh_runtime_registry(pool) -> None:
         await load_models_from_db(pool)
     except Exception:
         return
+
+
+def _org(user: AuthenticatedUser) -> str | None:
+    return str(user.organization_id) if user.organization_id else None
+
+
+async def _validate_backend_binding(
+    pool,
+    backend_id: str | None,
+    *,
+    provider: str,
+    org_id: str | None,
+) -> str | None:
+    """Validate that a model may be bound to a backend, returning the id.
+
+    A binding is a promise about *where* the model runs: the backend holds the
+    endpoint and credentials. Binding a model to a backend of a different provider
+    would send, say, an ``openai`` model id to a local llama.cpp server (or leak a
+    native key to it), so the provider must match. An inaccessible backend is
+    indistinguishable from a nonexistent one (404 semantics at the caller).
+
+    A provider with no endpoint of its own (``custom``) must have a binding: saving
+    such a model without one produces a row that can only fail at session start, so
+    it is rejected now, where the admin can fix it. Empty strings clear the binding.
+    """
+    from lucent.llm.langchain_providers import provider_requires_base_url
+
+    if not str(backend_id or "").strip():
+        if provider_requires_base_url(provider):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Provider '{provider}' needs an endpoint: bind the model to "
+                    "a backend_id (Settings → Models → Custom endpoints)"
+                ),
+            )
+        return None
+    cleaned = str(backend_id).strip()
+    from uuid import UUID
+
+    from lucent.db.backends import BackendRepository
+
+    try:
+        UUID(cleaned)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="backend_id must be a UUID")
+    backend = await BackendRepository(pool).get(cleaned, org_id=org_id)
+    if not backend:
+        raise HTTPException(status_code=422, detail="Unknown backend for this organization")
+    backend_provider = str(backend.get("provider") or "").strip().lower()
+    model_provider = (provider or "").strip().lower()
+    if backend_provider and model_provider and backend_provider != model_provider:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Model provider '{model_provider}' cannot be bound to a "
+                f"'{backend_provider}' backend"
+            ),
+        )
+    return cleaned
 
 
 @router.get("")
@@ -214,6 +280,12 @@ async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
         warnings = validate_engine_override(body.provider, body.engine)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    backend_id = await _validate_backend_binding(
+        pool,
+        body.backend_id,
+        provider=body.provider,
+        org_id=_org(user),
+    )
     model = await repo.create_model(
         model_id=body.model_id,
         provider=body.provider,
@@ -230,6 +302,7 @@ async def create_model(body: ModelUpsertRequest, user: AuthenticatedUser):
         is_enabled=body.is_enabled,
         org_id=str(user.organization_id) if user.organization_id else None,
         engine=body.engine,
+        backend_id=backend_id,
         discovery_source="manual",
         is_custom=True,
     )
@@ -273,6 +346,22 @@ async def update_model(model_id: str, body: ModelPatchRequest, user: Authenticat
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     updates = body.model_dump(exclude_unset=True)
+    if "backend_id" in body.model_fields_set:
+        updates["backend_id"] = await _validate_backend_binding(
+            pool,
+            body.backend_id,
+            provider=provider,
+            org_id=_org(user),
+        )
+    elif "provider" in body.model_fields_set and existing.get("backend_id"):
+        # Changing the provider invalidates a binding to a backend of the old
+        # provider; a stale binding would route the model to the wrong endpoint.
+        updates["backend_id"] = await _validate_backend_binding(
+            pool,
+            str(existing["backend_id"]),
+            provider=provider,
+            org_id=_org(user),
+        )
     # Models belong to the organization (131): an edit through this route
     # clears any stale ownership instead of preserving it.
     updates["owner_user_id"] = None

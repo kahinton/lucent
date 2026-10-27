@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from itertools import count
 from typing import Any, Callable
 
@@ -39,6 +40,35 @@ class _StreamIdleTimeout(Exception):
 
 class _ToolRoundLimitExceeded(RuntimeError):
     pass
+
+
+_CONTEXT_OVERFLOW_PATTERN = re.compile(
+    r"exceed_context_size|context (?:size|length)|maximum context length|"
+    r"too many tokens|reduce the length of the messages|context_length_exceeded",
+    re.IGNORECASE,
+)
+
+
+def _describe_provider_error(model: str, error: BaseException) -> str:
+    """Turn a terse provider failure into something a person can act on.
+
+    Self-hosted servers report context overflow as a bare 400 with the server's
+    own numbers ("request (34994 tokens) exceeds the available context size
+    (16384 tokens)"). That is the single most common failure when someone points
+    Lucent at a llama.cpp/vLLM server with a default context window, and the
+    useful action — raise the server's context or pick a bigger model — is not
+    obvious from the raw message.
+    """
+    message = str(error) or type(error).__name__
+    if _CONTEXT_OVERFLOW_PATTERN.search(message):
+        return (
+            f"The model '{model}' rejected the request because it exceeds the "
+            "server's context window. Lucent's agent prompt and tool set are more "
+            "than a small server default can hold — start the model server with a "
+            "larger context (llama.cpp: -c 32768 or more) or choose a model with a "
+            f"bigger window. Server said: {message}"
+        )
+    return message
 
 
 # Provider mapping: our model IDs → LangChain provider + provider model ID
@@ -126,12 +156,16 @@ def get_registered_engine(model_id: str) -> str | None:
 def _resolve_model(model_id: str) -> tuple[str, str]:
     """Resolve a Lucent model ID to (provider, provider_model_id).
 
-    If the model isn't in our map, try to infer the provider from the name.
+    The provider is the integration id ``init_chat_model()`` is called with, or
+    the Lucent provider name stored on the DB row. Catalog lookups
+    (:mod:`lucent.llm.langchain_providers`) canonicalize as needed, so
+    ``google_genai`` (the integration) and ``google`` (the Lucent provider) are
+    both accepted.
     """
     if model_id in PROVIDER_MODEL_MAP:
         return PROVIDER_MODEL_MAP[model_id]
 
-    # Check runtime registry (DB-populated Ollama/custom models)
+    # Check runtime registry (DB-populated Ollama/custom/any provider)
     if model_id in _runtime_model_registry:
         provider, api_model_id, _engine = _runtime_model_registry[model_id]
         return provider, api_model_id
@@ -144,7 +178,7 @@ def _resolve_model(model_id: str) -> tuple[str, str]:
     elif model_id.startswith("gemini"):
         return "google_genai", model_id
 
-    # Check DB for provider (handles ollama and other custom providers)
+    # Provider comes from the DB row (see register_model); nothing to infer.
     return "", model_id
 
 
@@ -285,22 +319,17 @@ async def _provider_api_key(
     org_id = str((audit_context or {}).get("organization_id") or "").strip()
     if not org_id:
         return None
-    provider_key = "google" if provider == "google_genai" else provider
+    from lucent.llm.langchain_providers import normalize_provider
+
+    provider_key = normalize_provider(provider)
     try:
         from lucent.model_discovery import (
-            model_provider_credential_definitions,
+            model_provider_credential_definition,
             model_provider_secret_scope,
         )
         from lucent.secrets import SecretRegistry
 
-        definition = next(
-            (
-                item
-                for item in model_provider_credential_definitions()
-                if item.provider == provider_key
-            ),
-            None,
-        )
+        definition = model_provider_credential_definition(provider_key)
         if not definition:
             return None
         token = await SecretRegistry.get().get(
@@ -315,13 +344,81 @@ async def _provider_api_key(
         return None
 
 
+async def _backend_secret(
+    backend: dict[str, Any] | None,
+    field: str,
+    audit_context: dict[str, Any] | None,
+) -> str | None:
+    """Read a secret value a backend references (``secret_refs[field]``).
+
+    Backend secrets are stored in the secret provider under the key recorded in
+    ``secret_refs``; the row itself carries only key names. A missing org scope
+    or a cleared field simply yields ``None`` so the env fallback can apply.
+    """
+    if not backend:
+        return None
+    key = (backend.get("secret_refs") or {}).get(field)
+    if not key:
+        return None
+    org_id = str((audit_context or {}).get("organization_id") or "").strip()
+    if not org_id:
+        return None
+    try:
+        from lucent.model_discovery import model_provider_secret_scope
+        from lucent.secrets import SecretRegistry
+
+        token = await SecretRegistry.get().get(
+            key, model_provider_secret_scope(org_id)
+        )
+        return (token or "").strip() or None
+    except KeyError:
+        return None
+    except Exception:
+        logger.warning("Failed to load backend secret %s", field, exc_info=True)
+        return None
+
+
+def _reasoning_kwarg(provider_spec: str, reasoning_effort: str) -> dict[str, Any]:
+    """Map Lucent's reasoning effort onto a provider's constructor kwarg.
+
+    Providers name the knob differently; this is the one place that knows, so
+    callers pass one Lucent value. Providers not listed simply ignore effort
+    (they either have no such control or expose it at call time).
+    """
+    if provider_spec in {"openai"}:
+        return {"reasoning_effort": reasoning_effort}
+    if provider_spec in {"anthropic"}:
+        return {"effort": reasoning_effort}
+    if provider_spec in {"google", "google_genai", "google_vertexai"}:
+        return {"thinking_level": reasoning_effort}
+    if provider_spec == "ollama":
+        return {"reasoning": reasoning_effort}
+    if provider_spec in {"groq", "deepseek", "xai", "openrouter", "litellm"}:
+        # OpenAI-wire providers all accept the OpenAI spelling.
+        return {"reasoning_effort": reasoning_effort}
+    return {}
+
+
 async def _get_chat_model(
     model_id: str,
     timeout: int = 300,
     reasoning_effort: str | None = None,
     audit_context: dict[str, Any] | None = None,
 ) -> Any:
-    """Create a LangChain chat model from a Lucent model ID."""
+    """Create a LangChain chat model from a Lucent model ID.
+
+    Everything provider-specific is resolved here from two inputs:
+
+    * the model's provider (DB row → runtime registry → name inference), and
+    * the resolved **engine backend**, when the caller supplied one — a backend
+      row carries the endpoint URL and the key for a self-hosted server, so a
+      model on ``provider='custom'`` (llama.cpp, vLLM, LM Studio, a LiteLLM
+      gateway) or any other LangChain provider runs with no extra code path.
+
+    Credential precedence is backend secret → org provider credential (Settings →
+    Models → LLM Providers) → provider environment variable → the integration's
+    own default.
+    """
     try:
         from langchain.chat_models import init_chat_model
     except ImportError:
@@ -331,31 +428,79 @@ async def _get_chat_model(
             "(or whichever provider you need)"
         )
 
-    provider, provider_model = _resolve_model(model_id)
+    from lucent.llm.langchain_providers import (
+        CUSTOM_PROVIDER,
+        langchain_model_provider,
+        normalize_provider,
+        provider_accepts_api_key,
+        provider_accepts_base_url,
+        resolve_provider_base_url,
+    )
+
+    raw_provider, provider_model = _resolve_model(model_id)
+    provider = normalize_provider(raw_provider)
+    backend = (audit_context or {}).get("engine_backend") or {}
+    backend_config = backend.get("config") or {}
+    backend_provider = normalize_provider(backend.get("provider") or "")
+
+    # ``custom`` maps onto LangChain's ``openai`` integration; every other
+    # catalog provider names its own integration. Unknown ids pass through so an
+    # operator-supplied provider is not silently rewritten.
+    integration = langchain_model_provider(provider)
 
     kwargs: dict[str, Any] = {"timeout": timeout}
-    if provider:
-        kwargs["model_provider"] = provider
+    if integration:
+        kwargs["model_provider"] = integration
 
-    api_key = await _provider_api_key(provider, audit_context)
-    if api_key and provider in {"openai", "anthropic", "google_genai"}:
-        kwargs["api_key"] = api_key
+    # The backend's pinned model wins over the row's api_model_id: a backend that
+    # names its served model is describing a concrete deployment (llama.cpp serves
+    # one GGUF under one alias). Falling back keeps discovery-created rows working.
+    backend_model = str(backend_config.get("model") or "").strip()
+    if backend_model and (not backend_provider or backend_provider == provider):
+        provider_model = backend_model
 
-    if reasoning_effort:
-        if provider == "openai":
-            kwargs["reasoning_effort"] = reasoning_effort
-        elif provider == "anthropic":
-            kwargs["effort"] = reasoning_effort
-        elif provider == "google_genai":
-            kwargs["thinking_level"] = reasoning_effort
-        elif provider == "ollama":
-            kwargs["reasoning"] = reasoning_effort
+    reasoning_kwargs = _reasoning_kwarg(provider, reasoning_effort or "") if reasoning_effort else {}
+    if reasoning_kwargs:
+        kwargs.update(reasoning_kwargs)
 
-    # Ollama: pass base_url from env so Docker containers can reach the host
-    if provider == "ollama":
-        import os
-        ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-        kwargs["base_url"] = ollama_host
+    # ── Endpoint ───────────────────────────────────────────────────────────
+    # A backend's base_url is authoritative for the provider it targets; without
+    # one, fall back to the provider's own env/default resolution.
+    base_url = ""
+    if provider_accepts_base_url(provider) or provider_accepts_base_url(integration):
+        if backend and backend_provider in ("", provider):
+            base_url = str(backend_config.get("base_url") or "").strip()
+        if not base_url:
+            base_url = resolve_provider_base_url(provider)
+        if base_url:
+            kwargs.setdefault("base_url", base_url)
+
+    if provider == CUSTOM_PROVIDER and not base_url:
+        # There is no vendor to fall back to: without an address this model would
+        # be sent to api.openai.com with the operator's own key. Refuse loudly.
+        raise RuntimeError(
+            f"Model '{model_id}' uses the 'custom' provider but no endpoint is "
+            "configured. Create an engine backend for it with a base URL "
+            "(Settings → Models → Custom endpoints) and bind the model to it."
+        )
+
+    # ── Credentials ───────────────────────────────────────────────────────
+    if provider_accepts_api_key(provider) or provider_accepts_api_key(integration):
+        api_key = await _backend_secret(backend, "api_key", audit_context)
+        if not api_key:
+            api_key = await _provider_api_key(provider, audit_context)
+        if not api_key and backend_provider in ("", provider):
+            # A backend may also carry its key inline in ``config`` for
+            # deployments whose secret store is unavailable. Accept it only
+            # after the encrypted stores, never instead of them.
+            api_key = str(backend_config.get("api_key") or "").strip() or None
+        if api_key:
+            kwargs["api_key"] = api_key
+        elif provider == CUSTOM_PROVIDER:
+            # OpenAI-compatible servers commonly require *some* key even when
+            # they ignore it. Sending none makes the openai client raise before
+            # the request leaves the process, so supply a documented placeholder.
+            kwargs["api_key"] = "not-required"
 
     return init_chat_model(provider_model, **kwargs)
 
@@ -472,7 +617,7 @@ class LangChainEngine(LLMEngine):
                 current_user_text=current_user_text,
             )
         except Exception as e:
-            error_message = str(e) or type(e).__name__
+            error_message = _describe_provider_error(model, e)
             logger.error("LangChain streaming session failed: %s", error_message)
             if on_event:
                 on_event(SessionEvent(type=SessionEventType.ERROR, content=error_message))

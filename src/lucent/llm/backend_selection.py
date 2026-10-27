@@ -202,9 +202,8 @@ async def model_execution_catalog(
         provider_label,
         provider_engine_map,
     )
-    from lucent.llm.local_providers import LOCAL_PROVIDERS
+    from lucent.llm.langchain_providers import provider_is_self_hosted
     from lucent.model_registry import list_models as _list_models
-
     backends = await BackendRepository(pool).list(org_id=org_id, enabled_only=False)
     if models is None:
         models = [
@@ -230,7 +229,11 @@ async def model_execution_catalog(
     decision_models: list[dict[str, Any]] = []
     for model in models:
         provider = (model.provider or "").strip().lower()
-        is_local = provider in LOCAL_PROVIDERS
+        # ``custom`` and the local providers have no vendor endpoint: without a
+        # bound backend they have no address at all, so they must not be offered
+        # as a runnable default target (a ``custom`` model would otherwise be
+        # sent to api.openai.com with the organization's own key).
+        is_local = provider_is_self_hosted(provider)
         is_decision = model.model_class == "decision"
         # Decision models are System One classifiers, never chat/task models.
         # Keep them visible with no execution targets so list consumers do not
@@ -283,10 +286,12 @@ async def model_execution_catalog(
             # The default engine can run with default routing (native
             # credentials or the provider's env base URL) when it has no
             # configured backend. When it does, the backend rows below are the
-            # concrete default targets.
+            # concrete default targets. ``custom`` is excluded: it has no
+            # vendor endpoint, so without a backend it has no address at all.
             if (
                 name == default_engine
                 and not engine_backends
+                and provider != "custom"
                 and (not is_local or name == "langchain")
             ):
                 targets.append(
@@ -302,7 +307,8 @@ async def model_execution_catalog(
                     }
                 )
             # Native providers can also run on another engine's native
-            # credentials; local providers need a configured backend.
+            # credentials; local providers (and custom endpoints) need a
+            # configured backend.
             elif not is_local:
                 targets.append(
                     {

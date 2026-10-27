@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from lucent.db.models import ModelRepository
+from lucent.llm.langchain_providers import CUSTOM_PROVIDER
 from lucent.logging import get_logger
 from lucent.secrets import SecretRegistry, SecretScope
 
@@ -73,9 +74,86 @@ _PROVIDER_CREDENTIALS_BY_PROVIDER = {
 }
 
 
-def model_provider_credential_definitions() -> list[ModelProviderCredentialDefinition]:
-    """Return provider credential definitions for UI/API configuration surfaces."""
-    return list(MODEL_PROVIDER_CREDENTIALS)
+def model_provider_credential_definition(
+    provider: str,
+) -> ModelProviderCredentialDefinition | None:
+    """Credential metadata for a provider, or None when it carries no key.
+
+    Covers every provider in the LangChain catalog, not only the four Lucent
+    ships a key form for: an admin who installs ``langchain-groq`` must be able
+    to save a Groq key the same way they save an OpenAI one. The canonical secret
+    key shape (``model_providers.<provider>.api_key``) is shared by discovery, the
+    engine, and the UI, so a provider can never be configured in two places.
+    """
+    from lucent.llm.langchain_providers import LANGCHAIN_PROVIDERS, normalize_provider
+
+    key = normalize_provider(provider)
+    definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get(key)
+    if definition is not None:
+        return definition
+    from lucent.llm.langchain_providers import provider_is_simple_key
+
+    spec = LANGCHAIN_PROVIDERS.get(key)
+    if spec is None or not spec.api_key_env or not provider_is_simple_key(spec.name):
+        # Local servers (ollama/custom) authenticate with nothing, or with a
+        # backend-scoped key; providers that also need an endpoint, deployment,
+        # or region are configured on an engine backend. Neither has a
+        # workspace-level provider credential.
+        return None
+    return ModelProviderCredentialDefinition(
+        provider=spec.name,
+        name=spec.label,
+        credential_label="API key",
+        secret_key=f"model_providers.{spec.name}.api_key",
+        env_vars=spec.api_key_env,
+        help_text=(
+            f"Used by the LangChain engine for {spec.label} models. Requires the "
+            f"'{spec.package}' package."
+        ),
+    )
+
+
+def model_provider_credential_definitions(
+    *, include_catalog: bool = False
+) -> list[ModelProviderCredentialDefinition]:
+    """Return provider credential definitions for UI/API configuration surfaces.
+
+    ``include_catalog=True`` appends every other LangChain provider that takes an
+    API key, so the provider-credentials panel covers what the engine can
+    actually reach rather than only what Lucent ships by default.
+    """
+    definitions = list(MODEL_PROVIDER_CREDENTIALS)
+    if not include_catalog:
+        return definitions
+    from lucent.llm.langchain_providers import (
+        LANGCHAIN_PROVIDERS,
+        provider_is_simple_key,
+        provider_package_installed,
+    )
+
+    known = {definition.provider for definition in definitions}
+    for spec in LANGCHAIN_PROVIDERS.values():
+        if spec.name in known or not spec.api_key_env:
+            continue
+        # Only advertise a provider this runtime can actually instantiate, and
+        # only those a single key is enough for — the rest need an endpoint,
+        # deployment, or region and belong on an engine backend instead.
+        if not provider_is_simple_key(spec.name):
+            continue
+        if not provider_package_installed(spec.name):
+            continue
+        definitions.append(
+            ModelProviderCredentialDefinition(
+                provider=spec.name,
+                name=spec.label,
+                credential_label="API key",
+                secret_key=f"model_providers.{spec.name}.api_key",
+                env_vars=spec.api_key_env,
+                help_text=f"Requires the '{spec.package}' package.",
+            )
+        )
+        known.add(spec.name)
+    return definitions
 
 
 def model_provider_secret_scope(organization_id: str) -> SecretScope:
@@ -90,7 +168,7 @@ async def resolve_provider_credential(provider: str, *, org_id: str | None = Non
     so a provider key entered once under Settings → Models → LLM Providers serves
     every engine that uses that provider.
     """
-    definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get((provider or "").strip().lower())
+    definition = model_provider_credential_definition(provider)
     if not definition:
         return ""
     if org_id:
@@ -128,6 +206,11 @@ class DiscoveredModel:
     tags: list[str] = field(default_factory=list)
     reasoning_efforts: list[str] = field(default_factory=list)
     engine: str | None = None
+    # Concrete engine backend this model runs on (endpoint + credentials). Set
+    # for providers whose catalog belongs to one configured backend — a custom
+    # OpenAI-compatible endpoint serves only the models it loads, so the binding
+    # is part of the discovery result, not an admin follow-up step.
+    backend_id: str | None = None
     model_class: str = "language"
     discovery_metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -183,7 +266,12 @@ def _clean_model_id(model_id: str) -> str:
 
 def _display_name(model_id: str) -> str:
     """Best-effort human-readable name from a model ID."""
-    return re.sub(r"[-_:]+", " ", _clean_model_id(model_id)).strip().title()
+    cleaned = _clean_model_id(model_id)
+    # Self-hosted servers name a model after its weight file: llama.cpp reports
+    # "qwen2.5-coder-7b-instruct-q4_k_m.gguf". Neither the extension nor the
+    # quantisation suffix belongs in a display name.
+    cleaned = re.sub(r"\.gguf$", "", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"[-_:]+", " ", cleaned).strip().title()
 
 
 def _infer_category(model_id: str, name: str = "") -> str:
@@ -400,12 +488,31 @@ class ModelDiscoveryService:
             out.append("copilot")
         if os.environ.get("OLLAMA_HOST"):
             out.append("ollama")
+        # Custom endpoints are configured per organization as backends, not as a
+        # credential, so the credential loop above never sees them. Include the
+        # provider whenever the org has an endpoint to ask.
+        if await self._has_custom_endpoint(org_id=org_id):
+            out.append(CUSTOM_PROVIDER)
         # Coding engines that report their own catalogs. Codex is discovered
         # through the SDK's own list, so it only appears when the SDK is
         # installed; a failure there is reported per-provider, not fatally.
         if "codex" not in out and _engine_catalog_available("codex"):
             out.append("codex")
         return out
+
+    async def _has_custom_endpoint(self, *, org_id: str | None = None) -> bool:
+        """Whether the organization has an enabled OpenAI-compatible endpoint."""
+        try:
+            from lucent.db.backends import BackendRepository
+
+            rows = await BackendRepository(self.pool).list(
+                org_id=org_id, provider=CUSTOM_PROVIDER, enabled_only=True
+            )
+        except Exception:  # noqa: BLE001 — a probe must not break discovery
+            return False
+        return any(
+            str((row.get("config") or {}).get("base_url") or "").strip() for row in rows
+        )
 
     async def provider_configuration_statuses(
         self,
@@ -414,7 +521,7 @@ class ModelDiscoveryService:
     ) -> list[dict[str, Any]]:
         """Return UI-safe provider configuration status without secret values."""
         statuses: list[dict[str, Any]] = []
-        for definition in MODEL_PROVIDER_CREDENTIALS:
+        for definition in model_provider_credential_definitions(include_catalog=True):
             source = "none"
             configured = False
             error: str | None = None
@@ -461,7 +568,7 @@ class ModelDiscoveryService:
         return statuses
 
     async def _provider_secret(self, provider: str, *, org_id: str | None = None) -> str:
-        definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get(provider)
+        definition = model_provider_credential_definition(provider)
         if not definition or not org_id:
             return ""
         try:
@@ -475,7 +582,7 @@ class ModelDiscoveryService:
         return (value or "").strip()
 
     async def _provider_credential(self, provider: str, *, org_id: str | None = None) -> str:
-        definition = _PROVIDER_CREDENTIALS_BY_PROVIDER.get(provider)
+        definition = model_provider_credential_definition(provider)
         if not definition:
             return ""
         secret = await self._provider_secret(provider, org_id=org_id)
@@ -608,6 +715,8 @@ class ModelDiscoveryService:
             return await self._discover_google(org_id=org_id)
         if provider == "ollama":
             return await self._discover_ollama()
+        if provider == CUSTOM_PROVIDER:
+            return await self._discover_custom_endpoints(org_id=org_id)
 
         engine_models = await self._discover_via_engine_hook(provider, org_id=org_id)
         if engine_models is not None:
@@ -1051,3 +1160,188 @@ class ModelDiscoveryService:
                 models.append(result)
         return models
 
+
+    async def _discover_custom_endpoints(
+        self, *, org_id: str | None = None
+    ) -> list[DiscoveredModel]:
+        """Discover models from the organization's OpenAI-compatible endpoints.
+
+        A ``custom`` provider has no vendor catalog to ask: the catalog is
+        whatever each configured endpoint serves. Every enabled ``custom``
+        backend the organization can see is asked for ``GET <base>/v1/models``
+        (llama.cpp's ``llama-server``, vLLM, LM Studio, LiteLLM and friends all
+        answer it). Results are merged into one provider namespace because a
+        model id is what a task names, not the endpoint behind it — the same id
+        served by two endpoints stays one row, and binding is done per model via
+        ``models.backend_id``.
+
+        A single unreachable endpoint is reported via ``logger.warning`` and does
+        not fail the others; discovery of every endpoint failing raises so the
+        sync summary shows the provider as errored rather than silently empty.
+        """
+        from lucent.db.backends import BackendRepository
+
+        try:
+            backends = await BackendRepository(self.pool).list(
+                org_id=org_id, provider=CUSTOM_PROVIDER, enabled_only=True
+            )
+        except Exception as exc:  # noqa: BLE001 — surface as a provider error
+            raise ValueError(f"Could not read custom endpoint backends: {exc}") from exc
+
+        targets = [
+            backend
+            for backend in backends
+            if str((backend.get("config") or {}).get("base_url") or "").strip()
+        ]
+        if not targets:
+            raise ValueError(
+                "No custom endpoint is configured. Add one under "
+                "Settings → Models → Custom endpoints."
+            )
+
+        discovered: dict[str, DiscoveredModel] = {}
+        errors: list[str] = []
+        for backend in targets:
+            base_url = str((backend.get("config") or {}).get("base_url") or "").strip()
+            name = str(backend.get("name") or base_url)
+            try:
+                rows = await self._list_openai_compatible_models(backend, base_url)
+            except Exception as exc:  # noqa: BLE001 — one endpoint must not stop the rest
+                logger.warning(
+                    "Custom endpoint discovery failed for %s (%s): %s", name, base_url, exc
+                )
+                errors.append(f"{name}: {exc}")
+                continue
+            for model in rows:
+                # First endpoint wins for a duplicate id, but record every
+                # endpoint that serves it so the UI can show the choice.
+                existing = discovered.get(model.id)
+                if existing is None:
+                    discovered[model.id] = model
+                else:
+                    served = list(
+                        (existing.discovery_metadata.get("served_by") or [])
+                    )
+                    served.append({"backend_id": str(backend["id"]), "name": name})
+                    existing.discovery_metadata["served_by"] = served
+
+        if not discovered and errors:
+            raise ValueError("; ".join(errors))
+        if errors:
+            logger.warning(
+                "Custom endpoint discovery partially failed: %s", "; ".join(errors)
+            )
+        return list(discovered.values())
+
+    async def _list_openai_compatible_models(
+        self, backend: dict[str, Any], base_url: str
+    ) -> list[DiscoveredModel]:
+        """List models from one OpenAI-compatible endpoint."""
+        url = self._openai_models_url(base_url)
+        key = await self._backend_api_key(backend)
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        data = await self._get_json(url, headers=headers or None)
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        if not rows and isinstance(data, dict) and isinstance(data.get("models"), list):
+            # A few OSS servers use ``models`` instead of OpenAI's ``data``.
+            rows = data["models"]
+
+        models: list[DiscoveredModel] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(
+                row.get("id") or row.get("model") or row.get("name") or ""
+            ).strip()
+            if not model_id:
+                continue
+            if not _is_generation_model(model_id):
+                continue
+            category = _infer_category(model_id)
+            # Context window: llama.cpp reports it in ``meta.n_ctx_train`` (the
+            # trained limit) alongside the runtime ``n_ctx``; vLLM uses
+            # ``max_model_len``. Prefer the trained value — the runtime
+            # allocation is per-deployment, not a model property.
+            meta = row.get("meta") or {}
+            models.append(
+                DiscoveredModel(
+                    id=model_id,
+                    provider=CUSTOM_PROVIDER,
+                    name=str(row.get("name") or _display_name(model_id)),
+                    category=category,
+                    api_model_id=model_id,
+                    context_window=int(
+                        row.get("context_length")
+                        or row.get("max_model_len")
+                        or row.get("context_window")
+                        or (meta.get("n_ctx_train") if isinstance(meta, dict) else 0)
+                        or 0
+                    ),
+                    # OpenAI-compatible servers do not advertise tool support in
+                    # their model list. Assume yes (llama.cpp/vLLM both support
+                    # it) and let an admin switch it off per model, mirroring how
+                    # the Ollama path treats a missing capability.
+                    supports_tools=bool(row.get("supports_tools", True)),
+                    supports_vision=any(
+                        marker in model_id.lower() for marker in ("vision", "llava", "vl")
+                    ),
+                    notes=(
+                        "Discovered from a custom OpenAI-compatible endpoint "
+                        f"({(backend.get('config') or {}).get('base_url')})."
+                    ),
+                    tags=sorted({"custom", "local", category}),
+                    engine="langchain",
+                    backend_id=str(backend["id"]),
+                    discovery_metadata={
+                        "endpoint": {
+                            "backend_id": str(backend["id"]),
+                            "name": backend.get("name"),
+                            "base_url": base_url,
+                        },
+                        "served_by": [
+                            {
+                                "backend_id": str(backend["id"]),
+                                "name": backend.get("name"),
+                            }
+                        ],
+                        "catalog_row": {
+                            key: row[key]
+                            for key in ("id", "owned_by", "created")
+                            if key in row
+                        },
+                    },
+                )
+            )
+        return models
+
+    @staticmethod
+    def _openai_models_url(base_url: str) -> str:
+        """Derive the model-list URL from what an admin typed.
+
+        Operators paste every shape of base URL: ``http://llama:8080``,
+        ``http://llama:8080/``, ``http://llama:8080/v1``, or a full
+        ``.../v1/chat/completions``. Normalize rather than demanding one form.
+        """
+        base = base_url.strip().rstrip("/")
+        for suffix in ("/chat/completions", "/completions", "/models"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)].rstrip("/")
+                break
+        if base.endswith("/v1"):
+            return f"{base}/models"
+        return f"{base}/v1/models"
+
+    async def _backend_api_key(self, backend: dict[str, Any]) -> str:
+        """The API key a backend references, or "" when it carries none."""
+        key = (backend.get("secret_refs") or {}).get("api_key")
+        org_id = str(backend.get("organization_id") or "")
+        if key and org_id:
+            try:
+                value = await SecretRegistry.get().get(
+                    key, model_provider_secret_scope(org_id)
+                )
+                if value and value.strip():
+                    return value.strip()
+            except Exception:  # noqa: BLE001 — fall through to config
+                logger.debug("Backend secret %s unreadable", key, exc_info=True)
+        return str((backend.get("config") or {}).get("api_key") or "").strip()

@@ -33,55 +33,64 @@
 </div>
 {% endif %}
 
-<div class="mb-8 bg-white rounded-xl border border-gray-200 overflow-hidden">
-    <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
-        <div>
-            <h2 class="text-base font-semibold text-gray-900">LLM Providers</h2>
-            <p class="mt-1 text-sm text-gray-500">API keys for the general LLM layer (LangChain), used for all non-coding work. Encrypted through Lucent secret storage; overrides environment fallbacks.</p>
-        </div>
+<div class="mb-8">
+    <div class="mb-3">
+        <h2 class="text-lg font-semibold text-gray-700">General LLM layer</h2>
+        <p class="mt-1 text-sm text-gray-500">Provider-agnostic chat for all non-coding work. Lucent owns the tool loop. Reach a vendor API with a key, or an OpenAI-compatible server you host yourself.</p>
     </div>
-    <div class="divide-y divide-gray-100">
-        {% for provider_config in llm_provider_statuses %}
-        <div class="p-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,28rem)] lg:items-start">
-            <div class="min-w-0">
-                <div class="flex flex-wrap items-center gap-2">
-                    <h3 class="text-sm font-semibold text-gray-900">{{ provider_config.name }}</h3>
-                    {% if provider_config.configured %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">configured</span>
-                    {% else %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">not configured</span>
+
+    <div class="mb-8 bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4">
+            <div>
+                <h3 class="text-base font-semibold text-gray-900">LLM Providers</h3>
+                <p class="mt-1 text-sm text-gray-500">API keys for the general LLM layer (LangChain), used for all non-coding work. Encrypted through Lucent secret storage; overrides environment fallbacks.</p>
+            </div>
+        </div>
+        <div class="divide-y divide-gray-100">
+            {% for provider_config in llm_provider_statuses %}
+            <div class="p-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,28rem)] lg:items-start">
+                <div class="min-w-0">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <h4 class="text-sm font-semibold text-gray-900">{{ provider_config.name }}</h4>
+                        {% if provider_config.configured %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">configured</span>
+                        {% else %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">not configured</span>
+                        {% endif %}
+                        {% if provider_config.source == 'database' %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">saved</span>
+                        {% elif provider_config.source == 'environment' %}
+                        <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">env</span>
+                        {% endif %}
+                    </div>
+                    <p class="mt-1 text-sm text-gray-600">{{ provider_config.credential_label }}</p>
+                    {% if provider_config.help_text %}
+                    <p class="mt-1 text-xs text-gray-500">{{ provider_config.help_text }}</p>
                     {% endif %}
-                    {% if provider_config.source == 'database' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">saved</span>
-                    {% elif provider_config.source == 'environment' %}
-                    <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">env</span>
+                    {% if provider_config.env_vars %}
+                    <p class="mt-2 text-xs text-gray-500">Fallback: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ provider_config.env_vars|join('</code>, <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">')|safe }}</code></p>
+                    {% endif %}
+                    {% if provider_config.error %}
+                    <p class="mt-2 text-xs font-medium text-red-700">{{ provider_config.error }}</p>
                     {% endif %}
                 </div>
-                <p class="mt-1 text-sm text-gray-600">{{ provider_config.credential_label }}</p>
-                {% if provider_config.help_text %}
-                <p class="mt-1 text-xs text-gray-500">{{ provider_config.help_text }}</p>
-                {% endif %}
-                {% if provider_config.env_vars %}
-                <p class="mt-2 text-xs text-gray-500">Fallback: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ provider_config.env_vars|join('</code>, <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">')|safe }}</code></p>
-                {% endif %}
-                {% if provider_config.error %}
-                <p class="mt-2 text-xs font-medium text-red-700">{{ provider_config.error }}</p>
+                {% if provider_config.secret_key %}
+                <div class="flex flex-col sm:flex-row gap-2">
+                    <form method="POST" action="/settings/models/providers/{{ provider_config.provider }}/credential" class="flex-1 flex gap-2">
+                        <input name="credential" type="password" autocomplete="off" placeholder="Paste {{ provider_config.credential_label|lower }}" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                        <button type="submit" class="px-3 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Save</button>
+                    </form>
+                    <form method="POST" action="/settings/models/providers/{{ provider_config.provider }}/credential/clear">
+                        <button type="submit" class="w-full sm:w-auto px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 text-sm font-medium whitespace-nowrap">Clear</button>
+                    </form>
+                </div>
                 {% endif %}
             </div>
-            {% if provider_config.secret_key %}
-            <div class="flex flex-col sm:flex-row gap-2">
-                <form method="POST" action="/settings/models/providers/{{ provider_config.provider }}/credential" class="flex-1 flex gap-2">
-                    <input name="credential" type="password" autocomplete="off" placeholder="Paste {{ provider_config.credential_label|lower }}" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
-                    <button type="submit" class="px-3 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Save</button>
-                </form>
-                <form method="POST" action="/settings/models/providers/{{ provider_config.provider }}/credential/clear">
-                    <button type="submit" class="w-full sm:w-auto px-3 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 text-sm font-medium whitespace-nowrap">Clear</button>
-                </form>
-            </div>
-            {% endif %}
+            {% endfor %}
         </div>
-        {% endfor %}
     </div>
+
+    {% include "partials/custom_endpoints_panel.html" %}
 </div>
 
 <!-- Coding engines: product harnesses (Copilot / Claude Code / Codex) -->
@@ -213,10 +222,15 @@
     </div>
 </div>
 
-<!-- Group by provider -->
+<!-- Model catalog, grouped by provider -->
+<div class="mb-3">
+    <h2 class="text-lg font-semibold text-gray-700">Models</h2>
+    <p class="mt-1 text-sm text-gray-500">Every model these engines can run. Enable a model and grant access before anyone can use it — nothing is usable by default.</p>
+</div>
+
 {% for provider in providers %}
 <div class="mb-8">
-    <h2 class="text-lg font-semibold text-gray-700 mb-3 capitalize">{{ provider }}</h2>
+    <h3 class="text-base font-semibold text-gray-600 mb-3 capitalize">{{ provider|replace('_', ' ') }}</h3>
     <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
         <table class="w-full">
             <thead class="bg-gray-50">
@@ -258,7 +272,7 @@
                     <td class="px-4 py-3 hidden md:table-cell">
                         {% if model.model_class == 'decision' %}
                         <span class="text-xs text-gray-400">System One decision model</span>
-                        {% elif model.compatible_engines %}
+                        {% else %}
                         <div class="flex flex-wrap gap-1 max-w-56">
                             {% for engine in model.compatible_engines %}
                             <span class="inline-block px-1.5 py-0.5 rounded text-xs {% if engine.default %}bg-primary-100 text-primary-700 font-medium{% else %}bg-gray-100 text-gray-600{% endif %}"
@@ -267,13 +281,9 @@
                             </span>
                             {% endfor %}
                         </div>
-                        {% if model.compatible_engines|selectattr('backends')|list %}
-                        <div class="mt-1 text-[10px] text-gray-400">
-                            {% for engine in model.compatible_engines %}{% if engine.backends %}{{ engine.display_name }}: {{ engine.backends|map(attribute='name')|join(', ') }}{% if not loop.last %}; {% endif %}{% endif %}{% endfor %}
-                        </div>
+                        {% if model.backend_name %}
+                        <div class="mt-1 text-[10px] text-gray-500">Endpoint: <span class="font-mono">{{ model.backend_name }}</span></div>
                         {% endif %}
-                        {% else %}
-                        <span class="text-xs text-amber-600">no compatible engine</span>
                         {% endif %}
                     </td>
                     <td class="px-4 py-3 hidden sm:table-cell">
@@ -403,7 +413,8 @@
                                 data-reasoning-efforts="{{ (model.reasoning_efforts or [])|join(',') }}"
                                 data-supports-tools="{{ 'true' if model.supports_tools else 'false' }}"
                                 data-supports-vision="{{ 'true' if model.supports_vision else 'false' }}"
-                                data-engine="{{ model.engine or '' }}">Edit</button>
+                                data-engine="{{ model.engine or '' }}"
+                                data-backend-id="{{ model.backend_id or '' }}">Edit</button>
                             <form method="POST" action="/settings/models/{{ model.id }}/toggle">
                                 <button type="submit" class="px-3 py-1 text-xs rounded-md font-medium
                                     {% if model.is_enabled %}bg-gray-100 text-gray-700 hover:bg-gray-200{% else %}bg-green-50 text-green-700 hover:bg-green-100{% endif %}">
@@ -482,6 +493,16 @@
                 <p class="mt-1 text-[11px] text-gray-400">
                     {% for provider, engines in provider_engine_map.items() if engines %}{{ provider|capitalize }} → {% for engine in engines %}{{ engine_labels.get(engine, engine) }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not loop.last %} · {% endif %}{% endfor %}
                 </p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Endpoint <span class="text-gray-400 font-normal">(optional)</span></label>
+                <select name="backend_id" id="add-backend" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="">Auto — use the provider's default endpoint</option>
+                    {% for backend in endpoint_backends %}
+                    <option value="{{ backend.id }}" data-provider="{{ backend.provider }}" data-engine="langchain">{{ backend.name }}{% if backend.base_url %} — {{ backend.base_url }}{% endif %}</option>
+                    {% endfor %}
+                </select>
+                <p class="mt-1 text-xs text-gray-500">Required for custom-provider models: it supplies the server address and key. Other providers only need one to override the global endpoint.</p>
             </div>
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
@@ -571,6 +592,16 @@
                 </p>
             </div>
             <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Endpoint <span class="text-gray-400 font-normal">(optional)</span></label>
+                <select name="backend_id" id="edit-backend" class="w-full px-3 py-2 border rounded-lg text-sm">
+                    <option value="">Auto — use the provider's default endpoint</option>
+                    {% for backend in endpoint_backends %}
+                    <option value="{{ backend.id }}" data-provider="{{ backend.provider }}">{{ backend.name }}{% if backend.base_url %} — {{ backend.base_url }}{% endif %}</option>
+                    {% endfor %}
+                </select>
+                <p class="mt-1 text-xs text-gray-500">Required for custom-provider models: it supplies the server address and key.</p>
+            </div>
+            <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">Tags <span class="text-gray-400 font-normal">(comma-separated)</span></label>
                 <input name="tags" id="edit-tags" class="w-full px-3 py-2 border rounded-lg text-sm">
                 <div class="mt-1 flex flex-wrap gap-1">
@@ -628,6 +659,7 @@ function openEditModal(btn) {
     const engineSelect = document.getElementById('edit-engine');
     engineSelect.value = d.engine || '';
     filterEngineOptions(document.getElementById('edit-provider'), engineSelect);
+    document.getElementById('edit-backend').value = d.backendId || '';
     // Preserve a legacy/engine value that isn't in the compatible list so
     // editing a model never silently drops an existing override.
     if ((d.engine || '') && engineSelect.value !== d.engine) {

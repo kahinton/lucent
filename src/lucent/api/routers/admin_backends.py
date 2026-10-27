@@ -124,11 +124,45 @@ async def create_backend(body: BackendCreateRequest, request: Request, user: Aut
     existing = await repo.list(org_id=org_id, engine=engine, provider=body.provider)
     if any(row["name"] == body.name for row in existing):
         raise HTTPException(status_code=409, detail="A backend with that name already exists")
+    config = dict(body.config or {})
+    base_url = str(config.get("base_url") or "").strip()
+    if base_url:
+        # Scheme only — see the note in the web route. A model endpoint is
+        # admin-configured and is expected to live on a private network or
+        # loopback (llama.cpp, vLLM); an SSRF block here would defeat the feature.
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise HTTPException(
+                status_code=422,
+                detail="config.base_url must be an absolute http:// or https:// URL",
+            )
+        config["base_url"] = base_url.rstrip("/")
+    if engine == "langchain":
+        from lucent.llm.langchain_providers import (
+            provider_requires_base_url,
+            resolve_provider_base_url,
+        )
+
+        if provider_requires_base_url(provider) and not base_url:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Provider '{provider}' requires config.base_url",
+            )
+        if not base_url and not resolve_provider_base_url(provider):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Provider '{provider}' has no endpoint of its own; "
+                    "set config.base_url"
+                ),
+            )
     backend = await repo.create(
         name=body.name,
         engine=engine,
         provider=provider,
-        config=body.config,
+        config=config,
         secret_refs=body.secret_refs,
         is_enabled=body.is_enabled,
         org_id=org_id,

@@ -64,8 +64,11 @@ class TestEngineRegistry:
     def test_config_schema_is_attached(self):
         copilot_fields = {f.key for f in er.engine_spec("copilot").config_schema}
         assert {"base_url", "provider_type", "api_key"} <= copilot_fields
-        # langchain carries no extra engine-backend fields.
-        assert er.engine_spec("langchain").config_schema == ()
+        # The general LLM engine's backend is a model source: it carries the
+        # endpoint and key for a self-hosted server (llama.cpp, vLLM, LiteLLM)
+        # and the model that server serves.
+        langchain_fields = {f.key for f in er.engine_spec("langchain").config_schema}
+        assert {"base_url", "api_key", "model"} <= langchain_fields
 
     def test_availability_shape(self):
         avail = er.engine_availability("langchain")

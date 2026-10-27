@@ -937,3 +937,36 @@ async def test_models_grant_requires_csrf_and_admin(
     )
     assert non_admin.status_code == 403
     assert await _model_clearances(db_pool, model_id) == []
+
+
+@pytest.mark.asyncio
+async def test_models_page_groups_custom_endpoints_under_general_llm(
+    client, db_pool, web_user
+):
+    """A custom endpoint is a general-LLM model source, not a coding harness.
+
+    It used to render directly after the Coding Engines panel with no section
+    heading of its own, so it read as part of that panel. It must stay inside
+    the "General LLM layer" section, before "Coding Engines".
+    """
+    _user, org, _token = web_user
+    await _promote_web_user(db_pool, web_user)
+
+    page = await client.get("/settings/models")
+    assert page.status_code == 200
+    html = page.text
+
+    general = html.index("General LLM layer")
+    providers = html.index("LLM Providers")
+    custom = html.index("<h3 class=\"text-base font-semibold text-gray-900\">Custom endpoints</h3>")
+    coding = html.index("Coding Engines")
+
+    # Custom endpoints is a subsection of the general layer...
+    assert general < providers < custom
+    # ...and it comes before the coding engines, never inside them.
+    assert custom < coding
+    # The panel is a subsection heading (h3), not a peer of "Coding Engines" (h2).
+    assert html.count("<h2 class=\"text-lg font-semibold text-gray-700\">Custom endpoints</h2>") == 0
+    # Its add form targets the general LLM engine with the custom provider.
+    assert 'name="engine" value="langchain"' in html
+    assert 'name="provider" value="custom"' in html

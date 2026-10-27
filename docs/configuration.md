@@ -87,9 +87,12 @@ For detailed secret storage configuration, see [Secret Storage](secret-storage.m
 Lucent engines come in two kinds:
 
 - **`llm_access`** — `langchain`, the general LLM layer for plain
-  text/reasoning models (Ollama, OpenAI, Anthropic, and Google). Lucent owns the
-  tool loop. The `custom` provider has no engine yet and is omitted from the
-  provider→engine map.
+  text/reasoning models. Lucent owns the tool loop. It reaches any provider with
+  an installed LangChain integration (OpenAI, Anthropic, Google, and — when the
+  matching `langchain-*` package is installed — Groq, DeepSeek, Mistral,
+  OpenRouter, xAI, and the rest), plus self-hosted OpenAI-compatible servers
+  through the `custom` provider: llama.cpp's `llama-server`, vLLM, LM Studio, or
+  a LiteLLM gateway.
 - **`coding_agent`** — product-specific agent harnesses that bring their own
   agent loop, tools, and auth: `copilot` (GitHub Copilot SDK), `claude_code`
   (Claude Agent SDK), and `codex` (OpenAI Codex SDK).
@@ -116,6 +119,8 @@ registry (`lucent.llm.engine_registry`); every other surface derives from it.
 | `OPENAI_API_KEY` | — | OpenAI API key for models running on the `langchain` engine |
 | `GOOGLE_API_KEY` | — | Google API key for models running on the `langchain` engine |
 | `OLLAMA_HOST` | `http://host.docker.internal:11434` | Ollama host URL for local models |
+| `LUCENT_MODEL_BASE_URL` | — | Fallback base URL for a `langchain` engine backend when none is stored in the DB |
+| `LUCENT_MODEL_API_KEY` | — | Fallback key for a `langchain` engine backend when none is stored in the secret provider |
 | `GITHUB_TOKEN` | — | GitHub token for Copilot SDK authentication |
 
 ### Engine Backends
@@ -147,13 +152,42 @@ The controlled map is:
 |---|---|
 | `anthropic` | `langchain`, `copilot`, `claude_code` |
 | `copilot` | `copilot` |
+| `custom` | `langchain` (requires a backend that names the endpoint) |
 | `google` | `langchain`, `copilot` |
 | `lmstudio` | `copilot`, `codex` |
 | `ollama` | `langchain`, `copilot`, `claude_code`, `codex` |
 | `openai` | `langchain`, `copilot`, `codex` |
 | `xai` | `copilot` |
 
-`custom` has no engine yet and is omitted from the map.
+Any other LangChain provider appears in the map once its integration package is
+installed (for example `pip install langchain-groq` → `groq: [langchain]`). The
+provider set is probed at runtime, not hardcoded, so a provider without its
+package is omitted rather than offered and broken. The catalog lives in
+`lucent.llm.langchain_providers`.
+
+### Custom model endpoints (llama.cpp, vLLM, LM Studio, LiteLLM)
+
+The `custom` provider is an OpenAI-compatible server you run. Create a
+**Settings → Models → Custom endpoints** entry (or `POST /api/admin/backends`
+with `engine=langchain, provider=custom`) carrying the endpoint URL; then use
+**Sync Providers** to import the models it serves. Discovered models are created
+disabled and bound to that endpoint via `models.backend_id`, so enabling one is
+all that is needed to run it.
+
+- The base URL accepts every shape people paste: `http://host:8080`,
+  `http://host:8080/v1`, or a full `/v1/chat/completions` path. Discovery
+  normalizes it to `<root>/v1/models`.
+- An optional API key is stored in the secret provider (`secret_refs.api_key`
+  on the backend). If none is set, Lucent sends the placeholder `not-required`,
+  because OpenAI-compatible servers commonly demand a key they never check.
+- A custom model bound to a backend always uses that backend's address and
+  model name; the backend's `config.model` overrides the row's `api_model_id`.
+- Endpoint URLs are admin-configured and are **not** SSRF-filtered: a llama.cpp
+  server on `127.0.0.1` or a vLLM pod on a private subnet is the expected case.
+  The URL is only ever contacted by the server/daemon using the organization's
+  own stored credential.
+- A `custom` model with no backend is refused at session start rather than being
+  sent to a vendor API.
 
 Default engine resolution is: an explicit default (`ollama` → `langchain`),
 then the deployment's configured default engine (`LUCENT_LLM_ENGINE`) when

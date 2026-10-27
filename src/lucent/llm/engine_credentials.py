@@ -54,7 +54,36 @@ def secret_key_for(engine: str, backend_name: str, field: str) -> str:
 # Declared in full so the taxonomy, validation, and UI stay complete; the
 # registry reports each engine's runtime availability.
 
-_LANGCHAIN_FIELDS: tuple[EngineConfigField, ...] = ()
+_LANGCHAIN_FIELDS: tuple[EngineConfigField, ...] = (
+    # A LangChain backend is a concrete *model source*: one endpoint (or one
+    # vendor account) plus the credentials to reach it. This is what makes
+    # self-hosted OpenAI-compatible servers (llama.cpp's llama-server, vLLM,
+    # LM Studio, LiteLLM) and providers outside the four Lucent ships a key for
+    # addressable without another code path.
+    EngineConfigField(
+        key="base_url",
+        label="Endpoint base URL",
+        field_type="url",
+        env_var="LUCENT_MODEL_BASE_URL",
+        help_text=(
+            "OpenAI-compatible root, e.g. http://llama-server:8080 or "
+            "http://llama-server:8080/v1. Ollama: http://localhost:11434"
+        ),
+    ),
+    EngineConfigField(
+        key="api_key",
+        label="Endpoint API key",
+        field_type="secret",
+        env_var="LUCENT_MODEL_API_KEY",
+        help_text="Optional. Self-hosted servers usually accept any placeholder value.",
+    ),
+    EngineConfigField(
+        key="model",
+        label="Default model id",
+        field_type="string",
+        help_text="Model name the server expects (llama.cpp: the GGUF name or --alias).",
+    ),
+)
 
 _COPILOT_FIELDS: tuple[EngineConfigField, ...] = (
     # The GitHub token lives as the Copilot *provider* credential (surfaced in the

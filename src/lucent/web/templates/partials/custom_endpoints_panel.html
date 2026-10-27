@@ -1,0 +1,78 @@
+{# Custom OpenAI-compatible endpoints (llama.cpp, vLLM, LM Studio, LiteLLM).
+
+   These are model sources for the general LLM layer, not coding harnesses, so
+   this partial is rendered inside the "General LLM layer" section — never
+   underneath the Coding Engines panel. #}
+<div class="mb-8 bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-100">
+        {# h3: this panel is a subsection of "General LLM layer", alongside
+           "LLM Providers" — not a peer of "Coding Engines". #}
+        <h3 class="text-base font-semibold text-gray-900">Custom endpoints</h3>
+        <p class="mt-1 text-sm text-gray-500">
+            Any OpenAI-compatible server — llama.cpp (<code class="font-mono">llama-server</code>), vLLM, LM Studio, a LiteLLM gateway, or an internal inference host.
+            Models discovered here run through the general LLM layer with this endpoint's address and key.
+        </p>
+    </div>
+
+    {% if endpoint_backends %}
+    <div class="divide-y divide-gray-100">
+        {% for backend in endpoint_backends %}
+        <div class="px-5 py-4">
+            <div class="flex flex-wrap items-center gap-2">
+                <span class="text-sm font-semibold text-gray-900">{{ backend.name }}</span>
+                <span class="px-2 py-0.5 rounded text-xs bg-primary-100 text-primary-700">{{ backend.provider_label }}</span>
+                {% if backend.organization_id %}
+                <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">org</span>
+                {% else %}
+                <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">shared</span>
+                {% endif %}
+                {% if backend.is_enabled %}
+                <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700">enabled</span>
+                {% else %}
+                <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500">disabled</span>
+                {% endif %}
+                <form method="POST" action="/settings/models/backends/{{ backend.id }}/delete" class="ml-auto">
+                    <button type="submit" class="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 text-xs font-medium">Delete</button>
+                </form>
+            </div>
+            {% if backend.base_url %}
+            <p class="mt-1 text-xs text-gray-500 font-mono">{{ backend.base_url }}</p>
+            {% endif %}
+            {% if backend.default_model %}
+            <p class="mt-1 text-xs text-gray-500">Default model: <span class="font-mono">{{ backend.default_model }}</span></p>
+            {% endif %}
+            <p class="mt-1 text-xs text-gray-500">
+                API key: {% if backend.has_api_key %}configured{% else %}none (servers usually accept any placeholder){% endif %}
+            </p>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="px-5 py-3 text-sm text-gray-500">No custom endpoints configured.</p>
+    {% endif %}
+
+    <details class="border-t border-gray-100 bg-gray-50">
+        <summary class="px-5 py-3 text-sm font-medium text-primary-700 cursor-pointer select-none">+ Add a custom endpoint</summary>
+        <form method="POST" action="/settings/models/backends" class="px-5 py-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)_auto] sm:items-end">
+            <input type="hidden" name="engine" value="langchain">
+            <input type="hidden" name="provider" value="custom">
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+                <input name="name" required placeholder="e.g. llama.cpp on gpu-box" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Endpoint URL</label>
+                <input name="base_url" required placeholder="http://llama-server:8080" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Default model <span class="text-gray-400 font-normal">(optional)</span></label>
+                <input name="model" placeholder="e.g. qwen2.5-coder-7b-instruct" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+            </div>
+            <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Add endpoint</button>
+            <p class="sm:col-span-4 text-xs text-gray-500">
+                Accepts <code class="font-mono">host:port</code> or a <code class="font-mono">/v1</code> root; both are normalized.
+                Use <strong>Sync Providers</strong> afterwards to import the models this endpoint serves. Add an API key on the endpoint after creating it if the server requires one.
+            </p>
+        </form>
+    </details>
+</div>

@@ -44,9 +44,12 @@ class ModelConfigError(ValueError):
 
 
 def _credential_defs() -> dict[str, Any]:
-    from lucent.model_discovery import MODEL_PROVIDER_CREDENTIALS
+    from lucent.model_discovery import model_provider_credential_definitions
 
-    return {d.provider: d for d in MODEL_PROVIDER_CREDENTIALS}
+    return {
+        d.provider: d
+        for d in model_provider_credential_definitions(include_catalog=True)
+    }
 
 
 def available_providers() -> list[dict[str, Any]]:

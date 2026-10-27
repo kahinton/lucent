@@ -12,6 +12,12 @@ def _ollama():
     return lp.local_provider_spec("ollama")
 
 
+def _package_installed(module: str) -> bool:
+    from importlib.util import find_spec
+
+    return find_spec(module) is not None
+
+
 def test_copilot_injection_is_byok_openai():
     inj = ei.build_local_injection("copilot", _ollama(), base_url="http://host:11434")
     assert inj.kwargs["provider"] == {"type": "openai", "base_url": "http://host:11434/v1"}
@@ -113,7 +119,11 @@ def test_compatible_providers_copilot():
 
 def test_compatible_providers_langchain():
     names = {o["name"] for o in ei.compatible_provider_options("langchain")}
-    assert names == {"anthropic", "google", "ollama", "openai"}
+    assert {"anthropic", "custom", "google", "ollama", "openai"} <= names
+    # Providers whose LangChain integration is not installed are not offered:
+    # presenting one would create models that fail at session start.
+    if not _package_installed("langchain_groq"):
+        assert "groq" not in names
 
 
 def test_compatible_providers_are_grouped():

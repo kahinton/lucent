@@ -264,6 +264,7 @@ class ModelRepository:
         discovery_metadata: dict | None = None,
         owner_user_id: str | None = None,
         owner_group_id: str | None = None,
+        backend_id: str | None = None,
     ) -> dict:
         now = datetime.now(timezone.utc)
         async with scoped_acquire(organization_id=org_id) as conn:
@@ -272,9 +273,10 @@ class ModelRepository:
                    api_model_id, context_window, supports_tools, supports_vision,
                    notes, tags, reasoning_efforts, is_enabled, organization_id,
                    engine, discovery_source, is_custom, discovery_metadata,
-                   created_at, updated_at, owner_user_id, owner_group_id)
+                   created_at, updated_at, owner_user_id, owner_group_id,
+                   backend_id)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-                       $16,$17,$18::jsonb,$19,$19,$20,$21)
+                       $16,$17,$18::jsonb,$19,$19,$20,$21,$22)
                    RETURNING *""",
                 model_id,
                 provider,
@@ -297,6 +299,7 @@ class ModelRepository:
                 now,
                 UUID(owner_user_id) if owner_user_id else None,
                 UUID(owner_group_id) if owner_group_id else None,
+                UUID(backend_id) if backend_id else None,
             )
         return dict(row)
 
@@ -316,6 +319,7 @@ class ModelRepository:
             "reasoning_efforts", "engine", "discovery_source", "is_custom",
             "last_discovered_at", "discovery_metadata",
             "organization_id", "owner_user_id", "owner_group_id",
+            "backend_id",
         }
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -332,7 +336,14 @@ class ModelRepository:
                 set_parts.append(f"{key} = ${i}")
                 params.append(
                     UUID(val)
-                    if key in {"organization_id", "owner_user_id", "owner_group_id"} and val
+                    if key
+                    in {
+                        "organization_id",
+                        "owner_user_id",
+                        "owner_group_id",
+                        "backend_id",
+                    }
+                    and val
                     else val
                 )
 
@@ -389,10 +400,10 @@ class ModelRepository:
                             context_window, supports_tools, supports_vision,
                             notes, tags, is_enabled, organization_id, engine,
                             reasoning_efforts, discovery_source, is_custom, last_discovered_at,
-                            discovery_metadata, created_at, updated_at
+                            discovery_metadata, backend_id, created_at, updated_at
                         ) SELECT
                             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,false,$12,$13,
-                            $14,'provider',false,$15,$16::jsonb,$15,$15
+                            $14,'provider',false,$15,$16::jsonb,$17,$15,$15
                         WHERE NOT EXISTS (SELECT 1 FROM existing)
                         """,
                         m["model_id"],
@@ -411,6 +422,7 @@ class ModelRepository:
                         m.get("reasoning_efforts") or [],
                         now,
                         _jsonb_param(m.get("discovery_metadata")),
+                        UUID(m["backend_id"]) if m.get("backend_id") else None,
                     )
                     row = await conn.fetchrow(
                         """
@@ -480,6 +492,16 @@ class ModelRepository:
                                     THEN models.discovery_source
                                 ELSE 'provider'
                             END,
+                            -- A discovered backend binding is refreshed only when
+                            -- the catalog supplied one; an admin's manual row keeps
+                            -- its own binding (guarded above).
+                            backend_id = CASE
+                                WHEN models.discovery_source = 'manual' OR models.is_custom
+                                    THEN models.backend_id
+                                WHEN $16::uuid IS NOT NULL
+                                    THEN $16::uuid
+                                ELSE models.backend_id
+                            END,
                             is_custom = CASE
                                 WHEN models.discovery_source = 'manual' OR models.is_custom
                                     THEN models.is_custom
@@ -517,6 +539,7 @@ class ModelRepository:
                         m.get("reasoning_efforts") or [],
                         now,
                         _jsonb_param(m.get("discovery_metadata")),
+                        UUID(m["backend_id"]) if m.get("backend_id") else None,
                     )
                     if row is not None:
                         upserted += 1
