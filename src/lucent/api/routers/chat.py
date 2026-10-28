@@ -40,6 +40,10 @@ from lucent.db import UserRepository, get_pool
 from lucent.db.llm_sessions import title_from_message
 from lucent.llm.engine_registry import capabilities_for
 from lucent.llm.engine_resolution import resolve_engine
+from lucent.llm.token_quota import (
+    TokenQuotaExceeded,
+    get_token_limit_service,
+)
 from lucent.logging import get_logger
 from lucent.mcp_config import build_internal_mcp_server
 from lucent.prompts.memory_usage import render_active_user_context
@@ -1891,6 +1895,26 @@ async def chat_stream_v2(
     if effort_error:
         raise HTTPException(status_code=400, detail=effort_error)
 
+    # Check token limits before any work is done so an exhausted budget is a
+    # plain HTTP error the client can render, rather than a stream that opens and
+    # immediately fails. The engine wrapper re-checks with the full prompt (this
+    # pass has no system prompt yet); this one exists to fail fast and clearly.
+    try:
+        quota_service = await get_token_limit_service(pool)
+        await quota_service.preflight(
+            organization_id=str(user["organization_id"]),
+            user_id=str(user["id"]),
+            model_id=selected_model,
+            prompt="\n".join(m.content for m in body.messages),
+            reserve=False,
+        )
+    except TokenQuotaExceeded as quota_error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(quota_error),
+            headers={"X-Lucent-Error-Code": "token_limit_exceeded"},
+        ) from quota_error
+
     engine_backend: dict[str, Any] | None = None
     try:
         resolution = await resolve_engine(
@@ -2432,6 +2456,29 @@ async def chat_stream_v2(
                     "type": "message",
                     "text": result,
                 })
+        except TokenQuotaExceeded as quota_error:
+            # A token limit stopped the request (preflight, or mid-stream when a
+            # running session ran out of budget). This is an expected, actionable
+            # outcome, so it gets its own error type the client can render as
+            # guidance rather than as a crash. Draining is left to ``finally``.
+            logger.info("Chat v2 blocked by token limit: %s", quota_error)
+            event_queue.put_nowait({
+                "type": "error",
+                "error": str(quota_error),
+                "code": "token_limit_exceeded",
+                "detail": {
+                    "policy": quota_error.policy_name,
+                    "dimension": quota_error.dimension,
+                    "limit": quota_error.limit,
+                    "used": quota_error.used,
+                    "window_seconds": quota_error.window_seconds,
+                    "scope_mode": quota_error.scope_mode,
+                    # ``model`` stays a single string for existing consumers;
+                    # ``models`` carries the full policy scope.
+                    "model": quota_error.model_id,
+                    "models": list(quota_error.model_ids),
+                },
+            })
         except Exception as e:
             logger.error("Chat v2 session failed: %s", e)
             event_queue.put_nowait({

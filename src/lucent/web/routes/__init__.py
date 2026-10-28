@@ -25,6 +25,7 @@ from . import (
     schedules,
     secrets,
     settings,
+    token_limits,
     usage,
     user_interactions,
 )
@@ -58,4 +59,5 @@ router.include_router(admin.router, prefix="/settings")
 router.include_router(groups.router, prefix="/settings")
 router.include_router(secrets.router, prefix="/settings")
 router.include_router(connections.router, prefix="/settings")
+router.include_router(token_limits.router, prefix="/settings")
 router.include_router(live.router)

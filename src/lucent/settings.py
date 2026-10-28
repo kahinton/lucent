@@ -749,6 +749,44 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         choices=("strict", "lenient"),
     ),
     RuntimeSettingDefinition(
+        key="token_limits.enabled",
+        env_var="LUCENT_TOKEN_LIMITS_ENABLED",
+        value_type="boolean",
+        default=True,
+        title="Enforce token limits",
+        section="Token limits",
+        description=(
+            "Check configured token limits before each model request and stop "
+            "sessions that exceed them."
+        ),
+        help_text=(
+            "This is the master switch for the whole feature. Turning it off "
+            "keeps every policy and its assignments intact but lets requests run "
+            "unchecked — useful to get out of trouble during rollout. With no "
+            "policies configured this has no effect."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="token_limits.cache_ttl_seconds",
+        env_var="LUCENT_TOKEN_LIMITS_CACHE_TTL_SECONDS",
+        value_type="integer",
+        default=15,
+        title="Policy cache lifetime (seconds)",
+        section="Token limits",
+        description=(
+            "How long policy definitions are cached before being re-read. "
+            "Consumption is always read live."
+        ),
+        help_text=(
+            "Lower values make new or edited policies take effect sooner, at the "
+            "cost of one extra query per request. The daemon runs in a separate "
+            "process, so this also bounds how quickly its view of a policy "
+            "change catches up."
+        ),
+        min_value=0,
+        max_value=3600,
+    ),
+    RuntimeSettingDefinition(
         key="chat.mcp_url",
         env_var="LUCENT_CHAT_MCP_URL",
         value_type="string",
@@ -1860,6 +1898,16 @@ def engine_auto_route(*, organization_id: Any | None = None) -> bool:
 def model_validation_mode(*, organization_id: Any | None = None) -> str:
     """Model validation mode: strict or lenient."""
     return _setting_string("models.validation_mode", organization_id=organization_id).lower()
+
+
+def token_limits_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether pre-request token-limit enforcement is active."""
+    return _setting_bool("token_limits.enabled", organization_id=organization_id)
+
+
+def token_limits_cache_ttl_seconds(*, organization_id: Any | None = None) -> int:
+    """How long token-limit policy definitions are cached."""
+    return _setting_int("token_limits.cache_ttl_seconds", organization_id=organization_id)
 
 
 def chat_mcp_url(*, organization_id: Any | None = None) -> str:

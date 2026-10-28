@@ -130,6 +130,13 @@ MODEL_UPDATE = "model.update"
 MODEL_CREATE = "model.create"
 MODEL_DELETE = "model.delete"
 
+# Token limits (quota policies and their principal assignments)
+TOKEN_LIMIT_CREATE = "token_limit.create"
+TOKEN_LIMIT_UPDATE = "token_limit.update"
+TOKEN_LIMIT_DELETE = "token_limit.delete"
+TOKEN_LIMIT_ASSIGN = "token_limit.assign"
+TOKEN_LIMIT_UNASSIGN = "token_limit.unassign"
+
 # Definitions (agents, skills, hooks, managed tools, MCP servers)
 DEFINITION_CREATE = "definition.create"
 DEFINITION_UPDATE = "definition.update"

@@ -1,0 +1,582 @@
+{% extends "settings_layout.html" %}
+
+{% set settings_section = "token_limits" %}
+{% set settings_title = "Token Limits" %}
+{% set settings_subtitle = "Cap how much of each model people can use, and who the cap applies to." %}
+
+{% block title %}Token Limits - Lucent{% endblock %}
+
+{% macro window_label(seconds) -%}
+    {%- set s = seconds | int -%}
+    {%- if s % 86400 == 0 and s >= 86400 -%}{{ (s // 86400) }} day{{ '' if (s // 86400) == 1 else 's' }}
+    {%- elif s % 3600 == 0 and s >= 3600 -%}{{ (s // 3600) }} hour{{ '' if (s // 3600) == 1 else 's' }}
+    {%- elif s % 60 == 0 and s >= 60 -%}{{ (s // 60) }} minute{{ '' if (s // 60) == 1 else 's' }}
+    {%- else -%}{{ s }} seconds{%- endif -%}
+{%- endmacro %}
+
+{% macro limit_display(value) -%}
+    {%- if value is none -%}<span class="text-gray-400">Unlimited</span>
+    {%- else -%}<span class="font-mono">{{ "{:,}".format(value) }}</span>{%- endif -%}
+{%- endmacro %}
+
+{#
+   Model picker: an "all models" toggle plus a filterable checkbox list grouped
+   by provider. A plain <select multiple> would be unusable here (500 models,
+   ctrl-click required), and a single-select is what this replaces.
+
+   Every model checkbox shares name="model_id", so the browser posts one value
+   per checked row. The "all models" checkbox posts the sentinel instead; the
+   script below keeps the two mutually exclusive.
+#}
+{% macro model_picker(prefix, selected, models) -%}
+{% set selected = selected or [] %}
+{% set all_selected = all_models in selected %}
+<div class="border border-gray-300 rounded-lg overflow-hidden" data-model-picker>
+    <label class="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200 cursor-pointer">
+        <input type="checkbox" name="model_id" value="{{ all_models }}" data-all-models
+               {% if all_selected %}checked{% endif %}
+               class="rounded border-gray-300 text-primary-600 focus:ring-primary-500">
+        <span class="text-sm font-medium text-gray-800">All models</span>
+        <span class="text-xs text-gray-500">— one budget covering everything</span>
+    </label>
+
+    <div class="px-3 py-2 border-b border-gray-200 bg-white">
+        <input type="text" data-model-filter placeholder="Filter models…"
+               class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-xs focus:ring-2 focus:ring-primary-500">
+    </div>
+
+    <div class="max-h-56 overflow-y-auto divide-y divide-gray-50" data-model-list>
+        {% for provider, provider_models in models | groupby("provider") %}
+        <div data-provider-group>
+            <p class="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 bg-gray-50 sticky top-0">
+                {{ provider | replace('_', ' ') }}
+            </p>
+            {% for model in provider_models %}
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 cursor-pointer" data-model-row
+                   data-search="{{ (model.name ~ ' ' ~ model.id ~ ' ' ~ (model.provider or '')) | lower }}">
+                <input type="checkbox" name="model_id" value="{{ model.id }}" data-model-option
+                       {% if model.id in selected %}checked{% endif %}
+                       {% if all_selected %}disabled{% endif %}
+                       class="rounded border-gray-300 text-primary-600 focus:ring-primary-500">
+                <span class="text-sm text-gray-800 truncate">{{ model.name }}</span>
+                <span class="text-xs text-gray-400 font-mono truncate ml-auto">{{ model.id }}</span>
+            </label>
+            {% endfor %}
+        </div>
+        {% endfor %}
+        <p data-empty-filter class="hidden px-3 py-6 text-center text-xs text-gray-500">No models match that filter.</p>
+    </div>
+</div>
+{%- endmacro %}
+
+{% block settings_actions %}
+    <span class="text-xs text-gray-500">{{ policies | length }} polic{{ 'y' if policies | length == 1 else 'ies' }}</span>
+{% endblock %}
+
+{% block settings_content %}
+
+{# Flash messages (success/error) are rendered by settings_layout.html. #}
+
+{% if not enforcement_enabled %}
+<div class="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-amber-900">Enforcement is switched off.</p>
+    <p class="mt-1 text-sm text-amber-800">
+        Policies below are saved but not checked. Turn it back on under
+        <a href="/settings/runtime" class="underline">Runtime Settings</a> → Token limits → <em>Enforce token limits</em>.
+    </p>
+</div>
+{% endif %}
+
+<!-- ── How this works ─────────────────────────────────────────────────── -->
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-100">
+        <h3 class="text-base font-semibold text-gray-900">How limits combine</h3>
+    </div>
+    <div class="p-5 grid gap-4 md:grid-cols-3 text-sm text-gray-600">
+        <div>
+            <p class="font-medium text-gray-900">Several policies can apply</p>
+            <p class="mt-1">A request is checked against every policy that reaches the person and the model. The
+                tightest remaining budget wins, so you can give one group a larger allowance than everyone else.</p>
+        </div>
+        <div>
+            <p class="font-medium text-gray-900">Shared vs per person</p>
+            <p class="mt-1">A <em>shared pool</em> is one budget for everyone the policy covers. A <em>per-person
+                pool</em> gives each covered person that full amount independently.</p>
+        </div>
+        <div>
+            <p class="font-medium text-gray-900">Rolling windows</p>
+            <p class="mt-1">Windows look backwards from right now rather than resetting at midnight, so usage can't be
+                doubled by bursting across a boundary.</p>
+        </div>
+    </div>
+    <div class="px-5 pb-4 text-xs text-gray-500 border-t border-gray-100 pt-3">
+        The daemon runs as a separate process and re-reads policies every
+        <strong>{{ cache_ttl_seconds }}</strong> second{{ '' if cache_ttl_seconds == 1 else 's' }};
+        changes made here take effect within that window.
+    </div>
+</div>
+
+<!-- ── Create policy ──────────────────────────────────────────────────── -->
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden" id="create-policy">
+    <div class="px-5 py-4 border-b border-gray-100">
+        <h3 class="text-base font-semibold text-gray-900">New policy</h3>
+        <p class="mt-1 text-sm text-gray-500">Leave a limit blank for no cap on that dimension.</p>
+    </div>
+    <form method="POST" action="/settings/token-limits/create" class="p-5 space-y-5">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="grid gap-4 md:grid-cols-2">
+            <div>
+                <label for="name" class="block text-xs font-medium text-gray-600 mb-1">Policy name</label>
+                <input id="name" name="name" required maxlength="128" placeholder="e.g. Daily allowance"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Models</label>
+                {{ model_picker("create", [all_models], models) }}
+                <p class="mt-1 text-xs text-gray-500">Pick one or more models, or all of them. A multi-model policy
+                    shares a single budget across the models you choose.</p>
+            </div>
+        </div>
+
+        <div class="grid gap-4 md:grid-cols-2">
+            <div>
+                <label for="window_seconds" class="block text-xs font-medium text-gray-600 mb-1">Window</label>
+                <select id="window_seconds" name="window_seconds"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                    {% for seconds, label in window_presets %}
+                    <option value="{{ seconds }}" {% if seconds == 86400 %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label for="scope_mode" class="block text-xs font-medium text-gray-600 mb-1">Pool</label>
+                <select id="scope_mode" name="scope_mode"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                    <option value="individual">Per person — everyone covered gets this much</option>
+                    <option value="global">Shared — one budget for everyone covered</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="grid gap-4 md:grid-cols-3">
+            <div>
+                <label for="raw_input_tokens_limit" class="block text-xs font-medium text-gray-600 mb-1">
+                    Uncached input tokens
+                </label>
+                <input id="raw_input_tokens_limit" name="raw_input_tokens_limit" inputmode="numeric"
+                       placeholder="Unlimited"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-primary-500">
+                <p class="mt-1 text-xs text-gray-500">Prompt tokens sent to the model, excluding cached ones.</p>
+            </div>
+            <div>
+                <label for="cached_input_tokens_limit" class="block text-xs font-medium text-gray-600 mb-1">
+                    Cached input tokens
+                </label>
+                <input id="cached_input_tokens_limit" name="cached_input_tokens_limit" inputmode="numeric"
+                       placeholder="Unlimited"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-primary-500">
+                <p class="mt-1 text-xs text-gray-500">Prompt tokens served from the provider's cache.</p>
+            </div>
+            <div>
+                <label for="output_tokens_limit" class="block text-xs font-medium text-gray-600 mb-1">
+                    Output tokens
+                </label>
+                <input id="output_tokens_limit" name="output_tokens_limit" inputmode="numeric"
+                       placeholder="Unlimited"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-primary-500">
+                <p class="mt-1 text-xs text-gray-500">Tokens the model generates.</p>
+            </div>
+        </div>
+
+        <div>
+            <label for="description" class="block text-xs font-medium text-gray-600 mb-1">
+                Description <span class="text-gray-400 font-normal">(optional)</span>
+            </label>
+            <input id="description" name="description" maxlength="1000" placeholder="Why this limit exists"
+                   class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+        </div>
+
+        <div class="grid gap-4 md:grid-cols-2">
+            <div>
+                <label for="assign_to" class="block text-xs font-medium text-gray-600 mb-1">Apply to</label>
+                <select id="assign_to" name="assign_to"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                    <option value="org">Everyone in the organization</option>
+                    <option value="group">A group</option>
+                    <option value="user">One person</option>
+                    <option value="none">Nobody yet — I'll apply it later</option>
+                </select>
+            </div>
+            <div>
+                <label for="assign_principal_id" class="block text-xs font-medium text-gray-600 mb-1">Target</label>
+                <select id="assign_principal_id" name="assign_principal_id"
+                        class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
+                    <option value="">— pick a group or person —</option>
+                    <optgroup label="Groups" data-target="group">
+                        {% for group in groups %}
+                        <option value="{{ group.id }}" data-for="group">{{ group.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <optgroup label="People" data-target="user">
+                        {% for member in users %}
+                        <option value="{{ member.id }}" data-for="user">{{ member.display_name or member.email or member.id }}</option>
+                        {% endfor %}
+                    </optgroup>
+                </select>
+            </div>
+        </div>
+
+        <div class="flex justify-end">
+            <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium">
+                Create policy
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- ── Existing policies ──────────────────────────────────────────────── -->
+<h3 class="text-base font-semibold text-gray-700 mt-2">Policies</h3>
+{% if not policies %}
+<div class="bg-white rounded-xl border border-gray-200 p-12 text-center">
+    <p class="text-sm font-medium text-gray-900">No token limits configured</p>
+    <p class="mt-1 text-sm text-gray-500">Nothing is capped until you create a policy above. Usage is still recorded on the
+        <a href="/settings/usage" class="text-primary-600 underline">Usage</a> page.</p>
+</div>
+{% endif %}
+
+{% for policy in policies %}
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden {% if not policy.is_enabled %}opacity-60{% endif %}">
+    <div class="px-5 py-4 border-b border-gray-100 flex flex-wrap items-start justify-between gap-3">
+        <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+                <h4 class="text-base font-semibold text-gray-900">{{ policy.name }}</h4>
+                <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">{{ policy.model_label }}</span>
+                <span class="px-2 py-0.5 rounded text-xs
+                    {% if policy.scope_mode == 'global' %}bg-blue-100 text-blue-700{% else %}bg-teal-100 text-teal-700{% endif %}">
+                    {{ 'shared pool' if policy.scope_mode == 'global' else 'per person' }}
+                </span>
+                <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">
+                    per {{ window_label(policy.window_seconds) }}
+                </span>
+                {% if not policy.is_enabled %}
+                <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">disabled</span>
+                {% endif %}
+            </div>
+            {% if policy.description %}
+            <p class="mt-1 text-sm text-gray-600">{{ policy.description }}</p>
+            {% endif %}
+        </div>
+        <div class="flex items-center gap-2">
+            <form method="POST" action="/settings/token-limits/{{ policy.id }}/toggle" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1.5 text-xs border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 font-medium">
+                    {{ 'Disable' if policy.is_enabled else 'Enable' }}
+                </button>
+            </form>
+            <form method="POST" action="/settings/token-limits/{{ policy.id }}/delete" class="inline js-confirm-delete"
+                  data-confirm="Delete the policy “{{ policy.name | e }}”? Its assignments go with it. Usage already recorded is kept.">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="px-3 py-1.5 text-xs border border-red-200 text-red-700 rounded-lg hover:bg-red-50 font-medium">
+                    Delete
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Limits -->
+    <div class="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-gray-100 border-b border-gray-100">
+        <div class="px-5 py-3">
+            <p class="text-xs font-medium uppercase text-gray-500">Uncached input</p>
+            <p class="mt-1 text-sm text-gray-900">{{ limit_display(policy.raw_input_tokens_limit) }}</p>
+        </div>
+        <div class="px-5 py-3">
+            <p class="text-xs font-medium uppercase text-gray-500">Cached input</p>
+            <p class="mt-1 text-sm text-gray-900">{{ limit_display(policy.cached_input_tokens_limit) }}</p>
+        </div>
+        <div class="px-5 py-3">
+            <p class="text-xs font-medium uppercase text-gray-500">Output</p>
+            <p class="mt-1 text-sm text-gray-900">{{ limit_display(policy.output_tokens_limit) }}</p>
+        </div>
+    </div>
+
+    <!-- Assignments -->
+    <div class="px-5 py-4">
+        <p class="text-xs font-medium uppercase text-gray-500 mb-2">Applies to</p>
+        {% if policy.assignments %}
+        <ul class="space-y-1.5 mb-3">
+            {% for assignment in policy.assignments %}
+            <li class="flex items-center justify-between gap-3 text-sm">
+                <span class="flex items-center gap-2 min-w-0">
+                    <span class="px-1.5 py-0.5 rounded text-[10px] uppercase font-medium
+                        {% if assignment.principal_type == 'org' %}bg-purple-100 text-purple-700
+                        {% elif assignment.principal_type == 'group' %}bg-blue-100 text-blue-700
+                        {% else %}bg-teal-100 text-teal-700{% endif %}">{{ assignment.principal_type }}</span>
+                    <span class="text-gray-800 truncate">{{ assignment.label }}</span>
+                </span>
+                <form method="POST" action="/settings/token-limits/{{ policy.id }}/assignments/{{ assignment.id }}/remove" class="inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="text-xs text-red-600 hover:underline">Remove</button>
+                </form>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="mb-3 text-sm text-amber-700">Not applied to anyone yet — this policy enforces nothing.</p>
+        {% endif %}
+
+        <form method="POST" action="/settings/token-limits/{{ policy.id }}/assign" class="flex flex-wrap gap-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <select name="principal_type" class="px-2 py-1.5 border border-gray-300 rounded-lg text-sm" required>
+                <option value="org">Everyone</option>
+                <option value="group">Group</option>
+                <option value="user">Person</option>
+            </select>
+            <select name="principal_id" class="min-w-0 flex-1 px-2 py-1.5 border border-gray-300 rounded-lg text-sm">
+                <option value="">— pick a group or person —</option>
+                <optgroup label="Groups">
+                    {% for group in groups %}
+                    <option value="{{ group.id }}">{{ group.name }}</option>
+                    {% endfor %}
+                </optgroup>
+                <optgroup label="People">
+                    {% for member in users %}
+                    <option value="{{ member.id }}">{{ member.display_name or member.email or member.id }}</option>
+                    {% endfor %}
+                </optgroup>
+            </select>
+            <button type="submit" class="px-3 py-1.5 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium">
+                Apply
+            </button>
+        </form>
+    </div>
+
+    <!-- Edit -->
+    <details class="border-t border-gray-100">
+        <summary class="px-5 py-3 text-sm font-medium text-primary-700 cursor-pointer hover:bg-gray-50">
+            Edit limits
+        </summary>
+        <form method="POST" action="/settings/token-limits/{{ policy.id }}/update" class="p-5 space-y-4 bg-gray-50">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="grid gap-4 md:grid-cols-2">
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Name</label>
+                    <input name="name" required maxlength="128" value="{{ policy.name }}"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Models</label>
+                    {{ model_picker("edit", policy.model_ids, models) }}
+                </div>
+            </div>
+            <div class="grid gap-4 md:grid-cols-2">
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Window</label>
+                    <select name="window_seconds" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        {% for seconds, label in window_presets %}
+                        <option value="{{ seconds }}" {% if policy.window_seconds == seconds %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Pool</label>
+                    <select name="scope_mode" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        <option value="individual" {% if policy.scope_mode == 'individual' %}selected{% endif %}>Per person</option>
+                        <option value="global" {% if policy.scope_mode == 'global' %}selected{% endif %}>Shared</option>
+                    </select>
+                </div>
+            </div>
+            <div class="grid gap-4 md:grid-cols-3">
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Uncached input tokens</label>
+                    <input name="raw_input_tokens_limit" inputmode="numeric" placeholder="Unlimited"
+                           value="{{ policy.raw_input_tokens_limit if policy.raw_input_tokens_limit is not none else '' }}"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Cached input tokens</label>
+                    <input name="cached_input_tokens_limit" inputmode="numeric" placeholder="Unlimited"
+                           value="{{ policy.cached_input_tokens_limit if policy.cached_input_tokens_limit is not none else '' }}"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-600 mb-1">Output tokens</label>
+                    <input name="output_tokens_limit" inputmode="numeric" placeholder="Unlimited"
+                           value="{{ policy.output_tokens_limit if policy.output_tokens_limit is not none else '' }}"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono">
+                </div>
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                <input name="description" maxlength="1000" value="{{ policy.description }}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+            </div>
+            <label class="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" name="is_enabled" {% if policy.is_enabled %}checked{% endif %}
+                       class="rounded border-gray-300 text-primary-600 focus:ring-primary-500">
+                Enabled
+            </label>
+            <div class="flex justify-end">
+                <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium">
+                    Save changes
+                </button>
+            </div>
+        </form>
+    </details>
+</div>
+{% endfor %}
+
+<!-- ── Consumption ────────────────────────────────────────────────────── -->
+{% if consumption %}
+<h3 class="text-base font-semibold text-gray-700 mt-2">Current consumption</h3>
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <div class="px-5 py-3 border-b border-gray-100">
+        <p class="text-sm text-gray-500">Provider-reported usage inside each policy's window, read live from the usage ledger.</p>
+    </div>
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-5 py-3">Policy</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-5 py-3">Subject</th>
+                    <th class="text-left text-xs font-medium text-gray-500 uppercase px-5 py-3 hidden md:table-cell">Model</th>
+                    <th class="text-right text-xs font-medium text-gray-500 uppercase px-5 py-3">Uncached in</th>
+                    <th class="text-right text-xs font-medium text-gray-500 uppercase px-5 py-3 hidden lg:table-cell">Cached in</th>
+                    <th class="text-right text-xs font-medium text-gray-500 uppercase px-5 py-3">Output</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100">
+                {% for row in consumption %}
+                <tr class="hover:bg-gray-50">
+                    <td class="px-5 py-3">
+                        <div class="font-medium text-gray-900">{{ row.policy_name }}</div>
+                        <div class="text-xs text-gray-500">
+                            per {{ window_label(row.window_seconds) }} ·
+                            {{ 'shared' if row.scope_mode == 'global' else 'per person' }}
+                        </div>
+                    </td>
+                    <td class="px-5 py-3 text-gray-700">
+                        <span class="px-1.5 py-0.5 rounded text-[10px] uppercase font-medium bg-gray-100 text-gray-600">{{ row.subject_type }}</span>
+                        <span class="ml-1.5">{{ row.subject_label }}</span>
+                    </td>
+                    <td class="px-5 py-3 text-gray-600 hidden md:table-cell font-mono text-xs">
+                        {{ row.model_label }}
+                    </td>
+                    <td class="px-5 py-3 text-right font-mono text-gray-700">{{ "{:,}".format(row.raw_input | int) }}</td>
+                    <td class="px-5 py-3 text-right font-mono text-gray-700 hidden lg:table-cell">{{ "{:,}".format(row.cached_input | int) }}</td>
+                    <td class="px-5 py-3 text-right font-mono text-gray-700">{{ "{:,}".format(row.output | int) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<p class="text-xs text-gray-500">
+    Requests are checked before they are sent and again while they stream, so a session that runs out of budget stops
+    instead of finishing. Blocks and overruns are recorded in the
+    <a href="/settings/audit" class="text-primary-600 underline">audit log</a>.
+</p>
+
+{% endblock %}
+
+{% block extra_scripts %}
+{{ super() }}
+<script nonce="{{ request.state.csp_nonce }}">
+(function () {
+    // Destructive actions confirm through a nonce-bearing script: inline
+    // onsubmit attributes are blocked by the application's CSP.
+    document.querySelectorAll('form.js-confirm-delete').forEach(function (form) {
+        form.addEventListener('submit', function (event) {
+            if (!window.confirm(form.dataset.confirm || 'Are you sure?')) {
+                event.preventDefault();
+            }
+        });
+    });
+
+    // Model pickers: keep "All models" and the per-model checkboxes mutually
+    // exclusive, and filter the list. Server-side validation is the real gate;
+    // this only stops the form from posting contradictory selections.
+    document.querySelectorAll('[data-model-picker]').forEach(function (picker) {
+        const all = picker.querySelector('[data-all-models]');
+        const options = Array.from(picker.querySelectorAll('[data-model-option]'));
+
+        function syncFromAll() {
+            // Local names must not look like inline handlers (``on*=``): the
+            // CSP regression test scans templates for that pattern.
+            const everything = !!all.checked;
+            options.forEach(function (option) {
+                option.disabled = everything;
+                if (everything) option.checked = false;
+            });
+        }
+
+        all.addEventListener('change', syncFromAll);
+        options.forEach(function (option) {
+            option.addEventListener('change', function () {
+                if (option.checked) all.checked = false;
+            });
+        });
+
+        // Filter: match on the pre-rendered name/id/provider text so the client
+        // never has to know how the list is grouped.
+        const filter = picker.querySelector('[data-model-filter]');
+        const rows = Array.from(picker.querySelectorAll('[data-model-row]'));
+        const groups = Array.from(picker.querySelectorAll('[data-provider-group]'));
+        const empty = picker.querySelector('[data-empty-filter]');
+        filter.addEventListener('input', function () {
+            const term = filter.value.trim().toLowerCase();
+            let visible = 0;
+            rows.forEach(function (row) {
+                const match = !term || (row.dataset.search || '').includes(term);
+                row.classList.toggle('hidden', !match);
+                if (match) visible += 1;
+            });
+            groups.forEach(function (group) {
+                const any = group.querySelectorAll('[data-model-row]:not(.hidden)').length > 0;
+                group.classList.toggle('hidden', !any);
+            });
+            if (empty) empty.classList.toggle('hidden', visible !== 0);
+        });
+    });
+
+    // Require at least one model (or "All models") before the form is submitted,
+    // because an unselected checkbox group posts nothing at all — a validation
+    // message is friendlier than a redirect with "Choose at least one model".
+    document.querySelectorAll('[data-model-picker]').forEach(function (picker) {
+        const form = picker.closest('form');
+        if (!form) return;
+        form.addEventListener('submit', function (event) {
+            const any = picker.querySelector(
+                'input[name="model_id"]:checked'
+            );
+            if (!any) {
+                event.preventDefault();
+                picker.classList.add('ring-2', 'ring-red-400', 'rounded-lg');
+                picker.scrollIntoView({block: 'center', behavior: 'smooth'});
+            } else {
+                picker.classList.remove('ring-2', 'ring-red-400', 'rounded-lg');
+            }
+        });
+    });
+
+    // Show only the relevant target group for the chosen "Apply to" value so the
+    // picker cannot offer a group name where a person is expected.
+    const scope = document.getElementById('assign_to');
+    const principal = document.getElementById('assign_principal_id');    if (!scope || !principal) return;
+    const options = Array.from(principal.querySelectorAll('option[data-for]'));
+    const groups = Array.from(principal.querySelectorAll('optgroup[data-target]'));
+    function sync() {
+        const want = scope.value;
+        groups.forEach(function (group) { group.hidden = group.dataset.target !== want; });
+        options.forEach(function (option) {
+            option.hidden = want !== 'group' && want !== 'user';
+            if (!option.hidden && option.dataset.for !== want) option.hidden = true;
+        });
+        if (want !== 'group' && want !== 'user') principal.value = '';
+    }
+    scope.addEventListener('change', sync);
+    sync();
+})();
+</script>
+{% endblock %}

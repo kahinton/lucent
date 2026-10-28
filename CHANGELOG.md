@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Token limits for models (migration 152).** Administrators can cap model
+  consumption and choose who the cap applies to. A policy names one or more
+  models (or all models), a rolling window, and up to three independent limits —
+  uncached input tokens, cached input tokens, and output tokens — each of which
+  may be left unbounded. A multi-model policy shares one budget across the models
+  it lists, so "these three models, 10M output tokens/day" is a single row.
+  Policies are assigned to the whole organization, a group, or a
+  person, and a single request is checked against **every** applicable policy so
+  the tightest budget wins: that is how a group gets a larger allowance than
+  everyone else. Each policy is either a **shared pool** (one budget for everyone
+  it covers) or **per person** (each covered person gets the full amount).
+  Enforcement runs before the request (an estimate that cannot fit is refused
+  with `403` and nothing is spent), during it (usage events are tracked in memory
+  and an overrun cancels the session, so a runaway tool loop cannot drain a
+  pool), and after it (provider totals are reconciled against the ledger). It is
+  applied by wrapping every engine returned from the engine registry, so all four
+  engines and any engine added later inherit it; decision models, which reach
+  Ollama over raw HTTP, are checked by `decide()` when the call is attributable.
+  Consumption is read from `llm_token_usage`, the same ledger the Usage report
+  renders, so limits cannot disagree with reported usage. Configure at
+  **Settings → Token Limits**; master switch is `token_limits.enabled`. Quota
+  breaches fail closed, while an infrastructure error reading policies fails open
+  with a warning so a billing control cannot take the product down.
+
 ### Changed
 
 - **The bare `daemon-service` identity is retired (migration 150).** Migration

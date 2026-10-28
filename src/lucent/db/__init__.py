@@ -53,6 +53,7 @@ from lucent.db.reviews import ReviewRepository
 from lucent.db.runtime_settings import RuntimeSettingsRepository
 from lucent.db.secrets import SecretMigrationRepository, SecretRepository
 from lucent.db.token_usage import TokenUsageRepository
+from lucent.db.token_quota import TokenQuotaRepository
 from lucent.db.tool_audit import ToolAuditRepository
 from lucent.db.user import UserRepository
 from lucent.db.user_interactions import UserInteractionRepository
@@ -65,6 +66,7 @@ __all__ = [
     # Repositories
     "MemoryRepository",
     "TokenUsageRepository",
+    "TokenQuotaRepository",
     "DuplicateTechnicalMemoryError",
     "VersionConflictError",
     "DefinitionRepository",

@@ -324,6 +324,107 @@ first. For local testing, start Ollama 0.35+, `ollama pull nimble`, and keep
 `OLLAMA_HOST` pointed at it — provider discovery picks the decision model up
 on the next sync.
 
+## Token Limits
+
+Administrators can cap how many tokens a model may consume, and choose who the
+cap applies to. Configure it in **Settings → Token Limits** (`/settings/token-limits`).
+
+### What a policy is
+
+A policy names one or more models (or **All models**), a rolling window (1 hour
+to 365 days), and up to three independent limits:
+
+| Limit | Counts |
+|---|---|
+| Uncached input | Prompt tokens sent to the provider, excluding cache reads |
+| Cached input | Prompt tokens served from the provider's prompt cache |
+| Output | Tokens the model generates |
+
+Each limit is optional, and a blank field means **unbounded** in that
+dimension. A policy with no limit at all is rejected — it would silently
+enforce nothing.
+
+### Shared vs per-person pools
+
+`scope_mode` decides how a budget is divided among the people the policy
+covers:
+
+- **Per person** (`individual`) — every covered person independently gets the
+  full allowance.
+- **Shared** (`global`) — one budget is drawn down by everyone the policy
+  covers together.
+
+### Assignments and combining policies
+
+A policy is enforced only once it is assigned to a principal: the whole
+organization, a group, or a single person. A policy may carry several
+assignments, and **several policies can apply to one request**. Every
+applicable policy is checked and the tightest remaining budget wins, which is
+how "everyone gets 5M output tokens a day, but Engineering gets 50M" is
+expressed as two policies.
+
+Resolution order for a request: policies scoped to the requested model plus
+policies scoped to **All models**, filtered to the ones assigned to the org,
+to a group the user belongs to, or to the user directly. Disabled policies are
+skipped.
+
+### Choosing models
+
+The model picker is a filterable checklist, so a policy can cover any set of
+models in one row — "everything on Anthropic", or "the two models the support
+agents use". A multi-model policy has **one** budget shared across the models it
+lists, not one budget per model: usage on any of them draws the same pool down.
+Use separate policies when the models should not share an allowance.
+
+Selecting **All models** supersedes individual picks and covers every model,
+including ones discovered later.
+
+### Where enforcement happens
+
+| Point | Behavior |
+|---|---|
+| Before the request | The prompt and system message are estimated. If the estimate cannot fit the remaining input budget, the request is refused with HTTP 403 and nothing is spent. An already-exhausted output budget refuses too. |
+| During the request | Usage events are accumulated in memory and compared against the budget captured up front. Exceeding it cancels the session, so a runaway tool loop cannot spend a whole pool in one turn. |
+| After the request | Real provider totals are re-checked against the ledger and any overshoot is logged. |
+
+Enforcement is applied by wrapping every engine returned from the engine
+registry, so all four engines (LangChain, Copilot, Claude Code, Codex) and any
+engine added later inherit it. Decision models reach Ollama over raw HTTP and
+are checked by `decide()` instead, when the call carries `audit_context`.
+
+### Accounting
+
+Consumption is read from `llm_token_usage`, the same ledger the Usage report
+renders, so a limit can never disagree with reported usage. Windows are
+rolling (measured back from now), so a burst across midnight cannot double an
+allowance.
+
+### Settings
+
+| Key | Default | Meaning |
+|---|---|---|
+| `token_limits.enabled` | `true` | Master switch. Off keeps policies but checks nothing. |
+| `token_limits.cache_ttl_seconds` | `15` | How long policy definitions are cached. Consumption is always read live. |
+
+The daemon runs as its own process and re-reads policies after this TTL, so a
+change made in the UI reaches it within that window.
+
+### Failure behavior
+
+A quota breach fails **closed** — the request is refused. An infrastructure
+failure while reading policies (for example, a database hiccup) fails
+**open** and the request proceeds with a warning, because a billing control
+should not take the product down. Requests with no attributable principal
+(system bootstrap and maintenance work) are not enforced.
+
+### Schema
+
+`token_quota_policies` holds the budget definitions (the model scope is a
+`model_ids` array, with `'*'` meaning every model) and
+`token_quota_assignments` binds them to principals (migration 152). Policy names
+are unique per organization. Both tables start empty, so the feature costs
+nothing until a policy is created.
+
 ### Proactive Memory Injection
 
 The message hook can look up relevant accessible memories before the first

@@ -427,13 +427,22 @@ def get_engine(name: str) -> "LLMEngine":
     Engines are stateless with respect to credentials — they resolve provider
     credentials per call from the request organization — so a single instance
     per engine is safe. Unknown or unimplemented engines raise.
+
+    The returned engine is always wrapped in :class:`QuotaEnforcingEngine`, so
+    every caller inherits token-limit enforcement. Wrapping here (rather than at
+    the dozen call sites) is what makes enforcement apply to an engine added
+    later without another edit. ``QuotaEnforcingEngine`` is transparent: it
+    reports the wrapped engine's ``name`` and forwards attribute access, so
+    capability checks and persisted session rows are unaffected.
     """
+    from lucent.llm.quota_engine import enforce
+
     spec = engine_spec(name)
     if not spec.implemented or spec.factory is None:
         raise UnknownEngineError(f"LLM engine {name!r} is declared but not implemented yet.")
     engine = _ENGINE_SINGLETONS.get(name)
     if engine is None:
-        engine = spec.factory()
+        engine = enforce(spec.factory())
         _ENGINE_SINGLETONS[name] = engine
     return engine
 

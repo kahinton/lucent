@@ -182,6 +182,48 @@ def _validate_request(request: DecisionRequest) -> None:
         )
 
 
+async def _enforce_token_limit(
+    request: DecisionRequest, audit_context: dict[str, Any] | None
+) -> None:
+    """Apply token limits to a decision call, when it is attributable.
+
+    Decision models are called over raw httpx, bypassing the engine wrapper, so
+    they need their own gate. Only attributed calls are checked: the System One
+    gates on the hot message path resolve their model from configuration and
+    have no user request to charge, and refusing them would break chat.
+    """
+    context = audit_context or {}
+    organization_id = str(context.get("organization_id") or "").strip()
+    user_id = str(context.get("user_id") or "").strip()
+    if not organization_id or not user_id:
+        return
+    try:
+        from lucent.llm.token_quota import get_token_limit_service
+
+        service = await get_token_limit_service()
+        snapshot = await service.preflight(
+            organization_id=organization_id,
+            user_id=user_id,
+            model_id=str(context.get("model") or request.model_id),
+            extra_text=[json.dumps(_request_payload(request), default=str)],
+        )
+    except Exception as exc:
+        # A quota refusal is a TokenQuotaExceeded and must propagate; anything
+        # else is infrastructure and must not take the gate down.
+        from lucent.llm.token_quota import TokenQuotaExceeded
+
+        if isinstance(exc, TokenQuotaExceeded):
+            raise
+        logger.warning("Decision token-limit check failed; allowing call", exc_info=True)
+        return
+    # One round trip per request, so the reply is immediate; the snapshot is
+    # still released so the estimate does not linger in the reservation ledger.
+    await service.release_reservation(
+        organization_id, user_id, str(context.get("model") or request.model_id)
+    )
+    del snapshot
+
+
 def _question_payload(question: DecisionQuestion) -> dict[str, Any]:
     payload: dict[str, Any] = {"type": question.type, "instructions": question.instructions}
     if question.criteria is not None:
@@ -269,13 +311,24 @@ async def decide(
     *,
     base_url: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    audit_context: dict[str, Any] | None = None,
 ) -> DecisionResponse:
     """Send a decision request and return typed answers.
 
     One HTTP round trip per :class:`DecisionRequest` — the server answers
     every named question in the same call.
+
+    ``audit_context`` optionally carries ``organization_id`` / ``user_id`` /
+    ``model``. Decision models reach the provider over raw httpx rather than
+    through an :class:`~lucent.llm.engine.LLMEngine`, so the engine wrapper's
+    token-limit enforcement cannot see them; when a caller supplies attribution
+    the same preflight applies here. Callers without attribution (System One
+    gates on the hot message path) are unchecked — they resolve their model from
+    configuration rather than a user request, and charging an arbitrary policy
+    for them would be wrong.
     """
     _validate_request(request)
+    await _enforce_token_limit(request, audit_context)
     url = f"{decision_base_url(base_url)}/v1/systemone"
     if not url.startswith("http://") and not url.startswith("https://"):
         url = f"http://{url}"
