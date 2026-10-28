@@ -812,6 +812,144 @@ class InstanceSettingLockResponse(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Usage quantities
+# ---------------------------------------------------------------------------
+
+
+class UsageSeatCounts(BaseModel):
+    """How many people are on a tenant, for seat-based usage reporting.
+
+    ``metered`` is the number to count: active human members, excluding
+    service identities (`daemon`) and instance-operator staff (`hyperadmin`).
+    Counting either would inflate every usage figure and make the seat count depend
+    on Lucent's internal machinery.
+    """
+
+    organization_id: UUID
+    total: int = Field(description="All human members, active or not")
+    active: int = Field(description="Human members who can sign in")
+    metered: int = Field(description="What to count: active, excluding staff")
+    active_only: bool = True
+    excluded_roles: list[str] = Field(default_factory=list)
+    by_role: dict[str, int] = Field(default_factory=dict)
+
+
+class UsageResourceTotals(BaseModel):
+    """Consumption quantities for a period.
+
+    Derived values (`cpu_seconds`, `cpu_hours`, `memory_mb_seconds`) are
+    computed by the server so every consumer agrees on rounding. Lucent records
+    quantities only — pricing lives in the application that sells the product,
+    because a stored rate would go stale the moment a price changed.
+
+    **Compute columns exclude tool invocations.** A managed-tool run and the
+    sandbox it created describe the same resources, so counting both would bill
+    every custom-tool execution twice. Invocations are counted separately in
+    `tool_invocations`.
+    """
+
+    intervals: int = Field(
+        default=0, description="Sandbox intervals (compute reservations)"
+    )
+    duration_seconds: int = 0
+    cpu_seconds: float = 0.0
+    cpu_hours: float = 0.0
+    memory_mb_seconds: int = 0
+    tool_invocations: int = Field(
+        default=0,
+        description=(
+            "Managed-tool executions. Counted independently of the compute "
+            "columns so a per-call price and a per-CPU-second price can coexist "
+            "without either double-counting the other."
+        ),
+    )
+    tool_duration_seconds: int = Field(
+        default=0, description="Wall-clock seconds spent in tool invocations"
+    )
+
+
+class UsageToolTotals(BaseModel):
+    """Invocation counts for one managed tool definition."""
+
+    tool_id: UUID
+    invocations: int = 0
+    succeeded: int = Field(
+        default=0, description="Runs that completed without an error outcome"
+    )
+    duration_seconds: int = 0
+
+
+class UsageResourceBySource(UsageResourceTotals):
+    """Consumption for one usage source (task, managed tool, interactive)."""
+
+    source: str = "unknown"
+
+
+class UsageOrganizationSummary(BaseModel):
+    """One tenant's usage quantities: seats and resource consumption."""
+
+    organization_id: UUID
+    organization_name: str | None = None
+    status: str | None = None
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    seats: UsageSeatCounts | None = None
+    resources: UsageResourceTotals | None = None
+    resources_by_source: list[UsageResourceBySource] = Field(default_factory=list)
+    tool_usage: list[UsageToolTotals] = Field(
+        default_factory=list,
+        description="Per-tool invocation counts, excluding compute",
+    )
+
+
+class UsageReportTenant(BaseModel):
+    """One row of the instance-wide usage report."""
+
+    organization_id: UUID | None = None
+    organization_name: str | None = None
+    status: str | None = None
+    seats: UsageSeatCounts | None = None
+    resources: UsageResourceTotals | None = None
+
+
+class UsageInstanceTotals(BaseModel):
+    """Instance-wide totals for the report period."""
+
+    seats: int = 0
+    intervals: int = 0
+    duration_seconds: int = 0
+    cpu_seconds: float = 0.0
+    cpu_hours: float = 0.0
+    memory_mb_seconds: int = 0
+    tool_invocations: int = 0
+
+
+class UsageReport(BaseModel):
+    """Every tenant's usage quantities, plus instance totals.
+
+    Tenants with ledger usage but no live organization row (offboarded) are
+    included with ``status="deleted"`` and ``seats=null``: their final period is
+    still chargeable even though nobody is on the account any more.
+    """
+
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    instance_totals: UsageInstanceTotals = Field(default_factory=UsageInstanceTotals)
+    tenants: list[UsageReportTenant] = Field(default_factory=list)
+
+
+class UsageBackfillResult(BaseModel):
+    """Outcome of reconstructing ledger rows from existing sandbox records."""
+
+    dry_run: bool = False
+    recorded: int = 0
+    would_record: int = 0
+    skipped: int = 0
+    skipped_detail: list[dict[str, Any]] = Field(default_factory=list)
+    sample: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class OrganizationSettingsResponse(BaseModel):
     """Runtime settings for one organization, grouped by section."""
 

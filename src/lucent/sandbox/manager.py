@@ -361,13 +361,77 @@ class SandboxManager:
             )
         except Exception as e:
             logger.warning("Failed to update sandbox %s status: %s", sandbox_id[:12], e)
+        # A stopped sandbox holds its reservation no longer. Closing here (and
+        # again on destroy) is safe: the ledger's first-close-wins rule means the
+        # later destroy cannot extend an interval that ended at the stop.
+        await self._record_usage(sandbox_id, outcome="stopped")
         return "stopped"
+
+    async def _record_usage(self, sandbox_id: str, *, outcome: str) -> None:
+        """Close this sandbox's metered interval, best effort.
+
+        Reads the start time and config from the database rather than process
+        memory so a teardown in a different worker — or after a restart, when the
+        in-memory maps are empty — still produces a correct interval.
+
+        Never raises: a usage write must not be able to fail a teardown and
+        leak a running container.
+        """
+        try:
+            repo = await self._repo()
+            row = await repo.get(sandbox_id)
+            if not row:
+                return
+            config_json = row.get("config") or {}
+            if isinstance(config_json, str):
+                import json
+
+                try:
+                    config_json = json.loads(config_json)
+                except ValueError:
+                    config_json = {}
+
+            started_at = row.get("ready_at") or row.get("created_at")
+            if started_at is None:
+                return
+
+            from lucent.db import get_pool
+            from lucent.services.usage import record_sandbox_usage
+
+            # A lightweight stand-in for the SandboxConfig the ledger needs; the
+            # DB row is the durable source and may outlive the object.
+            class _ConfigView:
+                organization_id = row.get("organization_id")
+                task_id = config_json.get("task_id")
+                request_id = config_json.get("request_id")
+                cpu_limit = config_json.get("cpu_limit")
+                memory_limit = config_json.get("memory_limit")
+                disk_limit = config_json.get("disk_limit")
+                name = config_json.get("name") or row.get("name")
+
+            await record_sandbox_usage(
+                await get_pool(),
+                sandbox_id=sandbox_id,
+                config=_ConfigView(),
+                started_at=started_at,
+                outcome=outcome,
+            )
+        except Exception:  # noqa: BLE001 — never fail teardown on a usage write
+            logger.warning(
+                "Failed to record usage for sandbox %s", sandbox_id[:12], exc_info=True
+            )
 
     async def destroy(self, sandbox_id: str) -> None:
         """Permanently destroy a sandbox."""
         if sandbox_id in self._cleanup_tasks:
             self._cleanup_tasks[sandbox_id].cancel()
             del self._cleanup_tasks[sandbox_id]
+
+        # Close the metered interval *before* the row is marked destroyed, so
+        # the ledger can still read its start time and config. Done here rather
+        # than in the backend because destroy() is the one path every teardown
+        # funnels through (API, web, idle sweep, auto-destroy timer).
+        await self._record_usage(sandbox_id, outcome="destroyed")
 
         # Clean up per-sandbox tracking.
         self._last_activity.pop(sandbox_id, None)

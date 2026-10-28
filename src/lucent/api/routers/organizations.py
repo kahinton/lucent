@@ -27,6 +27,7 @@ Design notes worth keeping in mind when changing this file:
   and rejected with a 422.
 """
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -67,6 +68,9 @@ from lucent.api.models import (
     OrganizationUpdate,
     ProvisionedUserResponse,
     SuccessResponse,
+    UsageBackfillResult,
+    UsageOrganizationSummary,
+    UsageReport,
     UserResponse,
     UserRoleUpdate,
 )
@@ -78,10 +82,11 @@ from lucent.db import (
 )
 from lucent.db import admin_audit as audit_actions
 from lucent.db.organization import OrganizationNameConflictError
+from lucent.db.resource_usage import ResourceUsageRepository
 from lucent.logging import get_logger
 from lucent.rbac import Permission, can_assign_role, can_manage_user
 from lucent.services import org_providers as instance_providers
-from lucent.services import org_provisioning
+from lucent.services import org_provisioning, usage
 from lucent.services import org_settings as instance_settings
 
 logger = get_logger(__name__)
@@ -562,6 +567,112 @@ async def list_instance_audit(
         limit=result["limit"],
         has_more=result["has_more"],
     )
+
+
+@router.get(
+    "/instance/usage/resources",
+    response_model=UsageReport,
+)
+async def get_instance_usage_report(
+    user: HyperadminUser,
+    starts_at: datetime | None = Query(
+        default=None, description="Only intervals starting at or after this time"
+    ),
+    ends_at: datetime | None = Query(
+        default=None, description="Only intervals starting before this time"
+    ),
+    include_seats: bool = Query(
+        default=True, description="Include live seat counts per tenant"
+    ),
+) -> UsageReport:
+    """Every tenant's usage quantities for a period.
+
+    Requires hyperadmin role. This is the call a usage run makes: one request
+    returns seats and resource consumption for every tenant, so a charge report cannot
+    be built from a partially-read view.
+
+    Two different time semantics apply, on purpose:
+
+    * **Resource usage is period-scoped.** Rows come from the append-only ledger
+      filtered by ``starts_at``/``ends_at``, and they survive tenant deletion —
+      an offboarded tenant still appears with ``status="deleted"`` and
+      ``seats=null`` because its final period is still chargeable.
+    * **Seats are a live count.** Seat count means "who is on the account right
+      now", not "who was here in March", so ``starts_at``/``ends_at`` do not
+      filter it.
+
+    Pass ``include_seats=false`` for a resources-only query, which avoids the
+    per-tenant count when only consumption is needed.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+
+    pool = await get_pool()
+    try:
+        payload = await usage.usage_report(
+            pool,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            include_seats=include_seats,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=str(exc)
+        ) from None
+
+    return UsageReport(**payload)
+
+
+@router.get(
+    "/instance/usage/backfill-preview",
+    response_model=UsageBackfillResult,
+)
+async def preview_usage_backfill(
+    user: HyperadminUser,
+    organization_id: UUID | None = Query(default=None),
+) -> UsageBackfillResult:
+    """Report what historical usage a backfill would reconstruct, writing nothing.
+
+    Requires hyperadmin role. Usage recorded before the ledger existed survives
+    only as ``sandboxes.config`` plus timestamps; this shows how many finished
+    sandboxes would be recoverable before committing to the write.
+
+    Declared above ``/{organization_id}/...`` routes because the literal
+    ``instance`` segment would otherwise be parsed as an organization id.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    pool = await get_pool()
+    result = await usage.backfill_from_sandboxes(
+        pool, organization_id=organization_id, dry_run=True
+    )
+    return UsageBackfillResult(**result)
+
+
+@router.post(
+    "/instance/usage/backfill",
+    response_model=UsageBackfillResult,
+)
+async def run_usage_backfill(
+    user: HyperadminUser,
+    organization_id: UUID | None = Query(default=None),
+) -> UsageBackfillResult:
+    """Reconstruct ledger rows for sandboxes that finished before the ledger existed.
+
+    Requires hyperadmin role. Idempotent: the ledger's unique key plus
+    first-close-wins means a re-run cannot double-count, and sandboxes already
+    closed by live teardown are skipped.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    pool = await get_pool()
+    result = await usage.backfill_from_sandboxes(
+        pool, organization_id=organization_id, dry_run=False
+    )
+    logger.info(
+        "Usage backfill by %s: recorded=%s skipped=%s",
+        user.id,
+        result.get("recorded"),
+        result.get("skipped"),
+    )
+    return UsageBackfillResult(**result)
 
 
 @router.get(
@@ -1291,6 +1402,80 @@ async def release_organization_setting_locks(
         released=result["released"],
         not_locked=result["not_locked"],
     )
+
+
+@router.get(
+    "/{organization_id}/usage/resources",
+    response_model=UsageOrganizationSummary,
+)
+async def get_organization_usage(
+    organization_id: UUID,
+    user: HyperadminUser,
+    starts_at: datetime | None = Query(default=None),
+    ends_at: datetime | None = Query(default=None),
+    include_seats: bool = Query(default=True),
+) -> UsageOrganizationSummary:
+    """One tenant's usage quantities: seats and resource consumption.
+
+    Requires hyperadmin role. Deliberately one request rather than "count users,
+    then page through sandboxes", because a usage run against a stale or partial
+    view is how charges end up disagreeing with the usage report.
+
+    ``resources_by_source`` splits consumption into ``task``, ``managed_tool``,
+    and ``interactive`` so a provider that prices custom tooling differently can
+    rate them separately.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+
+    pool = await get_pool()
+    try:
+        payload = await usage.organization_usage(
+            pool,
+            organization_id,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            include_seats=include_seats,
+        )
+    except usage.UnknownOrganizationError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=str(exc)
+        ) from None
+
+    return UsageOrganizationSummary(**payload)
+
+
+@router.get(
+    "/{organization_id}/usage/ledger",
+    response_model=list[dict[str, Any]],
+)
+async def list_organization_usage_ledger(
+    organization_id: UUID,
+    user: HyperadminUser,
+    starts_at: datetime | None = Query(default=None),
+    ends_at: datetime | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    """The raw ledger rows behind a tenant's totals.
+
+    Requires hyperadmin role. This exists so a disputed charge can be traced to
+    specific intervals — which sandbox, what it was for, and how long it held
+    its CPU and memory — rather than being reconciled against a summary number.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    pool = await get_pool()
+    rows = await ResourceUsageRepository(pool).list_events(
+        organization_id,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        limit=limit,
+        offset=offset,
+    )
+    return rows
 
 
 @router.get(

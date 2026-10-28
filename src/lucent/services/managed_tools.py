@@ -6,6 +6,7 @@ import json
 import textwrap
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from jsonschema import ValidationError, validate
@@ -174,7 +175,14 @@ class ManagedToolExecutor:
         )
         run_id = str(run["id"])
         started = time.monotonic()
+        # Wall-clock start for the usage ledger. `started` is monotonic and
+        # cannot be turned into a timestamp; the two measure different things
+        # (elapsed vs. when), and the ledger needs the latter.
+        run_started_at = datetime.now(UTC)
         sandbox_id: str | None = None
+        # Set by every completion path so the ledger write in `finally` records
+        # the real result rather than guessing from elapsed time.
+        run_outcome = "failed"
 
         try:
             manager = get_sandbox_manager()
@@ -183,7 +191,6 @@ class ManagedToolExecutor:
             sandbox_id = info.id
             if info.status != SandboxStatus.READY:
                 raise ManagedToolError(info.error or "Sandbox failed to become ready")
-
             await self._stage_runtime(manager, sandbox_id, tool, payload)
             await self._install_requirements(manager, sandbox_id, tool)
             timeout = int(tool.get("timeout_seconds") or 300)
@@ -200,6 +207,7 @@ class ManagedToolExecutor:
             duration_ms = int((time.monotonic() - started) * 1000)
             if not output.get("ok"):
                 error = str(output.get("error") or exec_result.stderr or "Tool execution failed")
+                run_outcome = "failed"
                 await self.repo.complete_managed_tool_run(
                     run_id,
                     status="failed",
@@ -222,6 +230,7 @@ class ManagedToolExecutor:
             result_value = output.get("result")
             if validate_output:
                 self._validate_output(tool, result_value)
+            run_outcome = "completed"
             await self.repo.complete_managed_tool_run(
                 run_id,
                 status="completed",
@@ -241,6 +250,7 @@ class ManagedToolExecutor:
             )
         except ManagedToolBlockedError:
             duration_ms = int((time.monotonic() - started) * 1000)
+            run_outcome = "blocked"
             await self.repo.complete_managed_tool_run(
                 run_id,
                 status="blocked",
@@ -262,12 +272,58 @@ class ManagedToolExecutor:
             )
             raise
         finally:
+            # Record the invocation (not the compute — that lives on the sandbox
+            # row this run created) before the sandbox is torn down, so a final
+            # invoice can still count tool calls after the tenant is offboarded.
+            await self._record_run_usage(
+                run_id=run_id,
+                tool=tool,
+                org_id=org_id,
+                started_at=run_started_at,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                outcome=run_outcome,
+            )
             if sandbox_id:
                 try:
                     await get_sandbox_manager().destroy(sandbox_id)
                 except Exception:
                     logger.warning("Failed to destroy managed-tool sandbox %s", sandbox_id,
                                    exc_info=True)
+
+    async def _record_run_usage(
+        self,
+        *,
+        run_id: str,
+        tool: dict[str, Any],
+        org_id: str,
+        started_at: datetime,
+        duration_ms: int,
+        outcome: str,
+    ) -> None:
+        """Write this invocation to the usage ledger. Best effort.
+
+        The ledger records the *invocation* only; the CPU and memory for a tool
+        run live on the sandbox row it created (``source='managed_tool'``), and
+        duplicating them here would double-bill any tenant that sums compute.
+        """
+        try:
+            from lucent.db import get_pool
+            from lucent.services.usage import record_managed_tool_usage
+
+            await record_managed_tool_usage(
+                await get_pool(),
+                managed_tool_run_id=run_id,
+                tool_id=str(tool.get("id")) if tool.get("id") else None,
+                organization_id=org_id,
+                started_at=started_at,
+                ended_at=started_at + timedelta(milliseconds=max(0, duration_ms)),
+                outcome=outcome,
+                task_id=tool.get("_task_id"),
+            )
+        except Exception:  # noqa: BLE001 — must never change how a run is reported
+            logger.warning(
+                "Failed to record usage for tool run %s", run_id, exc_info=True
+            )
 
     def _validate_input(self, tool: dict[str, Any], payload: dict[str, Any]) -> None:
         schema = tool.get("input_schema") or {"type": "object", "properties": {}}

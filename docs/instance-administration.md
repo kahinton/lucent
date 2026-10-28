@@ -99,6 +99,124 @@ All routes are under `/api/organizations`. Every route listed here requires
 | `PATCH` | `/{id}/models/{model_id}` | Enable/disable an **org-owned** model |
 | `GET` | `/{id}/audit` | That tenant's admin audit log |
 | `GET` | `/instance/audit` | Operator trail across all tenants |
+| `GET` | `/instance/usage/resources` | **Seats + resource usage for every tenant** |
+| `GET` | `/{id}/usage/resources` | Seats + resource usage for one tenant |
+| `GET` | `/{id}/usage/ledger` | Raw usage intervals behind the totals |
+| `GET` | `/instance/usage/backfill-preview` | What history a backfill would recover |
+| `POST` | `/instance/usage/backfill` | Reconstruct usage from pre-ledger sandboxes |
+
+### Usage data
+
+Two different things are reported, with different semantics:
+
+- **Seats** are a *live count* — "who is on the account right now". `metered`
+  excludes service identities (`daemon`) and operator staff (`hyperadmin`) and,
+  by default, inactive members. Counting either category would inflate every
+  invoice and make the seat count depend on how Lucent happens to be deployed.
+- **Resource usage** is *history* — sandbox CPU and memory reservations over time,
+  read from the append-only ledger (`resource_usage_events`, migration 154).
+
+```http
+GET /api/organizations/instance/usage/resources?starts_at=2026-10-01T00:00:00Z
+```
+
+```json
+{
+  "instance_totals": {"seats": 14, "intervals": 312, "cpu_seconds": 918400.0,
+                      "cpu_hours": 255.1, "memory_mb_seconds": 1884160000},
+  "tenants": [
+    {
+      "organization_id": "...",
+      "organization_name": "Acme Robotics",
+      "status": "active",
+      "seats": {"total": 6, "active": 5, "metered": 5, "by_role": {"owner": 1, "member": 4}},
+      "resources": {"intervals": 41, "duration_seconds": 147600,
+                    "cpu_seconds": 295200.0, "cpu_hours": 82.0,
+                    "memory_mb_seconds": 604569600}
+    }
+  ]
+}
+```
+
+**Lucent records quantities, not prices.** There is deliberately no rate, plan,
+charge, or tier in this API: the application that sells the product decides what
+a CPU-hour costs, and a stored rate would go stale the moment a price changed.
+
+Four properties are worth knowing:
+
+- **`NULL` is not zero.** A usage row whose limits could not be parsed contributes
+  nothing to a sum but stays visible in `/usage-events`, because an unknown
+  reservation must not be invoiced as free. The same applies to seats: a `null`
+  count means "not applicable", not "none".
+- **A stopped-then-destroyed sandbox meters to the stop.** The first close wins, so
+  the later teardown updates the outcome without extending the interval. Taking
+  the later end would meter idle hours.
+- **Usage survives tenant deletion.** `organization_id` is `ON DELETE SET NULL`
+  and the tenant name is snapshotted, so an offboarded tenant still appears in the
+  report with `status="deleted"` and `seats=null` — its final period is still
+  chargeable. This is why the ledger is a separate table rather than columns on
+  `sandboxes`, which is deleted with the tenant.
+- **`cpu_seconds` and `memory_mb_seconds` are derived server-side** as
+  `limit × duration_seconds`, so every consumer agrees on rounding instead of
+  recomputing it.
+
+`resources_by_source` splits consumption into `task`, `managed_tool`, and
+`interactive`, so a provider that prices custom tooling differently can rate them
+separately.
+
+#### Tool invocations
+
+A managed-tool execution produces **two** ledger entries, and they measure
+different things:
+
+| Row | Counts as | Carries |
+|-----|-----------|---------|
+| `resource_type = "sandbox"` | compute | `cpu_limit`, `memory_limit_mb`, duration |
+| `resource_type = "managed_tool_run"` | invocations | duration, outcome, `tool_id` |
+
+This split exists because a tool run *creates* the sandbox it runs in — the same
+resources, described twice. **Tool-run rows carry no CPU or memory on purpose**, and
+the aggregation counts compute only from `sandbox` rows. A database CHECK enforces
+it, so a future caller cannot write a reservation onto an invocation row and
+double-bill every custom-tool call.
+
+The payoff is that per-call pricing and per-CPU-second pricing can coexist on the
+same ledger without either polluting the other:
+
+```json
+{
+  "resources": {"intervals": 41, "cpu_hours": 82.0, "tool_invocations": 312},
+  "tool_usage": [
+    {"tool_id": "...", "invocations": 300, "succeeded": 297, "duration_seconds": 4210}
+  ]
+}
+```
+
+`tool_usage` is grouped per tool definition so one expensive tool can be priced
+differently from a cheap, frequently-called one. `succeeded` counts runs whose
+outcome is `completed`; `failed` and `blocked` runs still count as
+invocations, because the compute was spent either way.
+
+Tool-run rows survive tenant deletion for the same reason sandbox rows do — that
+is the gap `managed_tool_runs` could not fill, since it cascades with the
+organization. Outcomes use the tool vocabulary (`completed`, `failed`, `blocked`),
+not the sandbox one; they are answers to different questions.
+
+#### Historical usage
+
+The ledger only starts recording from migration 154. Existing finished sandboxes
+can be reconstructed from their stored config and timestamps:
+
+```bash
+# see what would be recovered
+curl ".../api/organizations/instance/usage/backfill-preview?organization_id=$ORG"
+# commit it (idempotent)
+curl -X POST ".../api/organizations/instance/usage/backfill?organization_id=$ORG"
+```
+
+Backfill only considers *finished* sandboxes: a live one has no end yet and would
+produce an interval that grows on every run. Re-running is safe — the ledger's
+unique key plus first-close-wins means nothing is double-billed.
 
 ### Locking settings for a tenant
 

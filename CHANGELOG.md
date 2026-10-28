@@ -8,6 +8,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Managed-tool invocations are recorded for usage reporting (migrations 155, 156).**
+  A custom-tool execution now writes a durable per-invocation row to the usage
+  ledger, so a provider that prices tool *calls* has something to meter from after
+  a tenant is offboarded — `managed_tool_runs` cascades with the organization, so
+  its rows disappeared exactly when a final period still needed closing. The
+  response gained `tool_invocations` (per tenant and instance-wide) and a new
+  `tool_usage` list grouped by tool definition with `invocations`, `succeeded`,
+  and duration. **Invocations never add to compute totals.** A tool run *creates*
+  the sandbox it runs in, so both rows describe the same CPU and memory; the
+  aggregation counts compute only from `sandbox` rows and a database CHECK forbids
+  a reservation on an invocation row, which keeps per-call and per-CPU-second
+  pricing able to coexist on one ledger without either double-counting the other.
+  Tool outcomes use their own vocabulary (`completed` / `failed` / `blocked`)
+  rather than the sandbox one, since a job's result and a reservation's end are
+  different facts.
+- **Usage quantities for instance operators (migration 154).** A hyperadmin can
+  now read what each tenant consumed, in one call per usage run:
+  `GET /api/organizations/instance/usage/resources` returns **seat counts** and
+  **sandbox resource usage** for every tenant, plus instance totals. Seat counts
+  exclude the per-organization `daemon-service` identity and hyperadmin staff, so
+  the number does not depend on Lucent's own machinery; inactive members are
+  excluded by default. Resource usage is recorded in a new append-only ledger
+  (`resource_usage_events`) of closed sandbox intervals — CPU limit, memory limit,
+  disk, wall-clock duration, and what the sandbox was for (`task`,
+  `managed_tool`, or `interactive`) — with `cpu_seconds`, `cpu_hours`, and
+  `memory_mb_seconds` derived server-side as `limit × duration` so every consumer
+  agrees on rounding. **Lucent records quantities, not prices**: there is no rate,
+  plan, or charge in the API, because a stored rate would go stale the moment a
+  price changed. The ledger is deliberately separate from `sandboxes`, which is
+  mutable and deleted with the tenant: `organization_id` is `ON DELETE SET NULL`
+  and the tenant name is snapshotted, so an offboarded tenant still appears in the
+  report (with `status="deleted"`) because its final period is still chargeable.
+  Teardown is idempotent and **first-close-wins**, so a sandbox stopped at 10:00
+  and destroyed at 14:00 bills one hour rather than five, and a retried destroy
+  cannot double-count. `GET /{id}/usage/ledger` exposes the raw intervals
+  so a disputed charge can be traced rather than reconciled against a summary.
+  Historical usage predating the ledger is reconstructible from existing sandbox
+  rows via `/instance/usage/backfill-preview` (dry run) and
+  `/instance/usage/backfill` (idempotent, finished sandboxes only).
 - **Bulk setting locks for tier application.** Tier definitions are owned by the
   application that sells them, so Lucent exposes the primitives that app needs
   rather than a tier model of its own. `PUT /api/organizations/{id}/setting-locks`
