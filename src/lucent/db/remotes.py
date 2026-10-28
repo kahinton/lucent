@@ -116,7 +116,9 @@ class RemoteRepository:
                         UUID(org_id),
                         name,
                         description,
-                        json.dumps(capabilities or {}),
+                        # The pool's JSONB codec encodes with json.dumps, so pass
+                        # the object and let the codec serialize once.
+                        capabilities or {},
                         UUID(created_by),
                     )
 
@@ -200,7 +202,9 @@ class RemoteRepository:
             params.append(description)
             sets.append(f"description = ${len(params)}")
         if capabilities is not None:
-            params.append(json.dumps(capabilities))
+            # Dict, not a pre-serialized string: the pool's JSONB codec encodes
+            # with json.dumps, so a str would be encoded twice.
+            params.append(capabilities)
             sets.append(f"capabilities = ${len(params)}")
         if status is not None:
             if status not in ("active", "disabled", "revoked"):
@@ -312,6 +316,66 @@ class RemoteRepository:
                    """,
                 UUID(remote_id),
                 UUID(org_id),
+            )
+
+    async def record_reported_capabilities(
+        self, remote_id: str, org_id: str, reported: dict
+    ) -> None:
+        """Merge a heartbeat's self-report into ``capabilities``.
+
+        The remote is the authority on how it executes work: which executor is
+        running, its hostname, and (for a ``command`` executor) the argv it
+        will use. Task authors need this to write a description the remote can
+        actually execute, so it is stored rather than logged and discarded.
+
+        Only a small allowlist is persisted. Heartbeats are remote-controlled
+        input; the row must not become a place to stash arbitrary payloads.
+        """
+        allowed = {"executor", "hostname", "pid", "shell", "command"}
+        patch: dict[str, Any] = {}
+        for key in allowed:
+            if key not in reported:
+                continue
+            value = reported[key]
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value[:512]
+            elif isinstance(value, (int, float, bool)):
+                pass
+            elif isinstance(value, list):
+                value = [str(item)[:256] for item in value[:16]]
+            else:
+                continue
+            patch[key] = value
+        if not patch:
+            return
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            # The connection registers a JSONB codec whose encoder is
+            # json.dumps, so a dict param is encoded exactly once. Passing a
+            # pre-serialized string here would be encoded twice and land as a
+            # JSON string scalar instead of an object.
+            #
+            # Older rows (and ``create``) wrote ``json.dumps(...)`` strings, so
+            # normalize a string-typed value back into an object before merging;
+            # concatenating onto a scalar yields an array, not a merge.
+            await conn.execute(
+                """UPDATE remote_instances
+                   SET capabilities =
+                         (CASE
+                             WHEN jsonb_typeof(capabilities) = 'string'
+                                 THEN (capabilities #>> '{}')::jsonb
+                             WHEN jsonb_typeof(capabilities) = 'object'
+                                 THEN capabilities
+                             ELSE '{}'::jsonb
+                          END)
+                         || $3::jsonb,
+                       updated_at = NOW()
+                   WHERE id = $1 AND organization_id = $2
+                   """,
+                UUID(remote_id),
+                UUID(org_id),
+                patch,
             )
 
     async def require_active(self, remote_id: str, org_id: str) -> dict | None:

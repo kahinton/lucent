@@ -594,3 +594,72 @@ async def test_activity_endpoint_payload_shape(db_pool, test_user):
     assert entry["task_total"] == 1
     assert entry["tasks"][0]["title"] == "Panel task"
     assert "result_excerpt" in entry["tasks"][0]
+
+
+@pytest.mark.asyncio
+async def test_report_prefers_actual_result_over_terse_summary(db_pool, test_user):
+    """The report must surface real output, not a remote's status line.
+
+    A remote executor sets ``result_summary`` to something like "Completed on
+    remote X in 0.3s" while ``result`` holds the host output the person asked
+    for. Preferring the summary made the card say nothing useful, so the agent
+    replied "let me know if you want me to pull them up" — a second round trip
+    for information it already had.
+    """
+    from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.db.remotes import RemoteRepository
+    from lucent.db.requests import RequestRepository
+    from lucent.services.subagent_reports import SubagentReportService
+
+    org_id = str(test_user["organization_id"])
+    sessions = LLMSessionRepository(db_pool)
+    session = await sessions.create_session(
+        org_id=org_id, user_id=str(test_user["id"]), kind="chat"
+    )
+    remote, _token = await RemoteRepository(db_pool).create(
+        org_id=org_id,
+        name=f"result-remote-{uuid.uuid4().hex[:8]}",
+        created_by=str(test_user["id"]),
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title="Host facts",
+        description="Report the host.",
+        source="user",
+        created_by=str(test_user["id"]),
+        org_id=org_id,
+    )
+    task = await repo.create_task(
+        request_id=str(request["id"]),
+        title="Fetch host facts",
+        org_id=org_id,
+        description="```sh\nsw_vers\n```",
+        agent_type="code",
+        remote_target_id=str(remote["id"]),
+    )
+    await repo.claim_task(str(task["id"]), instance_id="test", org_id=org_id)
+    await repo.complete_task(
+        str(task["id"]),
+        result="ProductVersion:\t26.4.1\n/dev/disk3s1s1  460Gi  242Gi free",
+        org_id=org_id,
+        result_summary="Completed on remote 2cd3ec5b in 0.0s",
+    )
+
+    signal = {
+        "session_id": str(session["id"]),
+        "request_id": str(request["id"]),
+        "task_id": str(task["id"]),
+        "kind": "task.completed",
+        "organization_id": org_id,
+        "user_id": str(test_user["id"]),
+    }
+    service = SubagentReportService()
+    context = await service._load_context(signal)
+    assert context is not None
+    card = service._build_card(signal, context)
+
+    body = card["body"]
+    assert "26.4.1" in body, f"actual output missing from card body: {body!r}"
+    assert "242Gi" in body
+    # The terse status line must not be what the person sees instead.
+    assert "Completed on remote" not in body

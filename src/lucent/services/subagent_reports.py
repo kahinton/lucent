@@ -483,7 +483,11 @@ class SubagentReportService:
                     task_row = await conn.fetchrow(
                         """SELECT id::text AS id, title, status, agent_type,
                                   error, result_summary,
-                                  left(COALESCE(result_summary, result, ''), 900) AS result_excerpt,
+                                  -- Prefer the actual output. A remote executor
+                                  -- reports a terse result_summary ("Completed on
+                                  -- remote X in 0.3s") that would otherwise mask
+                                  -- the host output the person asked for.
+                                  left(COALESCE(NULLIF(result, ''), result_summary, ''), 900) AS result_excerpt,
                                   cancel_requested_at
                            FROM tasks
                            WHERE id = $1::uuid AND organization_id = $2::uuid""",
@@ -507,7 +511,7 @@ class SubagentReportService:
                 # sentence. Bounded so a large request cannot flood the prompt.
                 result_rows = await conn.fetch(
                     """SELECT title, error,
-                              left(COALESCE(result_summary, result, ''), 600) AS result_excerpt
+                              left(COALESCE(NULLIF(result, ''), result_summary, ''), 600) AS result_excerpt
                        FROM tasks
                        WHERE request_id = $1::uuid
                          AND title <> 'Post-completion review'

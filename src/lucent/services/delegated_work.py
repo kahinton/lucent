@@ -82,7 +82,9 @@ def _task_line(task: dict[str, Any]) -> str:
     title = _clip(task.get("title"), 90)
     if task.get("cancel_requested_at") and task.get("status") in _ACTIVE_TASK_STATUSES:
         status = "stopping"
-    detail = _clip(task.get("result_summary") or task.get("error"))
+    # Prefer the actual output; a remote executor's result_summary is a terse
+    # status line that would mask the host output the person asked for.
+    detail = _clip(task.get("result") or task.get("result_summary") or task.get("error"))
     line = f"    - {title} [{status}]"
     return f"{line}\n      {detail}" if detail else line
 

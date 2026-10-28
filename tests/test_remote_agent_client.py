@@ -384,3 +384,200 @@ def test_client_maps_403_to_auth_error(monkeypatch):
     with pytest.raises(agent.AuthError) as exc:
         client.claim()
     assert "different remote" in str(exc.value)
+
+
+# ── Shell executor (opt-in arbitrary work) ──────────────────────────────
+
+
+def _shell_config(**overrides):
+    base = dict(
+        executor="shell",
+        shell="/bin/sh",
+        task_timeout_seconds=30,
+        once=True,
+    )
+    base.update(overrides)
+    return _config(**base)
+
+
+def test_extract_command_script_pulls_fenced_blocks():
+    task = {
+        "description": (
+            "Report the host.\n\n"
+            "```sh\nuname -s\n```\n\n"
+            "And the architecture:\n\n"
+            "```bash\nuname -m\n```\n"
+        )
+    }
+    assert agent.extract_command_script(task) == "uname -s\n\nuname -m"
+
+
+def test_extract_command_script_ignores_untagged_and_unterminated_fences():
+    assert agent.extract_command_script(
+        {"description": "```\nrm -rf /\n```"}
+    ) is None
+    assert agent.extract_command_script(
+        {"description": "```sh\nrm -rf /\n"}
+    ) is None
+    assert agent.extract_command_script({"description": "just prose"}) is None
+    assert agent.extract_command_script({}) is None
+
+
+def test_shell_executor_runs_the_fenced_command(tmp_path):
+    result = agent.execute_shell(
+        _shell_config(),
+        {"id": "t1", "description": "```sh\necho hello-from-remote\n```"},
+        str(tmp_path),
+    )
+    assert result.ok, result.output
+    assert "hello-from-remote" in result.output
+
+
+def test_shell_executor_keeps_the_operator_home(tmp_path):
+    """HOME must stay real so git/ssh/npm configs resolve.
+
+    The per-task dir is not containment for an executor that already runs
+    task-authored code; pointing HOME at it only made commands report a
+    throwaway path and broke tools reading ~/.gitconfig or ~/.ssh.
+    """
+    result = agent.execute_shell(
+        _shell_config(),
+        {"id": "t1", "description": "```sh\necho \"$HOME\"\n```"},
+        str(tmp_path),
+    )
+    assert result.ok, result.output
+    assert str(tmp_path) not in result.output
+    assert os.path.expanduser("~") in result.output
+
+
+def test_shell_executor_honours_explicit_home(tmp_path):
+    result = agent.execute_shell(
+        _shell_config(home="/tmp/custom-home"),
+        {"id": "t1", "description": "```sh\necho \"$HOME\"\n```"},
+        str(tmp_path),
+    )
+    assert result.ok, result.output
+    assert "/tmp/custom-home" in result.output
+
+
+def test_shell_executor_runs_in_the_per_task_directory(tmp_path):
+    result = agent.execute_shell(
+        _shell_config(),
+        {"id": "t1", "description": "```sh\npwd\n```"},
+        str(tmp_path),
+    )
+    assert result.ok, result.output
+    assert str(tmp_path) in result.output
+
+
+def test_shell_executor_exposes_task_identity_to_the_command(tmp_path):
+    result = agent.execute_shell(
+        _shell_config(),
+        {
+            "id": "task-abc",
+            "request_id": "req-xyz",
+            "description": '```sh\necho "$LUCENT_TASK_ID $LUCENT_REQUEST_ID"\n```',
+        },
+        str(tmp_path),
+    )
+    assert result.ok, result.output
+    assert "task-abc req-xyz" in result.output
+
+
+def test_shell_executor_refuses_to_execute_prose(tmp_path):
+    """Running a prose description as a script is never the intent."""
+    result = agent.execute_shell(
+        _shell_config(),
+        {"id": "t1", "description": "Please report the hostname and uptime."},
+        str(tmp_path),
+    )
+    assert not result.ok
+    assert result.exit_code == 2
+    assert "fenced code block" in result.output
+
+
+def test_shell_executor_reports_failure_exit_code(tmp_path):
+    result = agent.execute_shell(
+        _shell_config(),
+        {"id": "t1", "description": "```sh\necho bad >&2; exit 7\n```"},
+        str(tmp_path),
+    )
+    assert not result.ok
+    assert result.exit_code == 7
+    assert "bad" in result.output
+
+
+def test_shell_executor_enforces_timeout(tmp_path):
+    result = agent.execute_shell(
+        _shell_config(task_timeout_seconds=1),
+        {"id": "t1", "description": "```sh\nsleep 5\n```"},
+        str(tmp_path),
+    )
+    assert not result.ok
+    assert result.exit_code == 124
+    assert "timeout" in result.output.lower()
+
+
+def test_shell_executor_is_registered_but_not_the_default():
+    assert "shell" in agent.EXECUTORS
+    # The executor that runs task-authored code must be opt-in.
+    assert agent.AgentConfig(
+        controller_url="http://localhost:8766",
+        token="lr_" + "x" * 40,
+        remote_id=str(uuid4()),
+    ).executor == "command"
+
+
+def test_config_rejects_unknown_executor(monkeypatch):
+    monkeypatch.setenv("LUCENT_CONTROLLER_URL", "http://localhost:8766")
+    monkeypatch.setenv("LUCENT_REMOTE_TOKEN", "lr_" + "x" * 40)
+    monkeypatch.setenv("LUCENT_REMOTE_ID", str(uuid4()))
+    monkeypatch.setenv("LUCENT_REMOTE_EXECUTOR", "python-eval")
+    args = agent.build_parser().parse_args([])
+    with pytest.raises(agent.ConfigError) as exc:
+        agent.config_from_env(args)
+    assert "Available: command, noop, shell" in str(exc.value)
+
+
+def test_config_accepts_shell_executor(monkeypatch):
+    monkeypatch.setenv("LUCENT_CONTROLLER_URL", "http://localhost:8766")
+    monkeypatch.setenv("LUCENT_REMOTE_TOKEN", "lr_" + "x" * 40)
+    monkeypatch.setenv("LUCENT_REMOTE_ID", str(uuid4()))
+    monkeypatch.setenv("LUCENT_REMOTE_EXECUTOR", "shell")
+    monkeypatch.setenv("LUCENT_REMOTE_SHELL", "/bin/sh")
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    args = agent.build_parser().parse_args([])
+    config = agent.config_from_env(args)
+    assert config.executor == "shell"
+    assert config.shell == "/bin/sh"
+
+
+def test_client_survives_controller_restart_mid_request(monkeypatch):
+    """A controller restart must not kill the agent.
+
+    A routine deploy closes the connection mid-request, which surfaces as
+    http.client.RemoteDisconnected — NOT urllib.error.URLError. Unhandled, that
+    kills the process exactly when it needs to survive and reconnect.
+    """
+    import http.client
+
+    def fake_open(request, timeout=None):
+        raise http.client.RemoteDisconnected(
+            "Remote end closed connection without response"
+        )
+
+    client = agent.ControllerClient(_config())
+    monkeypatch.setattr(client._opener, "open", fake_open)
+    with pytest.raises(agent.ProtocolError) as exc:
+        client.claim()
+    assert "connection dropped" in str(exc.value)
+
+
+def test_client_survives_connection_reset(monkeypatch):
+    def fake_open(request, timeout=None):
+        raise ConnectionResetError("reset by peer")
+
+    client = agent.ControllerClient(_config())
+    monkeypatch.setattr(client._opener, "open", fake_open)
+    with pytest.raises(agent.ProtocolError):
+        client.heartbeat({"executor": "shell"})

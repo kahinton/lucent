@@ -1331,3 +1331,366 @@ class TestCreateTaskFusion:
         assert (
             "arbiter" in malformed["error"] or "candidates" in malformed["error"]
         )
+
+
+# ============================================================================
+# Remote targeting (Agent Control Protocol)
+# ============================================================================
+
+
+class TestRemoteTargeting:
+    """Agents must be able to discover remotes and pin work to them."""
+
+    _UPSERT_AGENT_DEFINITION_SQL = TestCreateTask._UPSERT_AGENT_DEFINITION_SQL
+
+    @pytest_asyncio.fixture
+    async def request_id(self, mcp, auth_user):
+        result = await _call(mcp, "create_request", {"title": "Remote Parent"})
+        return result["id"]
+
+    @pytest_asyncio.fixture
+    async def agent_def(self, db_pool, auth_user):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                self._UPSERT_AGENT_DEFINITION_SQL,
+                "code",
+                auth_user["organization_id"],
+                "test definition",
+                auth_user["id"],
+            )
+
+    @pytest_asyncio.fixture
+    async def remote(self, db_pool, auth_user):
+        from lucent.db.remotes import RemoteRepository
+
+        row, token = await RemoteRepository(db_pool).create(
+            org_id=str(auth_user["organization_id"]),
+            name=f"test-remote-{str(uuid4())[:8]}",
+            created_by=str(auth_user["id"]),
+            description="Unit-test remote",
+        )
+        yield row
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM remote_instances WHERE organization_id = $1",
+                auth_user["organization_id"],
+            )
+            await conn.execute(
+                "DELETE FROM api_keys WHERE user_id IN "
+                "(SELECT id FROM users WHERE organization_id = $1 "
+                "AND external_id LIKE 'remote-agent:%')",
+                auth_user["organization_id"],
+            )
+            await conn.execute(
+                "DELETE FROM users WHERE organization_id = $1 "
+                "AND external_id LIKE 'remote-agent:%'",
+                auth_user["organization_id"],
+            )
+
+    @pytest.mark.asyncio
+    async def test_list_remotes_exposes_targetable_id(self, mcp, auth_user, remote):
+        result = await _call(mcp, "list_remotes", {})
+        assert result["active_count"] == 1
+        entry = next(r for r in result["remotes"] if r["id"] == str(remote["id"]))
+        assert entry["name"] == remote["name"]
+        assert entry["status"] == "active"
+        assert entry["targetable"] is True
+        # Freshly created remotes have never polled.
+        assert entry["never_seen"] is True
+        assert result["remote_targeting"]
+
+    @pytest.mark.asyncio
+    async def test_list_remotes_empty_org_is_actionable(self, mcp, auth_user):
+        result = await _call(mcp, "list_remotes", {})
+        assert result["remotes"] == []
+        assert result["active_count"] == 0
+        assert "No remotes are registered" in result["remote_targeting"]
+
+    @pytest.mark.asyncio
+    async def test_list_remotes_marks_disabled_untargetable(
+        self, mcp, auth_user, remote, db_pool
+    ):
+        from lucent.db.remotes import RemoteRepository
+
+        await RemoteRepository(db_pool).update(
+            str(remote["id"]), str(auth_user["organization_id"]), status="disabled"
+        )
+        result = await _call(mcp, "list_remotes", {})
+        entry = next(r for r in result["remotes"] if r["id"] == str(remote["id"]))
+        assert entry["status"] == "disabled"
+        assert entry["targetable"] is False
+        assert result["active_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_create_task_pins_remote(
+        self, mcp, auth_user, request_id, remote, agent_def
+    ):
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Run on the remote",
+                "agent_type": "code",
+                "remote_target_id": str(remote["id"]),
+            },
+        )
+        assert "error" not in result, result
+        assert result["remote_target_id"] == str(remote["id"])
+        assert result["remote_name"] == remote["name"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_remote_id_is_rejected_with_discovery_hint(
+        self, mcp, auth_user, request_id, remote, agent_def
+    ):
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Bad remote",
+                "agent_type": "code",
+                "remote_target_id": str(uuid4()),
+            },
+        )
+        assert "error" in result
+        assert "list_remotes" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_disabled_remote_cannot_be_targeted(
+        self, mcp, auth_user, request_id, remote, agent_def, db_pool
+    ):
+        from lucent.db.remotes import RemoteRepository
+
+        await RemoteRepository(db_pool).update(
+            str(remote["id"]), str(auth_user["organization_id"]), status="disabled"
+        )
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Disabled remote",
+                "agent_type": "code",
+                "remote_target_id": str(remote["id"]),
+            },
+        )
+        assert "error" in result
+        assert "active remote" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_remote_and_sandbox_are_mutually_exclusive(
+        self, mcp, auth_user, request_id, remote, agent_def
+    ):
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": request_id,
+                "title": "Both placements",
+                "agent_type": "code",
+                "remote_target_id": str(remote["id"]),
+                "sandbox_template_id": str(uuid4()),
+            },
+        )
+        assert "error" in result
+        assert "cannot be combined" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_decision_task_cannot_target_remote(
+        self, mcp, auth_user, request_id, remote, db_pool, monkeypatch
+    ):
+        """Decision/fusion tasks execute in-process; a remote pin is nonsense."""
+        model_id = f"decision-{uuid4()}"
+        TestCreateTaskDecision()._decision_model_registry(monkeypatch, model_id)
+        await TestCreateTaskDecision()._seed_decision_model(
+            db_pool, auth_user["organization_id"], model_id
+        )
+        await TestCreateTaskDecision()._grant_org_read(
+            db_pool, auth_user["organization_id"], model_id, auth_user["id"]
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                TestCreateTaskDecision()._upsert_decision_agent_sql(),
+                auth_user["organization_id"],
+                auth_user["id"],
+            )
+        try:
+            result = await _call(
+                mcp,
+                "create_task",
+                {
+                    "request_id": request_id,
+                    "title": "Decision on a remote",
+                    "agent_type": "decision-step",
+                    "decision_config": {
+                        "questions": [
+                            {
+                                "name": "q",
+                                "type": "noul",
+                                "instructions": "check",
+                            }
+                        ],
+                        "model": model_id,
+                    },
+                    "remote_target_id": str(remote["id"]),
+                },
+            )
+        finally:
+            from lucent.db.models import ModelRepository
+
+            await ModelRepository(db_pool).delete_model(model_id)
+        assert "error" in result
+        assert "agent tasks only" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_task_plan_entry_can_target_remote(
+        self, mcp, auth_user, remote, agent_def
+    ):
+        result = await _call(
+            mcp,
+            "create_request",
+            {
+                "title": "Plan with a remote task",
+                "task_plan": [
+                    {
+                        "title": "Collect host facts",
+                        "description": "Report this machine's uname and disk usage.",
+                        "agent_type": "code",
+                        "sequence_order": 0,
+                        "remote_target_id": str(remote["id"]),
+                    }
+                ],
+            },
+        )
+        assert "error" not in result, result
+        assert result["tasks_created"] == 1
+
+    @pytest.mark.asyncio
+    async def test_task_plan_entry_rejects_bad_remote(
+        self, mcp, auth_user, remote, agent_def
+    ):
+        result = await _call(
+            mcp,
+            "create_request",
+            {
+                "title": "Plan with a bogus remote",
+                "task_plan": [
+                    {
+                        "title": "Bad pin",
+                        "agent_type": "code",
+                        "remote_target_id": str(uuid4()),
+                    }
+                ],
+            },
+        )
+        assert "error" in result
+        assert "task_plan[0]" in result["error"]
+        assert "list_remotes" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_task_plan_entry_rejects_remote_with_sandbox(
+        self, mcp, auth_user, remote, agent_def
+    ):
+        result = await _call(
+            mcp,
+            "create_request",
+            {
+                "title": "Plan with conflicting placements",
+                "task_plan": [
+                    {
+                        "title": "Conflict",
+                        "agent_type": "code",
+                        "remote_target_id": str(remote["id"]),
+                        "sandbox_template_id": str(uuid4()),
+                    }
+                ],
+            },
+        )
+        assert "error" in result
+        assert "cannot be combined" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_list_remotes_reports_executor_contract(
+        self, mcp, auth_user, remote, db_pool
+    ):
+        """Task authors need the command contract, not just an id."""
+        from lucent.db.remotes import RemoteRepository
+
+        await RemoteRepository(db_pool).record_reported_capabilities(
+            str(remote["id"]),
+            str(auth_user["organization_id"]),
+            {"executor": "shell", "shell": "/bin/zsh", "hostname": "builder"},
+        )
+        result = await _call(mcp, "list_remotes", {})
+        entry = next(r for r in result["remotes"] if r["id"] == str(remote["id"]))
+        assert entry["executor"] == "shell"
+        assert "fenced code block" in entry["description_contract"]
+        assert entry["capabilities"]["shell"] == "/bin/zsh"
+
+    def test_description_contract_varies_by_executor(self):
+        from lucent.tools.requests import _remote_description_contract
+
+        assert "fenced code block" in _remote_description_contract(
+            {"executor": "shell"}
+        )
+        assert "stdin" in _remote_description_contract(
+            {"executor": "command", "command": ["python3", "run.py"]}
+        )
+        assert "echoes" in _remote_description_contract({"executor": "noop"})
+        assert "not reported" in _remote_description_contract({})
+        # A JSONB string (as asyncpg may hand it back) must decode too.
+        assert "fenced code block" in _remote_description_contract(
+            '{"executor": "shell"}'
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_records_reported_capabilities(self, db_pool, auth_user):
+        """The remote is the authority on how it executes work."""
+        from lucent.db.remotes import RemoteRepository
+
+        repo = RemoteRepository(db_pool)
+        row, token = await repo.create(
+            org_id=str(auth_user["organization_id"]),
+            name=f"hb-remote-{str(uuid4())[:8]}",
+            created_by=str(auth_user["id"]),
+        )
+        try:
+            await repo.record_reported_capabilities(
+                str(row["id"]),
+                str(auth_user["organization_id"]),
+                {
+                    "executor": "shell",
+                    "shell": "/bin/zsh",
+                    "hostname": "mac",
+                    "pid": 42,
+                    # Not on the allowlist; must never be persisted.
+                    "evil": "payload",
+                },
+            )
+            stored = await repo.get(str(row["id"]), str(auth_user["organization_id"]))
+            # asyncpg returns JSONB as a JSON string in this deployment.
+            caps = stored["capabilities"]
+            if isinstance(caps, str):
+                caps = json.loads(caps)
+            assert caps["executor"] == "shell"
+            assert caps["shell"] == "/bin/zsh"
+            assert caps["hostname"] == "mac"
+            assert "evil" not in caps
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM remote_instances WHERE organization_id = $1",
+                    auth_user["organization_id"],
+                )
+                await conn.execute(
+                    "DELETE FROM api_keys WHERE user_id IN "
+                    "(SELECT id FROM users WHERE organization_id = $1 "
+                    "AND external_id LIKE 'remote-agent:%')",
+                    auth_user["organization_id"],
+                )
+                await conn.execute(
+                    "DELETE FROM users WHERE organization_id = $1 "
+                    "AND external_id LIKE 'remote-agent:%'",
+                    auth_user["organization_id"],
+                )

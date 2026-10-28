@@ -348,6 +348,21 @@ async def remote_heartbeat(
             org_id=str(user.organization_id),
             instance_id=instance_id,
         )
+    # Persist what the remote reports about itself, so task authors can see how
+    # it executes work. Without this an agent pins a task to a remote and writes
+    # prose at a `shell` executor that only runs fenced command blocks.
+    #
+    # The client wraps its self-report as {"agent": {...}}; older/other clients
+    # may post the fields bare, so accept both shapes.
+    payload = body if isinstance(body, dict) else {}
+    nested = payload.get("agent")
+    reported = nested if isinstance(nested, dict) else payload
+    if reported:
+        await remote_repo.record_reported_capabilities(
+            str(remote_id),
+            str(user.organization_id),
+            reported,
+        )
     await remote_repo.require_active(str(remote_id), str(user.organization_id))
     await remote_repo.touch_last_seen(str(remote_id), str(user.organization_id))
     return {

@@ -41,6 +41,7 @@ _SIGNIFICANT_SESSION_TOOLS = {
     "record_task_output",
     "send_handoff",
     "create_task",
+    "list_remotes",
     "propose_sandbox_template",
     "create_agent_definition",
     "update_agent_definition",

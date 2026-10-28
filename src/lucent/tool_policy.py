@@ -27,7 +27,7 @@ DEFINITION_ACTIVATION_TOOLS = frozenset({
 })
 WORK_ACTIVATION_TOOLS = frozenset({
     "create_request", "create_task", "list_task_kinds", "list_sandbox_templates",
-    "propose_sandbox_template",
+    "propose_sandbox_template", "list_remotes",
 })
 CAPABILITY_ACTIVATION_AGENT_TYPES = frozenset(
     {"assessment", "definition-engineer", "lucent", "planning", "reflection"}

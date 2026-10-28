@@ -530,6 +530,111 @@ async def _authoring_templates(ctx: dict):
     return ctx["_template_repo"]
 
 
+def _iso_or_none(value: Any) -> str | None:
+    """Render a datetime/str timestamp as an ISO string, or None."""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def _remote_capabilities(capabilities: Any) -> dict:
+    """Normalize a ``remote_instances.capabilities`` value into a dict.
+
+    asyncpg hands JSONB back as a JSON string in this deployment, so every
+    reader has to decode it. Returning a str to a task author would be worse
+    than useless — it looks like data and answers nothing.
+    """
+    if isinstance(capabilities, str):
+        try:
+            capabilities = json.loads(capabilities)
+        except (TypeError, ValueError):
+            return {}
+    return capabilities if isinstance(capabilities, dict) else {}
+
+
+def _remote_executor(capabilities: Any) -> str | None:
+    """Extract the executor a remote last reported, if any."""
+    executor = _remote_capabilities(capabilities).get("executor")
+    return str(executor) if executor else None
+
+
+def _remote_description_contract(capabilities: Any) -> str:
+    """Tell a task author how to write a description this remote can execute.
+
+    The executor determines the contract, and getting it wrong is not a
+    cosmetic failure: a `shell` remote will refuse a prose description, so the
+    task fails after dispatch. Stating the contract up front is cheaper than
+    discovering it from a failed task.
+    """
+    caps = _remote_capabilities(capabilities)
+    executor = str(caps.get("executor") or "").lower()
+
+    if executor == "shell":
+        return (
+            "This remote runs shell commands taken from fenced code blocks in "
+            "the task description. Tag the fence sh, bash, shell, zsh, or "
+            "console. A description with no fenced block executes nothing."
+        )
+    if executor == "command":
+        argv = caps.get("command")
+        detail = (
+            f" It runs {argv!r} (argv)." if isinstance(argv, list) and argv else ""
+        )
+        return (
+            "This remote runs one fixed configured command, passing the task "
+            f"text on stdin.{detail} Write the description as instructions for "
+            "that program, not as a shell script."
+        )
+    if executor == "noop":
+        return (
+            "This remote is a connectivity smoke test: it echoes the task back "
+            "and runs nothing."
+        )
+    return (
+        "This remote has not reported its executor yet, so its command "
+        "contract is unknown. If the work is specific, check with the operator "
+        "or use a host you know runs the `shell` executor."
+    )
+
+
+async def _resolve_remote_target(
+    ctx: dict, remote_target_id: str, *, label: str = "remote_target_id"
+) -> tuple[dict | None, str | None]:
+    """Resolve and validate a remote pin for task authoring.
+
+    Remote targeting is a real execution choice, so a bad pin must fail at
+    authoring time. Silently dropping it would leave the task unpinned, which
+    means a local daemon claims work the caller explicitly routed to another
+    machine — the opposite of what was asked for.
+
+    Returns ``(remote, error)``. ``remote`` is the resolved row so callers can
+    echo the name back to the model.
+    """
+    from lucent.db.remotes import RemoteRepository
+
+    try:
+        remote = await RemoteRepository(ctx["pool"]).require_active(
+            str(remote_target_id), str(ctx["org_id"])
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced to the model verbatim
+        return None, f"Invalid {label}: {exc}"
+    if not remote:
+        listed = await RemoteRepository(ctx["pool"]).list(str(ctx["org_id"]))
+        available = [
+            {"id": str(r["id"]), "name": r["name"], "status": r["status"]}
+            for r in listed
+        ]
+        return None, (
+            f"{label} {remote_target_id} does not reference an active remote "
+            f"instance in this organization. Call list_remotes to discover "
+            f"ids. Available: {available or 'none registered'}"
+        )
+    return remote, None
+
+
 async def _prepare_task_spec(
     spec: Any,
     *,
@@ -625,6 +730,31 @@ async def _prepare_task_spec(
 
     if (sandbox_template_id or sandbox_overrides) and not ctx["sandboxes_enabled"]:
         return None, "Sandboxes are disabled for this organization by the features.sandboxes_enabled setting"
+
+    # --- Remote targeting (Agent Control Protocol) ----------------------
+    # A remote runs the task in its own environment, so a sandbox on the same
+    # task would be silently ignored. Reject the combination rather than
+    # pretending both apply.
+    remote_target_id = spec.get("remote_target_id") or None
+    remote_name: str | None = None
+    if remote_target_id:
+        if sandbox_template_id or sandbox_overrides:
+            return None, (
+                "remote_target_id cannot be combined with sandbox_template_id "
+                "or sandbox_overrides — a remote executes the task in its own "
+                "environment"
+            )
+        if resolved_kind != "agent":
+            return None, (
+                f"remote_target_id applies to agent tasks only; this entry is "
+                f"a {resolved_kind!r} task"
+            )
+        remote, remote_error = await _resolve_remote_target(
+            ctx, str(remote_target_id)
+        )
+        if remote_error:
+            return None, remote_error
+        remote_name = remote["name"]
 
     # --- Decision steps -------------------------------------------------
     if resolved_kind == "decision":
@@ -816,7 +946,8 @@ async def _prepare_task_spec(
         "decision_config": None,
         "fusion_config": None,
         "backend_id": effective_backend,
-        "remote_target_id": spec.get("remote_target_id") or None,
+        "remote_target_id": str(remote_target_id) if remote_target_id else None,
+        "remote_name": remote_name,
     }
     if "parent_task_index" in spec:
         prepared["parent_task_index"] = spec.get("parent_task_index")
@@ -873,9 +1004,16 @@ from what actually gets scheduled. Each entry accepts the same fields as
 `create_task` (`title`, `description`, `agent_type`, `sequence_order`,
 `priority`, `model`, `reasoning_effort`, `sandbox_template_id`,
 `sandbox_overrides`, `output_contract`, `task_kind`, `execution_config`,
-`decision_config`, `fusion_config`, `backend_id`) plus `parent_task_index`
-(0-based position of the parent inside this same plan) for sub-tasks. Every
-entry is validated before the request is written.
+`decision_config`, `fusion_config`, `backend_id`, `remote_target_id`) plus
+`parent_task_index` (0-based position of the parent inside this same plan) for
+sub-tasks. Every entry is validated before the request is written.
+
+REMOTE PLACEMENT: an entry may carry `remote_target_id` to run that task on a
+registered remote instead of locally. Call `list_remotes` first, use only an
+`active` remote's id, and write the description to match that remote's
+`description_contract` — a remote running the `shell` executor only executes
+fenced sh/bash/shell/zsh/console code blocks. `remote_target_id` cannot be
+combined with `sandbox_template_id` or `sandbox_overrides`.
 
     Args:
     title: Short descriptive title (e.g. "Improve search performance")
@@ -1173,6 +1311,28 @@ accepted from planners — first call ``list_sandbox_templates`` to see what's
 approved, and if nothing fits, call ``propose_sandbox_template`` to submit a
 new design for review.
 
+REMOTE POLICY: To run the task on another machine (a laptop, build box, or any
+host running the Lucent remote agent) instead of locally, call ``list_remotes``
+first and pass the chosen remote's id as ``remote_target_id``. A remote
+executes the task in its own environment, so ``remote_target_id`` cannot be
+combined with ``sandbox_template_id`` / ``sandbox_overrides``. The task stays
+queued until that remote polls and claims it — it is invisible to local
+dispatch.
+
+The description you write must match that remote's executor — check the
+``description_contract`` field returned by ``list_remotes``. A remote running
+the ``shell`` executor only executes commands inside a fenced code block
+tagged ``sh``, ``bash``, ``shell``, ``zsh``, or ``console``; prose alone
+executes nothing and the task fails. Example of a description a ``shell``
+remote can run::
+
+    Report this host's identity.
+
+    ```sh
+    uname -a
+    df -h /
+    ```
+
 Args:
     request_id: ID of the parent request
     title: Short descriptive title for the task
@@ -1232,6 +1392,12 @@ Args:
         inherit the request's ``backend_id`` (if any) or use the default
         routing. For a local-provider backend, set ``model`` to one of that
         backend's models unless it declares a default.
+    remote_target_id: Optional id of a registered remote instance (from
+        list_remotes) that should execute this task. A remote runs the work in
+        its own environment; the task is invisible to local dispatch until that
+        remote claims it. Cannot be combined with ``sandbox_template_id`` or
+        ``sandbox_overrides``. Agent tasks only — decision/fusion tasks execute
+        in-process.
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved or the sandbox template is invalid."""
@@ -1254,6 +1420,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         decision_config: dict | None = None,
         fusion_config: dict | None = None,
         backend_id: str | None = None,
+        remote_target_id: str | None = None,
     ) -> str:
         user_id, org_id, user_role, _, _ = await _get_current_user_context()
         if not org_id:
@@ -1331,6 +1498,39 @@ if the agent type is not approved or the sandbox template is invalid."""
                     "custom_tooling_enabled": False,
                 }
             )
+
+        # --- Remote targeting (Agent Control Protocol) --------------------
+        # Validated here, not just in the repository, so the model gets an
+        # actionable message listing the remotes it can actually use.
+        remote_name: str | None = None
+        if remote_target_id:
+            if sandbox_template_id or sandbox_overrides:
+                return json.dumps(
+                    {
+                        "error": (
+                            "remote_target_id cannot be combined with "
+                            "sandbox_template_id or sandbox_overrides — a "
+                            "remote executes the task in its own environment"
+                        )
+                    }
+                )
+            if resolved_kind != "agent":
+                return json.dumps(
+                    {
+                        "error": (
+                            f"remote_target_id applies to agent tasks only; "
+                            f"this task is {resolved_kind!r} and runs "
+                            "in-process"
+                        )
+                    }
+                )
+            remote, remote_error = await _resolve_remote_target(
+                {"pool": await _get_pool(), "org_id": str(org_id)},
+                str(remote_target_id),
+            )
+            if remote_error:
+                return json.dumps({"error": remote_error})
+            remote_name = remote["name"]
 
         if sequence_order < 0:
             return json.dumps({"error": "sequence_order must be >= 0"})
@@ -1757,6 +1957,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                 backend_id=backend_id,
                 task_kind=resolved_kind,
                 execution_config=execution_config,
+                remote_target_id=str(remote_target_id) if remote_target_id else None,
                 authored_by_llm_session_id=get_llm_context().get("session_id"),
             )
         except ValueError as exc:
@@ -1778,8 +1979,115 @@ if the agent type is not approved or the sandbox template is invalid."""
                 "backend_id": (
                     str(task.get("backend_id")) if task.get("backend_id") else None
                 ),
+                "remote_target_id": (
+                    str(task.get("remote_target_id"))
+                    if task.get("remote_target_id")
+                    else None
+                ),
+                "remote_name": remote_name,
                 "sandboxes_enabled": org_sandboxes_enabled,
                 "custom_tooling_enabled": custom_tooling_enabled(organization_id=org_id),
+            }
+        )
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List registered remote executors available for task targeting.
+
+A remote is a non-local machine (another Lucent deployment, a laptop, a build
+box, or any host running the Lucent remote agent client) that polls this
+instance and runs the tasks pinned to it. Use this BEFORE creating a task that
+should run somewhere other than the local environment, then pass the chosen
+remote's ``id`` as ``remote_target_id`` on ``create_task`` or in a
+``task_plan`` entry.
+
+Returns JSON with ``remotes`` (id, name, description, status, last_seen_at,
+capabilities, token expiry) plus ``remote_targeting`` guidance. Only ``active``
+remotes can be targeted; ``disabled`` ones keep their pinned tasks queued but
+cannot claim, and ``revoked`` remotes are omitted.
+
+Targeting a remote is mutually exclusive with sandbox execution: a remote runs
+the work in its own environment, so a task cannot be both remote-pinned and
+sandboxed."""
+    )
+    async def list_remotes(include_disabled: bool = True) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+
+        from lucent.db.remotes import RemoteRepository
+
+        repo = RemoteRepository(await _get_pool())
+        try:
+            rows = await repo.list(str(org_id))
+        except Exception as exc:  # noqa: BLE001 — surfaced to the model verbatim
+            return json.dumps({"error": f"Could not read remote instances: {exc}"})
+
+        remotes: list[dict] = []
+        for row in rows:
+            status = row.get("status")
+            if status == "disabled" and not include_disabled:
+                continue
+            key_info = None
+            try:
+                key_info = await repo.get_key_expiry_info(
+                    str(row["id"]), str(org_id)
+                )
+            except Exception:  # noqa: BLE001 — token info is advisory only
+                logger.debug("Remote token info unavailable", exc_info=True)
+            remotes.append(
+                {
+                    "id": str(row["id"]),
+                    "name": row["name"],
+                    "description": row.get("description") or "",
+                    "status": status,
+                    "targetable": status == "active",
+                    "capabilities": _remote_capabilities(row.get("capabilities")),
+                    "executor": _remote_executor(row.get("capabilities")),
+                    "description_contract": _remote_description_contract(
+                        row.get("capabilities")
+                    ),
+                    "last_seen_at": _iso_or_none(row.get("last_seen_at")),
+                    "never_seen": not row.get("last_seen_at"),
+                    "token_expires_at": (
+                        _iso_or_none((key_info or {}).get("expires_at"))
+                    ),
+                }
+            )
+
+        active = [r for r in remotes if r["targetable"]]
+        if active:
+            hint = (
+                "Pass one of these ids as remote_target_id on create_task, or "
+                "in a task_plan entry. The task stays queued until that remote "
+                "polls and claims it, and it is invisible to local dispatch. A "
+                "remote-pinned task cannot also use sandbox_template_id. "
+                "IMPORTANT: read each remote's description_contract before "
+                "writing the task description — the contract decides what the "
+                "remote can execute. A remote whose executor is 'shell' only "
+                "runs fenced sh/bash/shell/zsh/console code blocks, so put the "
+                "actual commands in one."
+            )
+        elif remotes:
+            hint = (
+                "No remote is currently active. An owner must enable one at "
+                "/sandboxes?tab=remotes before tasks can target it. Without an "
+                "active remote, create the task without remote_target_id so "
+                "local execution handles it."
+            )
+        else:
+            hint = (
+                "No remotes are registered in this organization. Create tasks "
+                "without remote_target_id. To add one, an owner registers it at "
+                "/sandboxes?tab=remotes and runs scripts/lucent_remote_agent.py "
+                "on that machine."
+            )
+
+        return json.dumps(
+            {
+                "remotes": remotes,
+                "active_count": len(active),
+                "remote_targeting": hint,
             }
         )
 

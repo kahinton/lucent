@@ -117,9 +117,55 @@ tests). Use `--executor noop` to verify connectivity without running anything.
 | --- | --- |
 | `noop` | Echoes the task back as the result. Connectivity smoke test. |
 | `command` | Runs a fixed argv template, passing the rendered task text on stdin. Exit code 0 = success. |
+| `shell` | Runs the commands the task itself carries, in a per-task directory. Opt-in. |
 
 The task text includes the title, parent request title, task id, agent type,
 priority, and description — enough context to act without a round trip.
+
+#### The `command` executor
+
+`command` is for a host that has one fixed entry point (an agent runner, a build
+script). The task description travels on stdin, so it can never become shell
+syntax on the remote.
+
+#### The `shell` executor
+
+`shell` is for hosts where Lucent should be able to run arbitrary work. Enable
+it deliberately — it executes code chosen by whoever authored the task:
+
+```bash
+export LUCENT_REMOTE_EXECUTOR=shell
+# optional, defaults to $SHELL then /bin/sh
+export LUCENT_REMOTE_SHELL=/bin/zsh
+```
+
+The commands come from fenced code blocks in the task description, tagged `sh`,
+`bash`, `shell`, `zsh`, or `console`:
+
+    Report this host's identity.
+
+    ```sh
+    uname -a
+    sw_vers 2>/dev/null || true
+    ```
+
+Every recognized block is concatenated in order and run with `bash -c` (or the
+configured shell) in a fresh per-task directory. A task with **no** fenced
+command block fails with exit code 2 instead of executing the prose — running a
+description as a script is never the intent.
+
+Guard rails on `shell`:
+
+- per-task working directory (the cwd), cleaned up afterwards;
+- `TMPDIR` points at the task directory so scratch files are cleaned up;
+- `HOME` stays the operator's real home, so `git`, `ssh`, and `npm` read the
+  configs they expect. The per-task dir is not a sandbox — this executor already
+  runs task-authored code — so redirecting `HOME` would only have made commands
+  report a throwaway path and broken those tools. Override with
+  `LUCENT_REMOTE_HOME` if a dedicated home is wanted;
+- the configured task timeout applies (`--task-timeout`, default 3600s);
+- exit code and stderr are reported back, so failures are visible rather than
+  silent.
 
 A `lucent` executor (where the remote runs the task in its own sandboxes via a
 local daemon) fits the same interface and is the natural next step.
@@ -144,6 +190,33 @@ pretended.
 
 Tasks created by the daemon may also be pinned, which is how autonomous work
 can be routed to remote capacity.
+
+### From an agent (MCP)
+
+Agents discover remotes with `list_remotes()` and pin work with
+`remote_target_id`, either on `create_task` or inside a `create_request`
+`task_plan` entry:
+
+```python
+list_remotes()                 # ids, names, status, last_seen_at
+create_task(
+    request_id="…",
+    title="Collect host facts",
+    description="Report this machine's OS and disk usage.\n\n```sh\nuname -a\ndf -h\n```",
+    remote_target_id="<id from list_remotes>",
+)
+```
+
+Only `active` remotes are targetable. An unknown, disabled, or revoked id is
+rejected at authoring time with a list of usable remotes — never silently
+dropped, because a dropped pin means a local daemon claims work that was meant
+for another machine.
+
+`remote_target_id` is mutually exclusive with `sandbox_template_id` /
+`sandbox_overrides`, and applies to `agent` tasks only (decision and fusion
+tasks execute in-process).
+
+The shipped remote agent runs whichever executor its operator configured.
 
 ### Winding a remote down
 

@@ -140,6 +140,54 @@ request field, the `local` storage provider, and the `_migrations` bootstrap shi
 
 ### Added
 
+#### Remote task targeting for agents
+- **Agents can discover and target remotes.** `list_remotes` exposes every
+  registered remote with its id, status, `last_seen_at`, and — critically — its
+  **executor contract**, so a task author knows what a description must look like
+  to run there. Before this, `remote_target_id` existed in the database and the
+  REST API but no MCP tool accepted it, so a chat agent could not route work to a
+  remote at all.
+- **`create_task` and `task_plan` entries accept `remote_target_id`.** The pin is
+  validated at authoring time: an unknown, disabled, or revoked id fails with a
+  list of usable remotes rather than being dropped. A dropped pin would let local
+  dispatch claim work that was explicitly routed to another machine.
+- **Remote targeting is mutually exclusive with sandbox execution**, and applies
+  to `agent` tasks only (decision/fusion tasks run in-process). Both rules are
+  enforced when the task is authored, not when it dispatches.
+- **The remote agent gains a `shell` executor** for hosts where Lucent should run
+  arbitrary work. It executes commands from fenced `sh`/`bash`/`shell`/`zsh`/
+  `console` blocks in the task description, in a fresh per-task directory. A
+  description with no fenced block fails with exit code 2 instead of executing
+  prose. It is opt-in (`LUCENT_REMOTE_EXECUTOR=shell`) and never the default,
+  because it runs code chosen by whoever authored the task.
+- **Remotes report their executor on heartbeat**, and the controller persists it
+  onto `remote_instances.capabilities` (allowlisted fields only). This is what
+  lets `list_remotes` answer "how do I write a task this machine can run?".
+- **`scripts/start_remote_agent.sh`** starts this host as a remote from
+  `~/.lucent-remote.env`, refusing to start a second poller for the same remote.
+- **The remote agent survives a controller restart.** A deploy closing the
+  connection mid-request surfaced as `http.client.RemoteDisconnected`, which is
+  not a `urllib.error.URLError` — unhandled, it killed the agent on the remote
+  host at exactly the moment it needed to reconnect and retry.
+- **`remote_instances.capabilities` no longer doubles-encodes.** The pool's JSONB
+  codec already calls `json.dumps`, so writing `json.dumps(...)` produced a JSON
+  string scalar; merging onto it with `||` yielded an array instead of an object.
+  `RemoteRepository` now passes dicts, and the merge normalizes legacy scalar
+  values.
+- **Background reports surface real output, not a status line.** Every report path
+  used `COALESCE(result_summary, result)`; the remote agent sets
+  `result_summary` to "Completed on remote X in 0.0s", so that terse string won
+  and masked the host output the person asked for. The agent then replied "let
+  me know if you want me to pull them up" — a second round trip for data it
+  already had. Result now takes precedence in `subagent_reports`,
+  `RequestRepository`'s active-work excerpt, and `delegated_work`.
+- **The `shell` executor keeps the operator's real `HOME`.** Pointing `HOME` at
+  the per-task directory made `$HOME` report a throwaway path and would break
+  `~/.gitconfig`, `~/.ssh`, and `~/.npmrc`. The executor already runs
+  task-authored code, so redirecting `HOME` added no containment — only
+  misleading output. `TMPDIR` still points at the task directory. Override with
+  `LUCENT_REMOTE_HOME` / `--home`.
+
 #### Engine-owned model catalogs
 - **Engines report their own model lists.** `EngineSpec.discover` was declared on
   every engine from the start and called by nothing — discovery dispatched through

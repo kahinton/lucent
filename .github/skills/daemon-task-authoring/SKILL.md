@@ -96,7 +96,27 @@ For each task within a request, follow these steps:
 3. **Choose agent_type** — Pick a name returned by `list_agent_definitions(status='active')` (the [Agent Type Selection](#agent-type-selection) table gives examples). If it edits files → `code`. If it reads and synthesizes → `research`.
 4. **Set priority and size** — Use [Priority Calibration](#priority-calibration) for priority. Ensure the task fits within a single 3600-second session (see [Task Size](#task-size)); decompose if too large.
 5. **Add context** — Include specific file paths, search terms, constraints, and references to prior task results stored in memory. Omit nothing the agent would need.
-6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=..., backend_id=...)`. `model` is optional: omit it and the daemon selects a default. Set it only when the task clearly needs a specialized capability (see the model-selection skill). Normal tasks use the parent request's `backend_id` and `requested_model`; request-level pins are authoritative and cannot be replaced by a task-level default (decision steps ignore them). To run work on a coding engine, choose an `execution_targets` row from `list_available_models` and set both its `model` and `backend_id`; naming the model alone uses its `default_engine` instead. Do not assume a model is pinned to one engine — the model's `engine` is its default, and any compatible engine is selectable through that engine's backend.
+6. **Submit** — Call `create_task(request_id=..., title=..., description=..., agent_type=..., model=..., priority=..., sequence_order=..., backend_id=..., remote_target_id=...)`. `model` is optional: omit it and the daemon selects a default. Set it only when the task clearly needs a specialized capability (see the model-selection skill). Normal tasks use the parent request's `backend_id` and `requested_model`; request-level pins are authoritative and cannot be replaced by a task-level default (decision steps ignore them). To run work on a coding engine, choose an `execution_targets` row from `list_available_models` and set both its `model` and `backend_id`; naming the model alone uses its `default_engine` instead. Do not assume a model is pinned to one engine — the model's `engine` is its default, and any compatible engine is selectable through that engine's backend.
+
+### Where the Task Runs
+
+By default a task runs locally (or in a sandbox when `sandbox_template_id` is
+set). To run it on a **remote** — another registered machine that polls this
+instance — call `list_remotes()` and pass the chosen id as `remote_target_id`.
+
+```python
+create_task(request_id=..., title=..., description=..., remote_target_id="<id>")
+```
+
+- Only `status='active'` remotes are targetable; never invent an id.
+- A remote-pinned task is invisible to local dispatch and waits for that remote
+  to poll. No offline fallback to local execution.
+- `remote_target_id` is mutually exclusive with `sandbox_template_id` /
+  `sandbox_overrides`, and applies to `agent` tasks only.
+
+Reach for a remote when the work must observe or change a specific machine —
+that host's files, its toolchain, its network position — rather than generic
+code work that any environment could perform.
 
 ### Target Repository
 

@@ -37,8 +37,10 @@ testing and cron-style deployments).
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -92,6 +94,8 @@ class AgentConfig:
     remote_id: str
     executor: str = "command"
     command: list[str] = field(default_factory=list)
+    shell: str | None = None
+    home: str | None = None
     poll_seconds: int = DEFAULT_POLL_SECONDS
     heartbeat_seconds: int = DEFAULT_HEARTBEAT_SECONDS
     workdir: str | None = None
@@ -196,9 +200,9 @@ def config_from_env(args: argparse.Namespace) -> AgentConfig:
             "LUCENT_REMOTE_ID is required (the remote instance UUID shown in "
             "the Lucent UI when the remote was created)"
         )
-    if executor not in {"command", "noop"}:
+    if executor not in {"command", "noop", "shell"}:
         raise ConfigError(
-            f"Unknown executor {executor!r}. Available: command, noop"
+            f"Unknown executor {executor!r}. Available: command, noop, shell"
         )
     if executor == "command" and not command:
         raise ConfigError(
@@ -208,6 +212,14 @@ def config_from_env(args: argparse.Namespace) -> AgentConfig:
         raise ConfigError(
             f"Executor command not found on PATH: {command[0]!r}"
         )
+    if executor == "shell":
+        resolved_shell = args.shell or os.environ.get("LUCENT_REMOTE_SHELL") or ""
+        candidate = resolved_shell or os.environ.get("SHELL") or "/bin/sh"
+        if not shutil.which(candidate):
+            raise ConfigError(
+                f"Shell for the 'shell' executor not found: {candidate!r}"
+            )
+        resolved_shell = candidate
 
     return AgentConfig(
         controller_url=validate_controller_url(
@@ -217,6 +229,8 @@ def config_from_env(args: argparse.Namespace) -> AgentConfig:
         remote_id=remote_id,
         executor=executor,
         command=command,
+        shell=resolved_shell if executor == "shell" else None,
+        home=args.home or os.environ.get("LUCENT_REMOTE_HOME") or None,
         poll_seconds=args.poll_seconds,
         heartbeat_seconds=args.heartbeat_seconds,
         workdir=args.workdir,
@@ -272,6 +286,12 @@ class ControllerClient:
             raise ProtocolError(f"Controller unreachable: {exc.reason}") from exc
         except socket.timeout as exc:
             raise ProtocolError("Controller request timed out") from exc
+        except (http.client.HTTPException, OSError) as exc:
+            # The controller restarting mid-request surfaces as
+            # RemoteDisconnected / ConnectionResetError / BadStatusLine — none
+            # of which are URLError. Without this, a routine deploy kills the
+            # agent on the remote host, which is exactly when it must survive.
+            raise ProtocolError(f"Controller connection dropped: {exc}") from exc
 
         parsed: Any = None
         if raw:
@@ -470,7 +490,124 @@ def execute_noop(config: AgentConfig, task: dict, workdir: str) -> ExecutionResu
     )
 
 
-EXECUTORS = {"command": execute_command, "noop": execute_noop}
+# Fenced blocks a task description may use to carry commands for the "shell"
+# executor. Only a closed fence counts; an unterminated one is treated as prose
+# so a truncated task can never execute a half-written command.
+_COMMAND_FENCE = re.compile(
+    r"```(?:sh|bash|shell|zsh|console)\s*\n(.*?)```",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def extract_command_script(task: dict) -> str | None:
+    """Pull the shell commands out of a task description.
+
+    ``shell`` is the executor for *arbitrary* work, so the commands have to be
+    unambiguous. A task description is prose with an optional fenced command
+    block; running the whole description as a script would execute sentences.
+
+    Returns the concatenated body of every recognized fenced block, or None
+    when the task carries no command block.
+    """
+    description = str(task.get("description") or "")
+    blocks = [match.strip() for match in _COMMAND_FENCE.findall(description)]
+    blocks = [block for block in blocks if block]
+    if not blocks:
+        return None
+    return "\n\n".join(blocks)
+
+
+def execute_shell(config: AgentConfig, task: dict, workdir: str) -> ExecutionResult:
+    """Run the task's own shell commands in a shell, in a per-task directory.
+
+    SECURITY: this executor runs code chosen by whoever authored the task, so
+    it is opt-in — the operator enables it by setting
+    ``LUCENT_REMOTE_EXECUTOR=shell`` on that host. It is never the default.
+    The commands arrive inside the task description on stdin like every other
+    executor; nothing about them is interpolated into an argv, shell, or URL by
+    the agent itself.
+
+    Commands come from fenced ``sh``/``bash``/``shell`` blocks. A task with no
+    such block fails loudly instead of guessing, because executing prose is
+    never the intent.
+    """
+    started = time.monotonic()
+    script = extract_command_script(task)
+    if not script:
+        return ExecutionResult(
+            ok=False,
+            output=(
+                "The 'shell' executor needs the commands to run in a fenced "
+                "code block tagged sh, bash, shell, zsh, or console, e.g.\n\n"
+                "```sh\nuname -a\n```\n\n"
+                "This task's description contained no such block, so nothing "
+                "was executed."
+            ),
+            exit_code=2,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    shell = config.shell or os.environ.get("SHELL") or "/bin/sh"
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "LUCENT_TASK_ID": str(task.get("id") or ""),
+        "LUCENT_REQUEST_ID": str(task.get("request_id") or ""),
+        "LUCENT_REMOTE_ID": config.remote_id,
+        # Keep the operator's real HOME. The `shell` executor is already opt-in
+        # arbitrary code, so pointing HOME at the per-task dir would not add
+        # containment — it would only make commands report a throwaway path and
+        # break anything reading ~/.gitconfig, ~/.ssh, or ~/.npmrc.
+        "HOME": config.home or os.path.expanduser("~"),
+        # TMPDIR still points at the task dir so scratch files are cleaned up.
+        "TMPDIR": workdir,
+    }
+    try:
+        proc = subprocess.run(
+            [shell, "-c", script],
+            cwd=workdir,
+            env=env,
+            capture_output=True,
+            timeout=config.task_timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return ExecutionResult(
+            ok=False,
+            output=(
+                f"Task exceeded the remote timeout of "
+                f"{config.task_timeout_seconds}s and was terminated."
+            ),
+            exit_code=124,
+            duration_seconds=time.monotonic() - started,
+        )
+    except OSError as exc:
+        return ExecutionResult(
+            ok=False,
+            output=f"Failed to start shell {shell!r}: {exc}",
+            exit_code=127,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    combined = ""
+    if proc.stdout:
+        combined += proc.stdout.decode("utf-8", "replace")
+    if proc.stderr:
+        if combined and not combined.endswith("\n"):
+            combined += "\n"
+        combined += "--- stderr ---\n" + proc.stderr.decode("utf-8", "replace")
+
+    return ExecutionResult(
+        ok=proc.returncode == 0,
+        output=combined,
+        exit_code=proc.returncode,
+        duration_seconds=time.monotonic() - started,
+    )
+
+
+EXECUTORS = {
+    "command": execute_command,
+    "noop": execute_noop,
+    "shell": execute_shell,
+}
 
 
 # ── Agent loop ────────────────────────────────────────────────────────────
@@ -505,6 +642,12 @@ class RemoteAgent:
                 "hostname": socket.gethostname(),
                 "executor": self.config.executor,
                 "pid": os.getpid(),
+                # Report the execution contract so task authors know what a
+                # description must look like to run here. A `shell` remote only
+                # executes fenced command blocks; a `command` remote runs one
+                # fixed argv. Without this the controller has to guess.
+                "shell": self.config.shell,
+                "command": self.config.command,
             }
         )
         self._last_heartbeat = time.monotonic()
@@ -648,6 +791,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--command",
         help="Executor command; a JSON list for argv, or a plain string",
+    )
+    parser.add_argument(
+        "--shell",
+        help=(
+            "Shell binary for the 'shell' executor (default: $SHELL, then "
+            "/bin/sh). The shell executor is opt-in because it runs commands "
+            "authored by whoever created the task."
+        ),
+    )
+    parser.add_argument(
+        "--home",
+        help=(
+            "HOME for the 'shell' executor (default: the operator's real home, "
+            "so git/ssh/npm configs resolve normally)."
+        ),
     )
     parser.add_argument(
         "--poll-seconds", type=int, default=DEFAULT_POLL_SECONDS,

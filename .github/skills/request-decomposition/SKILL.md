@@ -28,6 +28,9 @@ on top of yours is the failure mode this design exists to prevent.
    The request-level `backend_id`/`requested_model` pins are inherited by every
    task, so set them at request level rather than per task.
 4. Call `list_sandbox_templates()` before assigning a sandbox to any task.
+5. Call `list_remotes()` when the work should run somewhere other than the
+   local environment — a person's own machine, a build box, or a named remote.
+   Only `active` remotes can be targeted. Never invent a remote id.
 
 ## Step 1: Decide Whether This Is Durable Work
 
@@ -140,11 +143,62 @@ Every entry accepts the same fields as `create_task`:
 `title`, `description`, `agent_type`, `sequence_order`, `priority`, `model`,
 `reasoning_effort`, `sandbox_template_id`, `sandbox_overrides`,
 `output_contract`, `task_kind`, `execution_config`, `decision_config`,
-`fusion_config`, `backend_id`
+`fusion_config`, `backend_id`, `remote_target_id`
 
 Plus `parent_task_index` — the 0-based position of the parent **within this same
 plan** — when a step is genuinely a sub-task. Parents must appear earlier in the
 list than their children.
+
+## Step 3b: Choose Where the Work Runs
+
+Three execution placements exist and they are mutually exclusive:
+
+| Placement | Mechanism | Use when |
+|---|---|---|
+| Local (default) | Neither field set | Ordinary work; the local daemon runs it |
+| Sandbox | `sandbox_template_id` | Isolated disposable container on this host |
+| Remote | `remote_target_id` | Work must happen on another machine — the person's laptop, a build box, a peer Lucent deployment |
+
+A remote is a registered executor that polls this instance, claims the tasks
+pinned to it, and reports back. It runs in **its own** environment, so a task
+that is remote-pinned must not also carry `sandbox_template_id` /
+`sandbox_overrides` — the combination is rejected rather than silently dropping
+one of them.
+
+```python
+list_remotes()      # discover ids; only status='active' is targetable
+```
+
+Then set it on the task:
+
+```python
+create_task(..., remote_target_id="<id from list_remotes>")
+# or, inside a plan:
+task_plan=[{..., "remote_target_id": "<id>"}]
+```
+
+Operational consequences to state plainly, because they change what the person
+observes:
+
+- A remote-pinned task is **invisible to local dispatch** — the local daemon
+  will never pick it up. It stays queued until that remote polls.
+- If the remote is offline, nothing runs. There is no automatic fallback to
+  local execution; that is deliberate, so work never silently runs on a machine
+  it was not meant for.
+- Only `active` remotes can claim. A `disabled` remote keeps its pinned tasks
+  queued; a `revoked` one is terminal.
+- `remote_target_id` applies to `agent` tasks only. Decision and fusion tasks
+  execute in-process.
+- A remote receives the task title/description and runs its configured
+  executor. It does not get sandbox credentials or Lucent secrets.
+
+If `list_remotes()` returns no active remote, do **not** invent an id. Either
+create the task without a remote pin so local execution handles it, or tell the
+person that a remote must be enabled first.
+
+When you report back, read the task's `result` (via `get_request_details`) and
+show the actual output. Saying "I got the details" without them makes the
+person ask a second time, which defeats the point of running it.
 
 ## Step 4: Sequence the Work
 
@@ -224,6 +278,8 @@ are about to extend. Switching a request that already has tasks back to
   in a transcript nobody will find later.
 - **Invented agent or model names.** Names not returned by
   `list_agent_definitions` / `list_available_models` are rejected at dispatch.
-- **Skipping discovery.** Naming an agent type or sandbox template you did not
-  look up.
+- **Skipping discovery.** Naming an agent type, sandbox template, or remote you
+  did not look up.
+- **Inventing a remote.** A made-up `remote_target_id` is rejected at authoring
+  time; an omitted one silently sends the work local instead of remote.
 - **Plans that cannot finish.** A single task asking for a multi-day refactor.

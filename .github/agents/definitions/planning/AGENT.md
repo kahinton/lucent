@@ -84,6 +84,26 @@ Follow the **daemon-task-authoring** skill's validation section:
 - Are agent types appropriate?
 - Does every sandboxed task reference an **approved** `sandbox_template_id`?
   Inline `sandbox_config` is rejected — see the sandbox section below.
+- Does every remotely-targeted task reference a real **active** remote from
+  `list_remotes()`, and is it free of sandbox fields?
+
+### Remote Selection (when work must run on a specific machine)
+
+A remote is a registered, non-local executor that polls this instance and runs
+the tasks pinned to it. Choose a remote when the work must observe or change a
+particular machine — its files, its toolchain, its network position — rather
+than generic work any environment could do.
+
+```
+list_remotes()      # only status='active' entries are targetable
+```
+
+Pass the chosen id as `remote_target_id` on `create_task` (or in the task-plan
+entry). Remote targeting and sandbox execution are mutually exclusive: a remote
+runs the task in its own environment, so a task cannot be both pinned and
+sandboxed. A remote-pinned task is invisible to local dispatch and stays queued
+until that remote polls — there is no offline fallback. If no remote is active,
+do not invent an id; leave the task local and report the gap.
 
 ### Sandbox Selection (required for any task that needs to run code)
 
