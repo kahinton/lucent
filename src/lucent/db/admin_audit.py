@@ -92,6 +92,12 @@ ORG_PROVISION = "org.provision"
 ORG_SUSPEND = "org.suspend"
 ORG_RESUME = "org.resume"
 ORG_SETTING_UPDATE = "org.setting_update"
+# Instance-operator pins. ``lock`` and ``unlock`` are kept distinct from
+# ``setting_update`` on purpose: writing a value and taking away a tenant's
+# ability to change it are different decisions, and an operator reviewing the
+# trail needs to see them separately.
+ORG_SETTING_LOCK = "org.setting_lock"
+ORG_SETTING_UNLOCK = "org.setting_unlock"
 ORG_USER_CREATE = "org.user_create"
 ORG_USER_ROLE_CHANGE = "org.user_role_change"
 ORG_API_KEY_CREATE = "org.api_key_create"
@@ -105,6 +111,8 @@ INSTANCE_OPERATOR_ACTIONS: frozenset[str] = frozenset(
         ORG_SUSPEND,
         ORG_RESUME,
         ORG_SETTING_UPDATE,
+        ORG_SETTING_LOCK,
+        ORG_SETTING_UNLOCK,
         ORG_USER_CREATE,
         ORG_USER_ROLE_CHANGE,
         ORG_API_KEY_CREATE,

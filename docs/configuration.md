@@ -24,6 +24,7 @@ The UI shows the active source for each value:
 - **From env** — no database value exists, so the matching environment variable is used.
 - **Default** — neither a database value nor environment variable is set.
 - **Locked** — visible for audit/diagnostics, but managed outside the DB-backed runtime settings table.
+- **Managed by your administrator** — the setting is controlled at the instance level (for example by a plan tier), so the workspace's admins and owner cannot change or reset it. Instance operators manage these through the hyperadmin API and the ops console; the operator's stated reason is shown in place of the editing controls.
 - **Hidden** — secret material is masked and not persisted in `runtime_settings`.
 - **Restart may be required** — the setting is loaded into process-level state; restart affected services after changing it.
 

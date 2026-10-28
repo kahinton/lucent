@@ -43,6 +43,8 @@
                         {% endif %}
                         {% if not d.editable %}
                         <span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">Locked</span>
+                        {% elif item.locked %}
+                        <span class="inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">Managed by your administrator</span>
                         {% endif %}
                         {% if d.sensitive %}
                         <span class="inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-medium text-rose-700">Hidden</span>
@@ -68,7 +70,7 @@
                         <p data-runtime-display-value class="mt-1 text-sm font-semibold text-gray-900 break-all">{{ item.display_value }}</p>
                     </div>
 
-                    {% if d.editable %}
+                    {% if d.editable and not item.locked %}
                     <div class="mt-3 flex flex-col sm:flex-row gap-2">
                         <form action="/settings/runtime/{{ d.key }}" method="post" class="flex-1 flex gap-2" data-runtime-form="save">
                             {% if item.control_type in ('select', 'model') %}
@@ -102,6 +104,20 @@
                                 Reset
                             </button>
                         </form>
+                    </div>
+                    {% elif item.locked %}
+                    <div class="mt-3 rounded-lg border border-violet-200 bg-violet-50 p-3">
+                        <p class="text-xs font-medium text-violet-900">Managed by your instance administrator</p>
+                        <p class="mt-1 text-xs text-violet-800">
+                            {% if item.lock and item.lock.reason %}
+                            {{ item.lock.reason }}
+                            {% else %}
+                            This setting is controlled at the instance level on your plan, so it cannot be changed here.
+                            {% endif %}
+                        </p>
+                        {% if item.lock and item.lock.locked_by_name %}
+                        <p class="mt-1 text-[11px] text-violet-700">Locked by {{ item.lock.locked_by_name }}</p>
+                        {% endif %}
                     </div>
                     {% else %}
                     <div class="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">

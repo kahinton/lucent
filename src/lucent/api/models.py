@@ -639,6 +639,11 @@ class OrganizationSettingValue(BaseModel):
     caller can read it, edit it, and write it back unchanged. ``display_value``
     is the human-readable rendering the settings UI shows (for example
     "Disabled" for a false boolean) and is for presentation only.
+
+    ``locked`` means an instance operator has pinned this setting: the tenant's
+    own admins and owners cannot change or reset it. Operator writes through this
+    API are still allowed — that is how the pin is applied. ``lock_reason`` is the
+    operator's explanation, rendered to the tenant in place of the controls.
     """
 
     key: str
@@ -648,6 +653,163 @@ class OrganizationSettingValue(BaseModel):
     title: str | None = None
     section: str | None = None
     display_value: str | None = None
+    locked: bool = Field(
+        default=False,
+        description="An instance operator locked this setting against tenant changes",
+    )
+    lock_reason: str | None = Field(
+        default=None, description="Operator-supplied explanation for the lock"
+    )
+    locked_by_name: str | None = None
+    locked_at: datetime | None = None
+
+
+class OrganizationSettingLockUpdate(BaseModel):
+    """Pin or unpin one runtime setting.
+
+    ``reason`` is shown to the tenant, so it should read as an explanation of the
+    plan or policy ("Included with the Team plan") rather than internal notes.
+    """
+
+    reason: str = Field(
+        default="",
+        max_length=500,
+        description="Explanation shown to the tenant instead of the editing controls",
+    )
+
+
+class OrganizationSettingLockValue(BaseModel):
+    """One locked setting, as returned by the operator lock endpoints."""
+
+    key: str
+    title: str | None = None
+    section: str | None = None
+    reason: str = ""
+    locked_by: UUID | None = None
+    locked_by_name: str | None = None
+    locked_at: datetime | None = None
+    value: Any = None
+    source: str | None = None
+    display_value: str | None = None
+
+
+class OrganizationSettingLockEntry(BaseModel):
+    """One setting in a bulk lock set.
+
+    ``value`` is optional and deliberately separate from the lock: naming a value
+    means "pin this tenant to that value", omitting it means "freeze whatever the
+    instance currently resolves to". The two are the same call because a tier
+    almost always wants both, but the distinction must stay expressible.
+    """
+
+    key: str = Field(..., min_length=1)
+    reason: str = Field(
+        default="",
+        max_length=500,
+        description="Explanation shown to the tenant instead of the editing controls",
+    )
+    value: Any = Field(
+        default=None,
+        description=(
+            "Optional value to store before locking. Omit to freeze the setting at "
+            "whatever the environment or built-in default currently resolves to."
+        ),
+    )
+
+
+class OrganizationSettingLockBulkRequest(BaseModel):
+    """Reconcile an organization's whole lock set in one call.
+
+    This is the shape a tier application applies: declare the complete set of
+    settings the plan pins, and the server converges to it. Re-sending the same
+    body is a no-op, which is what makes it safe to retry from a webhook.
+    """
+
+    locks: list[OrganizationSettingLockEntry] = Field(default_factory=list)
+    release_unlisted: bool = Field(
+        default=True,
+        description=(
+            "Release locks not named in `locks`. Set false to only add/reason "
+            "settings, leaving any other operator pin in place."
+        ),
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="Report what would change without writing",
+    )
+
+
+class OrganizationSettingLockBulkFailure(BaseModel):
+    """One setting in a bulk apply that could not be locked."""
+
+    key: str
+    error: str
+
+
+class OrganizationSettingLockBulkResult(BaseModel):
+    """Outcome of a bulk lock apply or release.
+
+    Per-setting failure rather than all-or-nothing: a tier that names one retired
+    setting still applies the rest and reports the bad one, so a catalog change
+    cannot brick a caller's entire flow.
+    """
+
+    organization_id: UUID
+    dry_run: bool = False
+    locked: list[str] = Field(default_factory=list)
+    updated: list[str] = Field(default_factory=list)
+    values_written: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Settings whose stored value was changed. Reported separately from "
+            "`locked`/`updated` because a value change and a lock change are "
+            "independent: a plan that keeps its locks but changes a limit "
+            "produces writes with no lock delta."
+        ),
+    )
+    released: list[str] = Field(default_factory=list)
+    unchanged: list[str] = Field(default_factory=list)
+    not_locked: list[str] = Field(default_factory=list)
+    failed: list[OrganizationSettingLockBulkFailure] = Field(default_factory=list)
+
+
+class OrganizationSettingLockReleaseRequest(BaseModel):
+    """Release a named set of locks.
+
+    Not a reconcile: exactly these keys are released, so a pin an operator placed
+    by hand survives. That is the right shape for "undo this tier".
+    """
+
+    keys: list[str] = Field(..., min_length=1)
+
+
+class InstanceSettingLockEntry(BaseModel):
+    """One lock in the cross-tenant monitoring view."""
+
+    organization_id: UUID
+    organization_name: str | None = None
+    key: str
+    title: str | None = None
+    section: str | None = None
+    reason: str = ""
+    db_value: Any = Field(
+        default=None,
+        description="The tenant's stored value; null means it inherits env/default",
+    )
+    locked_by: UUID | None = None
+    locked_by_name: str | None = None
+    locked_at: datetime | None = None
+
+
+class InstanceSettingLockResponse(BaseModel):
+    """Every setting lock on the instance, in three useful groupings."""
+
+    total: int
+    locks: list[InstanceSettingLockEntry]
+    by_setting: dict[str, list[InstanceSettingLockEntry]] = Field(default_factory=dict)
+    by_organization: dict[str, list[InstanceSettingLockEntry]] = Field(
+        default_factory=dict
+    )
 
 
 class OrganizationSettingsResponse(BaseModel):

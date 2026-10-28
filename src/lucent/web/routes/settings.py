@@ -46,6 +46,7 @@ from lucent.db import (
 from lucent.db import admin_audit as audit_actions
 from lucent.db.organization import OrganizationNameConflictError
 from lucent.db.pool import scoped_acquire_on
+from lucent.db.runtime_settings import RuntimeSettingLockedError
 from lucent.rbac import is_admin_role, is_owner_role
 
 from ._shared import _check_csrf, _set_csrf_cookie, get_user_context, templates
@@ -79,6 +80,18 @@ def _refresh_runtime_setting_dependents(setting_key: str) -> None:
             reset_rate_limiters()
         except Exception:
             logger.debug("failed to reset rate limiters after settings update", exc_info=True)
+
+
+def _may_bypass_setting_lock(user) -> bool:
+    """Only an instance operator may override a lock they own.
+
+    Tenant admins and owners are exactly who a lock excludes, so they must never
+    bypass it. A hyperadmin is the role that creates locks, and reaching this page
+    at all means they are acting on their own organization; refusing them would
+    mean an operator could pin a value and then be unable to fix it without
+    dropping back to the CLI or the console.
+    """
+    return _role_value(user) == "hyperadmin"
 
 
 def _runtime_settings_wants_json(request: Request) -> bool:
@@ -704,7 +717,12 @@ async def settings_runtime(
 
 @router.post("/settings/runtime/{setting_key:path}/reset")
 async def settings_runtime_reset(request: Request, setting_key: str):
-    """Delete a DB setting so env/default fallback is used again."""
+    """Delete a DB setting so env/default fallback is used again.
+
+    Refused when an instance operator has locked the setting: "reset to the
+    instance default" is otherwise a one-click way around a pin, because the
+    locked value usually *is* the tenant's DB row.
+    """
     user = await _require_admin_or_owner(request)
     await _check_csrf(request)
 
@@ -727,7 +745,14 @@ async def settings_runtime_reset(request: Request, setting_key: str):
 
     pool = await get_pool()
     repo = RuntimeSettingsRepository(pool)
-    deleted = await repo.delete_setting(user.organization_id, setting_key)
+    try:
+        deleted = await repo.delete_setting(
+            user.organization_id,
+            setting_key,
+            ignore_lock=_may_bypass_setting_lock(user),
+        )
+    except RuntimeSettingLockedError as exc:
+        return _runtime_settings_error_response(request, str(exc), status_code=403)
     runtime_settings.clear_runtime_setting_cache(user.organization_id, setting_key)
     _refresh_runtime_setting_dependents(setting_key)
 
@@ -770,7 +795,12 @@ async def settings_runtime_reset(request: Request, setting_key: str):
 
 @router.post("/settings/runtime/{setting_key:path}")
 async def settings_runtime_update(request: Request, setting_key: str):
-    """Create/update a DB-backed runtime setting value."""
+    """Create/update a DB-backed runtime setting value.
+
+    Refused when an instance operator has locked the setting. The lock is a
+    write barrier owned by the operator path, so this route never passes
+    ``ignore_lock``: a tenant admin or owner is exactly who the lock excludes.
+    """
     user = await _require_admin_or_owner(request)
     await _check_csrf(request)
 
@@ -809,13 +839,17 @@ async def settings_runtime_update(request: Request, setting_key: str):
     )
 
     repo = RuntimeSettingsRepository(pool)
-    await repo.upsert_setting(
-        organization_id=user.organization_id,
-        key=setting_key,
-        value=value,
-        value_type=definition.value_type,
-        user_id=user.id,
-    )
+    try:
+        await repo.upsert_setting(
+            organization_id=user.organization_id,
+            key=setting_key,
+            value=value,
+            value_type=definition.value_type,
+            user_id=user.id,
+            ignore_lock=_may_bypass_setting_lock(user),
+        )
+    except RuntimeSettingLockedError as exc:
+        return _runtime_settings_error_response(request, str(exc), status_code=403)
     runtime_settings.set_runtime_setting_cache(user.organization_id, setting_key, value)
     _refresh_runtime_setting_dependents(setting_key)
 

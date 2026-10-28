@@ -79,6 +79,12 @@ All routes are under `/api/organizations`. Every route listed here requires
 | `DELETE` | `/{id}/users/{uid}` | Remove a member |
 | `GET` | `/{id}/settings` | Editable runtime settings for that tenant |
 | `PUT` | `/{id}/settings/{key}` | Set (`{"value": ...}`) or reset (`{"reset": true}`) |
+| `GET` | `/{id}/setting-locks` | Settings this tenant cannot change |
+| `PUT` | `/{id}/setting-locks/{key}` | Pin a setting (`{"reason": "..."}`) |
+| `DELETE` | `/{id}/setting-locks/{key}` | Release a pin back to the tenant |
+| `PUT` | `/{id}/setting-locks` | **Reconcile the whole lock set** (tier apply) |
+| `POST` | `/{id}/setting-locks/release` | Release a named set of locks |
+| `GET` | `/instance/setting-locks` | Every lock across every tenant |
 | `GET` | `/instance/settings-schema` | Key/type/default/bounds for every editable setting |
 | `GET` | `/instance/runtime` | Configured LLM engine and the providers it can run |
 | `GET` | `/instance/providers` | Provider catalogue, with the engines using each |
@@ -93,6 +99,139 @@ All routes are under `/api/organizations`. Every route listed here requires
 | `PATCH` | `/{id}/models/{model_id}` | Enable/disable an **org-owned** model |
 | `GET` | `/{id}/audit` | That tenant's admin audit log |
 | `GET` | `/instance/audit` | Operator trail across all tenants |
+
+### Locking settings for a tenant
+
+A lock is a **write barrier, not a value**. The effective value keeps living in
+`runtime_settings` (or its environment/built-in fallback); a lock only removes
+the tenant's ability to change it. Two consequences worth knowing before using
+them:
+
+* **Set, then lock.** The two are deliberately separate calls, so you can pin a
+  setting without also pinning a value — the tenant is then held to whatever the
+  instance currently resolves to.
+* **Reset is blocked too.** Without that, a tenant could delete the DB row and
+  fall back to an instance default the operator was overriding, undoing the pin
+  in one click.
+
+Operator writes are *not* blocked: the same API owns the barriers. That is how a
+plan change re-pins a tenant to a new value without an unlock in between.
+
+Unlocking changes only *who may write* — the stored value is untouched, so
+releasing a barrier never silently changes what the customer experiences.
+
+```bash
+# pin sandboxes off for one tenant
+curl -X PUT .../api/organizations/$ORG/settings/features.sandboxes_enabled \
+     -d '{"value": false}'
+curl -X PUT .../api/organizations/$ORG/setting-locks/features.sandboxes_enabled \
+     -d '{"reason": "Not included in your plan."}'
+
+# hand it back (value stays false, tenant may now change it)
+curl -X DELETE .../api/organizations/$ORG/setting-locks/features.sandboxes_enabled
+```
+
+Every lock and unlock is written to the operator's own audit trail **and** to the
+tenant's, as `org.setting_lock` / `org.setting_unlock`. A customer can always see
+that access to a setting was removed, and by whom.
+
+The tenant's Settings page renders a locked setting as read-only, with the
+operator's `reason` in place of the editing controls.
+
+### Applying a tier
+
+Tier definitions belong to the application that sells them; this API supplies
+only the primitives that application needs. One call sets a tenant's complete
+lock set:
+
+```http
+PUT /api/organizations/{id}/setting-locks
+Authorization: Bearer <hyperadmin key>
+
+{
+  "locks": [
+    {"key": "features.sandboxes_enabled", "reason": "Starter plan", "value": false},
+    {"key": "models.chat_model", "reason": "Starter plan", "value": "<model id>"},
+    {"key": "memory.search_vitality_boost_alpha", "reason": "Starter plan"}
+  ],
+  "release_unlisted": true,
+  "dry_run": false
+}
+```
+
+The response is a diff, not a status:
+
+```json
+{
+  "organization_id": "...",
+  "dry_run": false,
+  "locked": ["features.sandboxes_enabled"],
+  "updated": ["models.chat_model"],
+  "values_written": ["memory.search_vitality_boost_alpha"],
+  "released": ["some.other.setting"],
+  "unchanged": ["another.setting"],
+  "not_locked": [],
+  "failed": [{"key": "retired.setting", "error": "Unknown or read-only setting: ..."}]
+}
+```
+
+`updated` (the **lock** changed, i.e. its reason) and `values_written` (the
+**value** changed) are deliberately separate: a plan can change a limit without
+changing which settings it pins, and a caller reconciling a tier needs to tell
+those apart. A setting whose value write fails is **not** locked — otherwise the
+tenant would be pinned to exactly the stale value the caller was replacing.
+
+Four properties are deliberate, because a webhook that fires twice, or a plan
+change during a catalog migration, is the normal case rather than the exception:
+
+* **Declare the target state, don't send a delta.** `release_unlisted: true`
+  (the default) releases any lock not named in `locks`, so re-sending the same
+  body is a no-op and the call converges instead of accumulating. Use
+  `release_unlisted: false` when you want to add to a tenant's set without
+  undoing pins an operator placed by hand.
+* **`value` is written before the lock.** A tier that says "pin this to X" can
+  never end up with a lock on a value it never wrote. Omit `value` to freeze the
+  setting at whatever the instance currently resolves to — no DB row is created.
+  A value that differs from what is stored is written even when the `reason` is
+  unchanged, so "same tier, new limit" is applied rather than skipped.
+* **Per-setting failure, never all-or-nothing.** A tier naming one retired
+  setting still applies the other twenty and reports the bad one in `failed`. A
+  catalog change cannot brick the caller's whole flow.
+* **`dry_run` returns the same diff without writing**, for pre-flighting a plan
+  change. It writes no audit row either.
+
+One audit row is written per batch — a tier apply is one decision — with the
+affected keys in `changed_fields` and the reasons under `new_values.reasons`. A
+batch that changed nothing writes nothing.
+
+To undo a tier, release exactly the keys it pinned:
+
+```http
+POST /api/organizations/{id}/setting-locks/release
+{"keys": ["features.sandboxes_enabled", "models.chat_model"]}
+```
+
+This is **not** a reconcile: anything an operator pinned by hand survives. Keys
+that were not locked come back in `not_locked` rather than erroring, so releasing
+the same set twice is safe.
+
+### Monitoring locks across tenants
+
+```http
+GET /api/organizations/instance/setting-locks?key=features.sandboxes_enabled
+```
+
+Returns `{total, locks, by_setting, by_organization}` — the same rows grouped
+both ways so a dashboard does not have to reshape them. Each row carries
+`organization_name`, `reason`, `locked_by_name`, and `db_value`.
+
+`db_value` is the tenant's **stored override** and is `null` when the tenant
+inherits the environment or built-in default. That is the frozen-fallback case,
+and a monitoring caller needs to see it rather than infer it: it means "this
+tenant is pinned, but to the instance's value rather than one of its own".
+
+Without this endpoint, answering "which tenants have X pinned" would be
+O(tenants) HTTP round trips.
 
 ### The signup flow
 
@@ -333,8 +472,10 @@ anything is worse than one that tells you which variable is missing.
   change role, reset password, mint key, remove), model providers (save or clear a
   per-tenant key, run discovery), models (grant a shared model into the tenant,
   enable/disable an owned one), runtime settings grouped by section with each
-  value's source (`DB` / `env` / `default`), recent activity, and a name-confirmed
-  delete.
+  value's source (`DB` / `env` / `default`) and a **lock** control per setting,
+  recent activity, and a name-confirmed delete. Locking is how a plan tier is
+  expressed: the tenant keeps its settings screen, but the settings you pinned
+  render read-only with your stated reason.
 * **Instance audit** — the operator trail, filterable by tenant and action.
 * **Status** — reachability, key validity, and whether the key belongs to a
   hyperadmin.

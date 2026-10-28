@@ -32,6 +32,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from lucent import settings as runtime_settings
 from lucent.api.deps import AuthenticatedUser, HyperadminUser, OwnerUser
 from lucent.api.models import (
     CredentialFieldSpec,
@@ -40,6 +41,8 @@ from lucent.api.models import (
     ErrorResponse,
     InstanceAuditEntry,
     InstanceAuditResponse,
+    InstanceSettingLockEntry,
+    InstanceSettingLockResponse,
     OrganizationAdminCreate,
     OrganizationAdminCreated,
     OrganizationApiKeyCreate,
@@ -53,6 +56,11 @@ from lucent.api.models import (
     OrganizationProvisionRequest,
     OrganizationProvisionResponse,
     OrganizationResponse,
+    OrganizationSettingLockBulkRequest,
+    OrganizationSettingLockBulkResult,
+    OrganizationSettingLockReleaseRequest,
+    OrganizationSettingLockUpdate,
+    OrganizationSettingLockValue,
     OrganizationSettingsResponse,
     OrganizationSettingUpdate,
     OrganizationSettingValue,
@@ -75,7 +83,6 @@ from lucent.rbac import Permission, can_assign_role, can_manage_user
 from lucent.services import org_providers as instance_providers
 from lucent.services import org_provisioning
 from lucent.services import org_settings as instance_settings
-from lucent import settings as runtime_settings
 
 logger = get_logger(__name__)
 
@@ -558,6 +565,65 @@ async def list_instance_audit(
 
 
 @router.get(
+    "/instance/setting-locks",
+    response_model=InstanceSettingLockResponse,
+)
+async def monitor_instance_setting_locks(
+    user: HyperadminUser,
+    key: str | None = Query(
+        default=None, description="Only locks on this setting key"
+    ),
+) -> InstanceSettingLockResponse:
+    """Every setting lock across every tenant.
+
+    Requires hyperadmin role. This is the monitoring half of the feature: an
+    outside application that assigns tiers needs to answer "which tenants are
+    pinned to what", and doing that by iterating tenants over HTTP would be
+    O(tenants) round trips for a single dashboard.
+
+    ``db_value`` is the tenant's stored override and is null when the tenant
+    inherits the environment or built-in default — the pure "frozen fallback"
+    case, which is a fact a monitoring caller needs to see rather than infer.
+
+    Declared here, above every ``/{organization_id}`` route, because a literal
+    ``instance`` segment would otherwise be captured by that UUID parameter and
+    rejected with a 422.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+
+    pool = await get_pool()
+    payload = await instance_settings.monitor_locks(pool, key=key)
+
+    def to_entry(row: dict[str, Any]) -> InstanceSettingLockEntry:
+        definition = runtime_settings.get_runtime_setting_definition(row["key"])
+        return InstanceSettingLockEntry(
+            organization_id=row["organization_id"],
+            organization_name=row.get("organization_name"),
+            key=row["key"],
+            title=definition.title if definition else None,
+            section=definition.section if definition else None,
+            reason=row.get("reason") or "",
+            db_value=row.get("db_value"),
+            locked_by=row.get("locked_by"),
+            locked_by_name=row.get("locked_by_name"),
+            locked_at=row.get("locked_at"),
+        )
+
+    return InstanceSettingLockResponse(
+        total=payload["total"],
+        locks=[to_entry(row) for row in payload["locks"]],
+        by_setting={
+            group: [to_entry(row) for row in rows]
+            for group, rows in payload["by_setting"].items()
+        },
+        by_organization={
+            group: [to_entry(row) for row in rows]
+            for group, rows in payload["by_organization"].items()
+        },
+    )
+
+
+@router.get(
     "",
     response_model=OrganizationListResponse,
 )
@@ -911,6 +977,320 @@ async def update_organization_setting(
     )
 
     return OrganizationSettingValue(**result["entry"])
+
+
+@router.put(
+    "/{organization_id}/setting-locks/{setting_key:path}",
+    response_model=OrganizationSettingLockValue,
+)
+async def lock_organization_setting(
+    organization_id: UUID,
+    setting_key: str,
+    user: HyperadminUser,
+    data: OrganizationSettingLockUpdate | None = None,
+) -> OrganizationSettingLockValue:
+    """Pin one runtime setting so the tenant can no longer change it.
+
+    Requires hyperadmin role. Locking is the feature, not a modifier on a write:
+    the value stays wherever it already lives (a DB row, or the env/default
+    fallback) and this only removes the tenant's ability to edit **or reset** it.
+    Resetting matters — without it, a tenant could delete the row and take the
+    setting back to an instance default that the operator was overriding.
+
+    Re-locking an already locked setting updates the reason and the operator, so
+    a pin can be re-justified after a plan change without an unlock in between.
+
+    The path deliberately does **not** live under ``/settings/``: that collection
+    already declares ``PUT /settings/{setting_key:path}``, whose greedy path
+    parameter would swallow ``/settings/<key>/lock`` whole.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    pool = await get_pool()
+    reason = (data.reason if data else "") or ""
+    try:
+        result = await instance_settings.lock_setting(
+            pool,
+            organization_id,
+            setting_key,
+            reason=reason,
+            actor_user_id=user.id,
+        )
+    except instance_settings.UnknownSettingError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
+
+    entry = result["entry"]
+    await _audit(
+        user,
+        action=audit_actions.ORG_SETTING_LOCK,
+        entity_type="settings",
+        entity_id=organization_id,
+        entity_label=result["title"],
+        target_org_id=organization_id,
+        changed_fields=[setting_key],
+        old_values={"locked": result["already_locked"], "reason": result["previous_reason"]},
+        new_values={"locked": True, "reason": result["reason"]},
+        notes=(
+            f"Setting {setting_key} re-locked by an instance operator."
+            if result["already_locked"]
+            else f"Setting {setting_key} locked against tenant changes by an instance operator."
+        ),
+    )
+
+    return OrganizationSettingLockValue(
+        key=entry["key"],
+        title=entry["title"],
+        section=entry["section"],
+        reason=result["reason"],
+        locked_by=result["lock"].get("locked_by"),
+        locked_by_name=entry.get("locked_by_name"),
+        locked_at=result["lock"].get("locked_at"),
+        value=entry["value"],
+        source=entry["source"],
+        display_value=entry["display_value"],
+    )
+
+
+@router.delete(
+    "/{organization_id}/setting-locks/{setting_key:path}",
+    response_model=OrganizationSettingLockValue,
+)
+async def unlock_organization_setting(
+    organization_id: UUID,
+    setting_key: str,
+    user: HyperadminUser,
+) -> OrganizationSettingLockValue:
+    """Release a pinned setting back to the tenant's admins and owners.
+
+    Requires hyperadmin role. The stored value is deliberately left alone:
+    unlocking changes *who may edit*, never what the tenant experiences.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    pool = await get_pool()
+    try:
+        result = await instance_settings.unlock_setting(
+            pool, organization_id, setting_key, actor_user_id=user.id
+        )
+    except instance_settings.UnknownSettingError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
+    except instance_settings.SettingNotLockedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+
+    entry = result["entry"]
+    await _audit(
+        user,
+        action=audit_actions.ORG_SETTING_UNLOCK,
+        entity_type="settings",
+        entity_id=organization_id,
+        entity_label=result["title"],
+        target_org_id=organization_id,
+        changed_fields=[setting_key],
+        old_values={"locked": True, "reason": result["previous_reason"]},
+        new_values={"locked": False},
+        notes=f"Setting {setting_key} unlocked by an instance operator.",
+    )
+
+    return OrganizationSettingLockValue(
+        key=entry["key"],
+        title=entry["title"],
+        section=entry["section"],
+        reason=result["previous_reason"],
+        value=entry["value"],
+        source=entry["source"],
+        display_value=entry["display_value"],
+    )
+
+
+@router.get(
+    "/{organization_id}/setting-locks",
+    response_model=list[OrganizationSettingLockValue],
+)
+async def list_organization_setting_locks(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> list[OrganizationSettingLockValue]:
+    """List the settings this tenant's admins cannot change.
+
+    Requires hyperadmin role. Kept separate from ``GET /{id}/settings`` so a
+    caller that only cares about "what is pinned here" does not have to load the
+    whole catalog, and so the console can render the locked set even when the
+    full settings read fails.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    pool = await get_pool()
+    await runtime_settings.load_runtime_setting_locks_from_db(
+        pool, organization_id=organization_id
+    )
+    locks = runtime_settings.runtime_setting_locks(organization_id)
+
+    items: list[OrganizationSettingLockValue] = []
+    for key, lock in sorted(locks.items()):
+        definition = runtime_settings.get_runtime_setting_definition(key)
+        value = runtime_settings.get_runtime_setting(key, organization_id=organization_id)
+        items.append(
+            OrganizationSettingLockValue(
+                key=key,
+                title=definition.title if definition else None,
+                section=definition.section if definition else None,
+                reason=lock.get("reason") or "",
+                locked_by=lock.get("locked_by"),
+                locked_by_name=lock.get("locked_by_name"),
+                locked_at=lock.get("locked_at"),
+                value=value,
+                source=runtime_settings.get_runtime_setting_source(
+                    key, organization_id=organization_id
+                ),
+                display_value=(
+                    runtime_settings._display_value(definition, value)  # noqa: SLF001
+                    if definition
+                    else str(value)
+                ),
+            )
+        )
+    return items
+
+
+@router.put(
+    "/{organization_id}/setting-locks",
+    response_model=OrganizationSettingLockBulkResult,
+)
+async def apply_organization_setting_locks(
+    organization_id: UUID,
+    data: OrganizationSettingLockBulkRequest,
+    user: HyperadminUser,
+) -> OrganizationSettingLockBulkResult:
+    """Declare this tenant's complete lock set and converge to it.
+
+    Requires hyperadmin role. This is the endpoint a tier application drives:
+    post the settings a plan pins and the server locks what is missing,
+    re-reasons what changed, and (unless ``release_unlisted`` is false) releases
+    what the plan no longer includes. Re-posting the same body is a no-op, which
+    is what makes it safe to retry from a webhook.
+
+    Partial failure is reported per setting rather than aborting: a tier naming
+    one retired setting still applies the rest, so a catalog change cannot brick
+    the caller's whole flow. ``dry_run`` returns the same diff shape without
+    writing, for pre-flighting a plan change.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    pool = await get_pool()
+    try:
+        result = await instance_settings.apply_lock_set(
+            pool,
+            organization_id,
+            entries=[entry.model_dump() for entry in data.locks],
+            actor_user_id=user.id,
+            release_unlisted=data.release_unlisted,
+            dry_run=data.dry_run,
+        )
+    except instance_settings.UnknownOrganizationError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
+
+    if data.dry_run:
+        # A dry run changed nothing, so it must not write an audit row.
+        return OrganizationSettingLockBulkResult(**result)
+
+    changed = (
+        result["locked"]
+        + result["updated"]
+        + result["values_written"]
+        + result["released"]
+    )
+    if changed or result["failed"]:
+        await _audit(
+            user,
+            action=audit_actions.ORG_SETTING_LOCK,
+            entity_type="settings",
+            entity_id=organization_id,
+            entity_label="setting locks (bulk)",
+            target_org_id=organization_id,
+            changed_fields=sorted(set(changed)),
+            old_values=None,
+            new_values={
+                "locked": result["locked"],
+                "updated": result["updated"],
+                "values_written": result["values_written"],
+                "released": result["released"],
+                "reasons": {
+                    entry.key: entry.reason
+                    for entry in data.locks
+                    if entry.key in result["locked"] + result["updated"]
+                },
+            },
+            notes=(
+                f"{len(result['locked'])} lock(s) applied, "
+                f"{len(result['updated'])} re-reasoned, "
+                f"{len(result['values_written'])} value(s) written, "
+                f"{len(result['released'])} released by an instance operator."
+                + (
+                    f" {len(result['failed'])} key(s) rejected: "
+                    + ", ".join(str(item['key']) for item in result["failed"])
+                    if result["failed"]
+                    else ""
+                )
+            ),
+        )
+
+    return OrganizationSettingLockBulkResult(**result)
+
+
+@router.post(
+    "/{organization_id}/setting-locks/release",
+    response_model=OrganizationSettingLockBulkResult,
+)
+async def release_organization_setting_locks(
+    organization_id: UUID,
+    data: OrganizationSettingLockReleaseRequest,
+    user: HyperadminUser,
+) -> OrganizationSettingLockBulkResult:
+    """Release a named set of locks.
+
+    Requires hyperadmin role. Unlike ``PUT /{id}/setting-locks`` this does not
+    reconcile: exactly these keys are released, so a pin an operator placed by
+    hand survives. That is the right shape for "undo this tier".
+
+    Idempotent — a key that was not locked is reported in ``not_locked`` rather
+    than treated as an error, so releasing the same set twice is safe.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    pool = await get_pool()
+    try:
+        result = await instance_settings.release_lock_set(
+            pool, organization_id, keys=data.keys
+        )
+    except instance_settings.UnknownSettingError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from None
+
+    if result["released"]:
+        await _audit(
+            user,
+            action=audit_actions.ORG_SETTING_UNLOCK,
+            entity_type="settings",
+            entity_id=organization_id,
+            entity_label="setting locks (bulk release)",
+            target_org_id=organization_id,
+            changed_fields=result["released"],
+            old_values={"locked": result["released"]},
+            new_values={"locked": []},
+            notes=(
+                f"{len(result['released'])} lock(s) released by an instance operator."
+            ),
+        )
+
+    return OrganizationSettingLockBulkResult(
+        organization_id=organization_id,
+        released=result["released"],
+        not_locked=result["not_locked"],
+    )
 
 
 @router.get(

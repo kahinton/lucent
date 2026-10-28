@@ -500,6 +500,7 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
         provider_catalog: list[dict[str, Any]] = []
         credentials: list[dict[str, Any]] = []
         org_models: list[dict[str, Any]] = []
+        locked_count = 0
 
         try:
             users = await api.list_users(organization_id)
@@ -508,6 +509,12 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
         try:
             settings_payload = await api.get_settings(organization_id)
             settings_sections = settings_payload.get("sections") or {}
+            locked_count = sum(
+                1
+                for entries in settings_sections.values()
+                for entry in entries
+                if entry.get("locked")
+            )
         except LucentAPIError as exc:
             warnings.append(f"Settings unavailable: {exc.detail}")
         try:
@@ -562,6 +569,7 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
                 "organization": organization,
                 "users": users,
                 "settings_sections": settings_sections,
+                "locked_count": locked_count,
                 "audit": audit_entries,
                 "warnings": warnings,
                 "provider_rows": provider_rows,
@@ -761,6 +769,43 @@ def create_app(config: ConsoleConfig | None = None) -> FastAPI:
             else:
                 result = await api.set_setting(organization_id, setting_key, value)
                 message = f"{result.get('title') or setting_key} updated."
+        except LucentAPIError as exc:
+            return fail(exc, f"/organizations/{organization_id}")
+        return back(f"/organizations/{organization_id}", success=message)
+
+    @app.post("/organizations/{organization_id}/setting-locks/{setting_key:path}")
+    async def organization_setting_lock(
+        request: Request,
+        organization_id: str,
+        setting_key: str,
+        reason: str = Form(default=""),
+        unlock: str = Form(default=""),
+        csrf_token: str = Form(default=""),
+    ):
+        """Pin or release one setting.
+
+        Locking and unlocking are separate form intents on one URL because the
+        console has no JavaScript: a second submit button cannot change the
+        request method, so ``unlock`` carries the intent instead.
+        """
+        auth.require(request)
+        auth.require_csrf(request, csrf_token)
+
+        api = client()
+        try:
+            if unlock:
+                result = await api.unlock_setting(organization_id, setting_key)
+                message = (
+                    f"{result.get('title') or setting_key} handed back to the workspace."
+                )
+            else:
+                result = await api.lock_setting(
+                    organization_id, setting_key, reason.strip()
+                )
+                message = (
+                    f"{result.get('title') or setting_key} locked — the workspace "
+                    "can no longer change it."
+                )
         except LucentAPIError as exc:
             return fail(exc, f"/organizations/{organization_id}")
         return back(f"/organizations/{organization_id}", success=message)

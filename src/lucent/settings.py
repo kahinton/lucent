@@ -18,6 +18,9 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from lucent.llm.engine_registry import engine_names as _engine_names
+from lucent.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Engines selectable as the deployment default, derived from the engine registry
 # (single source of truth) rather than a hardcoded tuple.
@@ -1481,6 +1484,16 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
 _SETTING_DEFINITIONS_BY_KEY = {d.key: d for d in _RUNTIME_SETTING_DEFINITIONS}
 _runtime_settings_by_org: dict[str, dict[str, Any]] = {}
 
+# Instance-operator locks, cached per organization for **rendering only**.
+#
+# This is deliberately not the enforcement point. Enforcement lives in
+# ``RuntimeSettingsRepository``, inside the same transaction as the write,
+# because this cache is per-process: a lock applied through another replica or
+# the ops console would be invisible here and the barrier would be advisory.
+# The cache exists so the settings page can render a locked control as disabled
+# without a second query per setting.
+_runtime_setting_locks_by_org: dict[str, dict[str, dict[str, Any]]] = {}
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -1707,9 +1720,11 @@ def clear_runtime_setting_cache(organization_id: Any | None = None, key: str | N
     org_id = _normalize_org_id(organization_id)
     if not org_id:
         _runtime_settings_by_org.clear()
+        _runtime_setting_locks_by_org.clear()
         return
     if key is None:
         _runtime_settings_by_org.pop(org_id, None)
+        _runtime_setting_locks_by_org.pop(org_id, None)
         return
     values = _runtime_settings_by_org.get(org_id)
     if values is not None:
@@ -1742,6 +1757,91 @@ async def load_runtime_settings_from_db(
         if key not in _SETTING_DEFINITIONS_BY_KEY:
             continue
         set_runtime_setting_cache(row.get("organization_id"), key, row.get("value"))
+
+    await load_runtime_setting_locks_from_db(
+        pool, organization_id=organization_id, repo=repo
+    )
+
+
+async def load_runtime_setting_locks_from_db(
+    pool: Any,
+    organization_id: Any | None = None,
+    *,
+    repo: Any | None = None,
+) -> None:
+    """Refresh the render-only lock cache, mirroring the settings load scope.
+
+    Locks are not settings and do not affect effective values, so a failure to
+    read them must never break a settings load: a page without lock badges is
+    degraded, but the write barrier in the repository still holds.
+    """
+    from lucent.db.runtime_settings import RuntimeSettingsRepository
+
+    try:
+        rows = await (repo or RuntimeSettingsRepository(pool)).list_locks(
+            organization_id=organization_id
+        )
+    except Exception:  # noqa: BLE001 — rendering aid only; enforcement is elsewhere
+        logger.debug("Failed to load runtime setting locks", exc_info=True)
+        return
+
+    if organization_id is not None:
+        normalized = _normalize_org_id(organization_id)
+        if normalized:
+            _runtime_setting_locks_by_org.pop(normalized, None)
+    else:
+        _runtime_setting_locks_by_org.clear()
+
+    for row in rows:
+        org_id = _normalize_org_id(row.get("organization_id"))
+        key = row.get("key")
+        if not org_id or not key:
+            continue
+        _runtime_setting_locks_by_org.setdefault(org_id, {})[key] = {
+            "reason": row.get("reason") or "",
+            "locked_by": row.get("locked_by"),
+            "locked_by_name": row.get("locked_by_name"),
+            "locked_by_email": row.get("locked_by_email"),
+            "locked_at": row.get("locked_at"),
+        }
+
+
+def runtime_setting_locks(
+    organization_id: Any | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return the cached locks for one organization, keyed by setting key."""
+    org_id, _cached = _org_cache(organization_id)
+    if not org_id:
+        return {}
+    return dict(_runtime_setting_locks_by_org.get(org_id, {}))
+
+
+def get_runtime_setting_lock(
+    key: str,
+    *,
+    organization_id: Any | None = None,
+) -> dict[str, Any] | None:
+    """Return the cached lock for one setting, or ``None`` when it is editable."""
+    return runtime_setting_locks(organization_id).get(key)
+
+
+def set_runtime_setting_lock_cache(
+    organization_id: Any,
+    key: str,
+    lock: dict[str, Any] | None,
+) -> None:
+    """Update the render-only lock cache after an operator lock/unlock."""
+    org_id = _normalize_org_id(organization_id)
+    if not org_id:
+        return
+    if lock is None:
+        values = _runtime_setting_locks_by_org.get(org_id)
+        if values is not None:
+            values.pop(key, None)
+            if not values:
+                _runtime_setting_locks_by_org.pop(org_id, None)
+        return
+    _runtime_setting_locks_by_org.setdefault(org_id, {})[key] = dict(lock)
 
 
 def _setting_control_type(definition: RuntimeSettingDefinition) -> str:
@@ -1802,10 +1902,12 @@ def runtime_setting_snapshots(
     snapshots: list[dict[str, Any]] = []
     resolved_option_sets = option_sets or {}
     org_id, cached = _org_cache(organization_id)
+    locks = _runtime_setting_locks_by_org.get(org_id, {}) if org_id else {}
     for definition in _RUNTIME_SETTING_DEFINITIONS:
         value = get_runtime_setting(definition.key, organization_id=org_id)
         source = get_runtime_setting_source(definition.key, organization_id=org_id)
         env_raw = os.environ.get(definition.env_var)
+        lock = locks.get(definition.key)
         snapshots.append(
             {
                 "definition": definition,
@@ -1820,6 +1922,11 @@ def runtime_setting_snapshots(
                 "default_display": _display_value(definition, definition.default),
                 "control_type": _setting_control_type(definition),
                 "options": _setting_options(definition, value, resolved_option_sets),
+                # ``locked`` is what the settings UI branches on; ``lock`` carries
+                # the operator's explanation so the page can say why a control is
+                # disabled instead of silently rendering a dead form.
+                "locked": lock is not None,
+                "lock": lock,
             }
         )
     return snapshots

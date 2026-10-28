@@ -234,6 +234,128 @@ class TestLucentClient:
         assert captured["body"]["reset"] is True
         assert captured["path"].endswith("/settings/features.sandboxes_enabled")
 
+    async def test_lock_setting_uses_the_dedicated_collection(self):
+        """``setting-locks`` exists because ``settings/{key:path}`` is greedy.
+
+        The server declares ``PUT /settings/{setting_key:path}``; a trailing
+        ``/lock`` segment would be swallowed whole as part of the key, so the
+        console must target the separate collection.
+        """
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["method"] = request.method
+            captured["body"] = json.loads(request.content)
+            captured["path"] = request.url.path
+            return httpx.Response(200, json={"key": "features.sandboxes_enabled"})
+
+        await _client(handler).lock_setting(
+            "org-1", "features.sandboxes_enabled", "Not in your plan."
+        )
+        assert captured["method"] == "PUT"
+        assert captured["body"] == {"reason": "Not in your plan."}
+        assert captured["path"].endswith(
+            "/setting-locks/features.sandboxes_enabled"
+        )
+
+    async def test_unlock_setting_deletes_the_lock(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            return httpx.Response(200, json={"key": "features.sandboxes_enabled"})
+
+        await _client(handler).unlock_setting("org-1", "features.sandboxes_enabled")
+        assert captured["method"] == "DELETE"
+        assert "/setting-locks/" in captured["path"]
+
+    async def test_list_setting_locks_retries(self):
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("transient")
+            return httpx.Response(200, json=[])
+
+        assert await _client(handler).list_setting_locks("org-1") == []
+        assert calls["n"] == 2
+
+    async def test_apply_lock_set_sends_the_target_state(self):
+        """The bulk call declares the target state, so the body must be whole.
+
+        A delta would put reconciliation in the caller and let two callers
+        disagree about what "the tier" is.
+        """
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"organization_id": "org-1", "locked": []})
+
+        locks = [
+            {"key": "features.sandboxes_enabled", "reason": "Starter", "value": False},
+        ]
+        await _client(handler).apply_lock_set("org-1", locks)
+        assert captured["method"] == "PUT"
+        assert captured["path"].endswith("/api/organizations/org-1/setting-locks")
+        assert captured["body"]["locks"] == locks
+        # Converging by default is what makes a retried webhook a no-op.
+        assert captured["body"]["release_unlisted"] is True
+        assert captured["body"]["dry_run"] is False
+
+    async def test_apply_lock_set_passes_dry_run_and_keep_flags(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"organization_id": "org-1"})
+
+        await _client(handler).apply_lock_set(
+            "org-1", [], release_unlisted=False, dry_run=True
+        )
+        assert captured["body"]["release_unlisted"] is False
+        assert captured["body"]["dry_run"] is True
+
+    async def test_release_lock_set_names_exact_keys(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"organization_id": "org-1"})
+
+        await _client(handler).release_lock_set("org-1", ["features.sandboxes_enabled"])
+        assert captured["method"] == "POST"
+        assert captured["path"].endswith("/setting-locks/release")
+        assert captured["body"] == {"keys": ["features.sandboxes_enabled"]}
+
+    async def test_monitor_setting_locks_forwards_the_key_filter(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["path"] = request.url.path
+            captured["params"] = dict(request.url.params)
+            return httpx.Response(
+                200, json={"total": 0, "locks": [], "by_setting": {}, "by_organization": {}}
+            )
+
+        await _client(handler).monitor_setting_locks(key="features.sandboxes_enabled")
+        assert captured["path"].endswith("/api/organizations/instance/setting-locks")
+        assert captured["params"] == {"key": "features.sandboxes_enabled"}
+
     async def test_timeout_is_bounded(self):
         client = LucentClient(BASE, "hs_x")
         assert client._timeout == DEFAULT_TIMEOUT

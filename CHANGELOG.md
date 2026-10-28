@@ -8,6 +8,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Bulk setting locks for tier application.** Tier definitions are owned by the
+  application that sells them, so Lucent exposes the primitives that app needs
+  rather than a tier model of its own. `PUT /api/organizations/{id}/setting-locks`
+  takes a tenant's **complete** lock set and converges to it — locking what is
+  missing, re-reasoning what changed, and releasing what is no longer named — which
+  makes a repeated call from a retried webhook a no-op instead of an accumulation.
+  Naming a `value` writes it before the lock so a "pin this to X" request can never
+  leave a lock on an unwritten value; omitting it freezes the setting at whatever
+  the instance currently resolves to. Value changes and lock changes are reported
+  separately (`values_written` vs `updated`) because a plan can change a limit
+  without changing what it pins, and a setting whose value write fails is not
+  locked at all rather than being pinned to the stale value it was replacing.
+  Bad entries fail per setting rather than aborting the batch, so a catalog change
+  cannot brick a caller's whole flow, and `dry_run` returns the same diff without
+  writing (or auditing).
+  `POST /{id}/setting-locks/release` releases exactly the keys named — not a
+  reconcile — so a pin an operator placed by hand survives an "undo this tier".
+  `GET /api/organizations/instance/setting-locks` returns every lock across every
+  tenant, grouped by setting and by organization, with each tenant's stored
+  override (null meaning it inherits the env/default); without it, answering
+  "which tenants have X pinned" would be one HTTP round trip per tenant. A key
+  that names a retired setting is reported, not fatal. One audit row is written
+  per batch, and none when nothing changed.
+- **Instance-operator locks on runtime settings (migration 153).** A hyperadmin
+  can pin any editable setting for a single organization, which removes that
+  tenant's ability to change **or reset** it while leaving everything else about
+  the workspace self-service. This is the mechanism a plan tier needs: "Team gets
+  sandboxes, Starter does not" becomes a settings the customer can see and cannot
+  edit, not a separate build. A lock is a **write barrier, not a value** — the
+  effective value keeps living in `runtime_settings` (or its env/default
+  fallback), so the two can never disagree and a lock on a setting with no saved
+  row is legal, meaning "hold whatever the instance resolves to". Resetting is
+  blocked as well as writing, because deleting the row would otherwise fall back
+  to the instance default the operator was overriding. Operator writes are still
+  allowed, which is how a plan change re-pins a tenant without an unlock in
+  between; unlocking changes only *who may write*, never the effective value.
+  Enforcement lives in `RuntimeSettingsRepository`, inside the same connection as
+  the write rather than against the in-process settings cache, because that cache
+  is per-process and a lock applied by another replica or by the ops console
+  would otherwise be invisible. The tenant's Settings page renders a locked
+  setting read-only with the operator's stated reason in place of the controls;
+  the ops console gained a lock/unlock control per setting. Every lock and unlock
+  is audited in both the operator's and the tenant's log as `org.setting_lock` /
+  `org.setting_unlock`, so a customer can always see that access was removed and
+  by whom. Manage it at `PUT`/`DELETE /api/organizations/{id}/setting-locks/{key}`.
 - **Token limits for models (migration 152).** Administrators can cap model
   consumption and choose who the cap applies to. A policy names one or more
   models (or all models), a rolling window, and up to three independent limits —

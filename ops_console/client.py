@@ -335,6 +335,79 @@ class LucentClient:
             json={"reset": True},
         )
 
+    # -- setting locks ----------------------------------------------------
+    #
+    # A lock is a write barrier, not a value: the effective value stays in the
+    # tenant's own settings row (or its env/default fallback) and locking only
+    # removes the tenant's ability to change or reset it. So "pin this tenant to a
+    # value" is two calls — set, then lock — and the console keeps them separate
+    # for the same reason the API does.
+    #
+    # The path is ``setting-locks`` rather than ``settings/<key>/lock`` because the
+    # server declares ``PUT /settings/{setting_key:path}``, whose greedy path
+    # parameter would swallow a trailing segment.
+
+    async def list_setting_locks(self, organization_id: str) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET",
+            f"/api/organizations/{organization_id}/setting-locks",
+            retry=True,
+        )
+
+    async def lock_setting(
+        self, organization_id: str, key: str, reason: str = ""
+    ) -> dict[str, Any]:
+        return await self._request(
+            "PUT",
+            f"/api/organizations/{organization_id}/setting-locks/{key}",
+            json={"reason": reason},
+        )
+
+    async def unlock_setting(
+        self, organization_id: str, key: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "DELETE",
+            f"/api/organizations/{organization_id}/setting-locks/{key}",
+        )
+
+    async def apply_lock_set(
+        self,
+        organization_id: str,
+        locks: list[dict[str, Any]],
+        *,
+        release_unlisted: bool = True,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Reconcile a tenant's whole lock set (the tier-application call)."""
+        return await self._request(
+            "PUT",
+            f"/api/organizations/{organization_id}/setting-locks",
+            json={
+                "locks": locks,
+                "release_unlisted": release_unlisted,
+                "dry_run": dry_run,
+            },
+        )
+
+    async def release_lock_set(
+        self, organization_id: str, keys: list[str]
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/api/organizations/{organization_id}/setting-locks/release",
+            json={"keys": keys},
+        )
+
+    async def monitor_setting_locks(self, *, key: str | None = None) -> dict[str, Any]:
+        params = {"key": key} if key else None
+        return await self._request(
+            "GET",
+            "/api/organizations/instance/setting-locks",
+            params=params,
+            retry=True,
+        )
+
     # -- audit ------------------------------------------------------------
 
     async def instance_audit(

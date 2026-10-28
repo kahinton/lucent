@@ -292,10 +292,17 @@
 
 <!-- Settings ----------------------------------------------------------- -->
 <div class="panel mb-5 rounded-xl p-5">
-    <h2 class="mb-1 text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Runtime settings</h2>
+    <div class="mb-1 flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-[#8f8b87]">Runtime settings</h2>
+        {% if locked_count %}
+        <span class="chip bg-[#241a33] text-[#c4a5ff]">{{ locked_count }} locked</span>
+        {% endif %}
+    </div>
     <p class="mb-4 text-xs text-[#6f6b68]">
         Applied to this organization immediately. <span class="mono">DB</span> means an explicit override;
         <span class="mono">env</span>/<span class="mono">default</span> mean it inherits the instance value.
+        <span class="text-[#c4a5ff]">Locking a setting keeps the workspace's own admins and owner from
+        changing or resetting it — set the value first, then lock it.</span>
     </p>
 
     {% if settings_sections %}
@@ -307,35 +314,67 @@
             </summary>
             <div class="divide-y divide-[#1c1c1c] border-t border-[#1c1c1c]">
                 {% for setting in entries %}
-                <form method="post" action="/organizations/{{ organization.id }}/settings/{{ setting.key }}"
-                      class="flex flex-wrap items-center gap-3 px-4 py-2.5">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                    <div class="min-w-[14rem] flex-1">
-                        <div class="text-sm">{{ setting.title }}</div>
-                        <div class="mono text-[11px] text-[#6f6b68]">{{ setting.key }}</div>
-                    </div>
-                    <span class="chip {% if setting.source == 'database' %}chip-active{% else %}bg-[#1a1a1a] text-[#8f8b87]{% endif %}">
-                        {{ setting.source }}
-                    </span>
-                    <div class="w-[16rem]">
-                        {% if setting.value_type == 'boolean' %}
-                        <select name="value" class="field w-full rounded-lg px-2 py-1.5 text-sm">
-                            <option value="true" {% if setting.value %}selected{% endif %}>true</option>
-                            <option value="false" {% if not setting.value %}selected{% endif %}>false</option>
-                        </select>
-                        {% else %}
-                        <input name="value" value="{{ setting.value }}"
-                               class="field w-full rounded-lg px-2 py-1.5 text-sm"
-                               placeholder="{{ setting.value_type }}">
+                <div class="px-4 py-3">
+                    <form method="post" action="/organizations/{{ organization.id }}/settings/{{ setting.key }}"
+                          class="flex flex-wrap items-center gap-3">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <div class="min-w-[14rem] flex-1">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="text-sm">{{ setting.title }}</span>
+                                {% if setting.locked %}
+                                <span class="chip bg-[#241a33] text-[#c4a5ff]">locked</span>
+                                {% endif %}
+                            </div>
+                            <div class="mono text-[11px] text-[#6f6b68]">{{ setting.key }}</div>
+                            {% if setting.locked and setting.lock_reason %}
+                            <div class="mt-1 text-[11px] text-[#c4a5ff]">{{ setting.lock_reason }}</div>
+                            {% endif %}
+                        </div>
+                        <span class="chip {% if setting.source == 'database' %}chip-active{% else %}bg-[#1a1a1a] text-[#8f8b87]{% endif %}">
+                            {{ setting.source }}
+                        </span>
+                        <div class="w-[16rem]">
+                            {% if setting.value_type == 'boolean' %}
+                            <select name="value" class="field w-full rounded-lg px-2 py-1.5 text-sm">
+                                <option value="true" {% if setting.value %}selected{% endif %}>true</option>
+                                <option value="false" {% if not setting.value %}selected{% endif %}>false</option>
+                            </select>
+                            {% else %}
+                            <input name="value" value="{{ setting.value }}"
+                                   class="field w-full rounded-lg px-2 py-1.5 text-sm"
+                                   placeholder="{{ setting.value_type }}">
+                            {% endif %}
+                        </div>
+                        <button class="btn btn-quiet" type="submit">Save</button>
+                        {% if setting.source == 'database' %}
+                        <button class="text-xs text-[#c2564f] underline-offset-2 hover:underline"
+                                type="submit" name="reset" value="true"
+                                formaction="/organizations/{{ organization.id }}/settings/{{ setting.key }}?reset=true">reset</button>
                         {% endif %}
-                    </div>
-                    <button class="btn btn-quiet" type="submit">Save</button>
-                    {% if setting.source == 'database' %}
-                    <button class="text-xs text-[#c2564f] underline-offset-2 hover:underline"
-                            type="submit" name="reset" value="true"
-                            formaction="/organizations/{{ organization.id }}/settings/{{ setting.key }}?reset=true">reset</button>
-                    {% endif %}
-                </form>
+                    </form>
+
+                    <!-- Lock is a separate form so the intent is unambiguous: it
+                         never submits a value, only the barrier. -->
+                    <form method="post" action="/organizations/{{ organization.id }}/setting-locks/{{ setting.key }}"
+                          class="mt-2 flex flex-wrap items-center gap-2">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        {% if setting.locked %}
+                        <input type="text" name="reason" value="{{ setting.lock_reason or '' }}"
+                               placeholder="reason shown to the workspace"
+                               class="field min-w-[16rem] flex-1 rounded-lg px-2 py-1 text-[11px]">
+                        <button class="btn btn-quiet" type="submit">update lock</button>
+                        <button class="text-xs text-[#8f8b87] underline-offset-2 hover:underline"
+                                type="submit" name="unlock" value="true">unlock</button>
+                        {% else %}
+                        <input type="text" name="reason"
+                               placeholder="optional reason shown to the workspace"
+                               class="field min-w-[16rem] flex-1 rounded-lg px-2 py-1 text-[11px]">
+                        <button class="text-xs text-[#c4a5ff] underline-offset-2 hover:underline" type="submit">
+                            lock for this workspace
+                        </button>
+                        {% endif %}
+                    </form>
+                </div>
                 {% endfor %}
             </div>
         </details>
