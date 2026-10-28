@@ -29,6 +29,10 @@ from lucent.db import OrganizationRepository, UserRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.schedules import ScheduleRepository
 
+# Webhook secrets now require >= 32 chars with real entropy (the endpoint is
+# unauthenticated, so the shared secret is the only credential).
+WIZARD_WEBHOOK_SECRET = "wizard-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -314,7 +318,7 @@ class TestWorkflowWizard:
                     "title": "Webhook wizard test",
                     "description": "Created by the workflow wizard",
                     "trigger_type": "webhook",
-                    "webhook_secret": "wizard-secret",
+                    "webhook_secret": WIZARD_WEBHOOK_SECRET,
                     "request_title": "{event_summary} webhook",
                     "action_title": "Handle webhook",
                     "action_prompt": "Process the webhook payload and record outputs.",

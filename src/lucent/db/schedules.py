@@ -103,6 +103,39 @@ def webhook_secret_hash(secret: str | None) -> str | None:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
+#: Minimum length for a workflow webhook shared secret.
+#:
+#: The webhook endpoint is unauthenticated and reachable from anywhere, so the
+#: secret is the only credential. A short secret is brute-forceable offline from
+#: a single captured hash and online against this endpoint, and the sha256 (not
+#: a KDF) comparison gives an attacker no work factor to pay. 32 chars is the
+#: length of the recommended ``secrets.token_urlsafe(24)`` output.
+MIN_WEBHOOK_SECRET_LENGTH = 32
+
+
+def validate_webhook_secret(secret: str | None) -> str:
+    """Validate a webhook secret's strength, returning the trimmed value.
+
+    Raises:
+        ValueError: when the secret is missing, too short, or trivially weak.
+    """
+    value = (secret or "").strip()
+    if not value:
+        raise ValueError("A webhook secret is required")
+    if len(value) < MIN_WEBHOOK_SECRET_LENGTH:
+        raise ValueError(
+            f"Webhook secret must be at least {MIN_WEBHOOK_SECRET_LENGTH} "
+            f"characters (got {len(value)}). Generate one with "
+            "`python -c 'import secrets; print(secrets.token_urlsafe(24))'`."
+        )
+    if len(set(value)) < 8:
+        raise ValueError(
+            "Webhook secret has too little entropy; use a random value rather "
+            "than a repeated or sequential pattern."
+        )
+    return value
+
+
 def verify_webhook_secret(secret: str | None, stored_hash: str | None) -> bool:
     """Constant-time verification for generic workflow webhooks."""
     if not stored_hash:

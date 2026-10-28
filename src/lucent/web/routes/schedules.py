@@ -600,8 +600,13 @@ async def workflow_create_from_wizard(request: Request):
         schedule_type = trigger_type
 
     webhook_secret = str(form.get("webhook_secret", "")).strip() or None
-    if trigger_type == "webhook" and not webhook_secret:
-        raise HTTPException(422, "Webhook workflows require a shared secret")
+    if trigger_type == "webhook":
+        from lucent.db.schedules import validate_webhook_secret
+
+        try:
+            webhook_secret = validate_webhook_secret(webhook_secret)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
     action_titles = _form_list(form, "action_title")
     action_prompts = _form_list(form, "action_prompt")

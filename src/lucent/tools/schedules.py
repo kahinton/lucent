@@ -363,7 +363,11 @@ Workflows are the broader replacement for schedules. A workflow has:
 
 For webhook workflows, provide webhook_secret. Lucent stores only a hash;
 external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
-?token= when POSTing /api/workflows/{id}/webhook."""
+?token= when POSTing /api/workflows/{id}/webhook.
+
+The secret is the ONLY credential on that endpoint, which is reachable from
+anywhere, so it must be at least 32 characters of high-entropy randomness.
+Generate one with: python -c "import secrets; print(secrets.token_urlsafe(24))\""""
     )
     async def create_workflow(
         title: str,
@@ -385,8 +389,13 @@ external callers send the secret as X-Lucent-Workflow-Token, Bearer token, or
             return json.dumps(
                 {"error": "trigger_type must be schedule, manual, webhook, or integration_event"}
             )
-        if trigger_type == "webhook" and not webhook_secret:
-            return json.dumps({"error": "webhook_secret is required for webhook workflows"})
+        if trigger_type == "webhook":
+            from lucent.db.schedules import validate_webhook_secret
+
+            try:
+                webhook_secret = validate_webhook_secret(webhook_secret)
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
         if priority not in ("low", "medium", "high", "urgent"):
             return json.dumps({"error": "priority must be 'low', 'medium', 'high', or 'urgent'"})
 
