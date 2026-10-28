@@ -471,9 +471,12 @@ async def provision_organization(
             admin_external_id=first.external_id if first else None,
             api_key_name=data.api_key_name,
             model_id=data.model_id,
+            model_provider=data.model_provider,
+            model_backend=data.model_backend,
             providers=[
                 {"provider": p.provider, "api_key": p.api_key} for p in data.providers
             ],
+            backends=[b.model_dump() for b in data.backends],
             settings=data.settings or None,
             operator_org_id=user.organization_id,
             operator_user_id=user.id,
@@ -501,6 +504,7 @@ async def provision_organization(
         seeded=result.seeded,
         model_id=result.model_id,
         providers_configured=result.providers_configured,
+        backends_created=result.backends_created,
         models_discovered=result.models_discovered,
         settings_applied=result.settings_applied,
         warnings=result.warnings,

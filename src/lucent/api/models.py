@@ -529,9 +529,28 @@ class OrganizationProvisionRequest(BaseModel):
         default=None,
         description=(
             "Model to enable and grant so the tenant can chat immediately. Also "
-            "applied as the tenant's models.default_model. Only meaningful when "
-            "the tenant has (or is given) a credential for that model's provider: "
-            "a model id alone does not grant access to a provider."
+            "applied as the tenant's models.default_model. If no shared catalogue "
+            "row exists (a gateway's model ids are whatever the gateway serves), "
+            "the model is defined for this tenant instead. Only meaningful when "
+            "the tenant has (or is given) a credential or backend that can serve "
+            "it: a model id alone does not grant access to a provider."
+        ),
+    )
+    model_provider: str | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Provider for `model_id` when it is not in the shared catalogue. "
+            "Defaults to the first configured provider."
+        ),
+    )
+    model_backend: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Name of an entry in `backends` to bind `model_id` to. Needed when an "
+            "instance offers several gateways and the model must run through a "
+            "specific one."
         ),
     )
     providers: list["OrganizationProvisionProvider"] = Field(
@@ -550,6 +569,51 @@ class OrganizationProvisionRequest(BaseModel):
             "in `warnings` rather than aborting the tenant."
         ),
     )
+    backends: list["OrganizationProvisionBackend"] = Field(
+        default_factory=list,
+        description=(
+            "Engine backends to create, applied before models are bound and "
+            "before discovery runs. Use one with provider='custom' to route this "
+            "tenant through a shared gateway with its own virtual key."
+        ),
+    )
+
+
+class OrganizationProvisionBackend(BaseModel):
+    """An engine backend to create with a new organization.
+
+    This is how a tenant is pointed at a shared LLM gateway. The gateway key goes
+    in ``secrets.api_key`` rather than in ``providers`` on purpose: a provider
+    credential is one key per organization for a *vendor*, while a gateway issues
+    a separate virtual key per tenant, and that key belongs on the backend that
+    routes to it.
+    """
+
+    name: str = Field(..., min_length=1, max_length=128)
+    engine: str = Field(default="langchain", description="langchain, copilot, claude_code, codex")
+    provider: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        description=(
+            "Provider family. Use 'custom' for an OpenAI-compatible gateway such "
+            "as LiteLLM: it accepts a per-backend base URL and key, and is the "
+            "provider model discovery fans out over."
+        ),
+    )
+    config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Non-secret settings such as {'base_url': 'https://gateway.internal'}",
+    )
+    secrets: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Engine secret fields keyed by field name. For a gateway: "
+            "{'api_key': '<that organization's virtual key>'}. Stored encrypted and "
+            "never returned."
+        ),
+    )
+    is_enabled: bool = True
 
 
 class OrganizationProvisionProvider(BaseModel):
@@ -589,6 +653,9 @@ class OrganizationProvisionResponse(BaseModel):
     seeded: dict[str, int] = Field(default_factory=dict)
     model_id: str | None = None
     providers_configured: list[str] = Field(default_factory=list)
+    backends_created: list[str] = Field(
+        default_factory=list, description="Names of engine backends created"
+    )
     models_discovered: int = Field(
         default=0,
         description="Models registered by discovery for the supplied provider credentials.",

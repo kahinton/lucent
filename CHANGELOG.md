@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Provision a tenant onto a shared LLM gateway (LiteLLM or equivalent).**
+  `POST /api/organizations/provision` gained a `backends` list, plus
+  `model_provider` / `model_backend` to bind the named model to one of them. An
+  instance can now front its default providers with a single OpenAI-compatible
+  gateway and give each organization its own **virtual key**, stored encrypted and
+  scoped to that org — the shape a pay-tiered deployment needs, where the operator
+  supplies the default models and each tenant meters separately. Use
+  `provider: "custom"` for the gateway: it takes a per-backend base URL and key,
+  needs no extra package, and is the provider custom-endpoint discovery fans out
+  over. The `litellm` catalog entry is the `langchain-litellm` integration, which
+  requires an extra package, is not covered by discovery, and also advertises a
+  workspace-level credential. Supporting changes: a `custom` backend now counts as
+  a discovery source even though it stores no provider credential (the key lives on
+  the backend), backends are created **before** models bind and before discovery
+  runs, and `create_model` accepts a `backend_id` so a manually defined model can
+  be bound to a specific route. Two correctness fixes came out of live
+  verification: `models_discovered` read a key (`created`) that discovery never
+  returns, so it always reported zero; and per-provider discovery *errors* were
+  ignored (discovery reports them in the summary rather than raising), so an
+  unreachable gateway produced a clean-looking tenant with no models. A gateway
+  model id that collides with an unrelated shared catalogue row now gets the tenant
+  its own `<model>@<org-prefix>` row bound to its own backend, instead of cloning
+  the shared row and silently dropping the binding.
 - **Managed-tool invocations are recorded for usage reporting (migrations 155, 156).**
   A custom-tool execution now writes a durable per-invocation row to the usage
   ledger, so a provider that prices tool *calls* has something to meter from after

@@ -234,11 +234,24 @@ class TestProvisionWithProvidersAndSettings:
         yield
         SecretRegistry.reset()
 
-    async def test_providers_are_stored(self, db_pool, operator, clean_test_data):
+    async def test_providers_are_stored(
+        self, db_pool, operator, clean_test_data, monkeypatch
+    ):
         from lucent.services import org_providers
 
         prefix = clean_test_data
         operator_org, operator_user = operator
+
+        # Discovery is stubbed: this test is about credential *storage*, and the
+        # un-stubbed call reaches api.openai.com with a fake key. It used to pass
+        # only because a per-provider discovery error was dropped silently;
+        # provisioning now reports those in `warnings` (an unreachable provider
+        # must not look like a clean tenant), so a live 401 would fail the run on
+        # a machine with network access and pass on one without.
+        async def _no_discovery(pool, organization_id, *, providers=None):
+            return {"providers": [], "upserted_count": 0, "errors": []}
+
+        monkeypatch.setattr(org_providers, "discover_models", _no_discovery)
 
         result = await org_provisioning.provision_organization(
             db_pool,

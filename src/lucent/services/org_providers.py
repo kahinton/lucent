@@ -409,6 +409,7 @@ async def create_model(
     provider: str,
     name: str,
     engine: str | None = None,
+    backend_id: str | None = None,
     category: str = "general",
     model_class: str = "language",
     context_window: int = 0,
@@ -418,12 +419,27 @@ async def create_model(
     is_enabled: bool = True,
     grant_to_org: bool = True,
     granted_by: UUID | str | None = None,
+    scope_id_on_collision: bool = False,
 ) -> dict[str, Any]:
     """Define a model for a tenant and (optionally) entitle the org to it.
 
     An enabled-but-ungranted model is not usable: usage is clearance-driven and
     default-deny. ``grant_to_org`` therefore defaults to True, because the point of
     defining a model for a tenant is that they can use it.
+
+    ``backend_id`` binds the model to one engine backend (a gateway, a pinned
+    endpoint). It is what makes an explicitly defined model reachable through a
+    specific route: without it, resolution falls back to an org/shared backend
+    matching the pinned ``(engine, provider)``, which for a single shared gateway
+    is the same thing but for several endpoints is ambiguous. The backend must
+    belong to the same organization and speak the same provider.
+
+    ``scope_id_on_collision`` gives the tenant its own row under the existing
+    ``<model>@<org-prefix>`` id when the requested id is already taken by a
+    *shared* row. ``models.id`` is a global primary key, so a gateway model id can
+    collide with an unrelated shared catalogue row (both call a model
+    ``claude-sonnet-4``). Cloning the shared row instead would silently drop the
+    backend binding and route the model somewhere the caller did not choose.
     """
     from lucent.model_registry import load_models_from_db
 
@@ -442,9 +458,46 @@ async def create_model(
         except ValueError as exc:
             raise ModelConfigError(str(exc)) from exc
 
+    # A backend binding is only meaningful if it can actually carry this model's
+    # traffic. Two rules, both mirroring what the engine enforces at call time:
+    # the backend must belong to THIS organization (otherwise a tenant could be
+    # pointed at another tenant's endpoint), and it must speak the same provider
+    # (a cross-provider binding must never redirect traffic).
+    clean_backend_id = (backend_id or "").strip() or None
+    if clean_backend_id:
+        backend = await BackendRepository(pool).get(clean_backend_id, org_id=org_id)
+        if backend is None:
+            raise ModelConfigError(
+                f"Backend '{clean_backend_id}' not found for this organization."
+            )
+        backend_provider = str(backend.get("provider") or "").strip().lower()
+        if backend_provider and backend_provider != provider.strip().lower():
+            raise ModelConfigError(
+                f"Backend '{backend.get('name')}' speaks provider "
+                f"'{backend_provider}', not '{provider.strip().lower()}'."
+            )
+        if engine and backend.get("engine") and backend["engine"] != engine:
+            raise ModelConfigError(
+                f"Backend '{backend.get('name')}' runs on engine "
+                f"'{backend['engine']}', not '{engine}'."
+            )
+
     repo = ModelRepository(pool)
-    if await repo.get_model(clean_id) is not None:
-        raise ModelConfigError(f"Model id '{clean_id}' already exists.")
+    existing_row = await repo.get_model(clean_id)
+    if existing_row is not None:
+        # A row this tenant already owns is fine to reuse (a retried provision).
+        # Anything else is a collision. With ``scope_id_on_collision`` the tenant
+        # gets its own suffixed row, matching the ``<model>@<org-prefix>``
+        # convention ``grant_model_to_org`` already uses; otherwise the caller is
+        # told, because silently defining a second row under a different id would
+        # surprise a caller who named this one.
+        owned_here = str(existing_row.get("organization_id") or "") == org_id
+        if not owned_here:
+            if not scope_id_on_collision:
+                raise ModelConfigError(f"Model id '{clean_id}' already exists.")
+            clean_id = f"{clean_id}@{org_id[:8]}"
+            if await repo.get_model(clean_id) is not None:
+                raise ModelConfigError(f"Model id '{clean_id}' already exists.")
 
     model = await repo.create_model(
         model_id=clean_id,
@@ -462,6 +515,7 @@ async def create_model(
         engine=engine or None,
         discovery_source="manual",
         is_custom=True,
+        backend_id=clean_backend_id,
     )
 
     granted = False

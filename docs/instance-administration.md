@@ -390,11 +390,73 @@ Response (`201`):
   "seeded": {"skills": 38, "agents": 14, "hooks": 2, "sandbox_templates": 3},
   "model_id": "claude-sonnet-4.6",
   "providers_configured": ["openai"],
+  "backends_created": [],
+  "models_discovered": 0,
   "settings_applied": {"features.sandboxes_enabled": false,
                        "memory.inject_max_memories": 2},
   "warnings": []
 }
 ```
+
+#### Provisioning onto a shared LLM gateway
+
+An instance can front its default providers with one OpenAI-compatible gateway
+(LiteLLM or equivalent) and give each tenant its own virtual key. Add `backends`
+and point the model at one:
+
+```http
+POST /api/organizations/provision
+
+{
+  "name": "Acme Robotics",
+  "first_admin": {"email": "owner@acme.test"},
+  "backends": [
+    {
+      "name": "shared-gateway",
+      "engine": "langchain",
+      "provider": "custom",
+      "config": {"base_url": "https://litellm.internal"},
+      "secrets": {"api_key": "sk-acme-virtual-key"}
+    }
+  ],
+  "model_id": "gpt-4o-mini",
+  "model_provider": "custom",
+  "model_backend": "shared-gateway"
+}
+```
+
+Use `provider: "custom"` for the gateway, not `"litellm"`. `custom` is the
+OpenAI-compatible *route*: it takes a per-backend base URL and key, it needs no
+extra package, and it is the provider custom-endpoint discovery fans out over.
+The `litellm` catalog entry is the `langchain-litellm` integration, which needs an
+extra package, is not covered by discovery, and also advertises a workspace-level
+credential — two places to put one key.
+
+What this buys you:
+
+* **Per-tenant keys.** The virtual key lives on that organization's backend, in
+  the encrypted secret store, scoped to the org. Two tenants on the same gateway
+  hold different keys and cannot read each other's; the key is never returned by
+  any API.
+* **Automatic catalogue.** A `custom` backend counts as a credential source, so
+  provisioning runs discovery against `GET <gateway>/v1/models` and registers
+  what the gateway serves. `models_discovered` reports the count.
+* **Bound models.** `model_backend` binds `model_id` to that specific backend, so
+  the model runs through the gateway even when the instance has several. Without
+  it, resolution falls back to any enabled backend matching `(engine, provider)`.
+* **Ordering is handled.** Backends are created before models bind and before
+  discovery runs — discovery needs the backend to exist to know where to ask.
+
+If the gateway's model id collides with an unrelated shared catalogue row of the
+same name (both may call a model `claude-sonnet-4`), the tenant gets its own row
+under the `<model>@<org-prefix>` id, bound to its gateway. Cloning the shared row
+would keep the model usable but silently drop the binding.
+
+A backend that cannot be created (bad secret field, duplicate name, unknown
+provider) is reported in `warnings` and the tenant is still created: rolling back
+an entire signup because an optional backend was malformed would be worse than a
+tenant with fewer capabilities and a clear message. The same applies to a failed
+discovery — see `warnings`, do not assume `models_discovered > 0`.
 
 What it guarantees:
 

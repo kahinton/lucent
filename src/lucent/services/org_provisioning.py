@@ -29,6 +29,7 @@ import asyncpg
 
 from lucent.db.admin_audit import AdminAuditRepository
 from lucent.db.api_key import ApiKeyRepository
+from lucent.db.models import ModelRepository
 from lucent.db.organization import OrganizationRepository
 from lucent.db.user import UserRepository
 from lucent.logging import get_logger
@@ -80,6 +81,7 @@ class ProvisionedOrganization:
     seeded: dict[str, int] = field(default_factory=dict)
     model_id: str | None = None
     providers_configured: list[str] = field(default_factory=list)
+    backends_created: list[str] = field(default_factory=list)
     models_discovered: int = 0
     settings_applied: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
@@ -351,7 +353,10 @@ async def provision_organization(
     admin_external_id: str | None = None,
     api_key_name: str | None = DEFAULT_API_KEY_NAME,
     model_id: str | None = None,
+    model_provider: str | None = None,
+    model_backend: str | None = None,
     providers: list[dict[str, str]] | None = None,
+    backends: list[dict[str, Any]] | None = None,
     settings: dict[str, Any] | None = None,
     operator_org_id: UUID | str | None = None,
     operator_user_id: UUID | str | None = None,
@@ -368,9 +373,22 @@ async def provision_organization(
         admin_external_id: Override the identity id (defaults to the email).
         api_key_name: Name for the minted key, or ``None`` to skip minting.
         model_id: Model to enable + grant if the tenant has none usable yet.
+        model_provider: Provider for ``model_id`` when it is not already in the
+            shared catalogue. Defaults to the first configured provider.
+        model_backend: Name of an entry in ``backends`` to bind ``model_id`` to.
+            Needed when an instance offers several gateways and the model must
+            run through a specific one.
         providers: Provider API keys to store for the tenant, as
             ``[{"provider": "openai", "api_key": "..."}]``. Stored encrypted at
             the canonical provider secret so the engines can use them.
+        backends: Engine backends (a gateway, a pinned endpoint) to create for the
+            tenant, as
+            ``[{"name": ..., "engine": "langchain", "provider": "custom",
+            "config": {"base_url": ...}, "secrets": {"api_key": ...}}]``.
+            Created **before** models are bound and before discovery runs, since
+            both need the backend to exist. A per-tenant gateway key belongs in
+            ``secrets.api_key`` here, not in ``providers``: that is what makes
+            each organization's traffic carry its own credential.
         settings: Runtime settings to apply, keyed by setting key. An invalid key
             raises ``InvalidProvisioningRequest`` so a tenant is never left
             half-configured.
@@ -443,6 +461,41 @@ async def provision_organization(
         result.warnings.append(f"Built-in definitions were not seeded: {exc}")
         logger.warning("Failed to seed built-ins for org %s", org_id, exc_info=True)
 
+    # Backends before credentials, models, and discovery: all three can depend on
+    # one. A gateway backend is the credential for its provider, and discovery
+    # fans out over enabled ``custom`` backends to learn what the gateway serves —
+    # so creating them last would leave a provisioned tenant with a configured
+    # gateway and no models behind it.
+    backend_ids: dict[str, str] = {}
+    for entry in backends or []:
+        backend_name = str(entry.get("name") or "").strip()
+        if not backend_name:
+            result.warnings.append("A backend entry was skipped: name is required.")
+            continue
+        try:
+            from lucent.services import org_providers as provider_service
+
+            created = await provider_service.create_backend(
+                pool,
+                org_id,
+                name=backend_name,
+                engine=str(entry.get("engine") or "langchain"),
+                provider=str(entry.get("provider") or ""),
+                config=dict(entry.get("config") or {}),
+                secrets=dict(entry.get("secrets") or {}),
+                is_enabled=bool(entry.get("is_enabled", True)),
+            )
+            backend_ids[backend_name] = created["id"]
+            result.backends_created.append(backend_name)
+        except Exception as exc:  # noqa: BLE001 — record, do not orphan the org
+            result.warnings.append(f"Backend {backend_name} was not created: {exc}")
+            logger.warning(
+                "Failed to create backend %s for org %s",
+                backend_name,
+                org_id,
+                exc_info=True,
+            )
+
     for entry in providers or []:
         provider_key = str(entry.get("provider") or "").strip()
         api_key = str(entry.get("api_key") or "").strip()
@@ -467,14 +520,42 @@ async def provision_organization(
     # "the tenant has an OpenAI key" into "the tenant can pick gpt-5.4". Without
     # this step a provisioned tenant looks configured while having an empty model
     # list, which is exactly the half-done state the create form exists to avoid.
-    if result.providers_configured:
+    #
+    # A ``custom`` backend counts as a credential source even though it stores no
+    # provider credential: the gateway's key lives on the backend itself, and the
+    # catalog it serves is whatever the gateway exposes. Without including it here
+    # a provisioned gateway tenant would have zero models despite a working route.
+    discovery_providers = list(result.providers_configured)
+    if any(
+        str(entry.get("provider") or "").strip().lower() == "custom"
+        for entry in backends or []
+    ):
+        discovery_providers.append("custom")
+    if discovery_providers:
         try:
             from lucent.services import org_providers as provider_service
 
             discovered = await provider_service.discover_models(
-                pool, org_id, providers=result.providers_configured
+                pool, org_id, providers=discovery_providers
             )
-            result.models_discovered = int(discovered.get("created") or 0)
+            # ``upserted_count`` is the number of models actually registered;
+            # ``created`` does not exist in the sync summary, so reading it would
+            # silently always report zero.
+            result.models_discovered = int(
+                discovered.get("upserted_count")
+                or discovered.get("created")
+                or 0
+            )
+            # Discovery does NOT raise for a per-provider failure — it records the
+            # error in the summary and moves on. Treating only exceptions as
+            # failure meant an unreachable gateway produced a tenant with no
+            # models and a clean-looking result, which is the half-configured
+            # state this whole block exists to prevent.
+            for failed in discovered.get("errors") or []:
+                result.warnings.append(
+                    f"Model discovery failed for {failed.get('provider')}: "
+                    f"{failed.get('error')}"
+                )
         except Exception as exc:  # noqa: BLE001 — credentials are still stored
             result.warnings.append(f"Model discovery did not run: {exc}")
             logger.warning(
@@ -502,14 +583,59 @@ async def provision_organization(
         try:
             from lucent.services import org_providers as provider_service
 
-            # Clones a shared registry row into the tenant rather than promoting
-            # it: ``models.id`` is the primary key, so promoting would take the
-            # model away from every other tenant. The tenant's own owner is used
-            # as grantor because an operator is not a member of the tenant.
-            granted = await provider_service.grant_model_to_org(
-                pool, org_id, model_id, granted_by=user["id"]
+            existing = await ModelRepository(pool).get_model(model_id)
+            # ``models.id`` is a global primary key, so the same id can already
+            # exist as a *shared* row from a different source (discovery of
+            # another provider). Two cases must be kept apart:
+            #
+            #   * a shared row and no backend requested — clone it into the tenant
+            #     (granting alone would leave it instance-wide);
+            #   * a backend requested — the caller named the route this model must
+            #     run through, so the tenant needs its OWN row bound to it. Cloning
+            #     a shared row would silently drop the binding and route the model
+            #     wherever the shared backend points.
+            already_tenants = (
+                existing is not None
+                and str(existing.get("organization_id") or "") == str(org_id)
             )
-            result.model_id = granted["model_id"]
+            if existing is None or (model_backend and not already_tenants):
+                # The model exists only behind the gateway (its ids are whatever
+                # the gateway serves), or it exists as another source's shared
+                # row. Define it for this tenant, bound to the requested backend,
+                # which is what makes it reachable at all.
+                created = await provider_service.create_model(
+                    pool,
+                    org_id,
+                    model_id=model_id,
+                    provider=(model_provider or "").strip().lower()
+                    or (
+                        result.providers_configured[0]
+                        if result.providers_configured
+                        else "custom"
+                    ),
+                    name=model_id,
+                    engine="langchain",
+                    backend_id=backend_ids.get(model_backend) if model_backend else None,
+                    granted_by=user["id"],
+                    # A gateway model id can collide with an unrelated shared
+                    # catalogue row of the same name; give the tenant its own
+                    # suffixed row rather than cloning the shared one, which
+                    # would drop this binding.
+                    scope_id_on_collision=True,
+                )
+                # create_model returns the model row, whose primary key is ``id``
+                # (the model id string), not ``model_id``.
+                result.model_id = created.get("id") or created.get("model_id")
+            else:
+                # Clones a shared registry row into the tenant rather than
+                # promoting it: ``models.id`` is the primary key, so promoting
+                # would take the model away from every other tenant. The tenant's
+                # own owner is used as grantor because an operator is not a
+                # member of the tenant.
+                granted = await provider_service.grant_model_to_org(
+                    pool, org_id, model_id, granted_by=user["id"]
+                )
+                result.model_id = granted["model_id"]
         except Exception as exc:  # noqa: BLE001
             result.warnings.append(f"Model was not enabled: {exc}")
             logger.warning("Failed to enable model for org %s", org_id, exc_info=True)
