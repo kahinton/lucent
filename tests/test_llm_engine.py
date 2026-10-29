@@ -569,6 +569,65 @@ class TestLangChainEngine:
         assert errors == ["LangChain stream idle timeout after 0.01s of inactivity"]
 
     @pytest.mark.asyncio
+    async def test_bridge_cleanup_failure_does_not_discard_the_response(
+        self, monkeypatch
+    ):
+        """Transport teardown must never cost the person their answer.
+
+        anyio's task groups raise ``BaseExceptionGroup``, which is *not* an
+        ``Exception``. An unguarded bridge close therefore escaped the engine's
+        ``except Exception`` handler, discarding a reply the model had already
+        produced — the turn rendered empty and nothing was persisted. Live
+        reproduction (2026-10-29): every chat turn lost its assistant message
+        once the MCP transport was torn down after a tool call.
+        """
+        from langchain_core.messages import AIMessage
+
+        from lucent.llm import langchain_engine
+        from lucent.llm.langchain_engine import LangChainEngine
+
+        class FakeChatModel:
+            def bind_tools(self, _schemas):
+                return self
+
+            async def astream(self, _messages):
+                yield AIMessage(content="the answer")
+
+        class ExplodingBridge:
+            async def call_tool(self, _name, _arguments):  # pragma: no cover
+                return "unused"
+
+            async def close(self):
+                # The exact shape anyio raises when a cancel scope is exited from
+                # a different task than it was entered in.
+                raise BaseExceptionGroup(
+                    "unhandled errors in a TaskGroup",
+                    [RuntimeError("Attempted to exit cancel scope in a different task")],
+                )
+
+        async def fake_get_chat_model(*_args, **_kwargs):
+            return FakeChatModel()
+
+        monkeypatch.setattr(langchain_engine, "_get_chat_model", fake_get_chat_model)
+        engine = LangChainEngine()
+
+        async def fake_create_bridges_with_bridge(*_args, **_kwargs):
+            return [ExplodingBridge()], {}, None, []
+
+        monkeypatch.setattr(engine, "_create_bridges", fake_create_bridges_with_bridge)
+
+        result = await engine.run_session_streaming(
+            model="test-model",
+            system_message="system",
+            prompt="question",
+            mcp_config={"test": {"url": "http://test.invalid"}},
+            approve_permissions=False,
+            on_event=lambda _event: None,
+        )
+
+        assert result == "the answer"
+
+    @pytest.mark.asyncio
     async def test_tool_round_limit_is_not_reported_as_success(self, monkeypatch):
         """A model still requesting tools at the round cap has not completed."""
         from langchain_core.messages import AIMessage

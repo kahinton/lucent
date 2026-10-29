@@ -154,6 +154,7 @@ class QuotaEnforcingEngine(LLMEngine):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        approval: Any = None,
         **kwargs: Any,
     ) -> str | None:
         organization_id, user_id = _principal(audit_context)
@@ -206,6 +207,7 @@ class QuotaEnforcingEngine(LLMEngine):
                     approve_permissions=approve_permissions,
                     attachments=attachments,
                     managed_tools=managed_tools,
+                    approval=approval,
                     **kwargs,
                 )
             except TypeError as exc:
@@ -227,6 +229,7 @@ class QuotaEnforcingEngine(LLMEngine):
                     approve_permissions=approve_permissions,
                     attachments=attachments,
                     managed_tools=managed_tools,
+                    approval=approval,
                     **kwargs,
                 )
         finally:
@@ -269,6 +272,7 @@ class QuotaEnforcingEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
         current_user_text: str | None = None,
+        approval: Any = None,
         **kwargs: Any,
     ) -> str | None:
         organization_id, user_id = _principal(audit_context)
@@ -338,6 +342,7 @@ class QuotaEnforcingEngine(LLMEngine):
                 attachments=attachments,
                 managed_tools=managed_tools,
                 current_user_text=current_user_text,
+                approval=approval,
                 **kwargs,
             )
 

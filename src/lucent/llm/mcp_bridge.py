@@ -60,6 +60,7 @@ class MCPToolBridge:
         skip_url_validation: bool = False,
         audit_context: dict[str, Any] | None = None,
         transport: str = "http",
+        server_name: str | None = None,
     ):
         if not skip_url_validation:
             validate_url(mcp_url, purpose="MCP bridge")
@@ -77,6 +78,10 @@ class MCPToolBridge:
         self._tools: list[dict[str, Any]] = []
         self._exit_stack: AsyncExitStack | None = None
         self._session: Any | None = None
+        #: The MCP server's configured name, when the caller knows it. Engines use
+        #: it to tell Lucent's own (server-side gated) tools from an external
+        #: server's when deciding whether an approval prompt is still needed.
+        self.server_name = server_name
 
     def _is_tool_allowed(self, tool_name: str) -> bool:
         return (
@@ -438,11 +443,33 @@ class MCPToolBridge:
             logger.debug("Failed to write tool call audit row", exc_info=True)
 
     async def close(self) -> None:
-        """Close the HTTP client."""
-        if self._exit_stack is not None:
-            await self._exit_stack.aclose()
-        self._exit_stack = None
+        """Close the HTTP client, never raising.
+
+        The MCP SDK's streamable-HTTP client runs its streams in an internal anyio
+        task group. Tearing that down after a long tool call makes anyio cancel its
+        own child tasks, and because anyio's asyncio backend implements a cancel
+        scope by cancelling the hosting task, the resulting ``CancelledError``
+        surfaces in *our* task. ``BaseExceptionGroup`` ("Attempted to exit cancel
+        scope in a different task") is the other shape it takes. Neither is an
+        ``Exception``, so an unguarded close escaped the engine's error handling and
+        discarded a response the model had already produced — chat turns rendered
+        their answer but never persisted an assistant message.
+
+        Swallowing this cancellation is safe: a genuine cancellation of this turn
+        (the person pressed Stop, the daemon is draining) leaves a pending
+        cancellation count on the task, so asyncio re-delivers it at the next
+        ``await`` outside this cleanup.
+        """
+        stack, self._exit_stack = self._exit_stack, None
         self._session = None
+        if stack is None:
+            return
+        try:
+            await stack.aclose()
+        except asyncio.CancelledError:
+            logger.debug("MCP bridge close was cancelled by transport teardown")
+        except (Exception, BaseExceptionGroup):  # noqa: BLE001 — cleanup is not fatal
+            logger.debug("MCP bridge cleanup failed; ignoring", exc_info=True)
 
 
 def _normalize_tool(tool: Any) -> dict[str, Any]:

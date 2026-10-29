@@ -437,6 +437,323 @@
         return wrapper;
     }
 
+    // ---------------------------------------------------------------------
+    // Human-in-the-loop interaction cards (tool approval + clarifying question)
+    // ---------------------------------------------------------------------
+    // Two families, one visual language: a bordered card that sits inline in the
+    // assistant row where the tool call or question happened, with the decision
+    // rendered in the card once it is made. Replaying a session rebuilds the
+    // same card in its resolved state, so history never claims a tool ran
+    // silently when the person was actually asked.
+    //
+    // The card never performs requests itself: it puts the answer in
+    // `data-lucent-interaction` and lets the host page POST, because only the
+    // host knows its CSRF and routing conventions.
+
+    const INTERACTION_LABELS = {
+        approve: { text: 'Approved', tone: 'approve' },
+        deny: { text: 'Denied', tone: 'deny' },
+        expired: { text: 'No answer', tone: 'muted' },
+    };
+
+    function interactionRiskNote(risk) {
+        if (risk === 'execute') return 'Runs code or a sandboxed command';
+        if (risk === 'write') return 'Changes data';
+        return 'Reads only';
+    }
+
+    function interactionPayload(payload) {
+        const root = payload && typeof payload === 'object' ? payload : {};
+        // Same shapes the hook chip has to survive: a live SSE payload puts the
+        // fields at the top level, while a replayed row from the sessions API
+        // nests them under `raw.raw` (the persistence layer stores the payload
+        // there so replay can rebuild the exact card). Walk down until the
+        // request id appears, bounded so a malformed row cannot loop.
+        let source = root;
+        for (let depth = 0; depth < 3; depth += 1) {
+            if (source.request_id) break;
+            const nested = source.raw;
+            if (!nested || typeof nested !== 'object') break;
+            source = nested;
+        }
+        const resolved = source.request_id || root.request_id ? source : { ...root, ...source };
+        // Questions arrive as a batch. Older payloads (and approvals) carry the
+        // single-question fields, so synthesize a one-entry list for them — the
+        // renderer then only ever deals with a list.
+        let questions = Array.isArray(resolved.questions) ? resolved.questions : [];
+        if (!questions.length && resolved.kind !== 'approval' && resolved.question) {
+            questions = [{
+                question: resolved.question,
+                header: resolved.header || '',
+                choices: Array.isArray(resolved.choices)
+                    ? resolved.choices.map(choice => (
+                        typeof choice === 'string' ? { label: choice } : choice
+                    ))
+                    : [],
+                allow_free_form: resolved.allow_freeform !== false,
+            }];
+        }
+        return {
+            requestId: resolved.request_id || root.event_id || '',
+            kind: resolved.kind === 'question' ? 'question' : 'approval',
+            sessionId: resolved.session_id || '',
+            tool: resolved.tool || '',
+            input: resolved.input,
+            question: resolved.question || '',
+            header: resolved.header || '',
+            choices: Array.isArray(resolved.choices) ? resolved.choices.filter(Boolean) : [],
+            allowFreeform: resolved.allow_freeform !== false,
+            risk: resolved.risk || 'write',
+            expiresAt: resolved.expires_at,
+            questions: questions.map(question => ({
+                question: question.question || '',
+                header: question.header || '',
+                // Free text is always offered: options are a shortcut, not a cage.
+                allowFreeForm: question.allow_free_form !== false,
+                choices: (Array.isArray(question.choices) ? question.choices : [])
+                    .map(choice => (
+                        typeof choice === 'string'
+                            ? { label: choice, description: '', recommended: false }
+                            : {
+                                label: choice.label || choice.value || '',
+                                description: choice.description || '',
+                                recommended: choice.recommended === true,
+                            }
+                    ))
+                    .filter(choice => choice.label),
+            })),
+        };
+    }
+
+    function interactionPreview(input) {
+        if (input == null || input === '') return '';
+        try {
+            const parsed = typeof input === 'string' ? JSON.parse(input) : input;
+            if (parsed && typeof parsed === 'object') {
+                return Object.entries(parsed)
+                    .filter(([, value]) => value != null && value !== '')
+                    .slice(0, 4)
+                    .map(([key, value]) => {
+                        const rendered = typeof value === 'string' ? value : JSON.stringify(value);
+                        return `${key}: ${String(rendered).slice(0, 80)}`;
+                    })
+                    .join('\n');
+            }
+        } catch (_error) {
+            /* fall through to raw text */
+        }
+        return String(input).slice(0, 240);
+    }
+
+    /**
+     * Append a tool-approval or clarifying-question card.
+     *
+     * @param {HTMLElement} container - the assistant row's tools container
+     * @param {object} payload - the live SSE or replayed event
+     * @returns {HTMLElement} the card wrapper
+     */
+    function appendInteractionRequest(container, payload) {
+        const data = interactionPayload(payload);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'interaction-card';
+        wrapper.dataset.interactionKind = data.kind;
+        wrapper.dataset.interactionId = data.requestId;
+        wrapper.dataset.sessionId = data.sessionId;
+
+        const isApproval = data.kind === 'approval';
+        const preview = isApproval ? interactionPreview(data.input) : '';
+        const questionCount = data.questions.length;
+        const title = isApproval
+            ? `Run ${displayToolName(data.tool)}?`
+            : (questionCount > 1
+                ? `${questionCount} questions`
+                : (data.questions[0]?.header || data.header || 'Question'));
+        const prompt = isApproval
+            ? interactionRiskNote(data.risk)
+            : (questionCount > 1 ? '' : (data.questions[0]?.question || data.question));
+
+        // Each question gets its own block: a choice row, the recommended hint,
+        // and a free-text field that is always present. Free text is the escape
+        // hatch when the model's options do not cover the real answer, so it is
+        // never hidden behind a disclosure.
+        const questionBlocks = isApproval ? '' : data.questions.map((question, index) => {
+            const choices = question.choices.length
+                ? `<div class="interaction-choices" role="group">${question.choices
+                    .map((choice, choiceIndex) => `
+                        <button type="button"
+                                class="interaction-choice${choice.recommended ? ' is-recommended' : ''}"
+                                data-interaction-choice="${escapeHtml(choice.label)}"
+                                data-interaction-question="${index}"
+                                data-interaction-choice-index="${choiceIndex}"
+                                title="${escapeHtml(choice.description || choice.label)}">
+                            <span class="interaction-choice-label">${escapeHtml(choice.label)}</span>
+                            ${choice.recommended
+                                ? '<span class="interaction-choice-badge">Recommended</span>'
+                                : ''}
+                            ${choice.description
+                                ? `<span class="interaction-choice-description">${escapeHtml(choice.description)}</span>`
+                                : ''}
+                        </button>`)
+                    .join('')}</div>`
+                : '';
+            return `
+                <div class="interaction-question" data-interaction-question-block="${index}">
+                    <div class="interaction-question-head">
+                        ${question.header ? `<span class="interaction-question-header">${escapeHtml(question.header)}</span>` : ''}
+                        <span class="interaction-question-text">${escapeHtml(question.question)}</span>
+                    </div>
+                    ${choices}
+                    ${question.allowFreeForm
+                        ? `<input type="text" class="interaction-note interaction-answer-field"
+                                  data-interaction-answer="${index}" maxlength="8000"
+                                  placeholder="${question.choices.length ? 'Or type your own answer' : 'Type your answer'}" />`
+                        : ''}
+                </div>`;
+        }).join('');
+
+        const freeform = isApproval
+            ? `<input type="text" class="interaction-note" data-interaction-note maxlength="2000"
+                      placeholder="Optional: tell the model why (or what to do instead)" />`
+            : '';
+
+        const actions = isApproval
+            ? `<div class="interaction-actions">
+                   <button type="button" class="interaction-btn interaction-btn-approve" data-interaction-decision="approve">Allow</button>
+                   <button type="button" class="interaction-btn interaction-btn-deny" data-interaction-decision="deny">Deny</button>
+                   <label class="interaction-remember">
+                       <input type="checkbox" data-interaction-remember />
+                       <span>Always allow in this chat</span>
+                   </label>
+               </div>`
+            : `<div class="interaction-actions">
+                   <button type="button" class="interaction-btn interaction-btn-approve" data-interaction-decision="answer">${questionCount > 1 ? 'Send answers' : 'Send answer'}</button>
+                   <button type="button" class="interaction-btn interaction-btn-quiet" data-interaction-decision="skip">Skip</button>
+               </div>`;
+
+        wrapper.innerHTML = `
+            <div class="interaction-card-inner">
+                <div class="interaction-card-head">
+                    <span class="interaction-card-icon" aria-hidden="true">
+                        ${isApproval
+                            ? '<svg fill="none" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751A11.959 11.959 0 0 1 12 2.714Z" /></svg>'
+                            : '<svg fill="none" viewBox="0 0 24 24" stroke-width="1.7" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 5.25h.008v.008H12v-.008Z" /></svg>'}
+                    </span>
+                    <span class="interaction-card-title">${escapeHtml(title)}</span>
+                    <span class="interaction-card-state" data-interaction-state></span>
+                </div>
+                ${prompt ? `<p class="interaction-card-prompt">${escapeHtml(prompt)}</p>` : ''}
+                ${preview ? `<pre class="interaction-card-input">${escapeHtml(preview)}</pre>` : ''}
+                ${questionBlocks}
+                ${freeform}
+                ${actions}
+            </div>`;
+        container.appendChild(wrapper);
+        return wrapper;
+    }
+
+    /**
+     * Normalize an outcome payload (live SSE or replayed row) to a flat object.
+     *
+     * Replay rows nest the payload one level deeper than live events, so the
+     * decision fields have to be unwrapped by the same rule the request cards
+     * use or a replayed answer is invisible.
+     *
+     * @param {object} payload
+     * @returns {object} flat outcome with request_id/decision/answer/reason
+     */
+    function interactionOutcome(payload) {
+        let source = payload && typeof payload === 'object' ? payload : {};
+        for (let depth = 0; depth < 3; depth += 1) {
+            if (source.request_id) break;
+            const nested = source.raw;
+            if (!nested || typeof nested !== 'object') break;
+            source = nested;
+        }
+        return source;
+    }
+
+    /**
+     * Render the outcome on an interaction card (live answer or history replay).
+     *
+     * @param {HTMLElement} wrapper - card returned by appendInteractionRequest
+     * @param {object} outcome - `{decision, answer, choice, reason, answered}`
+     */
+    function resolveInteractionCard(wrapper, outcome) {
+        if (!wrapper) return;
+        const data = outcome || {};
+        const isApproval = wrapper.dataset.interactionKind === 'approval';
+        const stateEl = wrapper.querySelector('[data-interaction-state]');
+        const decision = String(data.decision || '');
+        // Batched answers arrive as `answers`; a single question sends one string.
+        // Normalize here so the resolved renderer has one shape to read.
+        const answers = Array.isArray(data.answers)
+            ? data.answers
+            : (data.answer || data.choice
+                ? [{ answer: data.answer, choice: data.choice }]
+                : []);
+        const answered = data.answered === true
+            || answers.some(entry => entry && (entry.answer || entry.choice));
+
+        let label = '';
+        if (isApproval) {
+            const meta = INTERACTION_LABELS[decision] || INTERACTION_LABELS.expired;
+            label = decision === 'approve' ? 'Allowed' : (decision === 'deny' ? 'Denied' : 'No answer');
+            wrapper.dataset.interactionState = meta.tone;
+        } else if (answered) {
+            label = 'Answered';
+            wrapper.dataset.interactionState = 'approve';
+        } else {
+            label = 'Skipped';
+            wrapper.dataset.interactionState = 'muted';
+        }
+
+        if (stateEl) stateEl.textContent = label;
+        wrapper.classList.add('is-resolved');
+        // Drop the controls: the decision is made and cannot be replayed, so
+        // leaving live buttons would invite a click that always 409s.
+        wrapper.querySelectorAll(
+            '.interaction-actions, .interaction-choices, .interaction-freeform, ' +
+            '[data-interaction-note], [data-interaction-answer]'
+        ).forEach(node => node.remove());
+
+        const inner = wrapper.querySelector('.interaction-card-inner');
+        const reason = String(data.reason || data.note || '').trim();
+        if (reason) {
+            const note = document.createElement('p');
+            note.className = 'interaction-card-answer';
+            note.textContent = reason;
+            inner.appendChild(note);
+        }
+
+        if (isApproval) return;
+
+        // Rebuild each answered question in place so the transcript reads as a
+        // Q&A rather than a bare "Answered" chip. Per-question rendering also
+        // survives a batch where only some questions were answered.
+        const blocks = [...wrapper.querySelectorAll('[data-interaction-question-block]')];
+        blocks.forEach((block, index) => {
+            const entry = answers[index] || {};
+            const text = String(entry.answer || entry.choice || '').trim();
+            const target = block.querySelector('.interaction-question-head');
+            if (!target) return;
+            const value = document.createElement('span');
+            value.className = 'interaction-question-answer';
+            value.textContent = text || 'No answer';
+            if (!text) value.classList.add('is-missing');
+            target.appendChild(value);
+        });
+        // A single-question card without a per-question block (older payloads).
+        if (!blocks.length && answers.length) {
+            const text = String(answers[0].answer || answers[0].choice || '').trim();
+            if (text) {
+                const note = document.createElement('p');
+                note.className = 'interaction-card-answer';
+                note.textContent = text;
+                inner.appendChild(note);
+            }
+        }
+    }
+
     function toggleToolDetails(toolId) {
         const details = document.getElementById(`details-${toolId}`);
         if (!details) return;
@@ -449,13 +766,17 @@
 
     window.LucentChatMessageUI = {
         appendHookCall,
+        appendInteractionRequest,
         appendSubagentReport,
         appendToolCall,
         displayToolName,
         escapeHtml,
         finalizeToolCalls,
         formatJSON,
+        interactionOutcome,
+        interactionPayload,
         renderMarkdown,
+        resolveInteractionCard,
         toggleToolDetails,
         updateToolResult,
     };

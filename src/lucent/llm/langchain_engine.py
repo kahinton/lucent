@@ -536,6 +536,7 @@ class LangChainEngine(LLMEngine):
         managed_tools: list[dict[str, Any]] | None = None,
         expected_surface: dict[str, Any] | None = None,
         session_state: dict[str, Any] | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a blocking session (chat pattern)."""
         try:
@@ -555,6 +556,7 @@ class LangChainEngine(LLMEngine):
                 managed_tools=managed_tools,
                 expected_surface=expected_surface,
                 session_state=session_state,
+                approval=approval,
             )
         except Exception as e:
             logger.error("LangChain session failed: %s", e)
@@ -582,6 +584,7 @@ class LangChainEngine(LLMEngine):
         expected_surface: dict[str, Any] | None = None,
         session_state: dict[str, Any] | None = None,
         current_user_text: str | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a streaming session with event callbacks (daemon pattern).
 
@@ -615,6 +618,7 @@ class LangChainEngine(LLMEngine):
                 expected_surface=expected_surface,
                 session_state=session_state,
                 current_user_text=current_user_text,
+                approval=approval,
             )
         except Exception as e:
             error_message = _describe_provider_error(model, e)
@@ -642,6 +646,7 @@ class LangChainEngine(LLMEngine):
         expected_surface: dict[str, Any] | None = None,
         session_state: dict[str, Any] | None = None,
         current_user_text: str | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Core implementation: run model with MCP tool loop.
 
@@ -1046,6 +1051,47 @@ class LangChainEngine(LLMEngine):
                         messages.append(ToolMessage(content=result, tool_call_id=tool_id))
                         continue
 
+                    # Human-in-the-loop: the engine must gate the tools it fetched
+                    # itself (an external MCP server granted to the agent, or the
+                    # built-in file/shell/web set). Lucent's own tools are already
+                    # gated inside the MCP server, and `should_gate` skips a tool
+                    # whose bridge is the internal server so the person is never
+                    # asked twice.
+                    if approval is not None and getattr(approval, "enabled", False):
+                        source_bridge = tool_to_bridge.get(tool_name)
+                        server_name = (
+                            getattr(source_bridge, "server_name", None)
+                            if source_bridge is not None
+                            else None
+                        )
+                        gate_name = (
+                            f"mcp__{server_name}__{tool_name}" if server_name else tool_name
+                        )
+                        if approval.should_gate(gate_name):
+                            if on_event:
+                                on_event(
+                                    SessionEvent(
+                                        type=SessionEventType.TOOL_CALL,
+                                        tool_name=tool_name,
+                                        tool_input=tool_args,
+                                    )
+                                )
+                            decision = await approval.request(tool_name, tool_args or {})
+                            if not decision.approved:
+                                result = decision.as_tool_result(tool_name)
+                                messages.append(
+                                    ToolMessage(content=result, tool_call_id=tool_id)
+                                )
+                                if on_event:
+                                    on_event(
+                                        SessionEvent(
+                                            type=SessionEventType.TOOL_RESULT,
+                                            tool_name=tool_name,
+                                            tool_output=result[:300],
+                                        )
+                                    )
+                                continue
+
                     if on_event:
                         on_event(
                             SessionEvent(
@@ -1132,7 +1178,23 @@ class LangChainEngine(LLMEngine):
 
         finally:
             for bridge in bridges:
-                await bridge.close()
+                # Closing an MCP transport is cleanup and must never decide the
+                # outcome of a turn. The SDK's streamable-HTTP client runs its
+                # streams in an internal anyio task group; tearing that down after
+                # a long tool call can raise "Attempted to exit cancel scope in a
+                # different task", and anyio wraps it in a BaseExceptionGroup —
+                # which is NOT an Exception, so `except Exception` would let it
+                # propagate and discard a response the model already produced.
+                try:
+                    await bridge.close()
+                except asyncio.CancelledError:
+                    # Bridge.close() already tolerates transport-teardown
+                    # cancellation; reach here only if a future SDK raises it
+                    # directly. A pending cancellation is re-delivered by asyncio at
+                    # the next await, so swallowing it here cannot lose a real abort.
+                    logger.debug("MCP bridge close was cancelled by transport teardown")
+                except (Exception, BaseExceptionGroup):  # noqa: BLE001
+                    logger.debug("MCP bridge close failed", exc_info=True)
 
     async def _create_bridges(
         self, mcp_config: dict, audit_context: dict[str, Any] | None = None
@@ -1165,6 +1227,7 @@ class LangChainEngine(LLMEngine):
                         skip_url_validation=bool(server_conf.get("internal")),
                         audit_context={**(audit_context or {}), "mcp_server": server_name},
                         transport=str(server_conf.get("type") or "http"),
+                        server_name=server_name,
                     )
                     discovered = await bridge.discover_tools()
                 except Exception as e:

@@ -144,11 +144,17 @@ def _auto_selection_turn_metadata(choice) -> dict[str, Any]:
     return info
 
 
-def _assistant_turn_metadata(model_id: str, engine, auto_choice) -> dict[str, Any]:
+def _assistant_turn_metadata(
+    model_id: str, engine, auto_choice, *, tool_approval_mode: str | None = None
+) -> dict[str, Any]:
     """Assistant message metadata: what ran, plus arbiter provenance."""
     metadata: dict[str, Any] = {"model": model_id, "engine": engine.name}
     if auto_choice is not None:
         metadata["auto_selection"] = _auto_selection_turn_metadata(auto_choice)
+    if tool_approval_mode == "ask":
+        # Records how this turn was run, so a later reader can tell an
+        # approved run from an unattended one.
+        metadata["tool_approval_mode"] = tool_approval_mode
     return metadata
 
 
@@ -311,6 +317,10 @@ class ChatStreamRequest(BaseModel):
     agent_id: str | None = None  # optional agent definition to use
     session_id: str | None = None
     surface: str = Field(default="chat", pattern=r"^(chat|embedded_chat)$")
+    # Human-in-the-loop tool permission for this turn. ``auto`` (default) lets
+    # tools run; ``ask`` requires the person's approval for anything that
+    # changes state. Read-only tools run either way.
+    tool_approval_mode: str | None = Field(default=None, pattern=r"^(auto|ask)$")
 
 
 class CreateChatSession(BaseModel):
@@ -321,12 +331,18 @@ class CreateChatSession(BaseModel):
     agent_id: str | None = None
     initial_message: str | None = Field(default=None, max_length=1000)
     project_id: UUID | None = None  # file the new chat into a project up front
+    # Persisted tool-permission choice. Accepted here as well as on PATCH because
+    # the composer control can be used before the session exists.
+    tool_approval_mode: str | None = Field(default=None, pattern=r"^(auto|ask)$")
 
 
 class UpdateChatSession(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=256)
     status: str | None = Field(default=None, pattern=r"^(active|idle|archived|deleted)$")
     project_id: UUID | None = None
+    # Persisted per-conversation tool permission. Kept on the session so the
+    # choice survives reload and applies to later turns in the same chat.
+    tool_approval_mode: str | None = Field(default=None, pattern=r"^(auto|ask)$")
 
 
 @dataclass
@@ -424,6 +440,7 @@ def _build_mcp_config(
     llm_message_id: str | None = None,
     agent_definition_id: str | None = None,
     tools: list[str] | None = None,
+    tool_approval_mode: str | None = None,
 ) -> dict:
     """Build MCP server config using the user's session token.
 
@@ -439,6 +456,11 @@ def _build_mcp_config(
         headers["X-Lucent-LLM-Message-Id"] = llm_message_id
     if agent_definition_id:
         headers["X-Lucent-Agent-Definition-Id"] = agent_definition_id
+    # Tool permission travels with the MCP connection, so the server-side gate
+    # applies no matter which engine is driving the loop. Omitted for auto, the
+    # default, so the header only exists when a conversation asked for control.
+    if tool_approval_mode == "ask":
+        headers["X-Lucent-Tool-Approval"] = "ask"
 
     return {
         "memory-server": build_internal_mcp_server(
@@ -1101,13 +1123,13 @@ async def _chat_session_defaults(
         if not session:
             return {}
         agent_id = session.get("agent_definition_id")
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         return {
             "model": session.get("model"),
             "reasoning_effort": session.get("reasoning_effort"),
             "agent_id": str(agent_id) if agent_id else None,
-            "metadata": (
-                session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
-            ),
+            "tool_approval_mode": metadata.get("tool_approval_mode"),
+            "metadata": metadata,
         }
     except Exception:
         logger.debug("Failed to load chat session defaults", exc_info=True)
@@ -1256,6 +1278,44 @@ def _chat_tool_grounding_instructions() -> str:
         "inspection. In web chat, prefer MCP tools and page context; do not run shell, "
         "git, grep, view, or direct database commands to operate Lucent."
     )
+
+
+_CHAT_ASK_USER_INSTRUCTIONS = (
+    "## Asking the person a question\n"
+    "When a request is genuinely ambiguous and the answer changes what you do — "
+    "which item they mean, a missing constraint, two reasonable interpretations — "
+    "call `ask_user` instead of guessing or asking in prose. The conversation shows "
+    "your question inline and the turn waits for the answer, so never also write the "
+    "question as your reply.\n"
+    "**Batch your questions.** Put every question you need into ONE `ask_user` call "
+    "using the `questions` list, up to five. Asking them one at a time forces the "
+    "person to wait through several round-trips for what is one decision. Only come "
+    "back with another call when an answer genuinely raises a question you could not "
+    "have anticipated.\n"
+    "**Recommend the answer you believe is best.** When one option is clearly better, "
+    "set `recommended: true` on it (at most one per question). People read the "
+    "highlighted option first and can accept it with one click; withholding your "
+    "judgment to appear neutral just makes them do work you already did. Leave it off "
+    "when the options really are equal.\n"
+    "**Offer real options, plus the freedom to disagree.** Give two to four genuinely "
+    "plausible `choices` with a short `description` where the tradeoff needs saying. "
+    "The person can always type an answer instead, so use choices to save them typing, "
+    "not to constrain them — if the true answer is outside your options, they will "
+    "type it.\n"
+    "Read the result: `answers` is a list parallel to your questions, each with "
+    "`answer`, `choice`, and `recommended` (the option you suggested), so you can tell "
+    "when they overrode you. If `answered` is false, nobody is present: proceed with "
+    "your best judgment and say what you assumed."
+)
+
+
+_CHAT_APPROVAL_INSTRUCTIONS = (
+    "## Tool permission\n"
+    "This conversation asks the person before running tools that change "
+    "anything. Read-only tools run normally. When a tool call is refused, do not "
+    "retry it: explain what you wanted to do and ask how to proceed. The refusal "
+    "text already reached you as the tool result."
+)
 
 
 async def _render_active_user_context(user: dict, pool) -> str:
@@ -1671,6 +1731,11 @@ async def create_chat_session(request: Request, body: CreateChatSession):
         model=body.model,
         reasoning_effort=body.reasoning_effort,
         agent_definition_id=body.agent_id,
+        metadata=(
+            {"tool_approval_mode": body.tool_approval_mode}
+            if body.tool_approval_mode
+            else None
+        ),
     )
     if body.project_id is not None:
         from lucent.db.projects import ProjectRepository
@@ -1728,6 +1793,21 @@ async def update_chat_session(
     )
     if not session:
         raise HTTPException(status_code=404, detail="Chat session not found")
+    if body.tool_approval_mode is not None:
+        # The tool-permission choice belongs to the conversation, so a reload (or
+        # a later turn) keeps it. Stored in metadata rather than a dedicated column
+        # because it is a UI preference on a session, not a routing fact.
+        metadata = (
+            session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        )
+        metadata = {**metadata, "tool_approval_mode": body.tool_approval_mode}
+        updated = await repo.update_session(
+            session_id,
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+            metadata=metadata,
+        )
+        session = updated or session
     if "project_id" in body.model_fields_set:
         from lucent.db.projects import ProjectNotFoundError, ProjectRepository
 
@@ -1963,6 +2043,14 @@ async def chat_stream_v2(
         else session_defaults.get("reasoning_effort")
     )
     agent_id = body.agent_id or session_defaults.get("agent_id")
+    # Human-in-the-loop tool permission: an explicit choice for this turn wins,
+    # then the conversation's saved preference, then the default (auto, matching
+    # where the industry has settled).
+    from lucent.llm.tool_approval import normalize_approval_mode
+
+    tool_approval_mode = normalize_approval_mode(
+        body.tool_approval_mode or session_defaults.get("tool_approval_mode")
+    )
     validation_error = validate_model(selected_model)
     if validation_error:
         raise HTTPException(status_code=400, detail=validation_error)
@@ -2155,6 +2243,12 @@ async def chat_stream_v2(
             )
 
     system_prompt_parts.append(await _render_active_user_context(user, pool))
+    # Interaction guidance is unconditional: every chat surface can ask a
+    # question, and an agent definition that never learned the tool would
+    # otherwise fall back to asking in prose.
+    system_prompt_parts.append(_CHAT_ASK_USER_INSTRUCTIONS)
+    if tool_approval_mode == "ask":
+        system_prompt_parts.append(_CHAT_APPROVAL_INSTRUCTIONS)
     # Page awareness is shared with the (retired) v1 composer path via the same
     # helper, so an embedded surface cannot silently lose grounding.
     system_prompt_parts.extend(
@@ -2262,6 +2356,7 @@ async def chat_stream_v2(
             llm_message_id=chat_session.user_message_id,
             agent_definition_id=effective_agent_id,
             tools=allowed_tools,
+            tool_approval_mode=tool_approval_mode,
         )
         if session_token
         else {}
@@ -2321,26 +2416,32 @@ async def chat_stream_v2(
 
     async def _persist_and_audit(payload: dict, event: SessionEvent) -> None:
         raw = _event_raw(event)
-        if payload.get("type") == "hook_context":
+        payload_type = str(payload.get("type") or "")
+        if payload_type == "hook_context":
             # Preserve the hook-display promotion: the structured fields the UI
             # renders (phase / trigger_tool / decision / file_refs / memories)
             # live in payload, while _event_raw only captured the SessionEvent.
             # Merge them at raw.raw so reload replays through normalizeHookEvent
             # exactly like the live payload did.
             raw["raw"] = payload
+        elif payload_type.startswith(("tool_approval_", "user_question")):
+            # Interaction rows carry no engine event worth keeping, only the
+            # prompt itself. Storing the payload at raw.raw lets reload rebuild
+            # the same card the person watched live.
+            raw = {"type": payload_type, "raw": payload}
         row = await chat_session.repo.add_event(
             chat_session.session_id,
             org_id=str(user["organization_id"]),
             user_id=str(user["id"]),
             turn_id=chat_session.turn_id,
             message_id=chat_session.user_message_id,
-            event_type=payload.get("type", event.type.value),
+            event_type=payload_type or event.type.value,
             tool_name=payload.get("tool") or event.tool_name,
             tool_input=event.tool_input or payload.get("input"),
-            tool_output=event.tool_output or payload.get("output"),
-            detail=payload.get("text") or payload.get("error"),
+            tool_output=event.tool_output or payload.get("answer") or payload.get("decision"),
+            detail=payload.get("question") or payload.get("text") or payload.get("error"),
             raw=raw,
-            visible=payload.get("type") not in {"text_delta", "usage"},
+            visible=payload_type not in {"text_delta", "usage"},
         )
         if event.type == SessionEventType.USAGE and event.usage:
             from lucent.db.token_usage import TokenUsageRepository
@@ -2391,6 +2492,56 @@ async def chat_stream_v2(
             logger.debug("Failed to audit chat tool event", exc_info=True)
 
     event_persist_bridge = EventPersistBridge(_persist_and_audit)
+
+    # Human-in-the-loop channel. A tool that needs permission (or that asks the
+    # person a question) blocks inside the engine and emits here; the browser
+    # answers over a session-cookie JSON route, which resolves the wait.
+    #
+    # The channel is opened for every persistent chat turn, not just "ask" mode:
+    # `ask_user` is a clarifying question, which has nothing to do with tool
+    # permission and must work in auto mode too. Tool approval is gated separately
+    # by the mode (`EngineApproval` / the MCP middleware), so an open channel in
+    # auto mode simply goes unused for approvals.
+    #
+    # Approval specifically needs somewhere to show a prompt. An ephemeral chat
+    # (session persistence unavailable) has no conversation to address, so it keeps
+    # auto behavior rather than denying every tool.
+    from lucent.llm.tool_approval import interaction_broker
+
+    if tool_approval_mode == "ask" and not chat_session.session_id:
+        logger.info("Chat v2: tool approval downgraded to auto (no persistent session)")
+        tool_approval_mode = "auto"
+
+    def emit_interaction(payload: dict) -> None:
+        """Stream an interaction prompt to the browser and persist it.
+
+        Persisting matters: the prompt is part of the turn's visible history, and
+        a reload must show the same card (with its answer) instead of pretending
+        the tool call happened silently.
+        """
+        event_queue.put_nowait(payload)
+        persist_event(payload, SessionEvent(type=SessionEventType.OTHER, raw=payload))
+
+    channel_open = interaction_broker.open_channel(
+        chat_session.session_id,
+        emit_interaction,
+        user_id=str(user["id"]),
+    )
+    # Engines that own their tool loop must gate the tools the MCP server cannot
+    # see (external MCP servers granted to the agent, provider built-ins). Lucent's
+    # own tools arrive already gated by the server-side middleware.
+    engine_approval = None
+    if tool_approval_mode == "ask":
+        from lucent.llm.tool_approval import EngineApproval
+        from lucent.settings import chat_tool_approval_timeout_seconds
+
+        engine_approval = EngineApproval(
+            mode="ask",
+            session_id=chat_session.session_id,
+            timeout_seconds=chat_tool_approval_timeout_seconds(
+                organization_id=str(user["organization_id"])
+            ),
+        )
 
     def on_event(event: SessionEvent):
         """Push normalized events into the queue for SSE consumption."""
@@ -2523,6 +2674,7 @@ async def chat_stream_v2(
                     **({"engine_backend": engine_backend} if engine_backend else {}),
                 },
                 enable_config_discovery=enable_agent_provider_discovery,
+                approval=engine_approval,
             )
             if result and chat_session.repo and chat_session.session_id:
                 await chat_session.repo.add_message(
@@ -2532,7 +2684,12 @@ async def chat_stream_v2(
                     org_id=str(user["organization_id"]),
                     user_id=str(user["id"]),
                     turn_id=chat_session.turn_id,
-                    metadata=_assistant_turn_metadata(selected_model, engine, auto_choice),
+                    metadata=_assistant_turn_metadata(
+                        selected_model,
+                        engine,
+                        auto_choice,
+                        tool_approval_mode=tool_approval_mode,
+                    ),
                 )
                 if capabilities_for(engine).resume:
                     await chat_session.repo.mark_provider_initialized(
@@ -2576,11 +2733,29 @@ async def chat_stream_v2(
                 "type": "error",
                 "error": str(e),
             })
+        except BaseExceptionGroup as group:
+            # anyio task groups raise BaseExceptionGroup, which is NOT an
+            # Exception. Without this arm such a failure skipped the error
+            # event entirely, so the browser saw an empty reply with no reason.
+            # Cleanup failures (an MCP transport tearing down) are handled at
+            # their source; anything reaching here is still worth reporting.
+            logger.error("Chat v2 session failed: %s", group)
+            event_queue.put_nowait({
+                "type": "error",
+                "error": str(group),
+            })
         finally:
             # Stop intake, then drain the FIFO persist worker so every queued
             # event row is written before anything reads the session. The
             # bridge never raises (errors are logged per event), but guard the
             # drain anyway so a dead worker can't mask completion.
+            #
+            # The interaction channel closes first: a turn that ended can no
+            # longer answer a prompt, so any coroutine still waiting must be
+            # released rather than left parked until its own timeout.
+            if channel_open:
+                interaction_broker.close_channel(chat_session.session_id)
+
             async def _drain_and_stop_bridge():
                 await event_persist_bridge.drain_and_stop()
                 await _maybe_capture_session_experience(user=user, chat_session=chat_session)

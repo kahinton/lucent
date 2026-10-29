@@ -497,6 +497,7 @@
         .chat-input-area .relative.flex.items-center { flex-wrap: wrap; gap: 0.4rem; }
         .config-select { min-width: 0; max-width: calc(50vw - 1.25rem); }
         #agent-select, #model-select { flex: 1 1 calc(50% - 0.25rem); }
+        #tool-approval-select { flex: 1 1 100%; }
         .chat-input-area .relative.flex.items-center > .ml-auto { margin-left: 0; }
         .input-footer { display: none; }
         .msg-enter { padding: 0.85rem 1rem; }
@@ -731,6 +732,10 @@
                 <select id="reasoning-select" class="config-select hidden text-xs rounded-lg border px-2 py-1 focus:outline-none cursor-pointer" title="Reasoning effort">
                     <option value="">Reasoning: default</option>
                 </select>
+                <select id="tool-approval-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer" title="Whether the agent may run tools on its own">
+                    <option value="auto">Tools: auto-run</option>
+                    <option value="ask">Tools: ask first</option>
+                </select>
                 <div class="ml-auto flex items-center gap-2">
                     <button type="button" id="session-menu-btn" class="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="Conversation history" aria-expanded="false">
                         <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
@@ -811,6 +816,10 @@ const state = {
     delegatedActiveCount: 0,
     delegatedPollTimer: null,
     delegatedResyncPending: false,
+    // Human-in-the-loop: pending tool approvals / questions rendered inline.
+    // Keyed by request id so a live event and its later result land on the same
+    // card, and so a replayed history row can be matched to its outcome.
+    interactions: {},
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -994,6 +1003,8 @@ function applySessionConfig(session) {
     } else {
         document.getElementById('agent-select').value = '';
     }
+    const savedApproval = session.metadata && session.metadata.tool_approval_mode;
+    setSelectValueIfPresent('tool-approval-select', savedApproval || 'auto');
     updateAttachAvailability();
 }
 
@@ -1310,6 +1321,9 @@ async function createSession(firstMessage) {
             reasoning_effort: selectedReasoning || null,
             agent_id: selectedAgent || null,
             project_id: state.activeProjectId || null,
+            // Sent at creation too: the composer control can be used on a brand
+            // new conversation, before any session exists to PATCH.
+            tool_approval_mode: currentApprovalMode(),
         }),
     });
     if (!resp.ok) throw new Error('Unable to create session');
@@ -1369,6 +1383,14 @@ function replaySessionEvents(assistantEl, events) {
             if (!reasoningEl) reasoningEl = createReasoningBlock(toolsEl);
             reasoningText += event.detail || '';
             updateReasoningBlock(reasoningEl, reasoningText);
+        } else if (eventTypeMatches(event, 'tool_approval_request')) {
+            appendInteractionRequest(toolsEl, event);
+        } else if (eventTypeMatches(event, 'tool_approval_result')) {
+            resolveInteractionCard(event);
+        } else if (eventTypeMatches(event, 'user_question')) {
+            appendInteractionRequest(toolsEl, event);
+        } else if (eventTypeMatches(event, 'user_question_result')) {
+            resolveInteractionCard(event);
         }
     }
 
@@ -1380,6 +1402,9 @@ function renderSessionMessages(messages, events = []) {
     const msgs = document.getElementById('messages');
     msgs.innerHTML = '';
     state.messages = [];
+    // Cards from the previous transcript must not be matched by a later event
+    // carrying a recycled id; the live map is rebuilt as the rows replay.
+    state.interactions = {};
     const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant');
     const turnIdByMessageId = new Map(
         visible
@@ -1507,6 +1532,7 @@ async function sendMessage(e) {
                 model: selectedModel || null,
                 reasoning_effort: selectedReasoning || null,
                 agent_id: selectedAgent || null,
+                tool_approval_mode: currentApprovalMode(),
             }),
             signal: state.abortController.signal,
         });
@@ -1620,6 +1646,33 @@ async function sendMessage(e) {
                             // A background sub-agent reported into this turn.
                             appendSubagentReport(toolsEl, event);
                             refreshDelegatedWork({ resync: false });
+                            scrollToBottom();
+                            break;
+
+                        case 'tool_approval_request':
+                            // The model wants to run a state-changing tool and
+                            // this conversation requires permission. The turn is
+                            // blocked inside the engine until this is answered.
+                            appendInteractionRequest(toolsEl, event);
+                            showStatus(`Waiting for you to allow ${(event.tool || 'a tool').replace(/_/g, ' ')}...`);
+                            scrollToBottom();
+                            break;
+
+                        case 'tool_approval_result':
+                            resolveInteractionCard(event);
+                            showStatus(event.decision === 'approve' ? 'Running…' : 'Thinking...');
+                            scrollToBottom();
+                            break;
+
+                        case 'user_question':
+                            appendInteractionRequest(toolsEl, event);
+                            showStatus('Waiting for your answer...');
+                            scrollToBottom();
+                            break;
+
+                        case 'user_question_result':
+                            resolveInteractionCard(event);
+                            showStatus('Thinking...');
                             scrollToBottom();
                             break;
                             
@@ -1805,6 +1858,110 @@ function appendSubagentReport(container, payload) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Tool approval + clarifying questions (human-in-the-loop)
+// ═══════════════════════════════════════════════════════════════════
+
+function currentApprovalMode() {
+    return document.getElementById('tool-approval-select').value || 'auto';
+}
+
+/**
+ * Render a prompt card and register it, so the outcome (live or replayed) can
+ * find it again by request id.
+ */
+function appendInteractionRequest(container, payload) {
+    const card = LucentChatMessageUI.appendInteractionRequest(container, payload);
+    const info = LucentChatMessageUI.interactionPayload(payload);
+    if (info.requestId) {
+        state.interactions[info.requestId] = card;
+        card.dataset.turnId = payload && payload.turn_id ? payload.turn_id : '';
+    }
+    return card;
+}
+
+/** Apply a decision/answer to its card. Safe to call for an unknown id. */
+function resolveInteractionCard(payload) {
+    const raw = LucentChatMessageUI.interactionOutcome(payload);
+    const requestId = raw.request_id || LucentChatMessageUI.interactionPayload(payload).requestId;
+    const card = requestId ? state.interactions[requestId] : null;
+    if (!card) return;
+    LucentChatMessageUI.resolveInteractionCard(card, raw || {});
+    delete state.interactions[requestId];
+}
+
+/** Persist the per-conversation tool permission so it survives reload. */
+async function saveApprovalMode(mode) {
+    if (!state.sessionId) return;
+    try {
+        await fetch(`/api/chat/sessions/${encodeURIComponent(state.sessionId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tool_approval_mode: mode }),
+        });
+    } catch (error) {
+        console.warn('Could not save tool permission', error);
+    }
+}
+
+/**
+ * Gather one answer per question block on a card.
+ *
+ * Returns an array parallel to the questions shown, with `{answer, choice}` per
+ * entry. Free text is what the person typed; a clicked option already wrote its
+ * label into the field, so the two paths agree. Unanswered questions stay empty
+ * so the model can see exactly what it did not get.
+ */
+function collectQuestionAnswers(card) {
+    const fields = [...card.querySelectorAll('[data-interaction-answer]')];
+    return fields.map(field => {
+        const value = field.value.trim();
+        const index = field.dataset.interactionAnswer;
+        const selected = card.querySelector(
+            `[data-interaction-question="${index}"].is-selected`
+        );
+        return {
+            answer: value,
+            choice: selected && selected.dataset.interactionChoice === value
+                ? value
+                : null,
+        };
+    });
+}
+
+/**
+ * POST the answer to a waiting tool call or question.
+ *
+ * The card is disabled immediately: the resolve route answers 409 once the wait
+ * is gone (the turn ended, or someone else answered), and a second click must
+ * not look like a failure.
+ */
+async function submitInteraction(card, body) {
+    const requestId = card.dataset.interactionId;
+    if (!requestId) return;
+    card.querySelectorAll('button, input').forEach(node => { node.disabled = true; });
+    const csrfCookie = document.cookie.split('; ').find(c => c.startsWith('lucent_csrf='));
+    try {
+        const resp = await fetch(`/chat/interactions/${encodeURIComponent(requestId)}/resolve`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(csrfCookie ? { 'X-CSRF-Token': csrfCookie.split('=')[1] } : {}),
+            },
+            body: JSON.stringify({ session_id: card.dataset.sessionId || state.sessionId, ...body }),
+        });
+        if (!resp.ok) {
+            // The waiting turn is gone (aborted, timed out, or the server
+            // restarted). Render that honestly instead of leaving live controls.
+            resolveInteractionCard({ request_id: requestId, ...body, expired: true });
+        }
+    } catch (error) {
+        console.warn('Could not answer interaction', error);
+        card.querySelectorAll('button, input').forEach(node => { node.disabled = false; });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Reasoning Block Rendering
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1869,6 +2026,7 @@ function clearConversation(options = {}) {
     state.toolCalls = [];
     state.streamedText = '';
     state.pendingAttachments = [];
+    state.interactions = {};
     renderAttachmentPreviews();
     if (!options.keepSession) {
         state.sessionId = '';
@@ -2396,6 +2554,75 @@ document.addEventListener('click', function(e) {
         return;
     }
 
+    // ── Human-in-the-loop interaction cards ──────────────────────────────
+    const interactionDecision = e.target.closest('[data-interaction-decision]');
+    if (interactionDecision) {
+        const card = interactionDecision.closest('.interaction-card');
+        const decision = interactionDecision.dataset.interactionDecision;
+        if (decision === 'approve' || decision === 'deny') {
+            // "Always allow" is an approval-scope choice, so it only applies to
+            // the approve path. Denying never persists.
+            const remember = decision === 'approve'
+                && !!card.querySelector('[data-interaction-remember]')?.checked;
+            const noteField = card.querySelector('[data-interaction-note]');
+            submitInteraction(card, {
+                decision,
+                remember,
+                note: noteField ? noteField.value.trim() : '',
+            });
+        } else if (decision === 'answer') {
+            const answers = collectQuestionAnswers(card);
+            if (!answers.some(entry => entry.answer)) {
+                // Nothing answered yet: focus the first empty field instead of
+                // sending an empty submission the model would have to interpret.
+                const empty = [...card.querySelectorAll('[data-interaction-answer]')]
+                    .find(field => !field.value.trim());
+                if (empty) empty.focus();
+                return;
+            }
+            submitInteraction(card, {
+                answer: answers.map(entry => entry.answer).filter(Boolean).join(' | '),
+                choice: null,
+                answers,
+            });
+        } else if (decision === 'skip') {
+            submitInteraction(card, { answer: '', choice: null, answers: [] });
+        }
+        return;
+    }
+
+    const interactionChoice = e.target.closest('[data-interaction-choice]');
+    if (interactionChoice) {
+        const card = interactionChoice.closest('.interaction-card');
+        const value = interactionChoice.dataset.interactionChoice || '';
+        const questionIndex = parseInt(
+            interactionChoice.dataset.interactionQuestion || '0', 10
+        );
+        // A click picks that answer for its own question. It fills the field and
+        // marks the option, then submits everything answered so far — a batched
+        // card is answered in one round trip, not one per question.
+        const answers = collectQuestionAnswers(card);
+        answers[questionIndex] = { answer: value, choice: value };
+        // Reflect the pick so an answer given by clicking is visible if the
+        // person finishes the remaining questions.
+        const field = card.querySelector(`[data-interaction-answer="${questionIndex}"]`);
+        if (field) field.value = value;
+        card.querySelectorAll(
+            `[data-interaction-question="${questionIndex}"]`
+        ).forEach(node => node.classList.toggle('is-selected', node === interactionChoice));
+
+        const total = card.querySelectorAll('[data-interaction-question-block]').length;
+        const answeredCount = answers.filter(entry => entry && entry.answer).length;
+        if (total <= 1 || answeredCount >= total) {
+            submitInteraction(card, {
+                answer: answers.map(entry => entry && entry.answer).filter(Boolean).join(' | '),
+                choice: total <= 1 ? value : null,
+                answers,
+            });
+        }
+        return;
+    }
+
     const reasoningBtn = e.target.closest('[data-reasoning-toggle]');
     if (reasoningBtn) {
         toggleReasoning(reasoningBtn);
@@ -2428,6 +2655,42 @@ chatInput.addEventListener('keydown', function(e) {
 });
 chatInput.addEventListener('input', function() {
     autoResize(this);
+});
+
+// Tool permission: the control is per-conversation, so remember the choice and
+// persist it on the session as soon as one exists.
+const toolApprovalSelect = document.getElementById('tool-approval-select');
+if (toolApprovalSelect) {
+    toolApprovalSelect.addEventListener('change', function() {
+        // No session yet (a brand-new conversation): the choice is sent with the
+        // session-creation POST instead, so nothing is lost.
+        saveApprovalMode(this.value);
+    });
+}
+
+// Enter submits an inline interaction answer (Shift+Enter is unnecessary in a
+// single-line field, but leaving it unhandled would swallow the key).
+document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter') return;
+    const field = e.target.closest('[data-interaction-answer], [data-interaction-note]');
+    if (!field) return;
+    const card = field.closest('.interaction-card');
+    if (!card) return;
+    e.preventDefault();
+    if (field.hasAttribute('data-interaction-answer')) {
+        // Enter on one question submits the whole card: batching only pays off
+        // if the person is not forced to click a button after each field.
+        const answers = collectQuestionAnswers(card);
+        if (!answers.some(entry => entry.answer)) return;
+        submitInteraction(card, {
+            answer: answers.map(entry => entry.answer).filter(Boolean).join(' | '),
+            choice: null,
+            answers,
+        });
+    } else {
+        const approve = card.querySelector('[data-interaction-decision="approve"]');
+        if (approve) approve.click();
+    }
 });
 
 // Attachment controls

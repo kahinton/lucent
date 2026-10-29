@@ -810,6 +810,41 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         min_value=30,
     ),
     RuntimeSettingDefinition(
+        key="chat.tool_approval_timeout_seconds",
+        env_var="LUCENT_CHAT_TOOL_APPROVAL_TIMEOUT",
+        value_type="integer",
+        default=120,
+        title="Tool approval wait",
+        section="Chat",
+        description=(
+            "How long chat waits for a person to approve a tool call in "
+            "approval mode."
+        ),
+        help_text=(
+            "Applies only when a conversation asks before running tools. An "
+            "unanswered prompt is treated as a refusal so the turn continues "
+            "instead of hanging. Keep this below the chat timeout."
+        ),
+        min_value=10,
+        max_value=900,
+    ),
+    RuntimeSettingDefinition(
+        key="chat.ask_user_timeout_seconds",
+        env_var="LUCENT_CHAT_ASK_USER_TIMEOUT",
+        value_type="integer",
+        default=240,
+        title="Clarifying question wait",
+        section="Chat",
+        description="How long a chat question may wait for the person's answer.",
+        help_text=(
+            "When the wait expires the model is told nobody answered and is asked "
+            "to proceed with a stated assumption. Keep this below the chat "
+            "timeout, or the turn ends before the answer arrives."
+        ),
+        min_value=10,
+        max_value=1800,
+    ),
+    RuntimeSettingDefinition(
         key="chat.session_experience_summary_enabled",
         env_var="LUCENT_SESSION_EXPERIENCE_SUMMARY_ENABLED",
         value_type="boolean",
@@ -2025,6 +2060,18 @@ def chat_mcp_url(*, organization_id: Any | None = None) -> str:
 def chat_timeout_seconds(*, organization_id: Any | None = None) -> int:
     """Maximum runtime for chat model sessions."""
     return _setting_int("chat.timeout_seconds", organization_id=organization_id)
+
+
+def chat_tool_approval_timeout_seconds(*, organization_id: Any | None = None) -> int:
+    """How long chat waits for a person to approve a tool call."""
+    return _setting_int(
+        "chat.tool_approval_timeout_seconds", organization_id=organization_id
+    )
+
+
+def chat_ask_user_timeout_seconds(*, organization_id: Any | None = None) -> int:
+    """How long a chat clarifying question may wait for an answer."""
+    return _setting_int("chat.ask_user_timeout_seconds", organization_id=organization_id)
 
 
 def session_experience_summary_enabled(*, organization_id: Any | None = None) -> bool:

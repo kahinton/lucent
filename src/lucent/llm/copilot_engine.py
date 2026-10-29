@@ -113,6 +113,70 @@ def _copilot_prompt(prompt: str, attachments: list[dict[str, Any]] | None) -> st
     return inline_text_documents(prompt, attachments)
 
 
+def _permission_request_label(request: Any) -> tuple[str | None, dict[str, Any]]:
+    """Map a Copilot permission request to a tool name and argument preview.
+
+    The SDK's request union has one variant per privileged operation (shell,
+    write, read, url, mcp, memory, …). ``EngineApproval`` only needs a name it can
+    classify and a small object to show, so each variant is flattened here.
+    """
+    kind = str(getattr(request, "kind", "") or "")
+    if kind == "mcp":
+        server = str(getattr(request, "server_name", "") or "")
+        tool = str(getattr(request, "tool_name", "") or "")
+        args = getattr(request, "args", None)
+        return f"mcp__{server}__{tool}" if server and tool else tool or kind, (
+            args if isinstance(args, dict) else {}
+        )
+    if kind == "shell":
+        return "run_shell", {"command": getattr(request, "full_command_text", "")}
+    if kind == "write":
+        return "write_file", {"path": getattr(request, "file_name", "")}
+    if kind == "read":
+        return "read_file", {"path": getattr(request, "path", "")}
+    if kind == "url":
+        return "web_fetch", {"url": getattr(request, "url", "")}
+    if kind == "memory":
+        return "memory_write", {
+            "action": getattr(request, "action", ""),
+            "subject": getattr(request, "subject", ""),
+        }
+    tool_name = (
+        getattr(request, "tool_name", None)
+        or getattr(request, "name", None)
+        or kind
+        or "tool"
+    )
+    args = getattr(request, "args", None)
+    return str(tool_name), args if isinstance(args, dict) else {}
+
+
+def _approval_permission_handler(approval: Any) -> Any:
+    """Build a Copilot ``on_permission_request`` handler backed by the broker.
+
+    The SDK calls this for its own privileged operations (shell, file writes,
+    URL access, memory writes, external MCP tools). Lucent's own MCP tools are
+    already gated inside the MCP server, so they are approved here without a
+    second prompt — a person should never be asked the same question twice.
+    """
+
+    async def handler(request: Any, _invocation: Any) -> Any:
+        from copilot.generated.rpc import (
+            PermissionDecisionApproveOnce,
+            PermissionDecisionReject,
+        )
+
+        tool_name, tool_input = _permission_request_label(request)
+        if not approval.should_gate(tool_name):
+            return PermissionDecisionApproveOnce(approved_interactively=False)
+        decision = await approval.request(tool_name, tool_input)
+        if decision.approved:
+            return PermissionDecisionApproveOnce(approved_interactively=True)
+        return PermissionDecisionReject(feedback=decision.as_tool_result(tool_name))
+
+    return handler
+
+
 
 def _install_copilot_session_event_compat() -> None:
     """Tolerate newer Copilot CLI event payloads with older SDK schemas.
@@ -450,6 +514,7 @@ class CopilotEngine(LLMEngine):
         enable_config_discovery: bool = False,
         approve_permissions: bool = True,
         provider: dict[str, Any] | None = None,
+        approval: Any = None,
     ) -> dict:
         """Build create_session kwargs."""
         kwargs: dict[str, Any] = {
@@ -468,7 +533,17 @@ class CopilotEngine(LLMEngine):
             # such as bash/view without suppressing configured MCP tools.
             kwargs["excluded_tools"] = list(RESTRICTED_WEB_CHAT_EXCLUDED_TOOLS)
         if _PermissionHandler is not None:
-            kwargs["on_permission_request"] = _PermissionHandler.approve_all
+            if approval is not None and getattr(approval, "enabled", False):
+                # The SDK asks before running its own privileged operations. Chat
+                # approval mode answers through the shared broker so the person
+                # sees one kind of prompt regardless of engine. Lucent's own MCP
+                # tools are already gated server-side, so this handler approves
+                # those without asking again.
+                kwargs["on_permission_request"] = _approval_permission_handler(
+                    approval
+                )
+            else:
+                kwargs["on_permission_request"] = _PermissionHandler.approve_all
         if _SystemMessageReplaceConfig is not None:
             kwargs["system_message"] = _SystemMessageReplaceConfig(
                 mode="replace", content=system_message
@@ -528,6 +603,7 @@ class CopilotEngine(LLMEngine):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a blocking session using send_and_wait (chat pattern)."""
         if not _ensure_sdk():
@@ -550,6 +626,7 @@ class CopilotEngine(LLMEngine):
                 enable_config_discovery=enable_config_discovery,
                 approve_permissions=approve_permissions,
                 provider=self._backend_provider(audit_context, model),
+                approval=approval,
             )
             session = await self._open_session(
                 client,
@@ -614,6 +691,7 @@ class CopilotEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
         current_user_text: str | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a streaming session using send + event callbacks (daemon pattern).
 
@@ -654,6 +732,7 @@ class CopilotEngine(LLMEngine):
                 enable_config_discovery=enable_config_discovery,
                 approve_permissions=approve_permissions,
                 provider=self._backend_provider(audit_context, model),
+                approval=approval,
             )
             session = await self._open_session(
                 client,

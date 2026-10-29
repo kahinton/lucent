@@ -143,6 +143,7 @@ class LLMEngine(ABC):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a single LLM session and return the full response text.
 
@@ -170,6 +171,13 @@ class LLMEngine(ABC):
                 ``lucent.llm.attachments`` for the normalized shape.
             managed_tools: Granted managed MCP proxy definitions with cached
                 native descriptors available to engines that support direct binding.
+            approval: Optional ``lucent.llm.tool_approval.EngineApproval`` for a
+                chat turn that requires the person's permission before a tool
+                runs. ``None`` (the default) means "never prompt", which is what
+                every daemon and background caller passes. Lucent's own tools are
+                gated inside the MCP server either way; this covers tools an
+                engine fetched from an external MCP server or ships as a
+                provider built-in.
 
         Returns:
             The assistant's response text, or None on error.
@@ -196,6 +204,7 @@ class LLMEngine(ABC):
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
         current_user_text: str | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run an LLM session with event streaming.
 
@@ -232,6 +241,8 @@ class LLMEngine(ABC):
                 turn. Engines with runtime hooks (message-memory-lookup) use it
                 to anchor message-phase extraction to the current turn; engines
                 without such hooks may ignore it.
+            approval: Optional ``lucent.llm.tool_approval.EngineApproval``. See
+                ``run_session`` for the semantics.
 
         Returns:
             The assistant's full response text, or None on error.

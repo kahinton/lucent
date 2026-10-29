@@ -57,6 +57,11 @@ class EngineCapabilities:
     reasoning_effort: bool = False
     injection: frozenset[str] = frozenset()  # subset of {direct, byok, gateway, oss}
     discovery: bool = False  # can enumerate its own catalog
+    #: Whether the engine can ask before a tool it fetched itself runs. Lucent's
+    #: own MCP tools are gated server-side for every engine; this flag covers the
+    #: per-call hook for external MCP servers and provider built-ins. False means
+    #: the engine falls back to a coarser control (Codex: read-only sandbox).
+    tool_approval: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,6 +225,8 @@ _LANGCHAIN_CAPS = EngineCapabilities(
     reasoning_effort=True,
     injection=frozenset({"direct"}),
     discovery=True,
+    # Lucent owns this loop, so it can pause before any tool call.
+    tool_approval=True,
 )
 
 _COPILOT_CAPS = EngineCapabilities(
@@ -233,6 +240,8 @@ _COPILOT_CAPS = EngineCapabilities(
     reasoning_effort=True,
     injection=frozenset({"byok"}),
     discovery=True,
+    # The SDK exposes on_permission_request for its privileged operations.
+    tool_approval=True,
 )
 
 _CLAUDE_CODE_CAPS = EngineCapabilities(
@@ -250,6 +259,8 @@ _CLAUDE_CODE_CAPS = EngineCapabilities(
     # cannot deliver, so it stays false and its providers come from
     # ``provider_support``.
     discovery=False,
+    # can_use_tool gives a per-call decision.
+    tool_approval=True,
 )
 
 _CODEX_CAPS = EngineCapabilities(
@@ -263,6 +274,9 @@ _CODEX_CAPS = EngineCapabilities(
     reasoning_effort=True,
     injection=frozenset({"oss", "gateway"}),
     discovery=True,
+    # No interactive approval callback exists; the engine honors the setting by
+    # mounting a read-only sandbox instead.
+    tool_approval=False,
 )
 
 

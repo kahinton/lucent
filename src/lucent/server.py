@@ -18,6 +18,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from lucent.auth import set_current_api_key_id, set_current_user
 from lucent.auth_providers import organization_allows_access
 from lucent.llm.context import clear_llm_context, set_llm_context
+from lucent.llm.tool_approval_gate import ToolApprovalMiddleware
 from lucent.logging import configure_logging, get_logger
 from lucent.prompts.memory_usage import (
     get_memory_system_prompt,
@@ -99,7 +100,13 @@ def _build_mcp_transport_security() -> TransportSecuritySettings:
 
 
 # Create the MCP server
-mcp = FastMCP("Lucent")
+#
+# The approval middleware is the human-in-the-loop gate: every engine Lucent runs
+# (LangChain, Copilot, Claude Code, Codex) reaches Lucent's tools through this
+# server, so deciding whether a state-changing tool may run without asking the
+# person is one check here rather than four engine-specific paths. It is inert
+# unless the chat turn carried ``ask`` mode, so daemon work is unaffected.
+mcp = FastMCP("Lucent", middleware=[ToolApprovalMiddleware()])
 
 # Register all memory tools
 register_tools(mcp)
@@ -123,6 +130,11 @@ register_definition_tools(mcp)
 from lucent.tools.tool_audit import register_tool_audit_tools  # noqa: E402
 
 register_tool_audit_tools(mcp)
+
+# Register the clarifying-question tool (chat human-in-the-loop: ask_user).
+from lucent.tools.interaction import register_interaction_tools  # noqa: E402
+
+register_interaction_tools(mcp)
 
 # Get logger for this module
 logger = get_logger("server")
@@ -159,6 +171,9 @@ class MCPAuthMiddleware:
             "task_id": _get(b"x-lucent-task-id"),
             "schedule_run_id": _get(b"x-lucent-schedule-run-id"),
             "agent_definition_id": _get(b"x-lucent-agent-definition-id"),
+            # Chat's human-in-the-loop gate. Absent for daemon and background
+            # work, which must never block waiting for a person.
+            "tool_approval_mode": _get(b"x-lucent-tool-approval"),
         }
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):

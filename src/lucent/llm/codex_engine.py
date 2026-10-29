@@ -108,8 +108,17 @@ class CodexEngine(LLMEngine):
         approve_permissions: bool,
         audit_context: dict[str, Any] | None,
         native_env: dict[str, str] | None = None,
+        approval: Any = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
-        """Build thread_start kwargs (+ subprocess env) for a turn."""
+        """Build thread_start kwargs (+ subprocess env) for a turn.
+
+        Codex's SDK exposes no interactive approval callback: it has sandbox and
+        approval-policy settings, not a per-call ``may I run this?`` hook. So a
+        chat that asks before running tools is honored conservatively — the
+        sandboxed filesystem is mounted read-only, which makes the answer to
+        "may this modify anything?" a structural no rather than a prompt that
+        could not be shown.
+        """
         if not _ensure_sdk():
             raise RuntimeError(
                 "Codex engine requires the openai-codex package. "
@@ -118,7 +127,12 @@ class CodexEngine(LLMEngine):
         backend = (audit_context or {}).get("engine_backend")
         injection = backend_local_injection("codex", backend, model=model)
 
-        sandbox = _Sandbox.workspace_write if approve_permissions else _Sandbox.read_only
+        approval_requested = approval is not None and getattr(approval, "enabled", False)
+        sandbox = (
+            _Sandbox.workspace_write
+            if approve_permissions and not approval_requested
+            else _Sandbox.read_only
+        )
         kwargs: dict[str, Any] = {"model": model, "sandbox": sandbox}
         config: dict[str, Any] = {}
         env: dict[str, str] = {}
@@ -178,6 +192,7 @@ class CodexEngine(LLMEngine):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a blocking Codex turn and return the final response text."""
         if not _ensure_sdk():
@@ -194,6 +209,7 @@ class CodexEngine(LLMEngine):
             approve_permissions=approve_permissions,
             audit_context=audit_context,
             native_env=native_env,
+            approval=approval,
         )
         text = _combine_prompt(system_message, prompt, attachments)
 
@@ -231,6 +247,7 @@ class CodexEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
         current_user_text: str | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a streaming Codex turn, emitting normalized events."""
         if not _ensure_sdk():
@@ -251,6 +268,7 @@ class CodexEngine(LLMEngine):
             approve_permissions=approve_permissions,
             audit_context=audit_context,
             native_env=native_env,
+            approval=approval,
         )
         text = _combine_prompt(system_message, prompt, attachments)
 

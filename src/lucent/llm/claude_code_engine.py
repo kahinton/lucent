@@ -67,6 +67,33 @@ def _attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _claude_approval_callback(approval: Any) -> Any:
+    """Build the SDK's ``can_use_tool`` callback around an ``EngineApproval``.
+
+    Claude Code reports MCP tools as ``mcp__<server>__<tool>``, which is exactly
+    the shape ``EngineApproval.should_gate`` understands: Lucent's own server is
+    skipped (its tools are already gated server-side), external servers and
+    built-ins (``Bash``, ``Write``, …) prompt.
+
+    A denial returns ``PermissionResultDeny`` with the note, so the model reads
+    the refusal as a tool error with a reason instead of silently retrying.
+    """
+
+    async def can_use_tool(tool_name: str, tool_input: Any, _context: Any) -> Any:
+        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+        if not approval.should_gate(tool_name):
+            return PermissionResultAllow()
+        decision = await approval.request(
+            tool_name, tool_input if isinstance(tool_input, dict) else {}
+        )
+        if decision.approved:
+            return PermissionResultAllow()
+        return PermissionResultDeny(message=decision.as_tool_result(tool_name))
+
+    return can_use_tool
+
+
 def _as_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -119,6 +146,7 @@ class ClaudeCodeEngine(LLMEngine):
         audit_context: dict[str, Any] | None,
         include_partial: bool,
         native_env: dict[str, str] | None = None,
+        approval: Any = None,
     ) -> Any:
         if not _ensure_sdk():
             raise RuntimeError(
@@ -139,6 +167,11 @@ class ClaudeCodeEngine(LLMEngine):
             "permission_mode": "acceptEdits" if approve_permissions else "default",
             "include_partial_messages": include_partial,
         }
+        # The SDK's can_use_tool callback is the native seam for "may this run?".
+        # It is only wired when the conversation asked for approval, because a
+        # callback also disables the CLI's own auto-approval shortcuts.
+        if approval is not None and getattr(approval, "enabled", False):
+            kwargs["can_use_tool"] = _claude_approval_callback(approval)
         if system_message:
             kwargs["system_prompt"] = system_message
         mcp_servers = to_claude_mcp_servers(mcp_config)
@@ -175,6 +208,7 @@ class ClaudeCodeEngine(LLMEngine):
         approve_permissions: bool = True,
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a blocking Claude Code turn and return the final response text."""
         return await self._run(
@@ -191,6 +225,7 @@ class ClaudeCodeEngine(LLMEngine):
             attachments=attachments,
             on_event=None,
             include_partial=False,
+            approval=approval,
         )
 
     async def run_session_streaming(
@@ -213,6 +248,7 @@ class ClaudeCodeEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None = None,
         managed_tools: list[dict[str, Any]] | None = None,
         current_user_text: str | None = None,
+        approval: Any = None,
     ) -> str | None:
         """Run a streaming Claude Code turn, emitting normalized events."""
         return await self._run(
@@ -229,6 +265,7 @@ class ClaudeCodeEngine(LLMEngine):
             attachments=attachments,
             on_event=on_event,
             include_partial=True,
+            approval=approval,
         )
 
     async def _run(
@@ -247,6 +284,7 @@ class ClaudeCodeEngine(LLMEngine):
         attachments: list[dict[str, Any]] | None,
         on_event: Callable[[SessionEvent], None] | None,
         include_partial: bool,
+        approval: Any = None,
     ) -> str | None:
         if not _ensure_sdk():
             raise RuntimeError(
@@ -276,6 +314,7 @@ class ClaudeCodeEngine(LLMEngine):
             audit_context=audit_context,
             include_partial=include_partial,
             native_env=native_env,
+            approval=approval,
         )
 
         text = _combine_prompt(prompt, attachments)

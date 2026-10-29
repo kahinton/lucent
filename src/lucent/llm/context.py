@@ -27,6 +27,13 @@ _current_schedule_run_id: ContextVar[str | None] = ContextVar(
 _current_agent_definition_id: ContextVar[str | None] = ContextVar(
     "current_agent_definition_id", default=None
 )
+# Per-turn tool-permission mode for chat ("auto" | "ask"). Threaded onto MCP
+# requests so the server-side tool gate knows whether it may prompt the person
+# before running a tool. Absent for daemon work, which must never block on a
+# human.
+_current_tool_approval_mode: ContextVar[str | None] = ContextVar(
+    "current_tool_approval_mode", default=None
+)
 
 
 def set_llm_context(
@@ -38,6 +45,7 @@ def set_llm_context(
     task_id: str | None = None,
     schedule_run_id: str | None = None,
     agent_definition_id: str | None = None,
+    tool_approval_mode: str | None = None,
 ) -> None:
     """Set request-scoped LLM lineage values."""
     _current_llm_session_id.set(session_id)
@@ -47,6 +55,7 @@ def set_llm_context(
     _current_task_id.set(task_id)
     _current_schedule_run_id.set(schedule_run_id)
     _current_agent_definition_id.set(agent_definition_id)
+    _current_tool_approval_mode.set(tool_approval_mode)
 
 
 def clear_llm_context() -> None:
@@ -59,6 +68,7 @@ def clear_llm_context() -> None:
         task_id=None,
         schedule_run_id=None,
         agent_definition_id=None,
+        tool_approval_mode=None,
     )
 
 
@@ -72,4 +82,5 @@ def get_llm_context() -> dict[str, str | None]:
         "task_id": _current_task_id.get(),
         "schedule_run_id": _current_schedule_run_id.get(),
         "agent_definition_id": _current_agent_definition_id.get(),
+        "tool_approval_mode": _current_tool_approval_mode.get(),
     }
