@@ -12,27 +12,40 @@ enforced throughout the system.
 
 ## Authentication
 
-Lucent supports two authentication mechanisms: session-based authentication for
-the web UI and API key authentication for programmatic access. Both resolve to the
-same internal `CurrentUser` context, ensuring uniform authorization downstream.
+Lucent supports three authentication mechanisms: session-based authentication
+for the web UI, API key authentication for programmatic access, and SCIM bearer
+tokens for directory synchronization. All three resolve to the same internal
+`CurrentUser` context, ensuring uniform authorization downstream.
 
 ### Session-Based Authentication (Web UI)
 
-Sessions are managed via secure HTTP cookies. The flow:
+Sessions are managed via secure HTTP cookies. A session can be created by four
+paths, and every one of them ends in the same `create_session()` call so the
+cookie contract is identical regardless of how the person proved who they are:
 
-1. User authenticates via an auth provider (Google, GitHub, SAML, or local credentials)
+| Path | How the identity is established |
+|------|---------------------------------|
+| Password login (`POST /login`) | bcrypt comparison against `users.password_hash` |
+| Invitation acceptance (`POST /invite/{token}`) | single-use token, bound to one mailbox |
+| Self-serve signup (`POST /signup`) | the person creates the account and its tenant |
+| SSO (`/sso/{slug}/start` → callback) | OIDC `id_token` or SAML assertion, signature verified |
+
+The token flow:
+
+1. The identity check succeeds and yields a database user row
 2. Server generates a 48-byte URL-safe random token (`secrets.token_urlsafe(48)`)
-3. The SHA-256 hash of the token is stored in the `users.session_token` column
+3. The SHA-256 hash of the token is stored in `user_sessions`, one row per device
 4. The plaintext token is set as the `lucent_session` cookie
 
 **Session Validation:**
 
-On each request, the middleware hashes the cookie value and compares it against the
-stored hash. The session is valid only if:
+On each request, the middleware hashes the cookie value and looks it up in
+`user_sessions`. The session is valid only if:
 
-- The hash matches `users.session_token`
-- `session_expires_at > NOW()` (TTL not exceeded)
+- A row exists with that `token_hash`
+- `expires_at > NOW()` (TTL not exceeded)
 - `users.is_active = true` (account not deactivated)
+- The organization's `status` is `active` (not suspended)
 
 **Cookie Configuration:**
 
@@ -49,15 +62,154 @@ stored hash. The session is valid only if:
 |----------------------------|---------|--------------------------------------|
 | `LUCENT_SESSION_TTL_HOURS` | `24`    | Session lifetime in hours            |
 | `LUCENT_SECURE_COOKIES`    | `true`  | Require HTTPS for cookies            |
+| `LUCENT_SELF_SIGNUP_ENABLED` | `false` | Offer the public `/signup` form    |
+| `LUCENT_PUBLIC_URL`        | unset   | Externally visible base URL, used when a server (not a browser) needs to build a link |
 
 Setting `LUCENT_SECURE_COOKIES=false` logs a warning — it should only be used for
 local HTTP development.
 
 **Session Lifecycle:**
 
-- Login creates a new session, invalidating any previous token for that user
-- Logout calls `destroy_session()`, clearing the token from the database
-- Only one active session per user at a time
+- Login creates a new session for that device and leaves other devices signed in
+- Logout destroys only the presented token
+- A password change rotates this device's token and revokes every other session
+- Deactivation, an admin password reset, and SCIM deactivation all destroy every
+  session for the user immediately
+
+### Password Policy and Credential Handling
+
+Passwords are hashed with **bcrypt** and compared with `bcrypt.checkpw`. A
+complexity policy (minimum 8 characters, at least one uppercase, one lowercase,
+one digit) is enforced server-side on every path that accepts a password.
+
+A user may hold no password at all. This is a supported state, not an accident:
+a directory-provisioned account (SCIM), or an account created through an
+invitation whose invitee intends to sign in through SSO, has no local
+credential and can only be accessed through its identity provider.
+
+**Temporary passwords** are generated only for admin-created accounts that the
+administrator did not give a password for. They are returned exactly once, and
+the account is flagged `force_password_change`, which redirects every web page to
+`/force-password-change` until the person sets their own password. Two newer
+flows deliberately avoid this handoff entirely — invitation links and self-serve
+signup both let the person choose their own password before the account is ever
+usable.
+
+### Single Sign-On (OIDC, GitHub OAuth, SAML 2.0)
+
+SSO is configured per tenant in **Settings → Identity & access** and stored in
+`sso_connections`. An enabled connection's button appears automatically on the
+sign-in page. The rules below are enforced in code, not convention:
+
+**Trust anchors**
+
+- An **OIDC** connection names an `issuer`. Discovery is fetched from
+  `{issuer}/.well-known/openid-configuration` over TLS and the document's own
+  `issuer` field must match. The `id_token` is verified against the JWKS from
+  that document with `aud` = our client id, `iss` = the configured issuer, and a
+  required `nonce`.
+- `alg` is restricted to asymmetric algorithms. Accepting `HS256` would let
+  anyone who knows the public client id mint tokens.
+- A **SAML** connection pins one or more IdP certificates. Assertion signatures
+  are verified against those certificates and nothing else — no key is ever
+  fetched from the IdP at login time.
+- **GitHub** is plain OAuth 2.0 with no `id_token`, so identity comes from
+  GitHub's REST API. It is modelled as its own provider type rather than being
+  disguised as OIDC, because there is nothing to signature-check.
+
+**SAML assertion checks** (all mandatory)
+
+1. A signature exists on the assertion, the response, or both — an entirely
+   unsigned assertion is always rejected, whatever the connection's flags say.
+2. The signature validates against a pinned certificate.
+3. `InResponseTo` matches a request Lucent actually issued; the request id comes
+   from the database row keyed by `RelayState`, not from the POST body.
+4. `Audience` is this service provider; a `Destination`/`Recipient` present in
+   the document must be our ACS URL.
+5. `NotBefore`/`NotOnOrAfter` are satisfied, with 120 seconds of clock skew.
+6. The assertion `ID` is unspent. Spent ids are recorded in
+   `saml_assertion_replays` for the assertion's lifetime.
+
+XML is parsed with entity expansion, DTDs, and network access disabled, and no
+`<!DOCTYPE>` is accepted.
+
+**Replay protection.** OIDC state and PKCE verifier, the OIDC nonce, and SAML
+`RelayState`/request id are stored in `sso_login_states` keyed by the SHA-256 of
+the state value. Consuming a row is a single atomic
+`UPDATE ... WHERE consumed_at IS NULL RETURNING`, so a second callback with the
+same state finds nothing. Rows expire after 10 minutes.
+
+**Account resolution** (one implementation, shared by every federation path)
+
+1. Match on `(provider, external_id)` — the IdP's stable subject. This wins over
+   email, because a mailbox can change but a subject usually cannot.
+2. Fall back to email **within the connection's organization only**, and only
+   when the IdP asserts `email_verified`, the existing account has
+   `email_verified = true`, and the connection's `allow_email_linking` is on. An
+   unproven address must never be able to adopt an existing identity.
+3. Otherwise create the account, if `auto_create_users` is enabled.
+
+**Hard limits**
+
+- A federated identity can never become `hyperadmin`. That role is granted only
+  by the out-of-band CLI.
+- An identity already bound in one tenant is refused by another tenant's
+  connection rather than being moved between them.
+- Daemon service identities can never be adopted by a login flow.
+- `allowed_email_domains` restricts which mailboxes a shared IdP may vouch for.
+  An empty list means unrestricted, which is why it is strongly recommended for
+  Google and Microsoft.
+- Role changes are **not** re-derived from group claims on each login. Role is
+  refreshed only at JIT-creation time, so an IdP cannot silently promote or
+  demote a Lucent administrator on every sign-in.
+
+### SCIM 2.0 Directory Provisioning
+
+Enterprise identity providers keep the directory in sync through `/scim/v2`, the
+standard SCIM root. It is authenticated by its own bearer-token family, `sc_...`,
+stored in `scim_tokens` (prefix for lookup, bcrypt hash of the whole value).
+
+| Property | Behaviour |
+|----------|-----------|
+| Token scope | One organization. The tenant comes from the token, never from the payload. |
+| Assignable roles | `member`, `admin`. Never `owner` or `hyperadmin`. |
+| Created accounts | No password. They sign in through SSO or an admin reset. |
+| Deactivation (`active: false`) | Sets `is_active = false` **and** destroys all sessions. |
+| `DELETE` on a used account | Deactivates rather than deletes, so history stays attributable. |
+| `DELETE` on an unused account | Deletes outright, so a mistaken provisioning is undoable. |
+| Daemon identities | Invisible to and untouchable by SCIM. |
+| Audit | Every mutation is logged with the token as actor, not a person. |
+
+SCIM tokens are separate from user API keys on purpose: a directory token can
+create and remove people, which no user's API key should imply, and rotating the
+directory credential must not disturb anyone's API access.
+
+### Invitation Links
+
+An admin (or the hyperadmin API) can mint a single-use invitation for one email
+address, valid for a configurable window (24 hours by default).
+
+- Only the SHA-256 of the token is stored, so a database read yields no usable
+  credential.
+- The invitation's email is authoritative: redemption creates an account for the
+  address the link was sent to. A forwarded link therefore cannot become an
+  account-creation primitive for a different mailbox.
+- Accepted, revoked, expired, and unknown tokens all produce the same message, so
+  the page cannot be used to probe which addresses were invited.
+- Acceptance is an atomic claim (`UPDATE ... WHERE accepted_at IS NULL`); a lost
+  race rolls the newly created account back.
+- An admin cannot invite a role above their own, and `hyperadmin` is never
+  invitable.
+
+### Email Uniqueness
+
+`idx_users_org_email_unique` makes `(organization_id, lower(email))` unique for
+human members. Without it, two members of one tenant could share an address and
+SSO or SCIM identity matching by email would become ambiguous — an
+account-takeover shape rather than a nuisance. The constraint is scoped per
+tenant because one person may legitimately hold accounts in two tenants, and it
+excludes `daemon` identities because they share a synthetic address by
+construction.
 
 ### CSRF Protection
 

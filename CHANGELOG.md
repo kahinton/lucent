@@ -8,6 +8,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Self-serve signup, invitation links, OIDC/GitHub/SAML single sign-on, and
+  SCIM 2.0 provisioning (migration 157).** Four user-management gaps closed in
+  one wave, all sharing the property that a party outside the tenant asserts an
+  identity, so each is treated as a credential boundary.
+  - **Signup with a user-chosen password.** `POST /signup` (gated by
+    `LUCENT_SELF_SIGNUP_ENABLED`, default off) creates a tenant and its owner
+    with the password the person picks, then signs them in. No temporary
+    credential is generated and no reset is forced. The hyperadmin provisioning
+    endpoint gained the same capability in practice via its existing
+    `first_admin.password`, which now records `provisioned_by`/`email_verified`
+    so a later SSO link is possible.
+  - **Invitation links.** Admins mint a single-use link from **Settings →
+    Members** (or `POST /api/organizations/{id}/invitations` for operators),
+    valid for a configurable window with a 24-hour default. Only the token's
+    SHA-256 is stored; acceptance is an atomic claim, so a replayed link is
+    rejected and a lost race rolls the new account back. The invitation's email
+    is authoritative, so a forwarded link cannot create an account for a
+    different mailbox.
+  - **SSO.** Per-tenant connections in **Settings → Identity & access** support
+    OpenID Connect (with PKCE, single-use state, nonce, and JWKS-verified
+    `id_token`), GitHub OAuth (modelled separately because it has no `id_token`
+    to verify), and SAML 2.0 SP-initiated login (assertion/response signature
+    verified against pinned IdP certificates, `InResponseTo` bound to a request
+    we issued, audience/destination/timing checked, assertion-ID replay cache).
+    Enabled connections appear on the sign-in page automatically. JIT
+    provisioning is optional and its role comes from configurable group mappings
+    that cap at `owner` — a federated identity can never become `hyperadmin`.
+  - **SCIM 2.0.** `/scim/v2` supports Users create/read/update/patch/delete plus
+    discovery endpoints, authenticated by a separate `sc_` bearer-token family
+    scoped to one organization. Deactivation destroys live sessions; `DELETE`
+    deactivates an account that has been used and deletes one that never
+    signed in, so history stays attributable while mistaken provisionings
+    remain undoable. Only `member` and `admin` are assignable, and daemon
+    identities are invisible to and untouchable by the sync.
+  - Schema: new `identity_invitations`, `sso_connections`, `sso_login_states`,
+    `saml_assertion_replays`, and `scim_tokens` tables; `users.email_verified`,
+    `users.scim_external_id`, and `users.provisioned_by` columns; `oidc` added
+    to the provider enum; and a partial unique index making
+    `(organization_id, lower(email))` unique for human members, which is what
+    makes email-based SSO/SCIM matching unambiguous.
+- **`PyJWT` is now used** (it was declared but unused) for `id_token`
+  verification, and `signxml`/`lxml` are added for SAML XML-DSig. The SAML
+  libraries are imported lazily so a password-only deployment never loads them.
+
+### Changed
+
+- **`email_verified` gates email-based account linking.** An SSO login may adopt
+  an existing Lucent account by email only when the IdP asserts the address is
+  verified *and* the target row is already `email_verified` *and* the connection
+  permits linking. An unproven address can no longer take over an existing
+  identity — previously any assertion carrying a matching address would have
+  been sufficient, which is an account-takeover shape.
+- **Users now have many concurrent sessions** — one per device — which the
+  security documentation described incorrectly as a single session. Login adds a
+  session without touching other devices; logout removes only the presented one;
+  a password change rotates the current device and revokes the rest.
+- `docs/security-model.md` and `docs/troubleshooting.md` corrected: the former
+  claimed Google/GitHub/SAML providers existed when only `basic` and `api_key`
+  were implemented, and the latter claimed there was no password recovery path.
+
 - **Provision a tenant onto a shared LLM gateway (LiteLLM or equivalent).**
   `POST /api/organizations/provision` gained a `backends` list, plus
   `model_provider` / `model_backend` to bind the named model to one of them. An

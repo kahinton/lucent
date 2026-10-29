@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <title>{% block title %}Lucent{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" sizes="any" href="/static/lucent_logo_v2.svg">
+    <script src="/static/vendor/tailwindcss-3.4.17.js"></script>
+    <script nonce="{{ request.state.csp_nonce }}">
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#e6fffb', 100: '#bffaf2', 200: '#7feee4', 300: '#3ee0d6',
+                            400: '#00d4c7', 500: '#00b8ad', 600: '#00968f', 700: '#08766f',
+                            800: '#0b5d59', 900: '#0d4846', 950: '#072b2a',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    {#
+      Shared chrome for the unauthenticated pages (sign in, sign up, invitation
+      acceptance). Extracted so the public surface — the part of the app anyone
+      on the internet can reach — has one appearance and one place to fix. The
+      styling intentionally mirrors `login.html`; that page keeps its own copy
+      until it is migrated, and both must stay visually identical.
+    #}
+    <style>
+        :root {
+            color-scheme: dark;
+            --auth-black: #080808;
+            --auth-panel: rgba(18, 18, 18, 0.78);
+            --auth-line: rgba(255, 255, 255, 0.15);
+            --auth-text: #faf9f6;
+            --auth-muted: #9d9995;
+            --auth-teal: #00cfc1;
+            --auth-pink: #ff3f9b;
+        }
+        html { background: var(--auth-black); }
+        body {
+            position: relative;
+            padding: 2rem 1rem;
+            color: var(--auth-text);
+            background-color: var(--auth-black) !important;
+            background-image: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.018) 0, rgba(255, 255, 255, 0.018) 1px, transparent 1px, transparent 12px);
+        }
+        .auth-logo { filter: drop-shadow(0 8px 16px rgba(255, 63, 155, 0.2)); }
+        .auth-card {
+            position: relative;
+            overflow: hidden;
+            background: var(--auth-panel) !important;
+            border-color: var(--auth-line) !important;
+            border-radius: 0.5rem;
+            box-shadow: inset 0 1px rgba(255, 255, 255, 0.08), 0 6px 0 #000, 0 24px 60px rgba(0, 0, 0, 0.46);
+            backdrop-filter: blur(22px) saturate(135%);
+            -webkit-backdrop-filter: blur(22px) saturate(135%);
+        }
+        .auth-title, .auth-heading { color: var(--auth-text) !important; }
+        .auth-subtitle, .auth-label { color: var(--auth-muted) !important; }
+        input, select {
+            background-color: rgba(5, 5, 5, 0.72) !important;
+            color: var(--auth-text) !important;
+            border-color: #424242 !important;
+            border-radius: 0.4rem !important;
+            box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.55);
+        }
+        input::placeholder { color: #706d6a !important; }
+        input:focus, select:focus {
+            border-color: var(--auth-teal) !important;
+            box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.16), inset 0 1px 4px rgba(0, 0, 0, 0.55) !important;
+            outline: none;
+        }
+        .auth-submit {
+            color: #050505 !important;
+            background: var(--auth-pink) !important;
+            border-radius: 0.4rem;
+            box-shadow: 0 4px 0 #971950, 0 10px 22px rgba(255, 63, 155, 0.2);
+        }
+        .auth-submit:hover { background: #ff5baa !important; transform: translateY(-1px); }
+        .auth-submit:active { transform: translateY(2px); box-shadow: 0 1px 0 #971950; }
+        .auth-error {
+            background: rgba(255, 63, 63, 0.1);
+            border: 1px solid rgba(255, 63, 63, 0.35);
+            color: #ffb3b3;
+        }
+        .auth-notice {
+            background: rgba(0, 207, 193, 0.12);
+            border: 1px solid rgba(0, 207, 193, 0.35);
+            color: #7ff0e7;
+        }
+        .auth-hint { color: var(--auth-muted); }
+        .auth-link { color: var(--auth-teal); font-weight: 600; text-decoration: none; }
+        .auth-link:hover { text-decoration: underline; }
+        @media (max-width: 480px) {
+            body { align-items: flex-start !important; padding-top: max(2rem, env(safe-area-inset-top)); overflow-y: auto; }
+            .auth-card { padding: 1.5rem !important; }
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center">
+    <div class="w-full max-w-md">
+        <div class="flex flex-col items-center mb-8">
+            <img src="/static/lucent_logo_v2.svg" alt="Lucent" class="auth-logo h-16 mb-4">
+            <h1 class="auth-title text-2xl font-bold">Lucent</h1>
+            <p class="auth-subtitle text-sm mt-1">{% block tagline %}Lighten your load{% endblock %}</p>
+        </div>
+
+        <div class="auth-card border p-8">
+            {% block card %}{% endblock %}
+        </div>
+
+        <p class="mt-6 text-center text-xs auth-hint">{% block footer %}{% endblock %}</p>
+    </div>
+</body>
+</html>

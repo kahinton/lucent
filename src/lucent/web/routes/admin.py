@@ -82,11 +82,28 @@ async def users_list(
         user.role == "owner" if isinstance(user.role, str) else user.role.value == "owner"
     )
 
-    # Check for one-time temp password display (from user creation)
+    # Check for one-time temp password / invite link display (from user
+    # creation or invitation minting).
     temp_pw_display = None
+    invite_display = None
     ref = request.cookies.get("lucent_temp_pw_ref", "")
     if ref and ref in _temp_pw_store and _temp_pw_store[ref]["expires"] > time.time():
-        temp_pw_display = _temp_pw_store.pop(ref)["password"]
+        payload = _temp_pw_store.pop(ref)
+        if "invite_url" in payload:
+            invite_display = payload
+        else:
+            temp_pw_display = payload["password"]
+
+    pending_invitations: list[dict] = []
+    if can_manage:
+        from lucent.db.identity import InvitationRepository
+
+        try:
+            pending_invitations = await InvitationRepository(pool).list_pending(
+                user.organization_id
+            )
+        except Exception:  # noqa: BLE001 — never block the member list on this
+            logger.warning("Could not list pending invitations", exc_info=True)
 
     success = request.query_params.get("success")
     error = request.query_params.get("error")
@@ -100,6 +117,8 @@ async def users_list(
             "can_manage": can_manage,
             "can_impersonate": can_impersonate,
             "temp_password": temp_pw_display,
+            "invite_link": invite_display,
+            "pending_invitations": pending_invitations,
             "success": success,
             "error": error,
             "page": page,
@@ -208,6 +227,112 @@ async def create_user(
         path="/settings/users",
     )
     return response
+
+
+@router.post("/users/invite")
+async def create_invite_link(
+    request: Request,
+    email: str = Form(...),
+    role: str = Form("member"),
+    ttl_hours: int = Form(24),
+):
+    """Mint a shareable invitation link for this workspace.
+
+    Preferred over the temp-password flow: the invitee chooses their own
+    password, so no credential is ever handed over out of band and no forced
+    reset is needed. The link is single-use and expires (24 hours by default).
+    """
+    from lucent.services import identity as identity_service
+
+    await _check_csrf(request)
+    user = await get_user_context(request)
+
+    caller_role = user.role if isinstance(user.role, str) else user.role.value
+    if caller_role not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    pool = await get_pool()
+    try:
+        record, token = await identity_service.create_invitation(
+            pool,
+            organization_id=user.organization_id,
+            email=email,
+            role=role,
+            invited_by=user.id,
+            inviter_role=caller_role,
+            ttl_hours=ttl_hours,
+        )
+    except identity_service.InvitationError as exc:
+        return RedirectResponse(
+            url=f"/settings/users?error={quote_plus(str(exc))}", status_code=303
+        )
+
+    await AdminAuditRepository(pool).log_for_user(
+        user,
+        request,
+        action=audit_actions.INVITATION_CREATE,
+        entity_type="invitation",
+        entity_id=record["id"],
+        entity_label=email,
+        new_values={"email": email, "role": role, "expires_at": str(record["expires_at"])},
+        notes="invitation link created",
+    )
+
+    # The link is shown once, like a temp password, through the same
+    # server-side one-shot store so it never lands in a URL or a cookie.
+    base_url = str(request.base_url).rstrip("/")
+    invite_url = f"{base_url}/invite/{token}"
+
+    _cleanup_temp_pw_store()
+    if len(_temp_pw_store) >= _TEMP_PW_MAX_ENTRIES:
+        _temp_pw_store.clear()
+    ref_token = secrets.token_urlsafe(32)
+    _temp_pw_store[ref_token] = {
+        "invite_url": invite_url,
+        "email": email,
+        "expires_at": record["expires_at"].strftime("%Y-%m-%d %H:%M UTC"),
+        "expires": time.time() + _TEMP_PW_TTL,
+    }
+
+    response = RedirectResponse(url="/settings/users?success=invited", status_code=303)
+    response.set_cookie(
+        key="lucent_temp_pw_ref",
+        value=ref_token,
+        httponly=True,
+        samesite="lax",
+        secure=SECURE_COOKIES,
+        max_age=60,
+        path="/settings/users",
+    )
+    return response
+
+
+@router.post("/users/invitations/{invitation_id}/revoke")
+async def revoke_invite_link(request: Request, invitation_id: UUID):
+    """Revoke a pending invitation so its link stops working."""
+    from lucent.db.identity import InvitationRepository
+
+    await _check_csrf(request)
+    user = await get_user_context(request)
+
+    caller_role = user.role if isinstance(user.role, str) else user.role.value
+    if caller_role not in ("admin", "owner"):
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    pool = await get_pool()
+    revoked = await InvitationRepository(pool).revoke(
+        invitation_id, organization_id=user.organization_id
+    )
+    if revoked:
+        await AdminAuditRepository(pool).log_for_user(
+            user,
+            request,
+            action=audit_actions.INVITATION_REVOKE,
+            entity_type="invitation",
+            entity_id=invitation_id,
+            notes="invitation link revoked",
+        )
+    return RedirectResponse(url="/settings/users?success=invite_revoked", status_code=303)
 
 
 @router.post("/users/{user_id}/reset-password")

@@ -12,6 +12,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
@@ -839,6 +840,25 @@ def create_app() -> FastAPI:
 
     app.include_router(secrets_router.router, prefix="/api", tags=["Secrets"])
 
+    # SCIM 2.0 directory provisioning. Authenticated by its own ``sc_`` bearer
+    # tokens (not API keys) and scoped to the token's organization, so it is
+    # mounted at the standard SCIM root rather than under /api.
+    from lucent.api.routers import scim as scim_router
+
+    app.include_router(scim_router.router, tags=["SCIM"])
+
+    @app.exception_handler(scim_router.ScimAuthError)
+    async def scim_auth_error_handler(
+        request: Request, exc: scim_router.ScimAuthError
+    ) -> Any:
+        """Render SCIM authentication failures as SCIM error documents.
+
+        Without this the shared HTTPException handler would return HTML, because
+        a browser request is assumed for any non-``/api`` path — and an identity
+        provider parsing HTML reports an unhelpful generic sync failure.
+        """
+        return exc.to_response()
+
     # Include web interface routes (excluded from API docs)
     app.include_router(web_router, include_in_schema=False)
 
@@ -854,9 +874,11 @@ def create_app() -> FastAPI:
     def _is_web_request(request: Request) -> bool:
         """Check if the request is for the web UI (not API)."""
         path = request.url.path
-        accept = request.headers.get("accept", "")
-        if path.startswith("/api/") or path.startswith("/mcp"):
+        # /scim is a machine-facing API even though it is not under /api; an
+        # identity provider must never receive an HTML error page.
+        if path.startswith("/api/") or path.startswith("/mcp") or path.startswith("/scim/"):
             return False
+        accept = request.headers.get("accept", "")
         return "text/html" in accept or not path.startswith("/api/")
 
     def _error_title(status_code: int) -> str:

@@ -36,6 +36,13 @@ from lucent.db.credentials import CredentialRepository
 from lucent.db.dashboard import DashboardRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.groups import GroupRepository
+from lucent.db.identity import (
+    InvitationRepository,
+    SamlReplayRepository,
+    ScimTokenRepository,
+    SsoConnectionRepository,
+    SsoLoginStateRepository,
+)
 from lucent.db.integrations import IntegrationRepository
 from lucent.db.llm_sessions import LLMSessionRepository
 from lucent.db.memory import (
@@ -71,6 +78,11 @@ __all__ = [
     "VersionConflictError",
     "DefinitionRepository",
     "GroupRepository",
+    "InvitationRepository",
+    "SsoConnectionRepository",
+    "SsoLoginStateRepository",
+    "SamlReplayRepository",
+    "ScimTokenRepository",
     "IntegrationRepository",
     "LLMSessionRepository",
     "ProjectRepository",

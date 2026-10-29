@@ -171,6 +171,8 @@ async def create_first_user(
     display_name: str | None = None,
     external_id: str | None = None,
     password: str | None = None,
+    provisioned_by: str = "provisioning",
+    email_verified: bool | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Create the first human member of an organization.
 
@@ -183,6 +185,16 @@ async def create_first_user(
         external_id: Identity-provider id. Defaults to the email.
         password: Plaintext password. When omitted a strong temporary password
             is generated and returned so the caller can deliver it once.
+        provisioned_by: How the account came to exist. Reporting only, but it is
+            the difference an auditor cares about: an operator creating a
+o
+            account for a customer is not the same event as a customer signing
+            themselves up.
+        email_verified: Whether the address counts as proven. Defaults to
+            ``True`` when an address is present, because an instance operator
+            naming it is an out-of-band vouching step. Self-serve signup passes
+            ``False``: the person typed a string and nothing was delivered to
+            it, so it must not be usable to adopt the account later.
 
     Returns:
         ``(user_record, temporary_password_or_None)``.
@@ -227,6 +239,8 @@ async def create_first_user(
         email=email,
         display_name=display_name or email,
         role=role,
+        email_verified=bool(email) if email_verified is None else email_verified,
+        provisioned_by=provisioned_by,
     )
 
     temporary_password: str | None = None
@@ -308,6 +322,8 @@ async def add_member(
         email=email,
         display_name=display_name or email,
         role=role,
+        email_verified=bool(email),
+        provisioned_by="provisioning",
     )
 
     temporary_password: str | None = None
@@ -351,6 +367,8 @@ async def provision_organization(
     admin_password: str | None = None,
     admin_role: str = "owner",
     admin_external_id: str | None = None,
+    admin_provisioned_by: str = "provisioning",
+    admin_email_verified: bool | None = None,
     api_key_name: str | None = DEFAULT_API_KEY_NAME,
     model_id: str | None = None,
     model_provider: str | None = None,
@@ -427,6 +445,8 @@ async def provision_organization(
             display_name=admin_display_name,
             external_id=admin_external_id,
             password=admin_password,
+            provisioned_by=admin_provisioned_by,
+            email_verified=admin_email_verified,
         )
     except Exception as exc:
         # Do not leave a headless tenant behind: an org with no human member is

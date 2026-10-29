@@ -1,0 +1,334 @@
+{% extends "settings_layout.html" %}
+{% set settings_section = "identity" %}
+{% set settings_title = "Identity & access" %}
+{% set settings_subtitle = "Connect an identity provider, or let another system manage members through SCIM." %}
+
+{% block settings_content %}
+
+{% if error %}
+<div class="bg-rose-50 border border-rose-200 rounded-xl p-4">
+    <p class="text-sm text-rose-800">{{ error }}</p>
+</div>
+{% endif %}
+
+{% if success %}
+<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+    <p class="text-sm text-emerald-800">
+        {% if success == 'connection_created' %}Identity provider saved.
+        {% elif success == 'connection_updated' %}Connection updated.
+        {% elif success == 'connection_deleted' %}Connection deleted.
+        {% elif success == 'metadata_imported' %}IdP metadata imported. Review the certificate before enabling.
+        {% elif success == 'scim_token_created' %}SCIM token created.
+        {% elif success == 'scim_token_revoked' %}SCIM token revoked.
+        {% else %}Saved.{% endif %}
+    </p>
+</div>
+{% endif %}
+
+{% if new_scim_token %}
+<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-emerald-800">SCIM token (shown once)</p>
+    <p class="mt-1 text-sm text-emerald-700">
+        Copy this now — it will not be shown again. Configure it in your identity provider as a
+        bearer token for the SCIM endpoint below.
+    </p>
+    <div class="mt-2 flex items-center gap-2">
+        <code id="scim-token" class="flex-1 text-sm font-mono bg-white text-gray-800 px-3 py-2 rounded border border-emerald-300 select-all break-all">{{ new_scim_token }}</code>
+        <button type="button" id="copy-scim-token-btn" class="px-3 py-2 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700">Copy</button>
+    </div>
+</div>
+{% endif %}
+
+{# ── Single sign-on ─────────────────────────────────────────────────── #}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-200">
+        <h3 class="text-sm font-semibold text-gray-900">Single sign-on</h3>
+        <p class="mt-1 text-xs text-gray-500">
+            Let people sign in with an identity provider you control. When a connection is enabled,
+            its button appears on the sign-in page automatically.
+        </p>
+    </div>
+
+    {% if connections %}
+    <table class="w-full">
+        <thead>
+            <tr class="bg-gray-50 border-b border-gray-200">
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Connection</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Secret</th>
+                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for connection in connections %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3">
+                    <p class="text-sm font-medium text-gray-900">{{ connection.display_name }}</p>
+                    <p class="text-xs text-gray-500 font-mono">/sso/{{ connection.slug }}/start</p>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600 uppercase text-xs tracking-wide">{{ connection.provider_type }}</td>
+                <td class="px-4 py-3">
+                    {% if connection.is_enabled %}
+                    <span class="inline-flex items-center gap-1.5 text-sm text-emerald-600"><span class="w-2 h-2 rounded-full bg-emerald-500"></span>Enabled</span>
+                    {% else %}
+                    <span class="inline-flex items-center gap-1.5 text-sm text-gray-400"><span class="w-2 h-2 rounded-full bg-gray-300"></span>Disabled</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-600">
+                    {% if connection.provider_type == 'saml' %}
+                        {{ connection.certificate_count }} cert{{ '' if connection.certificate_count == 1 else 's' }}
+                    {% elif connection.has_client_secret %}
+                        <span class="text-emerald-600">Configured</span>
+                    {% else %}
+                        <span class="text-rose-600">Missing</span>
+                    {% endif %}
+                </td>
+                <td class="px-4 py-3 text-right">
+                    <div class="flex items-center justify-end gap-3 flex-wrap">
+                        {% if connection.provider_type == 'saml' %}
+                        <a href="/settings/identity/sso/{{ connection.id }}/metadata"
+                           class="text-xs text-primary-600 hover:text-primary-700 font-medium">SP metadata</a>
+                        {% endif %}
+                        <form action="/settings/identity/sso/{{ connection.id }}/toggle" method="post" class="inline">
+                            <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                            <button type="submit" class="text-xs text-gray-600 hover:text-gray-800 font-medium">
+                                {{ 'Disable' if connection.is_enabled else 'Enable' }}
+                            </button>
+                        </form>
+                        <form action="/settings/identity/sso/{{ connection.id }}/delete" method="post" class="inline"
+                              data-confirm="Delete the {{ connection.display_name }} connection? Anyone relying on it will lose access.">
+                            <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                            <button type="submit" class="text-xs text-rose-600 hover:text-rose-700 font-medium">Delete</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="px-5 py-8 text-center">
+        <p class="text-sm text-gray-500">No identity provider is connected yet. People sign in with a password.</p>
+    </div>
+    {% endif %}
+</div>
+
+{# ── Add connection ─────────────────────────────────────────────────── #}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-200">
+        <h3 class="text-sm font-semibold text-gray-900">Connect an identity provider</h3>
+    </div>
+    <form action="/settings/identity/sso" method="post" class="p-5 space-y-4">
+        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Protocol</label>
+                <select name="provider_type" id="provider-type" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    <option value="oidc">OpenID Connect</option>
+                    <option value="saml">SAML 2.0</option>
+                    <option value="github">GitHub (OAuth)</option>
+                </select>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Display name</label>
+                <input type="text" name="display_name" required class="w-full px-3 py-2 border border-gray-300 rounded-lg" placeholder="Okta">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">URL slug</label>
+                <input type="text" name="slug" required pattern="[a-z0-9][a-z0-9-]{0,62}"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm" placeholder="acme-okta">
+                <p class="mt-1 text-xs text-gray-500">Used at <code>/sso/&lt;slug&gt;/start</code>. Lowercase letters, digits, and hyphens.</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Default role for new users</label>
+                <select name="default_role" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                    <option value="member">Member</option>
+                    <option value="admin">Admin</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="border-t border-gray-100 pt-4 space-y-4" data-protocol="oidc github">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div data-field="issuer">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Issuer URL</label>
+                    <input type="url" name="issuer" class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
+                           placeholder="https://acme.okta.com">
+                    <p class="mt-1 text-xs text-gray-500">
+                        Required for OIDC. The signing keys and <code>iss</code> claim are verified against this
+                        exact value, so it must match what the provider advertises.
+                    </p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+                    <input type="text" name="client_id" class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm">
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Client secret</label>
+                <input type="password" name="client_secret" autocomplete="new-password"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm">
+                <p class="mt-1 text-xs text-gray-500">
+                    Stored encrypted in the secret store and never shown again.
+                </p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Redirect URI to register</label>
+                <code class="block w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-mono text-gray-700 break-all">{{ base_url }}/sso/callback/oidc</code>
+                <p class="mt-1 text-xs text-gray-500">For GitHub, register <code>{{ base_url }}/sso/callback/github</code> instead.</p>
+            </div>
+        </div>
+
+        <div class="border-t border-gray-100 pt-4 space-y-4 hidden" data-protocol="saml">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">IdP entity ID</label>
+                    <input type="text" name="idp_entity_id" class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
+                           placeholder="http://www.okta.com/exk...">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">IdP SSO URL</label>
+                    <input type="url" name="idp_sso_url" class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
+                           placeholder="https://acme.okta.com/app/.../sso/saml">
+                </div>
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">IdP signing certificate(s)</label>
+                <textarea name="idp_certificates" rows="5"
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-xs"
+                          placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+                <p class="mt-1 text-xs text-gray-500">
+                    Paste one or more PEM certificates. Include the new certificate alongside the old during
+                    a rollover so logins keep working. Assertion signatures are verified against these and
+                    nothing else.
+                </p>
+            </div>
+            <div class="flex flex-wrap gap-4">
+                <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input type="checkbox" name="want_assertions_signed" checked class="rounded border-gray-300"> Require signed assertions
+                </label>
+                <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input type="checkbox" name="want_response_signed" class="rounded border-gray-300"> Require signed responses
+                </label>
+            </div>
+        </div>
+
+        <div class="border-t border-gray-100 pt-4 space-y-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Allowed email domains</label>
+                <input type="text" name="allowed_email_domains" class="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                       placeholder="acme.com, acme.co.uk">
+                <p class="mt-1 text-xs text-gray-500">
+                    Comma-separated. Strongly recommended for shared providers such as Google or Microsoft —
+                    without it, any account that provider will vouch for can reach this workspace.
+                </p>
+            </div>
+            <div class="space-y-2">
+                <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input type="checkbox" name="auto_create_users" checked class="rounded border-gray-300">
+                    Create accounts for new users on first sign-in
+                </label>
+                <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+                    <input type="checkbox" name="allow_email_linking" checked class="rounded border-gray-300">
+                    Link to an existing account when a verified email matches
+                </label>
+            </div>
+        </div>
+
+        <div class="flex justify-end pt-2">
+            <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg">
+                Save connection
+            </button>
+        </div>
+    </form>
+</div>
+
+{# ── SCIM ───────────────────────────────────────────────────────────── #}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-5 py-4 border-b border-gray-200">
+        <h3 class="text-sm font-semibold text-gray-900">Directory sync (SCIM 2.0)</h3>
+        <p class="mt-1 text-xs text-gray-500">
+            Let your identity provider create, update, deactivate, and remove members automatically.
+            Users created this way still sign in through your SSO connection or a password.
+        </p>
+        <p class="mt-2 text-xs text-gray-600">
+            Base URL: <code class="font-mono bg-gray-50 px-1.5 py-0.5 rounded">{{ scim_base_url }}</code>
+        </p>
+    </div>
+
+    {% if scim_tokens %}
+    <table class="w-full">
+        <thead>
+            <tr class="bg-gray-50 border-b border-gray-200">
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Token</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Prefix</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last used</th>
+                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+            {% for token in scim_tokens %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3">
+                    <p class="text-sm font-medium text-gray-900">{{ token.name }}</p>
+                    {% if token.revoked_at %}<p class="text-xs text-rose-600">Revoked</p>{% endif %}
+                </td>
+                <td class="px-4 py-3 text-xs font-mono text-gray-500">{{ token.token_prefix }}…</td>
+                <td class="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">{{ token.last_used_at | datetime }}</td>
+                <td class="px-4 py-3 text-right">
+                    {% if not token.revoked_at %}
+                    <form action="/settings/identity/scim-tokens/{{ token.id }}/revoke" method="post" class="inline"
+                          data-confirm="Revoke this SCIM token? Your identity provider will stop being able to sync members.">
+                        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+                        <button type="submit" class="text-xs text-rose-600 hover:text-rose-700 font-medium">Revoke</button>
+                    </form>
+                    {% else %}<span class="text-xs text-gray-400">—</span>{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <form action="/settings/identity/scim-tokens" method="post" class="p-5 border-t border-gray-100 flex items-end gap-3">
+        <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+        <div class="flex-1">
+            <label class="block text-sm font-medium text-gray-700 mb-1">New token name</label>
+            <input type="text" name="name" required class="w-full px-3 py-2 border border-gray-300 rounded-lg" placeholder="Okta directory sync">
+        </div>
+        <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg">
+            Create token
+        </button>
+    </form>
+</div>
+
+<script nonce="{{ request.state.csp_nonce }}">
+(function () {
+    // Show only the field groups relevant to the selected protocol. The fields
+    // stay in the DOM (and are submitted) so switching back and forth does not
+    // lose what was typed.
+    const select = document.getElementById('provider-type');
+    function apply() {
+        const current = select.value;
+        document.querySelectorAll('[data-protocol]').forEach(function (group) {
+            const matches = group.getAttribute('data-protocol').split(' ').indexOf(current) !== -1;
+            group.classList.toggle('hidden', !matches);
+        });
+    }
+    select.addEventListener('change', apply);
+    apply();
+
+    {% if new_scim_token %}
+    document.getElementById('copy-scim-token-btn').addEventListener('click', function () {
+        const k = document.getElementById('scim-token').textContent.trim();
+        navigator.clipboard.writeText(k).then(() => {
+            this.textContent = 'Copied!';
+            setTimeout(() => { this.textContent = 'Copy'; }, 1500);
+        });
+    });
+    {% endif %}
+})();
+</script>
+{% endblock %}

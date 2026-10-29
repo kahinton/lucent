@@ -25,7 +25,7 @@ from lucent.bootstrap import (
 from lucent.bootstrap import (
     list_initial_setup_models as _list_initial_setup_models,
 )
-from lucent.db import get_pool
+from lucent.db import SsoConnectionRepository, get_pool
 
 # Re-exported so callers/tests can patch ``ModelRepository.<method>`` through
 # this module; the model-listing/enabling logic itself now lives in
@@ -60,14 +60,42 @@ async def _render_login_page(
     """Render login with a synchronized CSRF form token and cookie."""
     csrf_token = _get_csrf_for_request(request)
     provider = await get_auth_provider()
+
+    sso_connections: list[dict] = []
+    single_organization = True
+    signup_enabled = False
+    try:
+        pool = await get_pool()
+        connection_repo = SsoConnectionRepository(pool)
+        sso_connections = await connection_repo.list_public()
+        single_organization = len(
+            {str(row["organization_id"]) for row in sso_connections}
+        ) <= 1
+        from lucent.web.routes.identity_routes import signup_enabled as _signup_enabled
+
+        signup_enabled = _signup_enabled()
+    except Exception:  # noqa: BLE001 — the login page must render even if this fails
+        logger.warning("Could not load SSO connections for the login page", exc_info=True)
+
+    # `notice` is a fixed code from a known set, never free text, so the page
+    # cannot be used to render attacker-authored sentences in a trusted context.
+    from lucent.web.routes.identity_routes import LOGIN_MESSAGES
+
+    notice_code = request.query_params.get("notice")
+    notice = LOGIN_MESSAGES.get(notice_code or "")
+
     response = templates.TemplateResponse(
         request,
         "login.html",
         {
             "error": error,
+            "notice": notice,
             "csrf_token": csrf_token,
             "csrf_field_name": CSRF_FIELD_NAME,
             "fields": provider.get_login_fields(),
+            "sso_connections": sso_connections,
+            "single_organization": single_organization,
+            "signup_enabled": signup_enabled,
         },
         status_code=status_code,
     )

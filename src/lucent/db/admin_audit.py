@@ -76,6 +76,24 @@ PASSWORD_CHANGE = "auth.password_change"  # user changed their own
 API_KEY_CREATE = "api_key.create"
 API_KEY_REVOKE = "api_key.revoke"
 
+# Identity provisioning — invitations, federation, and directory sync.
+# These are kept distinct from USER_CREATE on purpose: an auditor asking "who
+# was let in, and on whose authority" needs to tell a hand-created account from
+# one that arrived through an invite link or an external identity provider.
+INVITATION_CREATE = "invitation.create"
+INVITATION_REVOKE = "invitation.revoke"
+INVITATION_ACCEPT = "invitation.accept"
+SIGNUP_COMPLETE = "auth.signup"
+SSO_LOGIN = "auth.sso_login"
+SSO_CONNECTION_CREATE = "sso.connection_create"
+SSO_CONNECTION_UPDATE = "sso.connection_update"
+SSO_CONNECTION_DELETE = "sso.connection_delete"
+SCIM_TOKEN_CREATE = "scim.token_create"
+SCIM_TOKEN_REVOKE = "scim.token_revoke"
+SCIM_USER_CREATE = "scim.user_create"
+SCIM_USER_UPDATE = "scim.user_update"
+SCIM_USER_DELETE = "scim.user_delete"
+
 # Sessions / impersonation
 IMPERSONATION_START = "impersonation.start"
 IMPERSONATION_STOP = "impersonation.stop"

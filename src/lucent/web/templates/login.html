@@ -77,6 +77,29 @@
         }
         .login-submit:hover { background: #ff5baa !important; transform: translateY(-1px); }
         .login-submit:active { transform: translateY(2px); box-shadow: 0 1px 0 #971950; }
+        .sso-link {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.55rem 0.75rem;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--login-text);
+            text-decoration: none;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--login-line);
+            border-radius: 0.4rem;
+            transition: background 120ms ease, border-color 120ms ease;
+        }
+        .sso-link:hover { background: rgba(0, 207, 193, 0.12); border-color: var(--login-teal); }
+        .login-notice {
+            background: rgba(0, 207, 193, 0.12);
+            border: 1px solid rgba(0, 207, 193, 0.35);
+            color: #7ff0e7;
+        }
+        .login-divider { color: var(--login-muted); }
+        .login-divider::before, .login-divider::after { background: var(--login-line); }
         @media (max-width: 480px) {
             body { align-items: flex-start !important; padding-top: max(2rem, env(safe-area-inset-top)); overflow-y: auto; }
             .login-card { padding: 1.5rem !important; }
@@ -96,6 +119,33 @@
 
         <div class="login-card border p-8">
             <h2 class="login-heading text-lg font-semibold mb-6">Sign In</h2>
+
+            {% if notice %}
+            <div class="mb-4 p-3 login-notice rounded-lg text-sm">
+                {{ notice }}
+            </div>
+            {% endif %}
+
+            {% if sso_connections %}
+            <div class="space-y-2 mb-6">
+                {% for connection in sso_connections %}
+                <a class="sso-link" href="/sso/{{ connection.slug }}/start">
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/>
+                    </svg>
+                    <span>Continue with {{ connection.display_name }}</span>
+                    {% if not single_organization %}
+                    <span class="opacity-60">&middot; {{ connection.organization_name }}</span>
+                    {% endif %}
+                </a>
+                {% endfor %}
+            </div>
+            <div class="flex items-center gap-3 mb-6 login-divider text-xs uppercase tracking-wider">
+                <span class="flex-1 h-px"></span>
+                <span>or</span>
+                <span class="flex-1 h-px"></span>
+            </div>
+            {% endif %}
 
             {% if error %}
             <div class="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded-lg text-sm">
@@ -125,6 +175,13 @@
                     Sign In
                 </button>
             </form>
+
+            {% if signup_enabled %}
+            <p class="mt-6 text-center text-sm login-subtitle">
+                Need a workspace?
+                <a href="/signup" class="font-semibold" style="color: var(--login-teal);">Create one</a>
+            </p>
+            {% endif %}
         </div>
     </div>
 </body>

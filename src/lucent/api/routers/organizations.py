@@ -51,6 +51,10 @@ from lucent.api.models import (
     OrganizationBackendCreate,
     OrganizationCreate,
     OrganizationCredentialUpdate,
+    OrganizationInvitationCreate,
+    OrganizationInvitationCreated,
+    OrganizationInvitationList,
+    OrganizationInvitationSummary,
     OrganizationListResponse,
     OrganizationModelCreate,
     OrganizationModelToggle,
@@ -87,6 +91,7 @@ from lucent.logging import get_logger
 from lucent.rbac import Permission, can_assign_role, can_manage_user
 from lucent.services import org_providers as instance_providers
 from lucent.services import org_provisioning, usage
+from lucent.services import identity as identity_service
 from lucent.services import org_settings as instance_settings
 
 logger = get_logger(__name__)
@@ -1755,6 +1760,166 @@ async def reset_organization_user_password(
             f"{temporary_password} (must be changed at next login)"
         ),
     )
+
+
+@router.post(
+    "/{organization_id}/invitations",
+    response_model=OrganizationInvitationCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_organization_invitation(
+    organization_id: UUID,
+    data: OrganizationInvitationCreate,
+    user: HyperadminUser,
+) -> OrganizationInvitationCreated:
+    """Mint a shareable invitation link for any organization.
+
+    Requires hyperadmin role. This is the operator-side counterpart to the
+    members-page invite button: it produces the same single-use, expiring link
+    without requiring the operator to sign in to the tenant.
+
+    The plaintext link is returned exactly once. Only its hash is stored, so
+    there is no way to retrieve it later — revoke and reissue instead.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    org = await _require_org(organization_id)
+
+    if data.role not in TENANT_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Role must be one of: {', '.join(TENANT_ROLES)}",
+        )
+    if not can_assign_role(user.role, data.role):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You cannot invite someone with the '{data.role}' role",
+        )
+
+    pool = await get_pool()
+    try:
+        record, token = await identity_service.create_invitation(
+            pool,
+            organization_id=organization_id,
+            email=data.email,
+            role=data.role,
+            invited_by=user.id,
+            # The hyperadmin's own role is the ceiling. `can_assign_role`
+            # already refuses anything above it, so passing the inviter's role
+            # here keeps the check honest rather than bypassable.
+            inviter_role=user.role,
+            ttl_hours=data.ttl_hours,
+            note=data.note,
+        )
+    except identity_service.InvitationError as exc:
+        message = str(exc)
+        status_code = (
+            status.HTTP_409_CONFLICT
+            if "already" in message.lower()
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code=status_code, detail=message) from None
+
+    await _audit(
+        user,
+        action=audit_actions.INVITATION_CREATE,
+        entity_type="invitation",
+        entity_id=record["id"],
+        entity_label=data.email,
+        target_org_id=organization_id,
+        changed_fields=["invitation"],
+        new_values={
+            "email": data.email,
+            "role": data.role,
+            "expires_at": str(record["expires_at"]),
+            "organization": org["name"],
+        },
+        notes="Invitation link created by an instance operator.",
+    )
+
+    # The base URL is taken from configuration rather than the request, because
+    # this endpoint is called by a server (an external signup site), where the
+    # request's own host is not the URL a browser should open.
+    import os
+
+    base_url = (
+        os.environ.get("LUCENT_PUBLIC_URL") or "http://localhost:8766"
+    ).rstrip("/")
+
+    return OrganizationInvitationCreated(
+        id=record["id"],
+        email=record["email"],
+        role=record["role"],
+        expires_at=record["expires_at"],
+        invite_url=f"{base_url}/invite/{token}",
+    )
+
+
+@router.get(
+    "/{organization_id}/invitations",
+    response_model=OrganizationInvitationList,
+)
+async def list_organization_invitations(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> OrganizationInvitationList:
+    """List pending (unaccepted, unrevoked, unexpired) invitations."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    from lucent.db import InvitationRepository
+
+    pool = await get_pool()
+    records = await InvitationRepository(pool).list_pending(organization_id)
+    return OrganizationInvitationList(
+        invitations=[
+            OrganizationInvitationSummary(
+                id=record["id"],
+                email=record["email"],
+                role=record["role"],
+                expires_at=record["expires_at"],
+                created_at=record["created_at"],
+                note=record.get("note"),
+            )
+            for record in records
+        ],
+        total_count=len(records),
+    )
+
+
+@router.delete(
+    "/{organization_id}/invitations/{invitation_id}",
+    response_model=SuccessResponse,
+)
+async def revoke_organization_invitation(
+    organization_id: UUID,
+    invitation_id: UUID,
+    user: HyperadminUser,
+) -> SuccessResponse:
+    """Revoke a pending invitation so its link stops working immediately."""
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    from lucent.db import InvitationRepository
+
+    pool = await get_pool()
+    revoked = await InvitationRepository(pool).revoke(
+        invitation_id, organization_id=organization_id
+    )
+    if not revoked:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No pending invitation with that id in this organization",
+        )
+
+    await _audit(
+        user,
+        action=audit_actions.INVITATION_REVOKE,
+        entity_type="invitation",
+        entity_id=invitation_id,
+        target_org_id=organization_id,
+        notes="Invitation revoked by an instance operator.",
+    )
+    return SuccessResponse(success=True, message="Invitation revoked")
 
 
 @router.post(

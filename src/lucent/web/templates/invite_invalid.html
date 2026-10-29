@@ -1,0 +1,18 @@
+{% extends "auth_base.html" %}
+{% block title %}Invitation unavailable - Lucent{% endblock %}
+{% block tagline %}This link can't be used{% endblock %}
+
+{% block card %}
+<h2 class="auth-heading text-lg font-semibold mb-2">This invitation isn't valid</h2>
+<p class="auth-subtitle text-sm">
+    The link is either unknown, has expired, was revoked, or has already been used.
+    Ask an administrator in your workspace to send a new invitation.
+</p>
+<p class="mt-6 text-sm">
+    <a href="/login" class="auth-link">Go to sign in</a>
+</p>
+{% endblock %}
+
+{% block footer %}
+For your security, we don't say which of those reasons applies.
+{% endblock %}

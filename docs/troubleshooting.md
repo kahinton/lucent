@@ -96,7 +96,13 @@ All API and MCP requests require an API key. Get one from:
 
 ### Can't Log In to Web UI
 
-- **Forgot password:** There's no password reset flow yet. Access the database directly:
+- **Forgot password:** Lucent has no self-service "forgot password" email flow,
+  because it has no outbound email transport. The recovery paths are:
+
+  1. An admin resets the password from **Settings → Members → Reset**. That issues
+     a one-time temporary password and forces a change at next sign-in.
+  2. A signed-in user changes their own password at **Settings → Account**.
+  3. If nobody can sign in, reset it directly against the database:
 
 ```sql
 -- Find your user
@@ -117,6 +123,30 @@ async def reset():
 asyncio.run(reset())
 "
 ```
+
+- **Locked out after an SSO change:** If a tenant enabled an SSO connection and
+  nobody can complete the IdP round trip, disable it in the database and sign in
+  with a password again:
+
+```sql
+UPDATE sso_connections SET is_enabled = false WHERE slug = 'your-slug';
+```
+
+- **"This invitation isn't valid":** Invitation links are single-use and expire
+  (24 hours by default). All four failure cases — unknown, expired, revoked, and
+  already used — deliberately show the same page, so the message alone does not
+  identify the cause. Ask an admin to revoke and reissue; there is no way to
+  recover the original link, because only its hash is stored.
+
+- **SCIM sync fails with 401:** The SCIM token was revoked or expired, or the
+  identity provider is sending it in the wrong header. It must be
+  `Authorization: Bearer sc_...`. Mint a new one in **Settings → Identity &
+  access**; the plaintext is shown once.
+
+- **SCIM sync fails with 400 `invalidFilter`:** Only `attribute eq "value"`
+  filters are supported, for `userName`, `externalId`, and `emails.value`. Other
+  SCIM filter operators return an error rather than a partial list, so the
+  provider does not mistake a full listing for a filtered result.
 
 - **Using API key auth provider:** If `LUCENT_AUTH_PROVIDER=api_key`, the login page expects an API key instead of username/password.
 

@@ -5,6 +5,10 @@
 
 {% block settings_actions %}
 {% if can_manage %}
+<button type="button" id="open-invite-member-btn" class="flex items-center gap-2 px-4 py-2 bg-white border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50">
+    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244"/></svg>
+    Invite with link
+</button>
 <button type="button" id="open-add-member-btn" class="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700">
     <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
     Add member
@@ -13,6 +17,21 @@
 {% endblock %}
 
 {% block settings_content %}
+{# One-time invitation link #}
+{% if invite_link %}
+<div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-emerald-800">Invitation link for {{ invite_link.email }} (shown once)</p>
+    <p class="mt-1 text-sm text-emerald-700">
+        Share this link with them. It expires {{ invite_link.expires_at }} and can only be used once.
+        They'll choose their own password when they accept.
+    </p>
+    <div class="mt-2 flex items-center gap-2">
+        <code id="invite-url" class="flex-1 text-sm font-mono bg-white text-gray-800 px-3 py-2 rounded border border-emerald-300 select-all break-all">{{ invite_link.invite_url }}</code>
+        <button type="button" id="copy-invite-url-btn" class="px-3 py-2 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700">Copy</button>
+    </div>
+</div>
+{% endif %}
+
 {# Show one-time temp password #}
 {% if temp_password %}
 <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
@@ -137,6 +156,90 @@
 </div>
 
 {% if can_manage %}
+{# Pending invitations #}
+{% if pending_invitations %}
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mt-6">
+    <div class="px-4 py-3 border-b border-gray-200">
+        <h3 class="text-sm font-semibold text-gray-900">Pending invitations</h3>
+        <p class="mt-0.5 text-xs text-gray-500">Links that haven't been accepted yet. Revoke one to invalidate its link immediately.</p>
+    </div>
+    <table class="w-full">
+        <tbody class="divide-y divide-gray-100">
+            {% for invitation in pending_invitations %}
+            <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 text-sm text-gray-900">{{ invitation.email }}</td>
+                <td class="px-4 py-3">
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+                        {% if invitation.role == 'owner' %}bg-purple-100 text-purple-700
+                        {% elif invitation.role == 'admin' %}bg-blue-100 text-blue-700
+                        {% else %}bg-gray-100 text-gray-700{% endif %}">
+                        {{ invitation.role | capitalize }}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">Expires {{ invitation.expires_at | datetime }}</td>
+                <td class="px-4 py-3 text-sm text-gray-500">{{ invitation.invited_by_name or invitation.invited_by_email or '—' }}</td>
+                <td class="px-4 py-3 text-right">
+                    <form action="/settings/users/invitations/{{ invitation.id }}/revoke" method="post" class="inline"
+                          data-confirm="Revoke the invitation for {{ invitation.email }}? Their link will stop working immediately.">
+                        <button type="submit" class="text-xs text-rose-600 hover:text-rose-700 font-medium">Revoke</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{# Invite-with-link modal #}
+<div id="invite-member-modal" class="hidden fixed inset-0 z-50 overflow-y-auto">
+    <div class="flex items-center justify-center min-h-screen px-4">
+        <div class="fixed inset-0 bg-gray-500/75" id="invite-member-backdrop"></div>
+        <div class="relative bg-white rounded-xl shadow-xl max-w-md w-full p-6 z-10">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-lg font-semibold text-gray-900">Invite with a link</h3>
+                <button type="button" id="close-invite-member-btn" class="text-gray-400 hover:text-gray-500">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <form action="/settings/users/invite" method="post" class="space-y-4">
+                <input type="hidden" name="{{ csrf_field_name }}" value="{{ request.cookies.get('lucent_csrf', '') }}">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                    <input type="email" name="email" required class="w-full px-3 py-2 border border-gray-300 rounded-lg" placeholder="jane@example.com">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                    <select name="role" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                        <option value="member">Member</option>
+                        {% set caller_role = (user.role.value if user.role.__class__.__name__ == 'Role' else user.role) %}
+                        {% if caller_role == 'owner' %}
+                        <option value="admin">Admin</option>
+                        <option value="owner">Owner</option>
+                        {% endif %}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Link expires in</label>
+                    <select name="ttl_hours" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
+                        <option value="1">1 hour</option>
+                        <option value="24" selected>24 hours</option>
+                        <option value="72">3 days</option>
+                        <option value="168">7 days</option>
+                    </select>
+                    <p class="mt-1 text-xs text-gray-500">
+                        They'll set their own password. No temporary password is created and no reset is forced.
+                    </p>
+                </div>
+                <div class="flex justify-end gap-3 pt-2">
+                    <button type="button" id="cancel-invite-member-btn" class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg">Cancel</button>
+                    <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg">Create link</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
 {# Add member modal #}
 <div id="add-member-modal" class="hidden fixed inset-0 z-50 overflow-y-auto">
     <div class="flex items-center justify-center min-h-screen px-4">
@@ -186,9 +289,24 @@
     document.getElementById('close-add-member-btn').addEventListener('click', close);
     document.getElementById('cancel-add-member-btn').addEventListener('click', close);
     document.getElementById('add-member-backdrop').addEventListener('click', close);
+
+    const inviteModal = document.getElementById('invite-member-modal');
+    function openInvite() { inviteModal.classList.remove('hidden'); }
+    function closeInvite() { inviteModal.classList.add('hidden'); }
+    document.getElementById('open-invite-member-btn').addEventListener('click', openInvite);
+    document.getElementById('close-invite-member-btn').addEventListener('click', closeInvite);
+    document.getElementById('cancel-invite-member-btn').addEventListener('click', closeInvite);
+    document.getElementById('invite-member-backdrop').addEventListener('click', closeInvite);
+
     {% if temp_password %}
     document.getElementById('copy-temp-pw-btn').addEventListener('click', function() {
         const k = document.getElementById('temp-pw').textContent.trim();
+        navigator.clipboard.writeText(k).then(() => { this.textContent = 'Copied!'; setTimeout(() => this.textContent = 'Copy', 1500); });
+    });
+    {% endif %}
+    {% if invite_link %}
+    document.getElementById('copy-invite-url-btn').addEventListener('click', function() {
+        const k = document.getElementById('invite-url').textContent.trim();
         navigator.clipboard.writeText(k).then(() => { this.textContent = 'Copied!'; setTimeout(() => this.textContent = 'Copy', 1500); });
     });
     {% endif %}

@@ -17,6 +17,8 @@ from . import (
     definitions,
     files,
     groups,
+    identity_routes,
+    identity_settings,
     live,
     memories,
     projects,
@@ -38,6 +40,9 @@ router = APIRouter()
 
 # Mount all sub-routers (order matters for route matching)
 router.include_router(auth.router)
+# Identity provisioning: /signup, /invite/{token}, /sso/*. Public (no session),
+# so it is mounted alongside auth rather than under /settings.
+router.include_router(identity_routes.router)
 router.include_router(chat.router)
 router.include_router(dashboard.router)
 router.include_router(definitions.router)
@@ -58,6 +63,7 @@ router.include_router(audit.router, prefix="/settings")
 router.include_router(admin.router, prefix="/settings")
 router.include_router(groups.router, prefix="/settings")
 router.include_router(secrets.router, prefix="/settings")
+router.include_router(identity_settings.router)
 router.include_router(connections.router, prefix="/settings")
 router.include_router(token_limits.router, prefix="/settings")
 router.include_router(live.router)

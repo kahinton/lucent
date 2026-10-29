@@ -1,0 +1,53 @@
+{% extends "auth_base.html" %}
+{% block title %}Accept invitation - Lucent{% endblock %}
+{% block tagline %}You've been invited to join {{ organization.name if organization else 'a workspace' }}{% endblock %}
+
+{% block card %}
+<h2 class="auth-heading text-lg font-semibold mb-1">Join {{ organization.name if organization else 'the workspace' }}</h2>
+<p class="auth-subtitle text-sm mb-6">
+    Your account will use <span class="font-medium">{{ invitation.email }}</span> as its sign-in
+    address. It was chosen by whoever sent the invitation and can't be changed here.
+</p>
+
+{% if error %}
+<div class="mb-4 p-3 auth-error rounded-lg text-sm">{{ error }}</div>
+{% endif %}
+
+<form method="POST" action="/invite/{{ token }}" class="space-y-4">
+    <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
+
+    <div>
+        <label for="display_name" class="auth-label block text-sm font-medium mb-1">Your name</label>
+        <input type="text" id="display_name" name="display_name" autocomplete="name"
+               placeholder="Jane Doe" class="w-full px-3 py-2 border text-sm">
+    </div>
+
+    <div>
+        <label for="password" class="auth-label block text-sm font-medium mb-1">Choose a password</label>
+        <input type="password" id="password" name="password" autocomplete="new-password"
+               class="w-full px-3 py-2 border text-sm">
+        <p class="mt-1 text-xs auth-hint">
+            At least 8 characters with an uppercase letter, a lowercase letter, and a digit.
+            Leave this blank if this workspace signs you in through an identity provider.
+        </p>
+    </div>
+
+    <div>
+        <label for="confirm_password" class="auth-label block text-sm font-medium mb-1">Confirm password</label>
+        <input type="password" id="confirm_password" name="confirm_password" autocomplete="new-password"
+               class="w-full px-3 py-2 border text-sm">
+    </div>
+
+    <button type="submit" class="auth-submit w-full py-2.5 px-4 font-semibold text-sm transition-all">
+        Create account
+    </button>
+</form>
+
+<p class="mt-6 text-center text-sm auth-subtitle">
+    Already have an account? <a href="/login" class="auth-link">Sign in</a>
+</p>
+{% endblock %}
+
+{% block footer %}
+This invitation expires {{ invitation.expires_at | datetime }} and can only be used once.
+{% endblock %}

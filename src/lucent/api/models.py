@@ -690,6 +690,51 @@ class OrganizationApiKeyCreate(BaseModel):
     name: str = Field(default="Default API key", max_length=200)
 
 
+class OrganizationInvitationCreate(BaseModel):
+    """Create a shareable invitation link for an organization (hyperadmin)."""
+
+    email: str = Field(..., min_length=3, max_length=320)
+    role: str = Field(default="member", description="member, admin, or owner")
+    ttl_hours: int = Field(
+        default=24,
+        ge=1,
+        le=720,
+        description="Link lifetime in hours. Defaults to 24.",
+    )
+    note: str | None = Field(default=None, max_length=500)
+
+
+class OrganizationInvitationCreated(BaseModel):
+    """An invitation with its one-time link.
+
+    ``invite_url`` is returned exactly once, like an API key's plaintext. The
+    token itself is never stored — only its hash — so a lost link must be
+    revoked and reissued rather than recovered.
+    """
+
+    id: UUID
+    email: str
+    role: str
+    expires_at: datetime
+    invite_url: str = Field(..., description="Shareable link — shown once")
+
+
+class OrganizationInvitationSummary(BaseModel):
+    """A pending invitation, without its token."""
+
+    id: UUID
+    email: str
+    role: str
+    expires_at: datetime
+    created_at: datetime
+    note: str | None = None
+
+
+class OrganizationInvitationList(BaseModel):
+    invitations: list[OrganizationInvitationSummary]
+    total_count: int
+
+
 class OrganizationApiKeyCreated(BaseModel):
     """The minted key. The plaintext is returned exactly once."""
 

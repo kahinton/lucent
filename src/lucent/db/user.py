@@ -38,6 +38,8 @@ class UserRepository:
         avatar_url: str | None = None,
         provider_metadata: dict[str, Any] | None = None,
         role: str | None = None,
+        email_verified: bool = False,
+        provisioned_by: str | None = None,
     ) -> dict[str, Any]:
         """Create a new user.
 
@@ -50,28 +52,22 @@ class UserRepository:
             avatar_url: URL to user's avatar.
             provider_metadata: Provider-specific metadata.
             role: User role (member, admin, owner). Defaults to 'member'.
+            email_verified: Whether the address was asserted by a trusted
+                identity source. Gates email-based account linking.
+            provisioned_by: How the account came to exist (reporting only).
 
         Returns:
             The created user record.
         """
-        if role:
-            query = """
-                INSERT INTO users (external_id, provider, organization_id,
-                    email, display_name, avatar_url, provider_metadata, role)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING id, external_id, provider, organization_id, email, display_name,
-                          avatar_url, provider_metadata, is_active, created_at, updated_at,
-                          last_login_at, role
-            """
-        else:
-            query = """
-                INSERT INTO users (external_id, provider, organization_id,
-                    email, display_name, avatar_url, provider_metadata)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                RETURNING id, external_id, provider, organization_id, email, display_name,
-                          avatar_url, provider_metadata, is_active, created_at, updated_at,
-                          last_login_at, role
-            """
+        query = """
+            INSERT INTO users (external_id, provider, organization_id,
+                email, display_name, avatar_url, provider_metadata, role,
+                email_verified, provisioned_by)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'member'), $9, $10)
+            RETURNING id, external_id, provider, organization_id, email, display_name,
+                      avatar_url, provider_metadata, is_active, created_at, updated_at,
+                      last_login_at, role, email_verified, scim_external_id, provisioned_by
+        """
 
         params = [
             external_id,
@@ -81,9 +77,10 @@ class UserRepository:
             display_name,
             avatar_url,
             provider_metadata or {},
+            role,
+            email_verified,
+            provisioned_by,
         ]
-        if role:
-            params.append(role)
 
         async with scoped_acquire(organization_id=organization_id) as conn:
             row = await conn.fetchrow(query, *params)
@@ -242,7 +239,8 @@ class UserRepository:
         """
         query = """
             SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
-                   provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                   provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                   email_verified, scim_external_id, provisioned_by
             FROM users
             WHERE id = $1
         """
@@ -255,6 +253,103 @@ class UserRepository:
             return None
 
         return self._row_to_dict(row)
+
+    async def get_by_email_in_organization(
+        self, email: str, organization_id: UUID | str
+    ) -> dict[str, Any] | None:
+        """Find a member of one organization by email, case-insensitively.
+
+        This is the identity-matching lookup for SSO and SCIM. It is scoped to
+        the organization because the same person may hold accounts in several
+        tenants, and matching across tenants would hand one tenant's session to
+        another tenant's user.
+
+        Daemon service identities are excluded: they share a synthetic address
+        and must never be adopted by a login flow.
+        """
+        normalized = (email or "").strip().lower()
+        if not normalized:
+            return None
+        query = """
+            SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
+                   provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                   email_verified, scim_external_id, provisioned_by
+            FROM users
+            WHERE organization_id = $1
+              AND LOWER(email) = $2
+              AND role <> 'daemon'
+            LIMIT 1
+        """
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            row = await conn.fetchrow(query, str(organization_id), normalized)
+        return self._row_to_dict(row) if row else None
+
+    async def get_by_scim_external_id(
+        self, scim_external_id: str, organization_id: UUID | str
+    ) -> dict[str, Any] | None:
+        """Find a user by the identity provider's own SCIM identifier."""
+        query = """
+            SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
+                   provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                   email_verified, scim_external_id, provisioned_by
+            FROM users
+            WHERE organization_id = $1 AND scim_external_id = $2
+            LIMIT 1
+        """
+        async with scoped_acquire(organization_id=organization_id) as conn:
+            row = await conn.fetchrow(query, str(organization_id), scim_external_id)
+        return self._row_to_dict(row) if row else None
+
+    async def set_email_verified(self, user_id: UUID, verified: bool) -> None:
+        """Record whether this account's email has been asserted by a trusted source."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET email_verified = $2, updated_at = NOW() WHERE id = $1",
+                str(user_id),
+                verified,
+            )
+
+    async def link_sso_identity(
+        self,
+        user_id: UUID,
+        *,
+        provider: str,
+        external_id: str,
+        provider_metadata: dict[str, Any] | None = None,
+        email_verified: bool = True,
+    ) -> dict[str, Any] | None:
+        """Bind an existing local account to a federated identity.
+
+        Used when a person who already has a password account signs in through
+        SSO for the first time. Only ``provider``/``external_id`` and the
+        verification flag change; the account keeps its id, role, and data.
+
+        The unique ``(provider, external_id)`` index is the collision guard: if
+        two users are pointed at the same IdP subject the second update fails
+        loudly rather than silently sharing a login.
+        """
+        query = """
+            UPDATE users
+            SET provider = $2,
+                external_id = $3,
+                provider_metadata = COALESCE($4, provider_metadata),
+                email_verified = email_verified OR $5,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, external_id, provider, organization_id, email, display_name,
+                      avatar_url, provider_metadata, is_active, created_at, updated_at,
+                      last_login_at, role, email_verified, scim_external_id, provisioned_by
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                query,
+                str(user_id),
+                provider,
+                external_id,
+                provider_metadata,
+                email_verified,
+            )
+        return self._row_to_dict(row) if row else None
 
     async def get_password_hash(self, user_id: UUID) -> str | None:
         # users is a cross-tenant identity table (no per-tenant predicate);
@@ -290,7 +385,8 @@ class UserRepository:
         """
         query = """
             SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
-                   provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                   provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                   email_verified, scim_external_id, provisioned_by
             FROM users
             WHERE external_id = $1 AND provider = $2
         """
@@ -407,10 +503,11 @@ class UserRepository:
 
         query = f"""
             UPDATE users
-            SET {", ".join(updates)}
+            SET {", ".join(updates)}, updated_at = NOW()
             WHERE id = ${param_idx}
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
-                      provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                      provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                      email_verified, scim_external_id, provisioned_by
         """
 
         # users is a cross-tenant identity table (no per-tenant predicate); reads/writes here bind by unique id/external_id.
@@ -522,7 +619,8 @@ class UserRepository:
             SET role = $1, updated_at = NOW()
             WHERE id = $2
             RETURNING id, external_id, provider, organization_id, email, display_name, avatar_url,
-                      provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                      provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                      email_verified, scim_external_id, provisioned_by
         """
 
         # users is a cross-tenant identity table (no per-tenant predicate);
@@ -579,7 +677,8 @@ class UserRepository:
             WHERE id = $1 AND organization_id = $2
             RETURNING id, external_id, provider, organization_id, email, display_name,
                       avatar_url, provider_metadata, is_active, created_at, updated_at,
-                      last_login_at, role
+                      last_login_at, role, email_verified, scim_external_id,
+                      provisioned_by
         """
         demote_q = """
             UPDATE users
@@ -587,7 +686,8 @@ class UserRepository:
             WHERE id = $1 AND organization_id = $2
             RETURNING id, external_id, provider, organization_id, email, display_name,
                       avatar_url, provider_metadata, is_active, created_at, updated_at,
-                      last_login_at, role
+                      last_login_at, role, email_verified, scim_external_id,
+                      provisioned_by
         """
 
         async with scoped_acquire(
@@ -627,7 +727,8 @@ class UserRepository:
         if role:
             query = """
                 SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
-                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                       provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                       email_verified, scim_external_id, provisioned_by
                 FROM users
                 WHERE organization_id = $1 AND role = $2
                 ORDER BY display_name
@@ -637,7 +738,8 @@ class UserRepository:
         else:
             query = """
                 SELECT id, external_id, provider, organization_id, email, display_name, avatar_url,
-                       provider_metadata, is_active, created_at, updated_at, last_login_at, role
+                       provider_metadata, is_active, created_at, updated_at, last_login_at, role,
+                       email_verified, scim_external_id, provisioned_by
                 FROM users
                 WHERE organization_id = $1
                 ORDER BY display_name
@@ -759,4 +861,16 @@ class UserRepository:
             "updated_at": row["updated_at"],
             "last_login_at": row["last_login_at"],
             "role": row["role"] if "role" in row.keys() else "member",
+            # Identity-provisioning fields are only present on projections that
+            # select them. Defaulting here keeps older queries working without
+            # pretending an unselected column is false.
+            "email_verified": row["email_verified"]
+            if "email_verified" in row.keys()
+            else False,
+            "scim_external_id": row["scim_external_id"]
+            if "scim_external_id" in row.keys()
+            else None,
+            "provisioned_by": row["provisioned_by"]
+            if "provisioned_by" in row.keys()
+            else None,
         }
