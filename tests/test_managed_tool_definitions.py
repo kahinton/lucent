@@ -82,7 +82,9 @@ def handler(args):
 
 
 def test_managed_tool_runner_redacts_unhandled_exception_details():
-    runner = ManagedToolExecutor._runner_script("handler")
+    from lucent.services.tool_runtimes.python_runtime import PythonRuntime
+
+    runner = PythonRuntime._runner_script("handler")
 
     assert "'error': 'Managed tool execution failed'" in runner
     assert "'error_type': type(exc).__name__" in runner

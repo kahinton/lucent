@@ -22,7 +22,7 @@
                 <span class="inline-flex items-center px-3 py-1 rounded-lg text-sm font-semibold
                     {% if memory.type == 'technical' %}bg-emerald-100 text-emerald-700
                     {% elif memory.type == 'experience' %}bg-blue-100 text-blue-700
-                    {% elif memory.type == 'procedural' %}bg-amber-100 text-amber-700
+                    {% elif memory.type == 'procedural' %}bg-cyan-100 text-cyan-700
                     {% elif memory.type == 'goal' %}bg-purple-100 text-purple-700
                     {% else %}bg-pink-100 text-pink-700{% endif %}">
                     {{ memory.type | capitalize }}
@@ -37,7 +37,7 @@
                     Importance: {{ memory.importance }}/10
                 </span>
                 {% if memory.shared %}
-                <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-amber-100 text-amber-700 rounded-lg text-xs font-medium">
+                <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-pink-100 text-pink-700 rounded-lg text-xs font-medium">
                     <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z" />
                     </svg>
@@ -59,7 +59,7 @@
                 <form method="post" action="/memories/{{ memory.id }}/share" class="inline-flex">
                     <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                     <button type="submit" class="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg transition-colors
-                        {% if memory.shared %}bg-amber-100 text-amber-700 hover:bg-amber-200{% else %}bg-gray-100 text-gray-700 hover:bg-gray-200{% endif %}">
+                        {% if memory.shared %}bg-pink-100 text-pink-700 hover:bg-pink-200{% else %}bg-gray-100 text-gray-700 hover:bg-gray-200{% endif %}">
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z" />
                         </svg>
@@ -121,7 +121,7 @@
                 <p class="mt-1 text-xs text-gray-500">Owners, organization admins, and configured recipients can read this memory.</p>
             </div>
             {% if memory.shared %}
-            <span class="rounded bg-amber-100 px-2 py-1 text-xs font-medium text-amber-700">Organization</span>
+            <span class="rounded bg-pink-100 px-2 py-1 text-xs font-medium text-pink-700">Organization</span>
             {% endif %}
         </div>
 
@@ -129,7 +129,7 @@
             <form method="post" action="/memories/{{ memory.id }}/access">
                 <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                 <input type="hidden" name="grantee_type" value="organization">
-                <button type="submit" class="w-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100">Share with organization</button>
+                <button type="submit" class="w-full rounded-md border border-pink-200 bg-pink-50 px-3 py-2 text-sm font-medium text-pink-800 hover:bg-pink-100">Share with organization</button>
             </form>
             {% if org_users | selectattr('id', 'ne', memory.user_id) | list %}
             <form method="post" action="/memories/{{ memory.id }}/access" class="flex gap-2">
@@ -316,8 +316,8 @@
             
             <!-- Procedural Metadata -->
             {% elif memory.type == 'procedural' %}
-            <div class="p-4 bg-amber-50 rounded-lg border border-amber-200">
-                <h4 class="text-sm font-semibold text-amber-800 mb-4">Procedural Details</h4>
+            <div class="p-4 bg-cyan-100/40 rounded-lg border border-cyan-200">
+                <h4 class="text-sm font-semibold text-cyan-800 mb-4">Procedural Details</h4>
                 <div class="space-y-4">
                     <div class="grid grid-cols-2 gap-4">
                         {% if memory.metadata.estimated_time %}
@@ -338,7 +338,7 @@
                         <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider">Prerequisites</dt>
                         <dd class="mt-2 flex flex-wrap gap-2">
                             {% for prereq in memory.metadata.prerequisites %}
-                            <span class="inline-block px-3 py-1 bg-amber-100 text-amber-800 rounded-full text-xs">{{ prereq }}</span>
+                            <span class="inline-block px-3 py-1 bg-cyan-100 text-cyan-800 rounded-full text-xs">{{ prereq }}</span>
                             {% endfor %}
                         </dd>
                     </div>
@@ -348,8 +348,8 @@
                         <dt class="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Steps</dt>
                         <dd class="space-y-2">
                             {% for step in memory.metadata.steps %}
-                            <div class="flex gap-3 p-3 bg-white rounded-lg border border-amber-100">
-                                <span class="flex-shrink-0 w-6 h-6 rounded-full bg-amber-200 text-amber-800 text-xs font-semibold flex items-center justify-center">{{ step.order }}</span>
+                            <div class="flex gap-3 p-3 bg-white rounded-lg border border-cyan-200">
+                                <span class="flex-shrink-0 w-6 h-6 rounded-full bg-cyan-100 text-cyan-800 text-xs font-semibold flex items-center justify-center">{{ step.order }}</span>
                                 <div class="flex-1">
                                     <p class="text-sm text-gray-900">{{ step.description }}</p>
                                     {% if step.notes %}
@@ -770,7 +770,7 @@
                         {% elif entry.action_type == 'update' %}bg-blue-100 text-blue-600
                         {% elif entry.action_type == 'delete' %}bg-red-100 text-red-600
                         {% elif entry.action_type == 'restore' %}bg-purple-100 text-purple-600
-                        {% elif entry.action_type == 'share' %}bg-amber-100 text-amber-600
+                        {% elif entry.action_type == 'share' %}bg-pink-100 text-pink-600
                         {% else %}bg-gray-100 text-gray-600{% endif %}">
                         {% if entry.action_type == 'create' %}
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">

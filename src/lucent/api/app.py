@@ -756,6 +756,17 @@ def create_app() -> FastAPI:
         organizations.router, prefix="/api/organizations", tags=["Organizations"]
     )
 
+    # Instance catalog: the operator's tool-provisioning surface. Kept on its own
+    # prefix because every route writes into another tenant's rows, which is a
+    # different job from /api/definitions (tenant-authoring).
+    from lucent.api.routers import instance_catalog
+
+    app.include_router(
+        instance_catalog.router,
+        prefix="/api/organizations",
+        tags=["Instance Catalog"],
+    )
+
     # Include definitions management router
     from lucent.api.routers import definitions
 

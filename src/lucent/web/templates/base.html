@@ -280,6 +280,32 @@
             .text-primary-700 { color: #60f0e5 !important; }
             .text-primary-600 { color: #22dfd2 !important; }
             .bg-primary-600 { background-color: #00a89f !important; }
+
+            /* Semantic text on tinted surfaces.
+               The tint backgrounds below are repainted to translucent washes, but
+               their foregrounds (`text-*-700`, a dark literal) were left alone —
+               so every status pill, warning note, and destructive button in the
+               app rendered dark-on-dark at roughly 3:1. Lifting the foreground to
+               the -300/-400 step keeps the hue (a "rejected" pill still reads red)
+               while clearing 4.5:1 against the near-black canvas. This mirrors
+               what the primary ramp above already does. */
+            .text-red-700, .text-red-800, .text-red-900 { color: #fca5a5 !important; }
+            .text-green-700, .text-green-800, .text-green-900 { color: #86efac !important; }
+            .text-emerald-700, .text-emerald-800, .text-emerald-900 { color: #6ee7b7 !important; }
+            .text-orange-700, .text-orange-800, .text-orange-900 { color: #fdba74 !important; }
+            .text-blue-700, .text-blue-800, .text-blue-900 { color: #93c5fd !important; }
+            .text-indigo-700, .text-indigo-800 { color: #a5b4fc !important; }
+            .text-purple-700, .text-purple-800 { color: #d8b4fe !important; }
+            .text-violet-700, .text-violet-800 { color: #c4b5fd !important; }
+            /* Pink is a first-class palette colour in this app (the brand accent
+               is --lucent-pink), so it needs the full foreground ramp — not just
+               -700/-800. -500/-600 are lifted too: the literal Tailwind values
+               are dark enough to sink into the near-black canvas. */
+            .text-pink-500, .text-pink-600 { color: #f472b6 !important; }
+            .text-pink-700, .text-pink-800, .text-pink-900, .text-pink-950 { color: #f9a8d4 !important; }
+            .text-teal-700, .text-teal-800, .text-teal-900, .text-teal-950 { color: #5eead4 !important; }
+            .text-cyan-700, .text-cyan-800 { color: #67e8f9 !important; }
+            .text-slate-600, .text-slate-700 { color: #cbd5e1 !important; }
             .sidebar-count-badge {
                 color: #60f0e5 !important;
                 background-color: rgba(0, 207, 193, 0.18) !important;
@@ -291,8 +317,12 @@
             .bg-green-100 { background-color: rgba(34, 197, 94, 0.15) !important; }
             .bg-red-50 { background-color: rgba(239, 68, 68, 0.1) !important; }
             .bg-red-100 { background-color: rgba(239, 68, 68, 0.15) !important; }
-            .bg-amber-50 { background-color: rgba(245, 158, 11, 0.1) !important; }
-            .bg-amber-100 { background-color: rgba(245, 158, 11, 0.15) !important; }
+            /* Pink tints use the brand accent so a "needs attention" surface reads
+               as the same pink as the rest of the product. Without these remaps a
+               `bg-pink-50` renders as an opaque #fdf2f8 block on a #080808 canvas. */
+            .bg-pink-50 { background-color: rgba(255, 63, 155, 0.10) !important; }
+            .bg-pink-100 { background-color: rgba(255, 63, 155, 0.16) !important; }
+            .bg-pink-200 { background-color: rgba(255, 63, 155, 0.24) !important; }
             .bg-blue-50 { background-color: rgba(59, 130, 246, 0.1) !important; }
             .bg-blue-100 { background-color: rgba(59, 130, 246, 0.15) !important; }
             .bg-indigo-100 { background-color: rgba(255, 63, 155, 0.16) !important; }
@@ -312,6 +342,8 @@
             .hover\:text-gray-600:hover { color: #b8b4b0 !important; }
             .hover\:bg-green-100:hover { background-color: rgba(34, 197, 94, 0.2) !important; }
             .hover\:bg-red-100:hover { background-color: rgba(239, 68, 68, 0.2) !important; }
+            .hover\:bg-pink-100:hover { background-color: rgba(255, 63, 155, 0.24) !important; }
+            .hover\:bg-pink-200:hover { background-color: rgba(255, 63, 155, 0.32) !important; }
 
             /* Shadow adjustments */
             .shadow-md, .shadow-lg, .shadow-xl, .shadow-2xl {
@@ -430,7 +462,7 @@
                         </span>
                         {# Capabilities other people attached to your agents that
                            are waiting for you to approve or decline them. #}
-                        <span id="capability-consent-sidebar-badge" data-live-badge="consents" data-live-badge-suppressed="{{ 'true' if '/definitions' in request.url.path else 'false' }}" class="sidebar-count-badge inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 {% if capability_consent_count <= 0 or '/definitions' in request.url.path %}hidden{% endif %}" title="Agent capabilities awaiting your approval" aria-live="polite">
+                        <span id="capability-consent-sidebar-badge" data-live-badge="consents" data-live-badge-suppressed="{{ 'true' if '/definitions' in request.url.path else 'false' }}" class="sidebar-count-badge inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-pink-100 text-pink-800 {% if capability_consent_count <= 0 or '/definitions' in request.url.path %}hidden{% endif %}" title="Agent capabilities awaiting your approval" aria-live="polite">
                             {{ capability_consent_count }}
                         </span>
                     </a>
@@ -491,19 +523,19 @@
         <div id="app-content" class="pl-56">
             <!-- Impersonation Banner (shows on all pages) -->
             {% if user.is_impersonated %}
-            <div class="bg-amber-50 border-b border-amber-200 px-8 py-3">
+            <div class="bg-pink-50 border-b border-pink-200 px-8 py-3">
                 <div class="max-w-6xl mx-auto flex items-center justify-between">
                     <div class="flex items-center gap-3">
-                        <svg class="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                        <svg class="w-5 h-5 text-pink-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
                         </svg>
                         <div>
-                            <span class="text-sm font-medium text-amber-800">Impersonating <strong>{{ user.display_name or user.email }}</strong></span>
-                            <span class="text-sm text-amber-600 ml-2">(actions logged as impersonated by {{ user.impersonator_display_name }})</span>
+                            <span class="text-sm font-medium text-pink-800">Impersonating <strong>{{ user.display_name or user.email }}</strong></span>
+                            <span class="text-sm text-pink-600 ml-2">(actions logged as impersonated by {{ user.impersonator_display_name }})</span>
                         </div>
                     </div>
                     <form action="/settings/users/stop-impersonation" method="POST">
-                        <button type="submit" class="px-3 py-1.5 text-sm font-medium text-amber-700 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors">
+                        <button type="submit" class="px-3 py-1.5 text-sm font-medium text-pink-700 bg-pink-100 hover:bg-pink-200 rounded-lg transition-colors">
                             Stop Impersonating
                         </button>
                     </form>
@@ -772,7 +804,7 @@
                         <select id="chat-model-select" class="text-[10px] text-gray-400 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-gray-600 transition-colors" style="background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%239ca3af'%3E%3Cpath fill-rule='evenodd' d='M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z'/%3E%3C/svg%3E&quot;); background-repeat: no-repeat; background-position: right 0 center; background-size: 12px;">
                             <option value="">Loading...</option>
                         </select>
-                        <select id="chat-reasoning-select" class="hidden text-[10px] text-amber-600 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-amber-700 transition-colors" title="Reasoning effort">
+                        <select id="chat-reasoning-select" class="hidden text-[10px] text-pink-600 bg-transparent border-none p-0 pr-4 -ml-0.5 cursor-pointer focus:ring-0 focus:outline-none appearance-none hover:text-pink-700 transition-colors" title="Reasoning effort">
                             <option value="">Reasoning: default</option>
                         </select>
                     </div>

@@ -1164,6 +1164,7 @@ class LangChainEngine(LLMEngine):
                         excluded_tools=server_conf.get("exclude_tools"),
                         skip_url_validation=bool(server_conf.get("internal")),
                         audit_context={**(audit_context or {}), "mcp_server": server_name},
+                        transport=str(server_conf.get("type") or "http"),
                     )
                     discovered = await bridge.discover_tools()
                 except Exception as e:

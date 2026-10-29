@@ -758,21 +758,52 @@ Returns: JSON with the created hook including its ID and status."""
     @mcp.tool(
         description="""Create a new managed tool definition.
 
-Managed tools are persistent, reviewable capabilities that run in Lucent
-sandbox containers. They start in 'proposed' status and must be approved by an
-admin before agents can invoke them. Default auth requires both user access to
-the tool and an explicit agent grant when called from an agent context.
+Managed tools are persistent, reviewable capabilities granted to agents. They
+start in 'proposed' status and must be approved before agents can invoke them.
+Default auth requires both user access to the tool and an explicit agent grant
+when called from an agent context.
+
+runtime_type decides how the tool actually runs:
+
+  python   Sandboxed Python you write. Use for computation, parsing, or custom
+           logic. Requires source_code; needs sandboxes enabled.
+  http     One HTTPS request described declaratively. No code, no container:
+           Lucent renders runtime_config url/query/body/headers from the
+           arguments and sends it. Use for a JSON API with a stable endpoint.
+  openapi  One operation from an OpenAPI 3.x or Swagger 2.0 document. Put the
+           document in runtime_config.spec and select it with
+           runtime_config.operation_id (or method + path). The input_schema is
+           derived from the operation, and the spec is stored at approval time so
+           an approved tool cannot change behaviour underneath the model.
+  builtin  A reviewed Lucent-native handler. runtime_config.handler names it:
+           web_search, web_fetch, weather_forecast, current_time,
+           date_calculate, calculate, json_extract, regex_extract,
+           text_transform, text_stats, unit_convert, csv_parse, uuid_generate,
+           random_choice, sort_and_dedupe — plus pdf/docx/xlsx/image handlers when
+           the image was built with the optional document extras. No code, no
+           container, and the input_schema comes from Lucent.
+
+For http and openapi, credentials must never be literal: put them in env_vars as
+a secret:// or credential:// reference and interpolate with {{env:NAME}}. The
+tool's network_policy must allow the hosts it contacts: 'none' blocks all
+outbound traffic, 'allowlist' permits only allowed_hosts, and 'bridge' permits
+any public host on ports 80/443. Private, loopback, link-local, and cloud-metadata
+addresses are always blocked.
 
 Args:
     name: Tool name (max 64 chars, e.g. 'lookup_customer')
     description: What this tool does
-    source_code: Python source code. Must define the entrypoint function.
-    input_schema: JSON Schema object or JSON string for tool arguments
+    runtime_type: python | http | openapi | builtin (default python)
+    source_code: Python source code (python only). Must define the entrypoint.
+    input_schema: JSON Schema object or JSON string for tool arguments. Ignored
+        for builtin (the catalog is authoritative); derivable for openapi.
     output_schema: Optional JSON Schema object or JSON string for returned data
-    entrypoint: Python function name to call; receives one dict argument
-    requirements: JSON array/list of pip requirements
+    entrypoint: Python function name (python) or catalog handler name (builtin)
+    requirements: JSON array/list of pip requirements (python only)
+    runtime_config: JSON object of per-kind configuration (url/method/query/body
+        for http; spec/operation_id for openapi; handler for builtin)
     env_vars: JSON object of environment variables or credential references
-    network_policy: JSON object, default {"network_mode":"none","allowed_hosts":[],"extra_hosts":{}}
+    network_policy: JSON object, default {"network_mode":"none","allowed_hosts":[]}
     resource_limits: JSON object for memory/cpu/disk limits
     timeout_seconds: Per-call execution timeout
 
@@ -781,6 +812,7 @@ Returns: JSON with the created proposed tool including its ID and status."""
     async def create_tool_definition(
         name: str,
         description: str = "",
+        runtime_type: str = "python",
         source_code: str = "",
         input_schema: dict | str | None = None,
         output_schema: dict | str | None = None,
@@ -800,14 +832,25 @@ Returns: JSON with the created proposed tool including its ID and status."""
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+        from lucent.services.tool_runtimes import runtime_requires_sandbox, runtime_types
         from lucent.settings import custom_tooling_enabled
 
-        if not custom_tooling_enabled(organization_id=org_id):
+        kind = str(runtime_type or "python").strip().lower()
+        if kind not in runtime_types():
+            return json.dumps(
+                {"error": f"runtime_type must be one of: {', '.join(runtime_types())}"}
+            )
+        # Only sandbox-backed kinds need the sandbox feature. A deployment with
+        # containers disabled can still create declarative and builtin tools.
+        if runtime_requires_sandbox(kind) and not custom_tooling_enabled(
+            organization_id=org_id
+        ):
             return json.dumps(
                 {
                     "error": (
                         "Custom tooling is disabled for this organization because "
-                        "features.sandboxes_enabled is off"
+                        "features.sandboxes_enabled is off. Create an 'http', "
+                        "'openapi', or 'builtin' tool instead, which needs no sandbox."
                     ),
                     "code": 409,
                     "custom_tooling_enabled": False,
@@ -815,8 +858,8 @@ Returns: JSON with the created proposed tool including its ID and status."""
             )
         if not name or len(name) > 64:
             return json.dumps({"error": "name is required and must be <= 64 characters"})
-        if not source_code:
-            return json.dumps({"error": "source_code is required"})
+        if kind == "python" and not source_code:
+            return json.dumps({"error": "source_code is required for a python tool"})
 
         try:
             parsed_input_schema = _parse_json_object(input_schema) or {
@@ -840,6 +883,11 @@ Returns: JSON with the created proposed tool including its ID and status."""
         except (ValueError, json.JSONDecodeError) as exc:
             return json.dumps({"error": str(exc)})
 
+        if kind == "builtin" and not parsed_runtime_config.get("handler") and entrypoint:
+            # The handler is a builtin's entrypoint; accept either field rather
+            # than making the model remember which one a kind uses.
+            parsed_runtime_config["handler"] = entrypoint
+
         repo = await _get_definition_repository()
         try:
             tool = await repo.create_managed_tool(
@@ -847,7 +895,7 @@ Returns: JSON with the created proposed tool including its ID and status."""
                 description=description,
                 input_schema=parsed_input_schema,
                 output_schema=parsed_output_schema,
-                runtime_type="python",
+                runtime_type=kind,
                 source_code=source_code,
                 entrypoint=entrypoint,
                 requirements=parsed_requirements,
@@ -1562,12 +1610,53 @@ Returns: JSON with the managed tool details, or an error if not found."""
         return json.dumps(found, default=_serialize)
 
     @mcp.tool(
-        description="""Run an approved managed tool in a sandbox container.
+        annotations=READ_ONLY,
+        description="""List the managed-tool runtime kinds and built-in handlers.
+
+Call this before creating a custom tool: it tells you which executor kinds this
+build supports, whether sandboxes (and therefore the 'python' kind) are enabled
+for your organization, and exactly which built-in handlers are available with
+their argument schemas. A handler listed with available=false needs an optional
+package that this image was not built with.
+
+Returns: JSON with runtime_kinds (runtime_type, label, summary, requires_sandbox,
+accepts_source, available), builtin_handlers (handler, label, description,
+input_schema, available, unavailable_reason), and sandboxes_enabled."""
+    )
+    async def list_tool_runtime_kinds() -> str:
+        _, org_id, _, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.services.builtin_tool_catalog import available_builtin_tools
+        from lucent.services.tool_runtimes import runtime_catalog
+        from lucent.settings import custom_tooling_enabled
+
+        sandboxes = custom_tooling_enabled(organization_id=org_id)
+        kinds = runtime_catalog()
+        for kind in kinds:
+            kind["available"] = sandboxes or not kind["requires_sandbox"]
+        return json.dumps(
+            {
+                "runtime_kinds": kinds,
+                "builtin_handlers": available_builtin_tools(),
+                "sandboxes_enabled": sandboxes,
+            },
+            default=_serialize,
+        )
+
+    @mcp.tool(
+        description="""Run an approved managed tool.
 
 The server enforces the default auth wrapper: the caller must be an
 authenticated user with access to the managed tool. If the call comes from an
 agent session, the tool must also be explicitly granted to that agent via the
 trusted agent-definition header set by Lucent, not a model-supplied argument.
+
+How the tool runs depends on its runtime_type, and is not something the caller
+chooses or can influence: python tools execute in a sandbox container, http and
+openapi tools send one pre-approved request, and builtin tools run a reviewed
+Lucent-native handler in-process. Input and output are validated against the
+tool's declared schemas either way.
 
 Args:
     tool: UUID or name of the active managed tool definition

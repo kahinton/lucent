@@ -680,6 +680,63 @@ The `CurrentUser` object provides `get_audit_context()` for comprehensive loggin
 
 ---
 
+## Outbound Network Policy (Egress)
+
+Tools and MCP servers are the two places where Lucent makes requests to hosts a
+tenant chose. Both are confined, but by different mechanisms because they run in
+different places.
+
+### Sandboxed tools (`runtime_type='python'`)
+
+The sandbox backend enforces `network_policy` at the container level:
+`none` blocks all egress, `allowlist` permits only `allowed_hosts`, and `bridge`
+permits any reachable address. Because the guest cannot escape the container's
+network namespace, this is the strongest of the three controls.
+
+### Server-executed tools (`http`, `openapi`, `builtin`)
+
+These run **in the server process**, so the server itself is the boundary. Every
+request — including each redirect hop — passes through
+`lucent.services.tool_runtimes.http_policy`, which enforces:
+
+1. **The tool's own policy.** `network_mode` must be `allowlist` or `bridge`; a
+   `host` entry without a port covers only 80/443, and `bridge` is likewise limited
+   to 80/443 so "any public host" cannot become "any public port".
+2. **SSRF protection**, independently of the tool's policy. Loopback, RFC 1918,
+   link-local, carrier-grade NAT, IPv6 unique-local, IPv4-mapped loopback,
+   multicast, reserved, and the cloud metadata endpoint are blocked. NAT64
+   (`64:ff9b::/96`), which embeds an IPv4 address, is blocked too.
+3. **Transport integrity.** A redirect may not downgrade HTTPS to HTTP.
+4. **Credential scoping.** Headers carrying a credential are dropped when a
+   redirect leaves the origin that credential was configured for. httpx's cookie
+   jar is disabled, because a `Set-Cookie` from hop 1 would otherwise be re-attached
+   to hop 2 and bypass that drop.
+5. **Bounded bodies.** Request and response sizes are capped, and the response is
+   read as a stream so a hostile endpoint cannot exhaust server memory.
+
+The deployment-wide `LUCENT_MCP_URL_ALLOWLIST` relaxes (2) for named private hosts.
+It does **not** relax (1): a tool's own `allowed_hosts` is an additional
+restriction, never a bypass. Both must agree.
+
+### MCP servers
+
+Remote MCP endpoints are validated with the same SSRF rules before a session is
+opened, and that validation happens in the **server**, before the config reaches an
+engine SDK — not only inside the LangChain bridge. The Copilot, Claude Code, and
+Codex engines receive an MCP config dict and open the connection themselves, so a
+check that lived only in the bridge would leave those engines unvalidated.
+
+A single unreachable or blocked MCP server is skipped with a warning rather than
+aborting the session: one misconfigured provider must not cost the agent every other
+tool.
+
+### Prompt-injection scanning
+
+Declarative tool configuration is model-visible. `runtime_config` (URL templates,
+header values, builtin options) is scanned for injection alongside `source_code` and
+the description, because an instruction hidden in a header value is read by the same
+context that reads the description.
+
 ## Secret Storage Architecture
 
 Lucent provides encrypted secret storage with a pluggable provider architecture.
@@ -728,8 +785,9 @@ recommended).
 
 ### Secret Protocol: `secret://`
 
-Resources that accept sensitive values (e.g., MCP server environment variables)
-can reference secrets by name using the `secret://` protocol:
+Resources that accept sensitive values (e.g., MCP server environment variables,
+managed-tool environment references) can reference secrets by name using the
+`secret://` protocol:
 
 ```
 secret://my_api_key

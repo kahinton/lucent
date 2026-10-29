@@ -22,6 +22,7 @@ Built-in objects are agent definitions, skill definitions, and system schedules 
 |---|---|---|
 | Agent definitions | `scope` | `'built-in'` |
 | Skill definitions | `scope` | `'built-in'` |
+| Managed tool definitions | `scope` | `'built-in'` |
 | MCP server definitions | `scope` | `'built-in'` |
 | Schedules | `is_system` | `true` |
 
@@ -32,10 +33,13 @@ Instance-scoped objects (created via API or MCP tools) are not affected by any o
 On every server startup, `_sync_built_in_definitions()` in `api/app.py` runs:
 
 1. Scans `.github/skills/` for `SKILL.md` files → upserts into `skill_definitions` with `scope='built-in'`
-2. Scans `.github/agents/definitions/` for `AGENT.md` files → upserts into `agent_definitions` with `scope='built-in'`
-3. Synchronizes agent-skill junction mappings to match the `skill_names` in each agent's YAML frontmatter
+2. Seeds every handler in `lucent/services/builtin_tool_catalog.py` → upserts into `managed_tool_definitions` with `scope='built-in'` and `runtime_type='builtin'`
+3. Scans `.github/agents/definitions/` for `AGENT.md` files → upserts into `agent_definitions` with `scope='built-in'`
+4. Synchronizes agent-skill junction mappings to match the `skill_names`, and agent tool grants to match the `tool_names`, in each agent's YAML frontmatter
 
-The upsert uses `ON CONFLICT (name, organization_id) DO UPDATE ... WHERE scope = 'built-in'`, which means every restart overwrites the DB content with whatever is on disk. Any DB-only change — made via API, MCP tool, or direct SQL — is silently replaced.
+The upsert is update-then-insert scoped to `scope = 'built-in'` (not `ON CONFLICT DO UPDATE`, which would fire the `BEFORE INSERT` auth_id trigger on the conflict path and leak an `auth_ids` row every sync). Either way, every restart overwrites the DB content with whatever is on disk. Any DB-only change — made via API, MCP tool, or direct SQL — is silently replaced.
+
+A built-in managed tool whose name collides with an instance-scoped tool is skipped with a warning rather than overwriting it; the unique `(name, organization_id)` constraint makes coexistence impossible.
 
 System schedules are seeded via `ensure_system_schedule()` with similar overwrite behavior.
 
@@ -47,9 +51,11 @@ System schedules are seeded via `ensure_system_schedule()` with similar overwrit
 .github/agents/definitions/<name>/AGENT.md
 ```
 
-Each agent directory contains a single `AGENT.md` with YAML frontmatter (`name`, `description`, `skill_names`) followed by the full agent prompt in markdown.
+Each agent directory contains a single `AGENT.md` with YAML frontmatter (`name`, `description`, `skill_names`, and optionally `tool_names`) followed by the full agent prompt in markdown.
 
 Example path: `.github/agents/definitions/code/AGENT.md`
+
+`tool_names` names entries from the built-in tool catalog (`web_search`, `current_time`, `calculate`, …). Declared tools are granted on every sync; grants the frontmatter does not declare are left alone, so an admin's manually attached tool is never stripped by a restart.
 
 ### Skill Definitions
 
@@ -98,6 +104,8 @@ Edit the on-disk file directly. For agent and skill definitions:
 
 For agents, the `skill_names` list in frontmatter controls which skills are granted. On sync, stale mappings are removed and new ones are added — you don't need to manually grant/revoke skills.
 
+The `tool_names` list binds built-in managed tools the same way, with one asymmetry: declared tools are added, but grants that the frontmatter does not declare are never removed (admins and the daemon attach tools too).
+
 ### Step 3: Restart the Server
 
 The sync only runs at startup. After editing the file, restart the server:
@@ -133,6 +141,7 @@ Check that:
 - [ ] The `content` field matches what you wrote in the file
 - [ ] The `description` matches the YAML frontmatter
 - [ ] For agents: `skill_names` lists the correct skills
+- [ ] For agents: `tool_names` lists the intended built-in tools
 - [ ] The `updated_at` timestamp is recent (reflects the restart)
 
 If the change didn't take effect:
@@ -158,4 +167,5 @@ New built-in definitions are automatically set to `active` status — they skip 
 | Updating via MCP tool or API as owner | Succeeds but gets overwritten on next restart | Edit the on-disk source file and restart |
 | Editing the file but not restarting | Sync only runs at startup — DB still has old content | Restart the server after every file edit |
 | Granting skills to a built-in agent via API | Junction table gets resynchronized on restart to match `skill_names` in frontmatter | Add the skill name to the `skill_names` list in the agent's YAML frontmatter |
+| Revoking a declared tool from a built-in agent via API | Declared tool grants are re-added by the next sync | Remove the name from the `tool_names` list in the agent's YAML frontmatter |
 | Invalid YAML frontmatter | File is silently skipped during sync | Validate frontmatter — ensure `---` delimiters, proper quoting, and correct list syntax |

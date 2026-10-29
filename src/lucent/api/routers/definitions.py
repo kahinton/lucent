@@ -5,7 +5,7 @@ Agents can be granted access to specific skills and MCP servers.
 """
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -48,6 +48,31 @@ def _validate_user_definition_create(status_value: str, scope_value: str) -> Non
             403,
             "Definitions created through the API must start as proposed instance definitions",
         )
+
+
+def _tool_config_strings(config: Any, *, _depth: int = 0) -> list[str]:
+    """Every string a declarative tool would expose to a model.
+
+    Request templates, headers, and a builtin's options are all model-visible: an
+    injected instruction in a header value is read by the same context that reads
+    the description. Scanning only ``source_code`` left those unscanned.
+    """
+    if _depth > 8:
+        return []
+    if isinstance(config, str):
+        return [config]
+    if isinstance(config, dict):
+        out: list[str] = []
+        for key, value in config.items():
+            out.append(str(key))
+            out.extend(_tool_config_strings(value, _depth=_depth + 1))
+        return out
+    if isinstance(config, (list, tuple)):
+        out = []
+        for item in config:
+            out.extend(_tool_config_strings(item, _depth=_depth + 1))
+        return out
+    return []
 
 
 def _require_admin_for_stdio(
@@ -131,7 +156,9 @@ class CreateSkill(BaseModel):
 class CreateMCPServer(BaseModel):
     name: str = Field(max_length=64)
     description: str | None = None
-    server_type: str = "http"
+    # http = Streamable HTTP (current MCP default); sse = the legacy HTTP+SSE
+    # transport many hosted servers still publish; stdio = a local subprocess.
+    server_type: Literal["http", "sse", "stdio", "copilot_github"] = "http"
     url: str | None = None
     command: str | None = None
     args: list[str] | None = None
@@ -159,8 +186,11 @@ class CreateManagedTool(BaseModel):
     description: str | None = None
     input_schema: dict = Field(default_factory=lambda: {"type": "object", "properties": {}})
     output_schema: dict | None = None
-    runtime_type: Literal["python"] = "python"
-    source_code: str
+    # Executor kind. `python` needs source_code; the others describe a request
+    # (http/openapi) or name a reviewed handler (builtin). Validation and the
+    # per-kind requirements live in DefinitionRepository._validate_tool_shape.
+    runtime_type: Literal["python", "http", "openapi", "builtin"] = "python"
+    source_code: str = ""
     entrypoint: str = Field(default="handler", max_length=128)
     requirements: list[str] = Field(default_factory=list)
     runtime_config: dict = Field(default_factory=dict)
@@ -191,7 +221,7 @@ class UpdateManagedTool(BaseModel):
     description: str | None = None
     input_schema: dict | None = None
     output_schema: dict | None = None
-    runtime_type: Literal["python"] | None = None
+    runtime_type: Literal["python", "http", "openapi", "builtin"] | None = None
     source_code: str | None = None
     entrypoint: str | None = Field(default=None, max_length=128)
     requirements: list[str] | None = None
@@ -219,7 +249,7 @@ class UpdateHook(BaseModel):
 class UpdateMCPServer(BaseModel):
     name: str | None = None
     description: str | None = None
-    server_type: str | None = None
+    server_type: Literal["http", "sse", "stdio", "copilot_github"] | None = None
     url: str | None = None
     command: str | None = None
     args: list[str] | None = None
@@ -918,9 +948,39 @@ async def list_managed_tools(
     return result
 
 
+@router.get("/tools/runtime-kinds")
+async def list_tool_runtime_kinds(user: AuthenticatedUser):
+    """Advertise which executor kinds this build can run.
+
+    The UI needs this to offer only kinds that will actually work: a
+    sandbox-less deployment must not present "Sandboxed Python" as a choice. The
+    catalog is also what the create form uses to decide which fields to show.
+    """
+    from lucent.services.tool_runtimes import runtime_catalog
+
+    sandboxes = custom_tooling_enabled(organization_id=user.organization_id)
+    kinds = runtime_catalog()
+    for kind in kinds:
+        kind["available"] = sandboxes or not kind["requires_sandbox"]
+    from lucent.services.builtin_tool_catalog import available_builtin_tools
+
+    return {
+        "runtime_kinds": kinds,
+        "builtin_handlers": available_builtin_tools(),
+        "sandboxes_enabled": sandboxes,
+    }
+
+
 @router.post("/tools", status_code=201)
 async def create_managed_tool(body: CreateManagedTool, user: AuthenticatedUser):
-    if not custom_tooling_enabled(organization_id=user.organization_id):
+    from lucent.services.tool_runtimes import runtime_requires_sandbox
+
+    # The feature gate is per-kind: only sandbox-backed kinds need
+    # `features.sandboxes_enabled`. A deployment that runs no containers can
+    # still offer declarative HTTP and Lucent-native tools.
+    if runtime_requires_sandbox(body.runtime_type) and not custom_tooling_enabled(
+        organization_id=user.organization_id
+    ):
         raise HTTPException(
             409,
             "Custom tooling is disabled for this organization because "
@@ -929,9 +989,14 @@ async def create_managed_tool(body: CreateManagedTool, user: AuthenticatedUser):
     _validate_user_definition_create(body.status, body.scope)
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
+    # Scan everything a model will read: the source code, the description, and the
+    # declarative request templates (a URL or header value is as visible to the
+    # model as a docstring).
     security_flags = scan_content_for_injection(body.source_code or "")
     if body.description:
         security_flags.extend(scan_content_for_injection(body.description))
+    for value in _tool_config_strings(body.runtime_config):
+        security_flags.extend(scan_content_for_injection(value))
     try:
         result = await repo.create_managed_tool(
             name=body.name,

@@ -1,9 +1,24 @@
-"""Sandbox-backed execution for managed tool definitions."""
+"""Execution of managed tool definitions across runtime kinds.
+
+This module owns the security boundary, not the execution mechanism. Every
+managed tool — sandboxed Python, declarative HTTP, an OpenAPI operation, or a
+Lucent-native handler — passes the same gates here:
+
+1. the caller's organization must have the capability enabled for this kind;
+2. the tool must be active;
+3. the caller's role must satisfy ``auth_policy``;
+4. when invoked from an agent, the tool must be granted to that agent;
+5. input and output must satisfy the declared JSON Schemas;
+6. each invocation is recorded in the run table and the usage ledger.
+
+Only step 7 — actually running it — differs, and that is delegated to
+:mod:`lucent.services.tool_runtimes`. Keeping authorization here rather than in
+the runtimes is what makes a new runtime kind a small, reviewable change instead
+of a second permission model that can drift.
+"""
 
 from __future__ import annotations
 
-import json
-import textwrap
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,8 +30,18 @@ from lucent.auth import set_current_user
 from lucent.db.definitions import DefinitionRepository
 from lucent.logging import get_logger
 from lucent.sandbox.manager import get_sandbox_manager
-from lucent.sandbox.models import SandboxConfig, SandboxStatus
 from lucent.secrets import SecretRegistry, resolve_env_vars
+from lucent.services.tool_runtimes import (
+    RuntimeExecutionContext,
+    get_runtime,
+    runtime_requires_sandbox,
+)
+from lucent.services.tool_runtimes.base import (
+    ToolRuntimeBlockedError as RuntimePolicyBlockedError,
+)
+from lucent.services.tool_runtimes.base import (
+    ToolRuntimeError as RuntimeInvocationError,
+)
 from lucent.settings import custom_tooling_enabled
 
 logger = get_logger("services.managed_tools")
@@ -144,7 +169,13 @@ class ManagedToolExecutor:
         validate_input: bool,
         validate_output: bool,
     ) -> ManagedToolExecutionResult:
-        if not custom_tooling_enabled(organization_id=org_id):
+        # Which runtime kind executes this definition. Sandboxes are only
+        # required for some kinds, so the feature gate has to be per-kind rather
+        # than a blanket check: a deployment with sandboxes disabled can still
+        # offer declarative HTTP and Lucent-native tools.
+        runtime_type = str(tool.get("runtime_type") or "python").strip().lower()
+        requires_sandbox = runtime_requires_sandbox(runtime_type)
+        if requires_sandbox and not custom_tooling_enabled(organization_id=org_id):
             raise ManagedToolBlockedError(
                 "Custom tooling is disabled for this organization because "
                 "features.sandboxes_enabled is off"
@@ -185,56 +216,58 @@ class ManagedToolExecutor:
         run_outcome = "failed"
 
         try:
-            manager = get_sandbox_manager()
-            config = await self._build_sandbox_config(tool, org_id=org_id, user_id=user_id)
-            info = await manager.create(config)
-            sandbox_id = info.id
-            if info.status != SandboxStatus.READY:
-                raise ManagedToolError(info.error or "Sandbox failed to become ready")
-            await self._stage_runtime(manager, sandbox_id, tool, payload)
-            await self._install_requirements(manager, sandbox_id, tool)
-            timeout = int(tool.get("timeout_seconds") or 300)
-            exec_result = await manager.exec(
-                sandbox_id,
-                "python /workspace/run_managed_tool.py",
-                cwd="/workspace",
-                timeout=timeout,
+            # Authorization is complete: the caller may run this tool. Hand the
+            # already-authorized request to the kind's runtime. A runtime never
+            # re-derives permission and never sees the caller's credential store,
+            # only the credential values this one call needs.
+            runtime = get_runtime(runtime_type)
+            context = RuntimeExecutionContext(
+                org_id=org_id,
+                user_id=user_id,
+                user_role=user_role,
+                agent_id=agent_id,
+                run_id=run_id,
+                arguments=payload,
+                credentials=await self._resolve_credentials(
+                    tool, org_id=org_id, user_id=user_id
+                ),
+                # `_tool` is the resolved definition the runtime needs for policy
+                # (network allowlist, timeout) and for kind-specific config.
+                runtime_config={**(tool.get("runtime_config") or {}), "_tool": tool},
             )
-            if exec_result.timed_out:
-                raise ManagedToolError(f"Tool timed out after {timeout}s")
-
-            output = await self._read_output(manager, sandbox_id)
+            outcome = await runtime.execute(context)
+            sandbox_id = outcome.sandbox_id
             duration_ms = int((time.monotonic() - started) * 1000)
-            if not output.get("ok"):
-                error = str(output.get("error") or exec_result.stderr or "Tool execution failed")
+
+            if not outcome.ok:
                 run_outcome = "failed"
                 await self.repo.complete_managed_tool_run(
                     run_id,
                     status="failed",
-                    output_payload=output,
-                    error=error,
+                    output_payload=outcome.to_dict(),
+                    error=outcome.error or "Tool execution failed",
                     sandbox_id=sandbox_id,
                     duration_ms=duration_ms,
                     org_id=org_id,
                 )
                 return ManagedToolExecutionResult(
                     ok=False,
-                    stdout=str(output.get("stdout") or exec_result.stdout or "")[:12000],
-                    stderr=str(output.get("stderr") or exec_result.stderr or "")[:12000],
-                    error=error,
+                    stdout=outcome.stdout[:12000],
+                    stderr=outcome.stderr[:12000],
+                    error=outcome.error,
                     sandbox_id=sandbox_id,
                     duration_ms=duration_ms,
                     run_id=run_id,
                 )
 
-            result_value = output.get("result")
+            result_value = outcome.result
             if validate_output:
                 self._validate_output(tool, result_value)
             run_outcome = "completed"
             await self.repo.complete_managed_tool_run(
                 run_id,
                 status="completed",
-                output_payload=output,
+                output_payload=outcome.to_dict(),
                 sandbox_id=sandbox_id,
                 duration_ms=duration_ms,
                 org_id=org_id,
@@ -242,12 +275,35 @@ class ManagedToolExecutor:
             return ManagedToolExecutionResult(
                 ok=True,
                 result=result_value,
-                stdout=str(output.get("stdout") or "")[:12000],
-                stderr=str(output.get("stderr") or "")[:12000],
+                stdout=outcome.stdout[:12000],
+                stderr=outcome.stderr[:12000],
                 sandbox_id=sandbox_id,
                 duration_ms=duration_ms,
                 run_id=run_id,
             )
+        except RuntimePolicyBlockedError as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            run_outcome = "blocked"
+            await self.repo.complete_managed_tool_run(
+                run_id,
+                status="blocked",
+                error=str(exc),
+                sandbox_id=sandbox_id,
+                duration_ms=duration_ms,
+                org_id=org_id,
+            )
+            raise ManagedToolBlockedError(str(exc)) from exc
+        except RuntimeInvocationError as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            await self.repo.complete_managed_tool_run(
+                run_id,
+                status="failed",
+                error=str(exc),
+                sandbox_id=sandbox_id,
+                duration_ms=duration_ms,
+                org_id=org_id,
+            )
+            raise ManagedToolError(str(exc)) from exc
         except ManagedToolBlockedError:
             duration_ms = int((time.monotonic() - started) * 1000)
             run_outcome = "blocked"
@@ -343,161 +399,30 @@ class ManagedToolExecutor:
         except ValidationError as exc:
             raise ManagedToolError(f"Output does not match tool schema: {exc.message}") from exc
 
-    async def _build_sandbox_config(
-        self,
-        tool: dict[str, Any],
-        *,
-        org_id: str,
-        user_id: str,
-    ) -> SandboxConfig:
-        runtime_config = tool.get("runtime_config") or {}
-        network_policy = tool.get("network_policy") or {}
-        resource_limits = tool.get("resource_limits") or {}
-        env_vars = tool.get("env_vars") or {}
+    async def _resolve_credentials(
+        self, tool: dict[str, Any], *, org_id: str, user_id: str
+    ) -> dict[str, str]:
+        """Resolve this tool's ``env_vars`` into the values its runtime may use.
 
+        Only sensitive-looking keys are required by the repository to hold a
+        `secret://` or `credential://` reference, but every value is resolved the
+        same way so a runtime never has to distinguish "literal" from "reference".
+
+        Credential references are user-scoped, so the current user is set for the
+        duration of resolution and cleared immediately after — resolution must
+        never be able to read another user's secret because of leaked context.
+        """
+        env_vars = tool.get("env_vars") or {}
+        if not isinstance(env_vars, dict) or not env_vars:
+            return {}
         provider = SecretRegistry.get()
-        # Credential/secret references are user-scoped. Set current user only
-        # while resolving them, then clear immediately so execution remains
-        # explicit and auditable.
-        set_current_user({"id": user_id, "organization_id": org_id, "role": "member"})
+        set_current_user(
+            {"id": user_id, "organization_id": org_id, "role": "member"}
+        )
         try:
-            resolved_env = await resolve_env_vars(env_vars, provider)
+            return dict(await resolve_env_vars(env_vars, provider))
         finally:
             set_current_user(None)
-
-        timeout_seconds = int(tool.get("timeout_seconds") or 300)
-        return SandboxConfig(
-            name=f"managed-tool-{tool.get('name', 'tool')}",
-            image=runtime_config.get("image") or "lucent-sandbox:base",
-            setup_commands=[],
-            env_vars=resolved_env,
-            working_dir="/workspace",
-            memory_limit=str(resource_limits.get("memory_limit") or "512m"),
-            cpu_limit=float(resource_limits.get("cpu_limit") or 1.0),
-            disk_limit=str(resource_limits.get("disk_limit") or "1g"),
-            network_mode=str(network_policy.get("network_mode") or "none"),
-            allowed_hosts=list(network_policy.get("allowed_hosts") or []),
-            extra_hosts=dict(network_policy.get("extra_hosts") or {}),
-            timeout_seconds=max(timeout_seconds + 60, 120),
-            idle_timeout_seconds=60,
-            organization_id=org_id,
-            requesting_user_id=user_id,
-        )
-
-    async def _install_requirements(self, manager, sandbox_id: str, tool: dict[str, Any]) -> None:
-        requirements = [
-            str(req).strip()
-            for req in (tool.get("requirements") or [])
-            if str(req).strip()
-        ]
-        if not requirements:
-            return
-        result = await manager.exec(
-            sandbox_id,
-            "python -m pip install --disable-pip-version-check -q -r /workspace/requirements.txt",
-            cwd="/workspace",
-            timeout=300,
-        )
-        if result.exit_code != 0:
-            raise ManagedToolError(f"Failed to install tool requirements: {result.stderr[:500]}")
-
-    async def _stage_runtime(
-        self,
-        manager,
-        sandbox_id: str,
-        tool: dict[str, Any],
-        payload: dict[str, Any],
-    ) -> None:
-        await manager.write_file(
-            sandbox_id,
-            "/workspace/managed_tool_impl.py",
-            str(tool.get("source_code") or "").encode("utf-8"),
-        )
-        await manager.write_file(
-            sandbox_id,
-            "/workspace/input.json",
-            json.dumps(payload).encode("utf-8"),
-        )
-        requirements = "\n".join(
-            str(req).strip() for req in (tool.get("requirements") or []) if str(req).strip()
-        )
-        await manager.write_file(
-            sandbox_id,
-            "/workspace/requirements.txt",
-            requirements.encode("utf-8"),
-        )
-        await manager.write_file(
-            sandbox_id,
-            "/workspace/run_managed_tool.py",
-            self._runner_script(str(tool.get("entrypoint") or "handler")).encode("utf-8"),
-        )
-
-    async def _read_output(self, manager, sandbox_id: str) -> dict[str, Any]:
-        try:
-            raw = await manager.read_file(sandbox_id, "/workspace/output.json")
-            parsed = json.loads(raw.decode("utf-8"))
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception as exc:
-            raise ManagedToolError(f"Tool did not produce a valid output.json: {exc}") from exc
-        raise ManagedToolError("Tool did not produce a JSON object")
-
-    @staticmethod
-    def _runner_script(entrypoint: str) -> str:
-        return textwrap.dedent(f"""
-            import asyncio
-            import contextlib
-            import importlib.util
-            import inspect
-            import io
-            import json
-
-            ENTRYPOINT = {entrypoint!r}
-
-            async def _main():
-                stdout = io.StringIO()
-                stderr = io.StringIO()
-                try:
-                    with open('/workspace/input.json', 'r', encoding='utf-8') as fh:
-                        payload = json.load(fh)
-                    spec = importlib.util.spec_from_file_location(
-                        'managed_tool_impl', '/workspace/managed_tool_impl.py'
-                    )
-                    if spec is None or spec.loader is None:
-                        raise RuntimeError('Could not load managed tool module')
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-                    func = getattr(module, ENTRYPOINT, None)
-                    if func is None or not callable(func):
-                        raise RuntimeError(f'Entrypoint {{ENTRYPOINT}} was not found or callable')
-                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                        result = func(payload)
-                        if inspect.isawaitable(result):
-                            result = await result
-                    output = {{
-                        'ok': True,
-                        'result': result,
-                        'stdout': stdout.getvalue(),
-                        'stderr': stderr.getvalue(),
-                    }}
-                    exit_code = 0
-                except Exception as exc:
-                    output = {{
-                        'ok': False,
-                        'error': 'Managed tool execution failed',
-                        'error_type': type(exc).__name__,
-                        'stdout': stdout.getvalue(),
-                        'stderr': stderr.getvalue(),
-                    }}
-                    exit_code = 1
-                with open('/workspace/output.json', 'w', encoding='utf-8') as fh:
-                    json.dump(output, fh, ensure_ascii=False)
-                raise SystemExit(exit_code)
-
-            if __name__ == '__main__':
-                asyncio.run(_main())
-            """).strip() + "\n"
-
 
 def normalize_discovered_mcp_tools(value: Any) -> list[dict[str, Any]]:
     """Validate proxy discovery output before it becomes a model tool schema."""

@@ -4910,6 +4910,12 @@ class LucentDaemon(
             # Build requester-scoped MCP config for this task
             task_mcp_config = {}
             task_enable_config_discovery = False
+            # A connector whose credential this requester has not added is a setup
+            # step, not a fault: record it, skip that server, and keep the rest of
+            # the task's tool surface. Letting a KeyError escape here killed the
+            # whole dispatch, so one unconfigured connector cost the task every
+            # other tool.
+            missing_mcp_credentials: dict[str, list[str]] = {}
             if mcp_servers:
                 set_current_user({"id": requesting_user_id, "organization_id": org_id})
                 try:
@@ -4929,15 +4935,30 @@ class LucentDaemon(
                             # or token env vars are needed for this mode.
                             task_enable_config_discovery = True
                             continue
-                        server_type = "http" if raw_server_type == "http" else "stdio"
-                        if server_type == "http":
+                        # `sse` is a remote transport, not a local process. Treating
+                        # it as stdio spawned a command that does not exist.
+                        server_type = "stdio" if raw_server_type == "stdio" else raw_server_type
+                        if server_type in ("http", "sse"):
+                            resolved_headers: dict[str, Any] = {}
+                            missing = False
+                            for key, value in (server.get("headers") or {}).items():
+                                if isinstance(value, str):
+                                    try:
+                                        resolved_headers[key] = await resolve_runtime_value(value)
+                                    except (KeyError, ValueError) as exc:
+                                        missing_mcp_credentials.setdefault(
+                                            str(server.get("name") or server.get("id")), []
+                                        ).append(str(exc))
+                                        missing = True
+                                        break
+                                else:
+                                    resolved_headers[key] = value
+                            if missing:
+                                continue
                             conf = {
                                 "type": server_type,
                                 "url": await resolve_runtime_value(server["url"]),
-                                "headers": {
-                                    k: (await resolve_runtime_value(v)) if isinstance(v, str) else v
-                                    for k, v in (server.get("headers") or {}).items()
-                                },
+                                "headers": resolved_headers,
                                 "tools": server.get("allowed_tools") or ["*"],
                             }
                         else:
@@ -4957,6 +4978,29 @@ class LucentDaemon(
                         task_mcp_config[f"mcp-{server['id']}"] = conf
                 finally:
                     set_current_user(None)
+
+            if missing_mcp_credentials:
+                # Tell the sub-agent why a connector it was granted is missing, so
+                # it asks the requester to add the secret instead of reporting that
+                # the capability does not exist.
+                _lines = [
+                    "## Connectors needing this user's credentials",
+                    (
+                        "Granted to this agent but not connected, because the "
+                        "requesting user has not added the required secret. Tell them "
+                        "to add it in Settings -> Secrets, then retry. Do not claim the "
+                        "service is unavailable."
+                    ),
+                    "",
+                ]
+                for _name, _reasons in sorted(missing_mcp_credentials.items()):
+                    _lines.append(f"- {_name}: " + "; ".join(dict.fromkeys(_reasons)))
+                system_message = f"{system_message}\n\n" + "\n".join(_lines)
+                log(
+                    f"Task {task_id}: {len(missing_mcp_credentials)} connector(s) "
+                    "need the requester's credentials",
+                    "INFO",
+                )
 
             # Determine memory scope for this task.
             #

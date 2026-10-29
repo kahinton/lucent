@@ -26,7 +26,7 @@
                     <a href="/handoffs/{{ interaction.id }}" class="truncate text-sm font-semibold text-gray-900 hover:underline">{{ interaction.title }}</a>
                     <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-600">{{ interaction.interaction_type }}</span>
                     {% if interaction.user_id is none %}<span class="rounded bg-primary-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary-700">Org</span>{% endif %}
-                    {% if interaction.requires_response %}<span class="text-[10px] font-medium text-amber-600">needs response</span>{% endif %}
+                    {% if interaction.requires_response %}<span class="text-[10px] font-medium text-pink-600">needs response</span>{% endif %}
                 </span>
                 <span class="mt-1 block truncate text-xs text-gray-500">{{ interaction.body | truncate(180) }}</span>
             </span>

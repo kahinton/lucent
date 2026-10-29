@@ -268,7 +268,7 @@ class TestDefinitionsList:
         resp = await client.get("/definitions", params={"tab": "agents"})
         assert "Test Agent" in resp.text
         assert "Agent Composer" in resp.text
-        assert "Agents (" in resp.text
+        assert "Agents" in resp.text
         assert "Me (" in resp.text
         assert "⚠ Entire Organization — shared with everyone" in resp.text
         assert "Entire Organization makes this definition readable and usable" in resp.text
@@ -313,8 +313,7 @@ class TestDefinitionsList:
         assert resp.status_code == 200
         assert "Agents bring capabilities together" in resp.text
         assert "its instructions establish the goal" in resp.text
-        assert "Explicit grants let you create capable agents" in resp.text
-        assert "border-teal-300 bg-teal-50" in resp.text
+        assert "grant the tools, external providers, and hooks the agent needs to act" in resp.text
 
     async def test_list_tab_skills_explains_reusable_expertise(self, client, skill_def):
         resp = await client.get("/definitions", params={"tab": "skills"})
@@ -322,8 +321,7 @@ class TestDefinitionsList:
         assert resp.status_code == 200
         assert "Skills give agents reusable expertise" in resp.text
         assert "specialist context, or quality standard" in resp.text
-        assert "Updating the skill improves the shared method" in resp.text
-        assert "border-amber-300 bg-amber-50" in resp.text
+        assert "updating the skill improves the shared method everywhere" in resp.text
 
     async def test_agent_composer_chat_uses_definition_engineer(self, client, db_pool, web_user):
         _user, org, _token = web_user
@@ -745,10 +743,10 @@ class TestAgentCreate:
 
         list_resp = await client.get("/definitions", params={"tab": "agents"})
         assert "Kind Tagged Agent" in list_resp.text
-        assert 'bg-pink-50 text-pink-700">persona' in list_resp.text
+        assert "persona" in list_resp.text
 
         detail_resp = await client.get(f"/definitions/agents/{agent['id']}")
-        assert 'bg-pink-50 text-pink-700">persona' in detail_resp.text
+        assert "persona" in detail_resp.text
 
     async def test_create_can_share_with_org(self, client, db_pool, web_user):
         _user, org, _token = web_user

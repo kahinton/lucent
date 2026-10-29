@@ -114,6 +114,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
+      # Optional native tool handlers. Both default to 0, so an ordinary
+      # `docker compose up` build is unchanged. Enable from your shell or .env
+      # without editing this repo:
+      #   LUCENT_TOOLS_ENABLE_DOCUMENTS=1 docker compose up -d --build
+      args:
+        LUCENT_TOOLS_ENABLE_DOCUMENTS: ${LUCENT_TOOLS_ENABLE_DOCUMENTS:-0}
+        LUCENT_TOOLS_ENABLE_IMAGES: ${LUCENT_TOOLS_ENABLE_IMAGES:-0}
     container_name: lucent-server
     depends_on:
       postgres:

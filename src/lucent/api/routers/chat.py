@@ -390,6 +390,32 @@ def _render_pending_capabilities_notice(pending: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _render_missing_credentials_notice(missing: dict[str, list[str]]) -> str:
+    """Tell the model which connectors need the user to add a credential.
+
+    Without this the connector is simply absent from the tool list, and a model
+    given a GitHub question will say it has no GitHub access — which is wrong and
+    unfixable from the user's side, because the fix is to add a token. Naming the
+    connector and where to add it turns a dead end into a one-step instruction.
+    """
+    if not missing:
+        return ""
+    lines = [
+        "## Connectors that need this user's credentials",
+        (
+            "These connectors are available to this agent but the user has not added "
+            "the credential they require, so they are NOT connected right now. Do not "
+            "claim you cannot access the service at all: tell the user to add the "
+            "secret in Settings → Secrets, then retry."
+        ),
+        "",
+    ]
+    for connector, reasons in sorted(missing.items()):
+        detail = "; ".join(dict.fromkeys(reasons))
+        lines.append(f"- {connector}: {detail}")
+    return "\n".join(lines)
+
+
 def _build_mcp_config(
     session_token: str,
     *,
@@ -426,13 +452,29 @@ def _build_mcp_config(
 
 async def _build_agent_mcp_config(
     servers: list[dict[str, Any]],
-) -> tuple[dict[str, Any], bool]:
-    """Build runtime MCP configuration from an agent's granted servers."""
+) -> tuple[dict[str, Any], bool, dict[str, list[str]]]:
+    """Build runtime MCP configuration from an agent's granted servers.
+
+    Three transports are supported, matching what the engines accept:
+
+    * ``http`` — Streamable HTTP (the current MCP default).
+    * ``sse`` — the legacy HTTP+SSE transport. Deprecated by the MCP specification
+      but still what a large fraction of hosted servers publish, so refusing it
+      would make those servers unusable.
+    * ``stdio`` — a local subprocess.
+
+    Every remote URL is passed through SSRF validation *here*, before it reaches an
+    engine SDK. The LangChain path validates inside :class:`MCPToolBridge`, but the
+    Copilot, Claude Code, and Codex engines receive this dict verbatim and open the
+    connection themselves — so without this check an http/sse server URL was an
+    unvalidated server-side request path.
+    """
     if not servers:
-        return {}, False
+        return {}, False, {}
 
     from lucent.secrets import SecretRegistry, resolve_env_vars
     from lucent.secrets.utils import is_secret_reference, resolve_secret_reference
+    from lucent.url_validation import SSRFError, validate_url
 
     secret_provider = SecretRegistry.get()
 
@@ -446,6 +488,20 @@ async def _build_agent_mcp_config(
             return await resolve_secret_reference(resolved, secret_provider)
         return resolved
 
+    # A credential the *user* has not added yet is not an error, it is a setup
+    # step. Built-in connectors are shared definitions whose `secret://` headers
+    # resolve per caller, so a colleague who has not created their token would
+    # otherwise take down the entire chat turn with a KeyError raised deep inside
+    # config assembly. Collect them and let the prompt tell the model what to say.
+    missing_credentials: dict[str, list[str]] = {}
+
+    async def resolve_or_record(value: str, server_name: str) -> str | None:
+        try:
+            return await resolve_runtime_value(value)
+        except (KeyError, ValueError) as exc:
+            missing_credentials.setdefault(server_name, []).append(str(exc))
+            return None
+
     mcp_config: dict[str, Any] = {}
     enable_copilot_github = False
     for server in servers:
@@ -454,15 +510,36 @@ async def _build_agent_mcp_config(
             enable_copilot_github = True
             continue
 
-        runtime_type = "http" if server_type == "http" else "stdio"
-        if runtime_type == "http":
-            config = {
-                "type": "http",
-                "url": await resolve_runtime_value(str(server.get("url") or "")),
-                "headers": {
-                    key: await resolve_runtime_value(value) if isinstance(value, str) else value
-                    for key, value in (server.get("headers") or {}).items()
-                },
+        if server_type in ("http", "sse"):
+            url = await resolve_runtime_value(str(server.get("url") or ""))
+            try:
+                validate_url(url, purpose=f"MCP server {server.get('name') or server.get('id')}")
+            except SSRFError as exc:
+                # Skip this one server rather than aborting the session: a single
+                # misconfigured provider must not cost the agent every other tool.
+                logger.warning(
+                    "Skipping MCP server %s: %s", server.get("id"), exc
+                )
+                continue
+            resolved_headers: dict[str, Any] = {}
+            skip_server = False
+            for key, value in (server.get("headers") or {}).items():
+                if isinstance(value, str):
+                    resolved = await resolve_or_record(
+                        value, str(server.get("name") or server.get("id"))
+                    )
+                    if resolved is None:
+                        skip_server = True
+                        break
+                    resolved_headers[key] = resolved
+                else:
+                    resolved_headers[key] = value
+            if skip_server:
+                continue
+            config: dict[str, Any] = {
+                "type": server_type,
+                "url": url,
+                "headers": resolved_headers,
             }
         else:
             config = {
@@ -477,7 +554,7 @@ async def _build_agent_mcp_config(
         config["tools"] = server.get("allowed_tools") or ["*"]
         mcp_config[f"mcp-{server['id']}"] = config
 
-    return mcp_config, enable_copilot_github
+    return mcp_config, enable_copilot_github, missing_credentials
 
 
 
@@ -2193,10 +2270,24 @@ async def chat_stream_v2(
         mcp_config["memory-server"]["exclude_tools"] = ["run_managed_tool"]
     # MCP servers were resolved with the rest of the capability chain; the
     # unfiltered junction read is no longer performed here.
-    agent_mcp_config, enable_agent_provider_discovery = await _build_agent_mcp_config(
-        agent_mcp_servers
-    )
+    (
+        agent_mcp_config,
+        enable_agent_provider_discovery,
+        missing_mcp_credentials,
+    ) = await _build_agent_mcp_config(agent_mcp_servers)
     mcp_config.update(agent_mcp_config)
+    if missing_mcp_credentials:
+        # A connector whose credential this user has not added is skipped from the
+        # tool surface, but the model must know why so it can tell the user to add
+        # the secret rather than reporting a capability gap.
+        notice = _render_missing_credentials_notice(missing_mcp_credentials)
+        if notice:
+            system_prompt_parts.append(notice)
+            logger.info(
+                "Chat v2: %d connector(s) need this user's credentials: %s",
+                len(missing_mcp_credentials),
+                ", ".join(sorted(missing_mcp_credentials)),
+            )
 
     logger.info(
         "Chat v2 session: engine=%s, model=%s, agent=%s",

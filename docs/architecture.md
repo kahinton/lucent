@@ -188,8 +188,7 @@ module.
 | MCP | yes | yes | yes | yes |
 | Provider-native resume | no (replays message history) | yes | yes | yes |
 | Declarative hooks | yes | no (accepted and ignored) | no | no |
-| Managed tools | yes | no | no | no |
-| Reasoning effort | yes | yes | no | yes |
+| Managed tools | yes | no | no | no || Reasoning effort | yes | yes | no | yes |
 | Catalog discovery | yes | yes | **no** | yes |
 
 `claude_code` reports `discovery: false` because the Claude Agent SDK exposes no
@@ -436,12 +435,13 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `list_mcp_server_definitions` | List registered external tool providers |
 | `grant_mcp_server_to_agent` | Grant external provider access to an agent |
 | `revoke_mcp_server_from_agent` | Revoke external provider access from an agent |
-| `create_tool_definition` | Propose a Lucent-hosted managed tool for review |
+| `create_tool_definition` | Propose a Lucent-executed managed tool (any runtime kind) for review |
+| `list_tool_runtime_kinds` | List supported runtime kinds and built-in handlers |
 | `list_tool_definitions` | List managed tool definitions |
 | `get_tool_definition` | Get one managed tool definition by ID or name |
 | `grant_tool_to_agent` | Grant a managed tool to an agent definition |
 | `revoke_tool_from_agent` | Revoke a managed tool from an agent definition |
-| `run_managed_tool` | Execute an approved, granted managed tool in a sandbox |
+| `run_managed_tool` | Execute an approved, granted managed tool under its policy |
 | `list_proposals` | List all pending proposals (agents, skills, hooks, tools, external providers) |
 
 Approval and rejection of proposed definitions are human review actions and are handled through the web UI or authenticated REST API, not MCP tools.
@@ -587,6 +587,32 @@ session experience instead of creating duplicates. Linked request IDs also
 receive the experience memory as a `context` memory so the conversation can act
 as glue between the user discussion, requests, tasks, outputs, and later
 learning extraction.
+
+## Managed Tool Runtime Kinds
+
+A managed tool is a *declaration* with a security envelope. The envelope — owner,
+agent grant, per-user consent, JSON input/output schemas, credential references,
+network policy, resource limits, and the run ledger — is kind-agnostic. Only the
+final step, producing a result, differs, so that step is a small plugin contract
+(`src/lucent/services/tool_runtimes/`).
+
+| Kind | Executor | Sandbox | Notes |
+|---|---|---|---|
+| `python` | Sandbox container | required | Arbitrary code; the only kind gated on `features.sandboxes_enabled` |
+| `http` | Server process | none | One templated HTTPS request |
+| `openapi` | Server process | none | One operation from a document stored at approval time |
+| `builtin` | Server process | none | Reviewed handler from `builtin_tool_catalog.py` |
+
+`ManagedToolExecutor` keeps every authorization decision and dispatches only after
+the caller, kind feature gate, agent grant, role policy, and input schema have all
+passed. A runtime receives an already-authorized request and never re-derives
+permission, so adding a kind cannot add a second, drifting permission model.
+
+Server-executed kinds share one egress policy (`tool_runtimes/http_policy.py` and
+`outbound.py`): per-hop SSRF validation, a per-tool host allowlist that is an
+additional restriction rather than a bypass, no HTTPS→HTTP downgrade, credential
+headers dropped across origins, a disabled cookie jar, and streamed, bounded bodies.
+See `docs/security-model.md`.
 
 ## Tool-Use Audit Log
 

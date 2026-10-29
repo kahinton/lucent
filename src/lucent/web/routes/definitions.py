@@ -258,6 +258,253 @@ def _env_vars_text(value) -> str:
     return str(value)
 
 
+# ── Managed tool authoring helpers ────────────────────────────────────────
+#
+# The create/update web routes accept kind-specific fields instead of a single
+# freeform `runtime_config` blob. These helpers turn the form into the exact
+# `runtime_config` each runtime documents, so the repository's per-kind
+# validator (the write boundary) sees a config it can actually judge.
+
+#: Cap on a posted OpenAPI document, matching the repository's stored-spec limit.
+_MAX_OPENAPI_SPEC_BYTES = 2_000_000
+
+_HTTP_FORM_FIELDS = (
+    "http_url",
+    "http_method",
+    "http_query",
+    "http_headers",
+    "http_body",
+    "http_form",
+    "http_response_path",
+    "http_response_format",
+    "http_allowed_status",
+    "http_content_type",
+)
+
+_OPENAPI_FORM_FIELDS = (
+    "openapi_spec",
+    "openapi_operation_id",
+    "openapi_base_url",
+    "openapi_response_path",
+    "openapi_response_format",
+    "openapi_allowed_status",
+    "openapi_headers",
+    "openapi_query",
+)
+
+
+def _tool_error_redirect(message: str, *, tool_id: str | None = None) -> RedirectResponse:
+    """Bounce back to the authoring page with a readable error, never a 500.
+
+    A malformed tool definition is a user mistake, so it should land on the form
+    the user just submitted with an explanation rather than as an unhandled
+    validation exception.
+    """
+    base = f"/definitions/tools/{tool_id}" if tool_id else "/definitions?tab=tools"
+    separator = "&" if "?" in base else "?"
+    return RedirectResponse(
+        url=f"{base}{separator}error={quote(str(message), safe='')}",
+        status_code=303,
+    )
+
+
+def _parse_key_value_map(value: str) -> dict[str, str]:
+    """Parse ``KEY=VALUE`` / ``Header: value`` lines, or a JSON object.
+
+    Query strings are usually written as ``k=v`` and headers as ``Header:
+    value``, so both separators are accepted rather than making the author
+    remember which field wants which. A JSON object is taken as-is because the
+    API surface also accepts one and users paste between the two.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            result: dict[str, str] = {}
+            for key, item in parsed.items():
+                if isinstance(item, (dict, list)):
+                    result[str(key)] = json.dumps(item)
+                elif item is None:
+                    result[str(key)] = ""
+                else:
+                    result[str(key)] = str(item)
+            return result
+    result = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, item = line.split("=", 1)
+        elif ":" in line:
+            key, item = line.split(":", 1)
+        else:
+            continue
+        key = key.strip()
+        if key:
+            result[key] = item.strip()
+    return result
+
+
+def _parse_status_codes(value: str) -> list[int] | None:
+    """Parse a comma-separated list of HTTP status codes, or ``None``."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    codes: list[int] = []
+    for chunk in raw.replace("\n", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            codes.append(int(chunk))
+        except ValueError:
+            raise ValueError(f"{chunk!r} is not an HTTP status code") from None
+    return codes or None
+
+
+def _parse_body_value(value: str):
+    """Parse a request body as JSON when possible, otherwise keep it raw.
+
+    XML, GraphQL, and plain-text bodies are legitimate, so an unparseable body
+    is stored as the raw string the runtime documents for non-JSON payloads
+    instead of being rejected.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _runtime_config_is_complete(form, kind: str) -> bool:
+    """Whether the form posted *every* field for *kind*.
+
+    The detail page's edit form renders all of a kind's fields, so "all present"
+    means the author saw and could clear each one — a cleared field should really
+    be cleared. A form that posts only some fields (an API-style partial edit) is
+    merged instead so nothing is silently dropped.
+    """
+    fields = {
+        "http": _HTTP_FORM_FIELDS,
+        "openapi": _OPENAPI_FORM_FIELDS,
+        "builtin": ("builtin_handler",),
+        "python": ("python_image",),
+    }.get(kind, ())
+    return bool(fields) and all(field in form for field in fields)
+
+
+def _runtime_config_from_form(form, kind: str) -> dict | None:
+    """Build the ``runtime_config`` for *kind* from the posted form.
+
+    Returns ``None`` when the form carries none of that kind's fields. That is
+    how an update distinguishes "the author edited this config" from "this
+    form never touched it", so editing a name cannot wipe a stored spec.
+    """
+    if kind == "http":
+        if not any(field in form for field in _HTTP_FORM_FIELDS):
+            return None
+        config: dict = {}
+        url = str(form.get("http_url", "")).strip()
+        if url:
+            config["url"] = url
+        method = str(form.get("http_method", "")).strip().upper()
+        if method:
+            config["method"] = method
+        for field, key in (
+            ("http_query", "query"),
+            ("http_headers", "headers"),
+            ("http_form", "form"),
+        ):
+            parsed = _parse_key_value_map(str(form.get(field, "")))
+            if parsed:
+                config[key] = parsed
+        body = _parse_body_value(str(form.get("http_body", "")))
+        if body is not None:
+            config["body"] = body
+        response_path = str(form.get("http_response_path", "")).strip()
+        if response_path:
+            config["response_path"] = response_path
+        response_format = str(form.get("http_response_format", "")).strip()
+        if response_format:
+            config["response_format"] = response_format
+        content_type = str(form.get("http_content_type", "")).strip()
+        if content_type:
+            config["content_type"] = content_type
+        allowed_status = _parse_status_codes(str(form.get("http_allowed_status", "")))
+        if allowed_status:
+            config["allowed_status"] = allowed_status
+        return config
+
+    if kind == "openapi":
+        if not any(field in form for field in _OPENAPI_FORM_FIELDS):
+            return None
+        config = {}
+        spec = str(form.get("openapi_spec", "")).strip()
+        if spec:
+            config["spec"] = spec
+        operation_id = str(form.get("openapi_operation_id", "")).strip()
+        if operation_id:
+            config["operation_id"] = operation_id
+        base_url = str(form.get("openapi_base_url", "")).strip()
+        if base_url:
+            config["base_url"] = base_url
+        response_path = str(form.get("openapi_response_path", "")).strip()
+        if response_path:
+            config["response_path"] = response_path
+        response_format = str(form.get("openapi_response_format", "")).strip()
+        if response_format:
+            config["response_format"] = response_format
+        allowed_status = _parse_status_codes(str(form.get("openapi_allowed_status", "")))
+        if allowed_status:
+            config["allowed_status"] = allowed_status
+        for field, key in (("openapi_headers", "headers"), ("openapi_query", "query")):
+            parsed = _parse_key_value_map(str(form.get(field, "")))
+            if parsed:
+                config[key] = parsed
+        return config
+
+    if kind == "builtin":
+        if "builtin_handler" not in form:
+            return None
+        handler = str(form.get("builtin_handler", "")).strip()
+        return {"handler": handler} if handler else {}
+
+    if kind == "python":
+        if "python_image" not in form:
+            return None
+        image = str(form.get("python_image", "")).strip()
+        return {"image": image} if image else {}
+
+    return None
+
+
+def _sandbox_gate_message() -> str:
+    return (
+        "Sandboxed Python tools are disabled for this organization because "
+        "features.sandboxes_enabled is off. HTTP, OpenAPI, and built-in tools "
+        "still work without a sandbox."
+    )
+
+
+def _parse_timeout_field(value) -> int:
+    """Parse the timeout input, defaulting a blank field to 300 seconds."""
+    raw = str(value or "").strip()
+    if not raw:
+        return 300
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"Timeout must be a whole number of seconds, not {raw!r}") from None
+
+
 # =============================================================================
 # Definitions Management
 # =============================================================================
@@ -326,9 +573,36 @@ async def definitions_page(
         requester_user_id=str(user.id),
         requester_role=role_value,
     )
-    from lucent.settings import custom_tooling_enabled
+    # A retired built-in is archived rather than deleted so its run history stays
+    # auditable, but it is not a tool anyone can use — listing it would offer a
+    # capability that fails on every call.
+    tools_result["items"] = [
+        item for item in tools_result.get("items", []) if item.get("status") != "archived"
+    ]
+    from lucent.settings import custom_tooling_enabled, sandboxes_enabled
 
+    org_sandboxes_enabled = sandboxes_enabled(organization_id=org_id)
     org_custom_tooling_enabled = custom_tooling_enabled(organization_id=org_id)
+    # One entry per executor kind, with an availability verdict the form uses to
+    # disable a choice instead of offering one that would fail on submit. Only
+    # sandbox-backed kinds depend on `features.sandboxes_enabled`.
+    from lucent.services.tool_runtimes import runtime_catalog
+
+    tool_runtime_kinds = runtime_catalog()
+    for runtime_kind in tool_runtime_kinds:
+        runtime_kind["available"] = (
+            org_sandboxes_enabled or not runtime_kind["requires_sandbox"]
+        )
+    from lucent.services.builtin_tool_catalog import available_builtin_tools
+
+    builtin_handlers = available_builtin_tools()
+    # Curated "connect your accounts" presets. These are verified vendor endpoints,
+    # shown so a user does not have to know a service publishes an MCP server or
+    # guess its URL.
+    from lucent.services.connector_catalog import connector_catalog, connector_categories
+
+    connector_presets = connector_catalog()
+    connector_groups = connector_categories()
     proposals = await repo.get_pending_proposals(
         org_id,
         requester_user_id=str(user.id),
@@ -403,8 +677,13 @@ async def definitions_page(
             "skills_total": skills_result["total_count"],
             "mcp_total": mcp_result["total_count"],
             "hooks_total": hooks_result["total_count"],
-            "tools_total": tools_result["total_count"],
+            "tools_total": len(tools_result["items"]),
             "custom_tooling_enabled": org_custom_tooling_enabled,
+            "sandboxes_enabled": org_sandboxes_enabled,
+            "tool_runtime_kinds": tool_runtime_kinds,
+            "builtin_handlers": builtin_handlers,
+            "connector_presets": connector_presets,
+            "connector_groups": connector_groups,
             "tab": tab,
             "page": page,
             "per_page": per_page,
@@ -594,6 +873,14 @@ async def mcp_server_detail_page(request: Request, server_id: str):
     can_approve = _is_admin_or_owner(user)
     approval_label = "Approve"
 
+    # Which declared credential slots this *user* can already satisfy. The
+    # endpoint is shared; the secret is personal, so "does this connector work for
+    # me" is a per-viewer question and has to be answered on the page rather than
+    # discovered when a tool call fails.
+    credential_status = await _mcp_credential_status(
+        pool, server, user, org_id
+    )
+
     return templates.TemplateResponse(
         request,
         "definition_detail.html",
@@ -605,8 +892,52 @@ async def mcp_server_detail_page(request: Request, server_id: str):
             "approval_label": approval_label,
             "owner_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
+            "credential_status": credential_status,
         },
     )
+
+
+async def _mcp_credential_status(
+    pool, server: dict, user, org_id: str
+) -> list[dict]:
+    """Report, per declared credential slot, whether this user can resolve it.
+
+    Uses the same clearance-driven resolution the runtime uses, so the page cannot
+    claim a connector is ready when a call would still fail.
+    """
+    slots = server.get("credential_slots") or []
+    if not slots:
+        return []
+    from lucent.secrets import SecretRegistry
+    from lucent.secrets.utils import resolve_secret_reference
+
+    try:
+        provider = SecretRegistry.get()
+    except KeyError:
+        provider = None
+
+    status: list[dict] = []
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        secret_key = str(slot.get("secret_key") or "").strip()
+        entry = {
+            "name": slot.get("name") or "",
+            "label": slot.get("label") or slot.get("name") or "",
+            "help": slot.get("help") or "",
+            "secret_key": secret_key,
+            "create_url": slot.get("create_url") or "",
+            "required": bool(slot.get("required", True)),
+            "resolved": False,
+        }
+        if secret_key and provider is not None:
+            try:
+                await resolve_secret_reference(f"secret://{secret_key}", provider)
+                entry["resolved"] = True
+            except (KeyError, ValueError):
+                entry["resolved"] = False
+        status.append(entry)
+    return status
 
 
 @router.get("/definitions/hooks/{hook_id}", response_class=HTMLResponse)
@@ -683,12 +1014,140 @@ async def managed_tool_detail_page(request: Request, tool_id: str):
             "user": user,
             "definition": tool,
             "definition_type": "tool",
+            "tool_kind": _tool_kind_view(tool),
+            "network_policy_summary": _network_policy_summary(
+                tool.get("network_policy")
+            ),
             "can_approve": can_approve,
             "approval_label": approval_label,
             "owner_groups": user_groups,
             "csrf_token": request.cookies.get(CSRF_COOKIE_NAME, ""),
         },
     )
+
+
+def _network_policy_summary(policy) -> str:
+    """Render a network policy as one plain-language sentence.
+
+    An operator approving a tool should not have to decode `network_mode` to
+    learn whether it can reach the internet.
+    """
+    if not isinstance(policy, dict):
+        return "No outbound network"
+    mode = str(policy.get("network_mode") or "none").strip().lower()
+    hosts = [
+        str(host).strip()
+        for host in (policy.get("allowed_hosts") or [])
+        if str(host).strip()
+    ]
+    if mode == "none":
+        return "No outbound network"
+    if mode == "allowlist":
+        if not hosts:
+            return "No outbound network (empty allowlist)"
+        return "Only " + ", ".join(hosts)
+    if mode == "bridge":
+        return "Any public host on port 80/443"
+    return f"Unrecognized network mode {mode!r}"
+
+
+def _config_keys(config: dict, key: str) -> list[str]:
+    """Sorted keys of a config mapping, tolerating a malformed stored value."""
+    value = config.get(key)
+    if isinstance(value, dict):
+        return sorted(str(item) for item in value)
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def _tool_kind_view(tool: dict) -> dict:
+    """Resolve the presentation details for one tool's runtime kind.
+
+    Built-in availability is checked live against this image so an approver can
+    see that a selected handler will fail to run here (a missing optional
+    dependency), rather than discovering it on the first agent call.
+    """
+    kind = str(tool.get("runtime_type") or "python").strip().lower()
+    config = tool.get("runtime_config") or {}
+    if not isinstance(config, dict):
+        config = {}
+    view: dict = {"kind": kind, "config": config, "handlers": [], "handler": None}
+
+    if kind == "python":
+        view["image"] = str(config.get("image") or "lucent-sandbox:base")
+    elif kind == "http":
+        view["url"] = config.get("url") or ""
+        view["method"] = str(config.get("method") or "GET").upper()
+        view["query_keys"] = _config_keys(config, "query")
+        view["header_names"] = _config_keys(config, "headers")
+        view["response_path"] = config.get("response_path") or ""
+        view["response_format"] = config.get("response_format") or "json"
+        view["allowed_status"] = config.get("allowed_status") or [200]
+    elif kind == "openapi":
+        from lucent.services.tool_runtimes.openapi_spec import (
+            SpecError,
+            list_operations,
+            parse_spec,
+            resolve_operation,
+        )
+
+        view["operation_id"] = config.get("operation_id") or ""
+        view["base_url"] = config.get("base_url") or ""
+        view["response_path"] = config.get("response_path") or ""
+        view["response_format"] = config.get("response_format") or "json"
+        view["allowed_status"] = config.get("allowed_status") or [200]
+        view["header_names"] = _config_keys(config, "headers")
+        view["query_keys"] = _config_keys(config, "query")
+        spec_text = config.get("spec") or ""
+        view["spec_text"] = spec_text
+        view["spec_bytes"] = len(spec_text.encode("utf-8")) if spec_text else 0
+        view["method"] = ""
+        view["path"] = ""
+        try:
+            document = parse_spec(spec_text)
+            operation = resolve_operation(
+                document, operation_id=config.get("operation_id")
+            )
+            view["method"] = operation["method"]
+            view["path"] = operation["path"]
+            view["base_url"] = view["base_url"] or operation.get("base_url") or ""
+            view["operation_count"] = len(list_operations(document))
+        except SpecError as exc:
+            view["spec_error"] = str(exc)
+    elif kind == "builtin":
+        from lucent.services.builtin_tool_catalog import (
+            available_builtin_tools,
+            get_builtin_tool,
+        )
+
+        handler = str(config.get("handler") or "").strip()
+        view["handler"] = handler
+        view["handlers"] = available_builtin_tools()
+        view["descriptor"] = next(
+            (item for item in view["handlers"] if item.get("handler") == handler), None
+        )
+        view["label"] = ""
+        view["handler_description"] = ""
+        view["handler_available"] = False
+        view["handler_unavailable_reason"] = None
+        view["handler_uses_network"] = False
+        if handler:
+            try:
+                spec = get_builtin_tool(handler)
+                view["label"] = spec.label
+                view["handler_description"] = spec.description
+                view["handler_uses_network"] = spec.uses_network
+            except Exception:  # noqa: BLE001 — an unknown handler is shown as such
+                view["handler_unavailable_reason"] = (
+                    f"No handler named {handler!r} exists in this build"
+                )
+        if view["descriptor"]:
+            view["handler_available"] = bool(view["descriptor"].get("available"))
+            view["handler_unavailable_reason"] = view["descriptor"].get(
+                "unavailable_reason"
+            )
+    return view
 
 
 @router.get("/definitions/mcp-servers/{server_id}/discover-tools")
@@ -1091,6 +1550,31 @@ async def create_mcp_web(request: Request):
     url = str(form.get("url", "")).strip() or None
     headers = _parse_json_object(str(form.get("headers", "")), {})
 
+    # A curated preset fills in the endpoint and transport so the user only has to
+    # confirm a name. The preset is looked up server-side and only used to *seed*
+    # values the user could have typed themselves — it grants nothing, and the
+    # normal proposed -> approved lifecycle still applies.
+    preset_slug = str(form.get("connector_preset", "")).strip()
+    if preset_slug:
+        from lucent.services.connector_catalog import get_connector
+
+        try:
+            preset = get_connector(preset_slug)
+        except KeyError:
+            return _tool_error_redirect(
+                f"Unknown connector preset {preset_slug!r}."
+            )
+        server_type = preset.transport
+        url = (
+            preset.readonly_url
+            if preset.has_readonly_variant and str(form.get("readonly", "")).strip()
+            else preset.url
+        )
+        if not str(form.get("name", "")).strip():
+            form = {**form, "name": preset.name}
+        if not str(form.get("description", "")).strip():
+            form = {**form, "description": preset.summary}
+
     server = await repo.create_mcp_server(
         name=str(form.get("name", "")).strip(),
         org_id=org_id,
@@ -1147,22 +1631,62 @@ async def create_hook_web(request: Request):
 
 @router.post("/definitions/tools/create")
 async def create_managed_tool_web(request: Request):
-    """Create a new managed tool definition."""
+    """Create a new managed tool definition of any supported runtime kind."""
     user = await get_user_context(request)
     _require_admin_or_owner(user)
-    from lucent.settings import custom_tooling_enabled
-
-    if not custom_tooling_enabled(organization_id=user.organization_id):
-        raise HTTPException(
-            409,
-            "Custom tooling is disabled for this organization because "
-            "features.sandboxes_enabled is off",
-        )
     await _check_csrf(request)
     form = await request.form()
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
+    from lucent.services.tool_runtimes import (
+        runtime_requires_sandbox,
+        runtime_types,
+    )
+
+    kind = str(form.get("runtime_type", "python")).strip().lower() or "python"
+    if kind not in runtime_types():
+        return _tool_error_redirect(
+            f"Unknown runtime kind {kind!r}. Choose one of: "
+            + ", ".join(runtime_types())
+        )
+    # Per-kind gate: a sandbox-less deployment may still author declarative and
+    # built-in tools because nothing is provisioned to run them.
+    if runtime_requires_sandbox(kind):
+        from lucent.settings import custom_tooling_enabled
+
+        if not custom_tooling_enabled(organization_id=user.organization_id):
+            return _tool_error_redirect(_sandbox_gate_message())
+
+    try:
+        runtime_config = _runtime_config_from_form(form, kind) or {}
+    except ValueError as exc:
+        return _tool_error_redirect(str(exc))
+    if kind == "openapi":
+        # Surface a bad document or a missing operation as a banner instead of
+        # letting the repository raise into a 500.
+        from lucent.services.tool_runtimes.openapi_spec import (
+            SpecError,
+            list_operations,
+            parse_spec,
+            resolve_operation,
+        )
+
+        try:
+            document = parse_spec(str(runtime_config.get("spec") or ""))
+        except SpecError as exc:
+            return _tool_error_redirect(f"OpenAPI document was rejected: {exc}")
+        operation_id = str(runtime_config.get("operation_id") or "").strip()
+        if not operation_id:
+            count = len(list_operations(document))
+            return _tool_error_redirect(
+                "Choose one operation from the OpenAPI document; an OpenAPI tool "
+                f"wraps exactly one operation (this document declares {count})."
+            )
+        try:
+            resolve_operation(document, operation_id=operation_id)
+        except SpecError as exc:
+            return _tool_error_redirect(f"OpenAPI operation was rejected: {exc}")
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
@@ -1170,38 +1694,85 @@ async def create_managed_tool_web(request: Request):
         form, user, pool
     )
 
-    tool = await repo.create_managed_tool(
-        name=str(form.get("name", "")).strip(),
-        org_id=org_id,
-        description=str(form.get("description", "")).strip(),
-        input_schema=_parse_json_object(
-            str(form.get("input_schema", "")), {"type": "object", "properties": {}}
-        ),
-        output_schema=_parse_json_object(str(form.get("output_schema", "")), {}) or None,
-        runtime_type="python",
-        source_code=str(form.get("source_code", "")).strip(),
-        entrypoint=str(form.get("entrypoint", "handler")).strip() or "handler",
-        requirements=_parse_lines_or_json_array(str(form.get("requirements", ""))),
-        runtime_config=_parse_json_object(str(form.get("runtime_config", "")), {}),
-        env_vars=_parse_env_vars(str(form.get("env_vars", ""))),
-        auth_policy=_parse_json_object(
-            str(form.get("auth_policy", "")),
-            {"mode": "agent_grant", "require_user_access": True},
-        ),
-        network_policy=_parse_json_object(
-            str(form.get("network_policy", "")),
-            {"network_mode": "none", "allowed_hosts": []},
-        ),
-        resource_limits=_parse_json_object(
-            str(form.get("resource_limits", "")),
-            {"memory_limit": "512m", "cpu_limit": 1.0, "disk_limit": "1g"},
-        ),
-        timeout_seconds=int(str(form.get("timeout_seconds", "300") or "300")),
-        created_by=str(user.id),
-        owner_user_id=owner_user_id,
-        owner_group_id=owner_group_id,
-        shared_with_org=shared_with_org,
+    input_schema = _parse_json_object(
+        str(form.get("input_schema", "")), {"type": "object", "properties": {}}
     )
+    if kind == "builtin":
+        # The catalog owns a built-in tool's contract; the repository enforces
+        # that, so never forward a schema the form happened to post.
+        from lucent.services.builtin_tool_catalog import get_builtin_tool
+        from lucent.services.tool_runtimes.base import ToolRuntimeError
+
+        handler = str(runtime_config.get("handler") or "").strip()
+        if not handler:
+            return _tool_error_redirect(
+                "Choose a built-in handler; a built-in tool is one reviewed "
+                "catalog action."
+            )
+        try:
+            input_schema = get_builtin_tool(handler).input_schema
+        except ToolRuntimeError as exc:
+            return _tool_error_redirect(str(exc))
+
+    network_policy_text = str(form.get("network_policy", "")).strip()
+    if network_policy_text:
+        network_policy = _parse_json_object(network_policy_text, {})
+    elif kind == "builtin":
+        # Seed a workable policy from the handler's own host list so a
+        # network-using handler is not approved with "no outbound network".
+        from lucent.services.builtin_tool_catalog import get_builtin_tool
+
+        spec = get_builtin_tool(str(runtime_config.get("handler") or "").strip())
+        if spec.network_hosts:
+            network_policy = {
+                "network_mode": "allowlist",
+                "allowed_hosts": list(spec.network_hosts),
+            }
+        elif spec.uses_network:
+            network_policy = {"network_mode": "bridge", "allowed_hosts": []}
+        else:
+            network_policy = {"network_mode": "none", "allowed_hosts": []}
+    else:
+        network_policy = {"network_mode": "none", "allowed_hosts": []}
+
+    try:
+        tool = await repo.create_managed_tool(
+            name=str(form.get("name", "")).strip(),
+            org_id=org_id,
+            description=str(form.get("description", "")).strip(),
+            input_schema=input_schema,
+            output_schema=_parse_json_object(str(form.get("output_schema", "")), {}) or None,
+            runtime_type=kind,
+            source_code=str(form.get("source_code", "")).strip() if kind == "python" else "",
+            entrypoint=(
+                (str(form.get("entrypoint", "handler")).strip() or "handler")
+                if kind == "python"
+                else "handler"
+            ),
+            requirements=(
+                _parse_lines_or_json_array(str(form.get("requirements", "")))
+                if kind == "python"
+                else []
+            ),
+            runtime_config=runtime_config,
+            env_vars=_parse_env_vars(str(form.get("env_vars", ""))),
+            auth_policy=_parse_json_object(
+                str(form.get("auth_policy", "")),
+                {"mode": "agent_grant", "require_user_access": True},
+            ),
+            network_policy=network_policy,
+            resource_limits=_parse_json_object(
+                str(form.get("resource_limits", "")),
+                {"memory_limit": "512m", "cpu_limit": 1.0, "disk_limit": "1g"},
+            ),
+            timeout_seconds=_parse_timeout_field(form.get("timeout_seconds")),
+            created_by=str(user.id),
+            owner_user_id=owner_user_id,
+            owner_group_id=owner_group_id,
+            shared_with_org=shared_with_org,
+        )
+    except ValueError as exc:
+        return _tool_error_redirect(str(exc))
     return RedirectResponse(url=f"/definitions/tools/{tool['id']}", status_code=303)
 
 
@@ -1305,7 +1876,13 @@ async def update_hook_web(request: Request, hook_id: str):
 
 @router.post("/definitions/tools/{tool_id}/update")
 async def update_managed_tool_web(request: Request, tool_id: str):
-    """Update a managed tool definition."""
+    """Update a managed tool definition, preserving its runtime kind.
+
+    Every field is optional: only the ones the form actually submitted are
+    forwarded, so a form that edits a name (or a form for a different kind) can
+    never silently rewrite `runtime_config` or flip an http/openapi/builtin tool
+    back to `python`.
+    """
     user = await get_user_context(request)
     _require_admin_or_owner(user)
     await _check_csrf(request)
@@ -1313,49 +1890,253 @@ async def update_managed_tool_web(request: Request, tool_id: str):
     pool = await get_pool()
     from lucent.db.audit import AuditRepository
     from lucent.db.definitions import DefinitionRepository
+    from lucent.services.tool_runtimes import (
+        runtime_requires_sandbox,
+        runtime_types,
+    )
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
     org_id = str(user.organization_id)
+    role_value = user.role if isinstance(user.role, str) else user.role.value
+    current = await repo.get_managed_tool(
+        tool_id,
+        org_id,
+        requester_user_id=str(user.id),
+        requester_role=role_value,
+    )
+    if not current:
+        raise HTTPException(status_code=404, detail="Managed tool not found")
+
+    # Preserve the stored kind unless the form explicitly switches it.
+    previous_kind = str(current.get("runtime_type") or "python").strip().lower()
+    kind = str(form.get("runtime_type", "")).strip().lower() or previous_kind
+    if kind not in runtime_types():
+        return _tool_error_redirect(
+            f"Unknown runtime kind {kind!r}. Choose one of: "
+            + ", ".join(runtime_types()),
+            tool_id=tool_id,
+        )
+    if kind != previous_kind and runtime_requires_sandbox(kind):
+        from lucent.settings import custom_tooling_enabled
+
+        if not custom_tooling_enabled(organization_id=user.organization_id):
+            return _tool_error_redirect(_sandbox_gate_message(), tool_id=tool_id)
+
+    previous_config = current.get("runtime_config") or {}
+    if not isinstance(previous_config, dict):
+        previous_config = {}
+    try:
+        form_config = _runtime_config_from_form(form, kind)
+    except ValueError as exc:
+        return _tool_error_redirect(str(exc), tool_id=tool_id)
+
+    if kind == "openapi" and form_config is not None:
+        from lucent.services.tool_runtimes.openapi_spec import (
+            SpecError,
+            list_operations,
+            parse_spec,
+            resolve_operation,
+        )
+
+        spec_text = str(form_config.get("spec") or previous_config.get("spec") or "")
+        operation_id = form_config.get("operation_id") or previous_config.get("operation_id")
+        try:
+            document = parse_spec(spec_text)
+            resolve_operation(document, operation_id=operation_id)
+        except SpecError as exc:
+            return _tool_error_redirect(
+                f"OpenAPI document was rejected: {exc}", tool_id=tool_id
+            )
+        operations = list_operations(document)
+        if operations and not operation_id:
+            return _tool_error_redirect(
+                "Choose one operation from the OpenAPI document; an OpenAPI tool "
+                "wraps exactly one operation.",
+                tool_id=tool_id,
+            )
+
+    if kind != previous_kind:
+        # Switching kinds replaces the config wholesale: carrying a stored spec
+        # into an http tool (or a URL into a builtin) would leave fields the new
+        # kind silently ignores.
+        runtime_config = dict(form_config or {})
+    elif form_config is not None and _runtime_config_is_complete(form, kind):
+        # The full form was rendered and submitted, so a blank field is a real
+        # deletion rather than a field this form does not know about.
+        runtime_config = dict(form_config)
+    elif form_config is not None:
+        # Partial form: merge so untouched fields keep their stored values.
+        runtime_config = {**previous_config, **form_config}
+    else:
+        runtime_config = None  # untouched
+
+    updates: dict = {
+        "requester_role": role_value,
+        "name": str(form.get("name", "")).strip() or current.get("name"),
+        "description": form.get("description", current.get("description") or ""),
+        "runtime_type": kind,
+    }
+
+    if kind == "python" and ("source_code" in form or previous_kind != kind):
+        source_code = str(form.get("source_code", "")).strip()
+        if source_code:
+            updates["source_code"] = source_code
+    if kind == "python" and ("entrypoint" in form or previous_kind != kind):
+        updates["entrypoint"] = str(form.get("entrypoint", "handler")).strip() or "handler"
+    if kind == "python" and ("requirements" in form or previous_kind != kind):
+        updates["requirements"] = _parse_lines_or_json_array(
+            str(form.get("requirements", ""))
+        )
+    if runtime_config is not None:
+        updates["runtime_config"] = runtime_config
+
+    if "input_schema" in form and kind != "builtin":
+        updates["input_schema"] = _parse_json_object(
+            str(form.get("input_schema", "")), {"type": "object", "properties": {}}
+        )
+    if "output_schema" in form:
+        updates["output_schema"] = _parse_json_object(
+            str(form.get("output_schema", "")), {}
+        ) or None
+    if kind == "builtin":  # the catalog owns the contract
+        from lucent.services.builtin_tool_catalog import get_builtin_tool
+        from lucent.services.tool_runtimes.base import ToolRuntimeError
+
+        handler = str((runtime_config or previous_config).get("handler") or "").strip()
+        if not handler:
+            return _tool_error_redirect(
+                "Choose a built-in handler; a built-in tool is one reviewed "
+                "catalog action.",
+                tool_id=tool_id,
+            )
+        try:
+            updates["input_schema"] = get_builtin_tool(handler).input_schema
+        except ToolRuntimeError as exc:
+            return _tool_error_redirect(str(exc), tool_id=tool_id)
+
+    if "env_vars" in form:
+        updates["env_vars"] = _parse_env_vars(str(form.get("env_vars", "")))
+    if "auth_policy" in form:
+        updates["auth_policy"] = _parse_json_object(
+            str(form.get("auth_policy", "")),
+            current.get("auth_policy") or {"mode": "agent_grant", "require_user_access": True},
+        )
+    network_policy_text = str(form.get("network_policy", "")).strip()
+    submitted_policy = _parse_json_object(network_policy_text, {}) if network_policy_text else {}
+    current_policy = current.get("network_policy") or {}
+    # Omitting an unchanged policy matters for `builtin`: the repository seeds the
+    # handler's own host list when a handler changes, and passing the old value
+    # back would suppress that.
+    if submitted_policy and submitted_policy != current_policy:
+        updates["network_policy"] = submitted_policy
+    elif kind == "builtin":
+        previous_handler = str(previous_config.get("handler") or "").strip()
+        new_handler = str((runtime_config or previous_config).get("handler") or "").strip()
+        if new_handler and (new_handler != previous_handler or kind != previous_kind):
+            # Re-derive the policy for the *new* handler. A handler that makes no
+            # outbound calls must not inherit `bridge` from the repository's
+            # host-less-handler default.
+            from lucent.services.builtin_tool_catalog import get_builtin_tool
+
+            spec = get_builtin_tool(new_handler)
+            if spec.network_hosts:
+                seeded = {
+                    "network_mode": "allowlist",
+                    "allowed_hosts": list(spec.network_hosts),
+                }
+            elif spec.uses_network:
+                seeded = {"network_mode": "bridge", "allowed_hosts": []}
+            else:
+                seeded = {"network_mode": "none", "allowed_hosts": []}
+            if seeded != current_policy:
+                updates["network_policy"] = seeded
+    if "resource_limits" in form:
+        updates["resource_limits"] = _parse_json_object(
+            str(form.get("resource_limits", "")),
+            current.get("resource_limits") or {
+                "memory_limit": "512m", "cpu_limit": 1.0, "disk_limit": "1g",
+            },
+        )
+    timeout_text = str(form.get("timeout_seconds", "")).strip()
+    if timeout_text:
+        try:
+            updates["timeout_seconds"] = int(timeout_text)
+        except ValueError:
+            return _tool_error_redirect(
+                f"Timeout must be a whole number of seconds, not {timeout_text!r}.",
+                tool_id=tool_id,
+            )
+
     owner_kwargs = {}
     if "owner_scope" in form:
         owner_user_id, owner_group_id, _shared_with_org = await _resolve_owner_scope(
             form, user, pool
         )
         owner_kwargs = {"owner_user_id": owner_user_id, "owner_group_id": owner_group_id}
-    role_value = user.role if isinstance(user.role, str) else user.role.value
 
-    await repo.update_managed_tool(
-        tool_id,
-        org_id,
-        requester_role=role_value,
-        name=str(form.get("name", "")).strip(),
-        description=str(form.get("description", "")).strip(),
-        input_schema=_parse_json_object(
-            str(form.get("input_schema", "")), {"type": "object", "properties": {}}
-        ),
-        output_schema=_parse_json_object(str(form.get("output_schema", "")), {}) or None,
-        runtime_type="python",
-        source_code=str(form.get("source_code", "")).strip(),
-        entrypoint=str(form.get("entrypoint", "handler")).strip() or "handler",
-        requirements=_parse_lines_or_json_array(str(form.get("requirements", ""))),
-        runtime_config=_parse_json_object(str(form.get("runtime_config", "")), {}),
-        env_vars=_parse_env_vars(str(form.get("env_vars", ""))),
-        auth_policy=_parse_json_object(
-            str(form.get("auth_policy", "")),
-            {"mode": "agent_grant", "require_user_access": True},
-        ),
-        network_policy=_parse_json_object(
-            str(form.get("network_policy", "")),
-            {"network_mode": "none", "allowed_hosts": []},
-        ),
-        resource_limits=_parse_json_object(
-            str(form.get("resource_limits", "")),
-            {"memory_limit": "512m", "cpu_limit": 1.0, "disk_limit": "1g"},
-        ),
-        timeout_seconds=int(str(form.get("timeout_seconds", "300") or "300")),
-        **owner_kwargs,
-    )
+    try:
+        await repo.update_managed_tool(tool_id, org_id, **updates, **owner_kwargs)
+    except ValueError as exc:
+        return _tool_error_redirect(str(exc), tool_id=tool_id)
     return RedirectResponse(url=f"/definitions/tools/{tool_id}", status_code=303)
+
+
+@router.post("/definitions/tools/openapi-operations")
+async def openapi_operations_ajax(request: Request):
+    """Return the operations of a posted OpenAPI document for the UI picker.
+
+    Chosen over rendering the picker server-side because the author may paste a
+    spec and want to see the operation list without committing a definition: a
+    JSON round-trip keeps the create modal open and never writes a row for a
+    half-filled form.
+
+    CSRF is checked the same way as every other state-changing web route, and the
+    document is size-capped before parsing so a hostile paste cannot exhaust the
+    worker.
+    """
+    user = await get_user_context(request)
+    _require_admin_or_owner(user)
+    await _check_csrf(request)
+
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > (
+        _MAX_OPENAPI_SPEC_BYTES + 65536
+    ):
+        return JSONResponse(
+            {
+                "operations": [],
+                "error": (
+                    f"Document exceeds the {_MAX_OPENAPI_SPEC_BYTES} byte limit; create "
+                    "per-operation tools instead of storing one large document."
+                ),
+            },
+            status_code=413,
+        )
+
+    form = await request.form()
+    spec_text = str(form.get("spec", ""))
+    if not spec_text.strip():
+        return JSONResponse({"operations": [], "error": "Paste an OpenAPI document first."})
+    if len(spec_text.encode("utf-8")) > _MAX_OPENAPI_SPEC_BYTES:
+        return JSONResponse({
+            "operations": [],
+            "error": (
+                f"Document exceeds the {_MAX_OPENAPI_SPEC_BYTES} byte limit; create "
+                "per-operation tools instead of storing one large document."
+            ),
+        })
+    from lucent.services.tool_runtimes.openapi_spec import (
+        SpecError,
+        list_operations,
+        parse_spec,
+    )
+
+    try:
+        document = parse_spec(spec_text)
+        operations = list_operations(document)
+    except SpecError as exc:
+        return JSONResponse({"operations": [], "error": str(exc)})
+    return JSONResponse({"operations": operations, "error": None})
 
 
 @router.post("/definitions/tools/{tool_id}/discover-tools")

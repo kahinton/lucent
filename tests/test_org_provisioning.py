@@ -212,7 +212,9 @@ class TestProvisionOrganization:
         # Seeding is environment-dependent (the definitions ship in .github/), so
         # assert the summary shape rather than a particular count.
         assert isinstance(result.seeded, dict)
-        assert set(result.seeded) == {"skills", "agents", "hooks", "sandbox_templates"}
+        assert set(result.seeded) == {
+            "skills", "agents", "hooks", "managed_tools", "sandbox_templates",
+        }
 
 
 class TestProvisionWithProvidersAndSettings:

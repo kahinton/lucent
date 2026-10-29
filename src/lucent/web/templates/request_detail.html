@@ -106,7 +106,7 @@
         {% if output.output_type == 'github_pr' %}bg-purple-100 text-purple-700
         {% elif output.output_type == 'github_issue' %}bg-emerald-100 text-emerald-700
         {% elif output.output_type == 'email' %}bg-blue-100 text-blue-700
-        {% elif output.output_type == 'document' %}bg-amber-100 text-amber-700
+        {% elif output.output_type == 'document' %}bg-pink-100 text-pink-700
         {% else %}bg-gray-100 text-gray-600{% endif %}">
         {% if output.output_type == 'github_pr' %}
         <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 3v12m0 0a3 3 0 103 3m-3-3a3 3 0 013 3m9-9a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
@@ -331,7 +331,7 @@
                         </h4>
 
                         {% if task.fusion.fallback_label %}
-                        <p class="mb-2 rounded bg-amber-50 px-2 py-1 text-[11px] text-amber-700">{{ task.fusion.fallback_label }}</p>
+                        <p class="mb-2 rounded bg-pink-50 px-2 py-1 text-[11px] text-pink-700">{{ task.fusion.fallback_label }}</p>
                         {% endif %}
 
                         {% if task.fusion.candidates %}
@@ -390,7 +390,7 @@
                         </dl>
 
                         {% if task.fusion.degraded %}
-                        <p class="mt-1 text-[11px] text-amber-700">Only one candidate produced output, so the run was degraded.</p>
+                        <p class="mt-1 text-[11px] text-pink-700">Only one candidate produced output, so the run was degraded.</p>
                         {% endif %}
                         {% if task.fusion.threshold_failed %}
                         <p class="mt-1 text-[11px] text-red-600">The winner scored below its required threshold.</p>
@@ -555,7 +555,7 @@
             <span class="rounded-md px-3 py-1 text-sm font-medium
                 {% if req.status == 'completed' %}bg-emerald-100 text-emerald-700
                 {% elif req.status in ('in_progress', 'review') %}bg-blue-100 text-blue-700
-                {% elif req.status == 'pending' %}bg-amber-100 text-amber-700
+                {% elif req.status == 'pending' %}bg-pink-100 text-pink-700
                 {% elif req.status == 'planned' %}bg-purple-100 text-purple-700
                 {% elif req.status == 'failed' %}bg-red-100 text-red-700
                 {% elif req.status == 'cancelled' %}bg-gray-100 text-gray-500
@@ -563,7 +563,7 @@
                 {{ req.status | replace('_', ' ') | title }}
             </span>
             {% if req.approval_status == 'pending_approval' %}
-            <span class="rounded-md bg-amber-200 px-3 py-1 text-sm font-medium text-amber-900">Awaiting approval</span>
+            <span class="rounded-md bg-pink-100 px-3 py-1 text-sm font-medium text-pink-900">Awaiting approval</span>
             {% elif req.approval_status == 'rejected' %}
             <span class="rounded-md bg-red-200 px-3 py-1 text-sm font-medium text-red-900">Sent back</span>
             {% endif %}
@@ -592,7 +592,7 @@
 
 <!-- ── Action banner: only when the user can actually do something ───── -->
 {% if req.approval_status == 'pending_approval' and req.status not in ('cancelled', 'rejection_processing') %}
-<div class="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4">
+<div class="mb-6 rounded-xl border border-pink-300 bg-pink-50 p-4">
     <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
             <h2 class="text-sm font-semibold text-gray-900">Lucent would like to start this work</h2>
@@ -609,9 +609,9 @@
                     Approve
                 </button>
             </form>
-            <details id="request-reject-feedback" class="rounded-lg border border-amber-300 bg-gray-50">
+            <details id="request-reject-feedback" class="rounded-lg border border-pink-300 bg-gray-50">
                 <summary class="cursor-pointer list-none rounded-lg px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100">Send back with a note</summary>
-                <form method="post" action="/requests/{{ req.id }}/approval" class="space-y-2 border-t border-amber-200 p-3" data-confirm="Send this back to be re-planned?">
+                <form method="post" action="/requests/{{ req.id }}/approval" class="space-y-2 border-t border-pink-200 p-3" data-confirm="Send this back to be re-planned?">
                     <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                     <input type="hidden" name="action" value="reject">
                     <label class="block text-xs font-medium text-gray-600" for="reject-comment">What should change?</label>
@@ -623,7 +623,7 @@
             </details>
         </div>
         {% else %}
-        <div class="rounded-lg border border-amber-300 bg-gray-50 px-3 py-2 text-sm text-gray-600">An admin or owner needs to approve this.</div>
+        <div class="rounded-lg border border-pink-300 bg-gray-50 px-3 py-2 text-sm text-gray-600">An admin or owner needs to approve this.</div>
         {% endif %}
     </div>
 </div>

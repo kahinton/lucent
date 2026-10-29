@@ -78,9 +78,9 @@
 {# Flash messages (success/error) are rendered by settings_layout.html. #}
 
 {% if not enforcement_enabled %}
-<div class="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
-    <p class="text-sm font-medium text-amber-900">Enforcement is switched off.</p>
-    <p class="mt-1 text-sm text-amber-800">
+<div class="mb-4 bg-pink-50 border border-pink-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-pink-900">Enforcement is switched off.</p>
+    <p class="mt-1 text-sm text-pink-800">
         Policies below are saved but not checked. Turn it back on under
         <a href="/settings/runtime" class="underline">Runtime Settings</a> → Token limits → <em>Enforce token limits</em>.
     </p>
@@ -259,7 +259,7 @@
                     per {{ window_label(policy.window_seconds) }}
                 </span>
                 {% if not policy.is_enabled %}
-                <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">disabled</span>
+                <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-800">disabled</span>
                 {% endif %}
             </div>
             {% if policy.description %}
@@ -321,7 +321,7 @@
             {% endfor %}
         </ul>
         {% else %}
-        <p class="mb-3 text-sm text-amber-700">Not applied to anyone yet — this policy enforces nothing.</p>
+        <p class="mb-3 text-sm text-pink-700">Not applied to anyone yet — this policy enforces nothing.</p>
         {% endif %}
 
         <form method="POST" action="/settings/token-limits/{{ policy.id }}/assign" class="flex flex-wrap gap-2">

@@ -21,9 +21,9 @@
 
     <div class="flex flex-wrap items-center gap-1 text-xs text-gray-500 sm:justify-end">
         {% if pending_approval_count > 0 %}
-        <span class="flex items-center gap-1.5 rounded-md bg-amber-100 px-2 py-1 font-medium text-amber-800"
+        <span class="flex items-center gap-1.5 rounded-md bg-pink-100 px-2 py-1 font-medium text-pink-800"
               title="{{ pending_approval_count }} request{% if pending_approval_count != 1 %}s{% endif %} awaiting your approval">
-            <span class="h-1.5 w-1.5 rounded-full bg-amber-500"></span>
+            <span class="h-1.5 w-1.5 rounded-full bg-pink-500"></span>
             <span>{{ pending_approval_count }}</span><span class="hidden sm:inline">to approve</span>
         </span>
         {% endif %}
@@ -37,7 +37,7 @@
             <span>{{ summary.requests.active or 0 }}</span><span class="hidden sm:inline">active</span>
         </a>
         <span class="flex items-center gap-1.5 px-2 py-1" title="Requests waiting to start">
-            <span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
+            <span class="h-1.5 w-1.5 rounded-full bg-pink-400"></span>
             <span>{{ summary.requests.pending or 0 }}</span><span class="hidden sm:inline">pending</span>
         </span>
         <span class="flex items-center gap-1.5 px-2 py-1" title="Tasks currently executing">

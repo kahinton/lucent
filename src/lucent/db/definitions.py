@@ -17,12 +17,15 @@ that user has *consented* (or is exempt: built-in, the attacher, or its owner).
 The agent is the structural hub; see ``lucent.agent_capabilities``.
 """
 
+import copy
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Final
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from asyncpg import Pool
@@ -155,6 +158,226 @@ def _prepare_json_schema(schema: dict | None, field_name: str) -> dict | None:
     return normalized
 VALID_HOOK_ACTION_TYPES = frozenset({"memory_lookup", "message_memory_lookup", "static_context", "command"})
 DEFAULT_AGENT_HOOK_NAMES = ("file-memory-lookup", "message-memory-lookup")
+
+
+def _parse_frontmatter_list(frontmatter: str, key: str) -> list[str]:
+    """Parse one block-style YAML list from on-disk definition frontmatter.
+
+    Deliberately not a YAML parser: built-in syncing must run before (and
+    independently of) anything that imports a YAML dependency, and the shipped
+    files use one simple shape — ``key:`` followed by ``  - value`` lines. This
+    is the parsing rule ``skill_names`` has always used, factored out so
+    ``tool_names`` binds through exactly the same path.
+    """
+    values: list[str] = []
+    in_list = False
+    for line in frontmatter.splitlines():
+        stripped = line.strip()
+        if stripped in (f"{key}:", f"{key}: []"):
+            in_list = stripped == f"{key}:"
+            continue
+        if not in_list:
+            continue
+        match = re.match(r"\s+-\s+(.+)", line)
+        if match:
+            values.append(match.group(1).strip())
+        elif stripped:
+            # Any other top-level (unindented or scalar) line ends the list.
+            in_list = False
+    return values
+
+
+# ── per-runtime-kind tool validation ──────────────────────────────────────
+#
+# These run at the repository's write boundary so a definition that cannot work
+# is rejected while its author is looking at the form, not on the first call.
+
+_ALLOWED_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"})
+# A declarative call has no sandbox around it, so its ceiling is the outbound
+# transport's own, not the 3600s a container may take.
+_MAX_DECLARATIVE_TIMEOUT = 120
+# Guard against a spec so large it costs more to parse than the tool is worth.
+_MAX_SPEC_BYTES = 2_000_000
+
+
+def _validate_python_tool(*, source_code: str, entrypoint: str, config: dict) -> None:
+    if not source_code or not source_code.strip():
+        raise ValueError("source_code is required for a python tool")
+    if not entrypoint or not entrypoint.isidentifier():
+        raise ValueError("entrypoint must be a Python identifier")
+    image = config.get("image")
+    if image is not None and not isinstance(image, str):
+        raise ValueError("runtime_config.image must be a string")
+
+
+def _validate_http_tool(*, config: dict) -> None:
+    url = config.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError(
+            "runtime_config.url is required for an http tool "
+            "(for example https://api.example.com/v1/weather/{city})"
+        )
+    parsed = urlsplit(url.strip())
+    # A relative URL has no scheme, so this check is also what stops a
+    # scheme-relative `//host/path` from being sent to an arbitrary host.
+    if parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("runtime_config.url must be an absolute http(s) URL")
+    if not parsed.netloc:
+        raise ValueError("runtime_config.url must include a hostname")
+    # Credentials must never be baked into a stored URL: they belong in env_vars
+    # as a reference, which the runtime resolves just in time. (`urlsplit` has no
+    # `userinfo` attribute; `username`/`password` are the public accessors.)
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise ValueError(
+            "runtime_config.url must not contain credentials; put them in env_vars "
+            "as a credential:// or secret:// reference and use {{env:NAME}} in the "
+            "template"
+        )
+
+    method = str(config.get("method") or "GET").strip().upper()
+    if method not in _ALLOWED_HTTP_METHODS:
+        raise ValueError(
+            "runtime_config.method must be one of: "
+            + ", ".join(sorted(_ALLOWED_HTTP_METHODS))
+        )
+    for key in ("query", "headers", "body", "form"):
+        value = config.get(key)
+        if value is None:
+            continue
+        if key == "body" and isinstance(value, str):
+            continue
+        if not isinstance(value, dict):
+            raise ValueError(f"runtime_config.{key} must be a JSON object")
+    if config.get("body") is not None and config.get("form") is not None:
+        raise ValueError("runtime_config may set 'body' or 'form', not both")
+    response_format = config.get("response_format")
+    if response_format is not None and response_format not in ("json", "text"):
+        raise ValueError("runtime_config.response_format must be 'json' or 'text'")
+    response_path = config.get("response_path")
+    if response_path is not None and not isinstance(response_path, str):
+        raise ValueError("runtime_config.response_path must be a string")
+    _validate_allowed_status(config.get("allowed_status"))
+    _validate_declarative_timeout(config.get("timeout_seconds"))
+    _validate_credential_headers(config.get("credential_headers"))
+
+
+def _validate_openapi_tool(*, config: dict) -> None:
+    from lucent.services.tool_runtimes.openapi_spec import SpecError, parse_spec, resolve_operation
+
+    spec = config.get("spec")
+    if not isinstance(spec, str) or not spec.strip():
+        raise ValueError(
+            "runtime_config.spec is required for an openapi tool. The document is "
+            "stored at approval time so an approved tool cannot change behaviour "
+            "underneath the model."
+        )
+    if len(spec.encode("utf-8")) > _MAX_SPEC_BYTES:
+        raise ValueError(
+            f"runtime_config.spec exceeds the {_MAX_SPEC_BYTES} byte limit; create "
+            "per-operation tools for the ones you need instead of storing a large "
+            "document"
+        )
+    try:
+        document = parse_spec(spec)
+        resolve_operation(
+            document,
+            operation_id=config.get("operation_id"),
+            method=config.get("method"),
+            path=config.get("path"),
+        )
+    except SpecError as exc:
+        raise ValueError(str(exc)) from exc
+
+    base_url = config.get("base_url")
+    if base_url is not None:
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("runtime_config.base_url must be a non-empty string")
+        parsed = urlsplit(base_url.strip())
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("runtime_config.base_url must be an absolute http(s) URL")
+        if parsed.username or parsed.password or "@" in parsed.netloc:
+            raise ValueError(
+                "runtime_config.base_url must not contain credentials; use env_vars "
+                "with a credential:// or secret:// reference instead"
+            )
+    response_format = config.get("response_format")
+    if response_format is not None and response_format not in ("json", "text"):
+        raise ValueError("runtime_config.response_format must be 'json' or 'text'")
+    _validate_allowed_status(config.get("allowed_status"))
+    _validate_declarative_timeout(config.get("timeout_seconds"))
+    _validate_credential_headers(config.get("credential_headers"))
+
+
+def _validate_builtin_tool(*, config: dict, input_schema: dict | None) -> None:
+    from lucent.services.builtin_tool_catalog import get_builtin_tool
+
+    handler = config.get("handler")
+    if not isinstance(handler, str) or not handler.strip():
+        raise ValueError(
+            "runtime_config.handler is required for a builtin tool (see the "
+            "built-in tool catalog for available handler names)"
+        )
+    try:
+        get_builtin_tool(handler)
+    except Exception as exc:
+        from lucent.services.tool_runtimes.base import ToolRuntimeError
+
+        if isinstance(exc, ToolRuntimeError):
+            raise ValueError(str(exc)) from exc
+        # A genuine internal fault must not be reported as a bad definition.
+        raise
+    # A builtin's schema comes from the catalog. Refuse a definition that tries to
+    # widen it, or an agent could be granted capabilities the reviewer never saw.
+    if input_schema is not None:
+        from lucent.services.builtin_tool_catalog import BUILTIN_TOOL_CATALOG
+
+        canonical = BUILTIN_TOOL_CATALOG[handler.strip()].input_schema
+        if _normalize_json_schema(input_schema) != _normalize_json_schema(canonical):
+            raise ValueError(
+                f"input_schema must match the catalog schema for handler {handler!r}; "
+                "a builtin tool's contract is fixed by Lucent, not by the definition"
+            )
+
+
+def _validate_allowed_status(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list) or not value:
+        raise ValueError(
+            "runtime_config.allowed_status must be a non-empty JSON array of status codes"
+        )
+    for entry in value:
+        if isinstance(entry, bool) or not isinstance(entry, int):
+            raise ValueError(
+                "runtime_config.allowed_status entries must be integers"
+            )
+        if entry < 100 or entry > 599:
+            raise ValueError(
+                f"runtime_config.allowed_status entry {entry} is not an HTTP status code"
+            )
+
+
+def _validate_declarative_timeout(value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("runtime_config.timeout_seconds must be an integer")
+    if value < 1 or value > _MAX_DECLARATIVE_TIMEOUT:
+        raise ValueError(
+            f"runtime_config.timeout_seconds must be between 1 and "
+            f"{_MAX_DECLARATIVE_TIMEOUT} for a tool executed by the server"
+        )
+
+
+def _validate_credential_headers(value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        return
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(
+            "runtime_config.credential_headers must be an array of header names"
+        )
 
 
 class BuiltInProtectionError(Exception):
@@ -424,6 +647,9 @@ class DefinitionRepository:
             ("args", []),
             ("discovered_tools", None),
             ("allowed_tools", None),
+            # Declared per-user credential slots. Empty means "none declared",
+            # which is the pre-migration behaviour for every existing row.
+            ("credential_slots", []),
         ):
             if key in data:
                 data[key] = cls._decode_json(data.get(key), default)
@@ -495,16 +721,27 @@ class DefinitionRepository:
         resource_limits: dict | None,
         timeout_seconds: int,
     ) -> None:
+        """Validate a tool definition against its runtime kind's contract.
+
+        Each kind has a different notion of "complete", and validating them
+        together is how a `python` definition acquires an `http` field that is
+        silently ignored (or an `http` definition is rejected for having no
+        source code). The per-kind rules live here — the repository is the write
+        boundary, so this is where a malformed definition must fail, not at call
+        time.
+        """
+        from lucent.services.tool_runtimes import runtime_types
+
         if input_schema is not None and not isinstance(input_schema, dict):
             raise ValueError("input_schema must be a JSON object")
         if output_schema is not None and not isinstance(output_schema, dict):
             raise ValueError("output_schema must be a JSON object when provided")
-        if runtime_type != "python":
-            raise ValueError("runtime_type must be 'python'")
-        if not source_code or not source_code.strip():
-            raise ValueError("source_code is required")
-        if not entrypoint or not entrypoint.isidentifier():
-            raise ValueError("entrypoint must be a Python identifier")
+
+        kind = str(runtime_type or "").strip().lower()
+        if kind not in runtime_types():
+            raise ValueError(
+                f"runtime_type must be one of: {', '.join(runtime_types())}"
+            )
         if requirements is not None and not isinstance(requirements, list):
             raise ValueError("requirements must be a JSON array")
         for name, value in (
@@ -533,6 +770,16 @@ class DefinitionRepository:
             raise ValueError(f"network_policy.{exc}") from exc
         if timeout_seconds < 1 or timeout_seconds > 3600:
             raise ValueError("timeout_seconds must be between 1 and 3600")
+
+        config = runtime_config or {}
+        if kind == "python":
+            _validate_python_tool(source_code=source_code, entrypoint=entrypoint, config=config)
+        elif kind == "http":
+            _validate_http_tool(config=config)
+        elif kind == "openapi":
+            _validate_openapi_tool(config=config)
+        elif kind == "builtin":
+            _validate_builtin_tool(config=config, input_schema=input_schema)
 
     async def _check_builtin_protection(
         self,
@@ -1499,12 +1746,20 @@ class DefinitionRepository:
             base += f" AND status = ${len(params)}"
 
         count_query = f"SELECT COUNT(*) AS total {base}"
+        # `runtime_config` is included minus `spec`: the list view needs the
+        # built-in handler name to label a row, but an OpenAPI document can be
+        # megabytes and is only meaningful on the detail page. Legacy rows may
+        # hold a JSON *string* rather than an object (double-encoded), and the
+        # `-` operator is only defined for objects, so guard on the type.
         query = f"""
                  SELECT id, name, description, runtime_type, entrypoint,
                      input_schema, output_schema, status, scope,
                      created_by, approved_by, approved_at, owner_approved_by, owner_approved_at,
                    owner_user_id, owner_group_id,
                    auth_policy, network_policy, resource_limits,
+                   CASE WHEN jsonb_typeof(runtime_config) = 'object'
+                        THEN runtime_config - 'spec'
+                        ELSE runtime_config END AS runtime_config,
                    discovered_tools, tools_discovered_at,
                    proposal_reason, proposal_evidence,
                    created_at, updated_at
@@ -1614,9 +1869,9 @@ class DefinitionRepository:
         self,
         name: str,
         description: str,
-        source_code: str,
-        org_id: str,
-        created_by: str,
+        source_code: str = "",
+        org_id: str = "",
+        created_by: str = "",
         input_schema: dict | None = None,
         output_schema: dict | None = None,
         runtime_type: str = "python",
@@ -1636,6 +1891,50 @@ class DefinitionRepository:
         proposal_reason: str | None = None,
         proposal_evidence: dict | None = None,
     ) -> dict:
+        kind = str(runtime_type or "python").strip().lower()
+        runtime_config = dict(runtime_config or {})
+
+        if kind == "builtin":
+            # A builtin's model-facing contract is the catalog's, not the
+            # author's. Copying it here keeps the row self-describing while the
+            # runtime still validates against the catalog on every call.
+            from lucent.services.builtin_tool_catalog import get_builtin_tool
+
+            handler = str(runtime_config.get("handler") or "").strip()
+            if handler:
+                spec = get_builtin_tool(handler)
+                # Unconditional: callers send a placeholder `{"type":"object",
+                # "properties":{}}` by default, so trusting the argument would
+                # either reject every create or advertise an empty contract.
+                input_schema = copy.deepcopy(spec.input_schema)
+                if network_policy is None:
+                    if spec.network_hosts:
+                        # Narrowest policy that actually works: the handler's own
+                        # known hosts.
+                        network_policy = {
+                            "network_mode": "allowlist",
+                            "allowed_hosts": list(spec.network_hosts),
+                        }
+                    elif spec.uses_network:
+                        # `web_fetch` reaches arbitrary public hosts by design; an
+                        # empty allowlist would fail every call, so it needs bridge.
+                        network_policy = {"network_mode": "bridge", "allowed_hosts": []}
+                default_timeout = spec.default_config.get("timeout_seconds")
+                if default_timeout and timeout_seconds == 300:
+                    timeout_seconds = int(default_timeout)
+            # Source code is meaningless for this kind; store none so an operator
+            # reading the row is not misled into thinking code runs.
+            source_code = ""
+            entrypoint = handler or entrypoint
+
+        elif kind in ("http", "openapi"):
+            # Declarative kinds have no code, and their ceiling is the outbound
+            # transport's, not a container's.
+            source_code = ""
+            entrypoint = "handler"
+            if timeout_seconds > _MAX_DECLARATIVE_TIMEOUT:
+                timeout_seconds = _MAX_DECLARATIVE_TIMEOUT
+
         input_schema = _prepare_json_schema(
             input_schema or {"type": "object", "properties": {}},
             "input_schema",
@@ -1650,7 +1949,7 @@ class DefinitionRepository:
         self._validate_tool_shape(
             input_schema=input_schema,
             output_schema=output_schema,
-            runtime_type=runtime_type,
+            runtime_type=kind,
             source_code=source_code,
             entrypoint=entrypoint,
             requirements=requirements,
@@ -1689,7 +1988,7 @@ class DefinitionRepository:
                 description,
                 json.dumps(input_schema),
                 json.dumps(output_schema) if output_schema is not None else None,
-                runtime_type,
+                kind,
                 source_code,
                 entrypoint,
                 json.dumps(requirements or []),
@@ -1732,14 +2031,74 @@ class DefinitionRepository:
             kwargs["output_schema"] = _prepare_json_schema(
                 kwargs["output_schema"], "output_schema",
             )
+        kind = str(
+            kwargs.get("runtime_type", current.get("runtime_type", "python"))
+        ).strip().lower()
+        kwargs["runtime_type"] = kind
+        if "runtime_config" in kwargs:
+            config = kwargs["runtime_config"] or {}
+        else:
+            config = current.get("runtime_config") or {}
+
+        previous_kind = str(current.get("runtime_type") or "python").strip().lower()
+        previous_handler = str((current.get("runtime_config") or {}).get("handler") or "").strip()
+        handler_changed = False
+        if kind == "builtin":
+            handler = str(config.get("handler") or "").strip()
+            handler_changed = handler != previous_handler
+            if handler:
+                from lucent.services.builtin_tool_catalog import get_builtin_tool
+
+                spec = get_builtin_tool(handler)
+                # A handler change invalidates the stored contract, the seeded
+                # network policy, and the handler's own timeout. Re-deriving all
+                # three together is what keeps the row truthful.
+                if handler_changed or "input_schema" not in kwargs:
+                    kwargs["input_schema"] = _prepare_json_schema(
+                        copy.deepcopy(spec.input_schema), "input_schema",
+                    )
+                if handler_changed:
+                    if "network_policy" not in kwargs:
+                        kwargs["network_policy"] = (
+                            {
+                                "network_mode": "allowlist",
+                                "allowed_hosts": list(spec.network_hosts),
+                            }
+                            if spec.network_hosts
+                            else {"network_mode": "bridge", "allowed_hosts": []}
+                        )
+                    default_timeout = spec.default_config.get("timeout_seconds")
+                    if default_timeout and "timeout_seconds" not in kwargs:
+                        kwargs["timeout_seconds"] = int(default_timeout)
+        elif kind in ("http", "openapi"):
+            # Declarative kinds are executed by the server, so they inherit the
+            # outbound transport's ceiling and carry no source code.
+            if "source_code" in kwargs or previous_kind != kind:
+                kwargs["source_code"] = ""
+                kwargs["entrypoint"] = "handler"
+                kwargs["requirements"] = []
+            requested = kwargs.get("timeout_seconds", current.get("timeout_seconds", 300))
+            if isinstance(requested, int) and requested > _MAX_DECLARATIVE_TIMEOUT:
+                kwargs["timeout_seconds"] = _MAX_DECLARATIVE_TIMEOUT
+        if kind != "python" and previous_kind == "python":
+            # Leaving `python` means the code is no longer reachable. Keeping it
+            # would contradict the migration's own statement that a non-python
+            # tool stores no source.
+            kwargs.setdefault("source_code", "")
+            kwargs.setdefault("requirements", [])
+        if kwargs.get("input_schema") is None and "input_schema" in kwargs:
+            # An explicit None would fail the NOT NULL constraint and bypass the
+            # builtin comparison; fall back to the kind's default contract.
+            kwargs["input_schema"] = {"type": "object", "properties": {}}
+
         self._validate_tool_shape(
             input_schema=kwargs.get("input_schema", current.get("input_schema")),
             output_schema=kwargs.get("output_schema", current.get("output_schema")),
-            runtime_type=kwargs.get("runtime_type", current.get("runtime_type", "python")),
+            runtime_type=kind,
             source_code=kwargs.get("source_code", current.get("source_code", "")),
             entrypoint=kwargs.get("entrypoint", current.get("entrypoint", "handler")),
             requirements=kwargs.get("requirements", current.get("requirements", [])),
-            runtime_config=kwargs.get("runtime_config", current.get("runtime_config", {})),
+            runtime_config=config,
             env_vars=kwargs.get("env_vars", current.get("env_vars", {})),
             auth_policy=kwargs.get("auth_policy", current.get("auth_policy", {})),
             network_policy=kwargs.get("network_policy", current.get("network_policy", {})),
@@ -3536,7 +3895,6 @@ class DefinitionRepository:
         Upserts on (name, org_id). Returns count of synced skills.
         """
         import pathlib
-        import re
 
         synced = 0
         skills_path = pathlib.Path(skills_dir)
@@ -3568,6 +3926,7 @@ class DefinitionRepository:
                         updated_at = NOW()
                     WHERE (name, organization_id) = ($1, $4)
                       AND scope = 'built-in'
+                      AND origin = 'disk'
                 """,
                     name,
                     description,
@@ -3596,14 +3955,13 @@ class DefinitionRepository:
         """Sync .github/agents/definitions/ into the DB as built-in agents.
 
         Reads AGENT.md files from subdirectories. Upserts on (name, org_id).
-        Parses ``skill_names`` from YAML frontmatter and syncs the
-        ``agent_skills`` junction table so skill mappings always reflect the
-        source files.
+        Parses ``skill_names`` and ``tool_names`` from YAML frontmatter and syncs
+        the ``agent_skills`` and ``agent_managed_tools`` junction tables so the
+        mappings always reflect the source files.
 
         Returns count of synced agents.
         """
         import pathlib
-        import re
 
         synced = 0
         agents_path = pathlib.Path(agents_dir)
@@ -3617,21 +3975,21 @@ class DefinitionRepository:
             name = agent_dir.name
             description = ""
             skill_names: list[str] = []
+            tool_names: list[str] = []
             fm_match = re.match(r"^---\n(.*?)\n---", raw, re.DOTALL)
             if fm_match:
-                in_skill_names = False
-                for line in fm_match.group(1).splitlines():
+                frontmatter = fm_match.group(1)
+                for line in frontmatter.splitlines():
                     if line.startswith("description:"):
                         description = line.split(":", 1)[1].strip().strip("'\"")
-                        in_skill_names = False
-                    elif line.strip() == "skill_names:":
-                        in_skill_names = True
-                    elif in_skill_names:
-                        m = re.match(r"\s+-\s+(.+)", line)
-                        if m:
-                            skill_names.append(m.group(1).strip())
-                        elif line.strip() and not line.startswith(" "):
-                            in_skill_names = False
+                skill_names = _parse_frontmatter_list(frontmatter, "skill_names")
+                tool_names = _parse_frontmatter_list(frontmatter, "tool_names")
+                # Shipped connectors this agent may use. A grant makes the
+                # connector reachable; the credential is supplied per requesting
+                # user, so one grant serves the whole organization.
+                mcp_server_names = _parse_frontmatter_list(
+                    frontmatter, "mcp_server_names"
+                )
             async with scoped_acquire_on(
                 self.pool, organization_id=org_id
             ) as conn:
@@ -3646,6 +4004,7 @@ class DefinitionRepository:
                         updated_at = NOW()
                     WHERE (name, organization_id) = ($1, $4)
                       AND scope = 'built-in'
+                      AND origin = 'disk'
                     RETURNING id
                 """,
                     name,
@@ -3727,6 +4086,99 @@ class DefinitionRepository:
                         name, len(to_add), len(to_remove),
                         len(declared_skill_ids),
                     )
+
+                # Managed tools declared in frontmatter bind through the same
+                # reconciliation, with one deliberate asymmetry: declared grants
+                # are added but non-declared grants are never removed. Skills'
+                # frontmatter is the complete binding for that agent, whereas tool
+                # grants are also created by admins and owners in the UI and by
+                # the daemon from other policies — a restart must not silently
+                # strip a grant the frontmatter never knew about.
+                if tool_names:
+                    tool_rows = await conn.fetch(
+                        """
+                        SELECT id, name FROM managed_tool_definitions
+                        WHERE name = ANY($1) AND organization_id = $2
+                            AND status = 'active' AND scope = 'built-in'
+                            AND origin = 'disk'
+                        """,
+                        tool_names,
+                        org_id,
+                    )
+                    declared_tool_ids = {str(r["id"]) for r in tool_rows}
+                else:
+                    declared_tool_ids = set()
+
+                current_tool_rows = await conn.fetch(
+                    "SELECT tool_id FROM agent_managed_tools WHERE agent_id = $1",
+                    agent_id,
+                )
+                current_tool_ids = {str(r["tool_id"]) for r in current_tool_rows}
+                tools_added = declared_tool_ids - current_tool_ids
+                for tid in tools_added:
+                    # System-originated (granted_by stays NULL) and no
+                    # config_override: built-in tools carry their own fixed
+                    # contract, and a NULL grantor must never look like
+                    # "somebody else attached this".
+                    await conn.execute(
+                        "INSERT INTO agent_managed_tools "
+                        "(agent_id, tool_id, config_override, granted_by) "
+                        "VALUES ($1, $2, NULL, NULL) ON CONFLICT DO NOTHING",
+                        agent_id,
+                        tid,
+                    )
+                if tools_added:
+                    logger.info(
+                        "Agent '%s': synced managed tools (+%d → %d total)",
+                        name, len(tools_added), len(current_tool_ids | tools_added),
+                    )
+
+                # Shipped connectors declared in frontmatter bind the same way and
+                # with the same asymmetry as managed tools: declared grants are
+                # added, non-declared ones are never removed, because an admin may
+                # have granted a connector the file does not know about.
+                #
+                # The grant is what makes the connector *reachable* by this agent.
+                # It is not what makes it *work* — the credential resolves per
+                # requesting user, so the same grant serves everyone in the org
+                # without an admin creating one definition per person.
+                if mcp_server_names:
+                    server_rows = await conn.fetch(
+                        """
+                        SELECT id FROM mcp_server_configs
+                        WHERE name = ANY($1) AND organization_id = $2
+                            AND status = 'active' AND scope = 'built-in'
+                            AND origin = 'disk'
+                        """,
+                        mcp_server_names,
+                        org_id,
+                    )
+                    declared_server_ids = {str(r["id"]) for r in server_rows}
+                else:
+                    declared_server_ids = set()
+
+                if declared_server_ids:
+                    current_server_rows = await conn.fetch(
+                        "SELECT mcp_server_id FROM agent_mcp_servers WHERE agent_id = $1",
+                        agent_id,
+                    )
+                    current_server_ids = {str(r["mcp_server_id"]) for r in current_server_rows}
+                    servers_added = declared_server_ids - current_server_ids
+                    for sid in servers_added:
+                        await conn.execute(
+                            "INSERT INTO agent_mcp_servers "
+                            "(agent_id, mcp_server_id, granted_by) "
+                            "VALUES ($1, $2, NULL) ON CONFLICT DO NOTHING",
+                            agent_id,
+                            sid,
+                        )
+                    if servers_added:
+                        logger.info(
+                            "Agent '%s': synced MCP connectors (+%d → %d total)",
+                            name,
+                            len(servers_added),
+                            len(current_server_ids | servers_added),
+                        )
             synced += 1
         return synced
 
@@ -3812,3 +4264,533 @@ class DefinitionRepository:
                 if grant_count:
                     logger.info("Granted default hooks to %d agent(s)", grant_count)
         return len(builtins)
+
+    async def sync_built_in_managed_tools(self, org_id: str) -> int:
+        """Sync the Lucent-native tool catalog into an org as built-in tools.
+
+        Every handler in :data:`~lucent.services.builtin_tool_catalog.BUILTIN_TOOL_CATALOG`
+        becomes one ``runtime_type='builtin'`` row with ``scope='built-in'``, so a
+        fresh deployment ships a usable toolset without an admin authoring
+        anything. Built-in scope is consent-exempt (see
+        ``lucent.agent_capabilities``), but a tool still has to be granted to an
+        agent before that agent can call it.
+
+        Returns the number of handlers synced. A handler that collides with a
+        user's instance tool of the same name is skipped and logged rather than
+        aborting the sync — one collision must not cost a deployment its whole
+        toolset.
+        """
+        from lucent.services.builtin_tool_catalog import BUILTIN_TOOL_CATALOG
+
+        synced = 0
+        skipped = 0
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            for name, spec in BUILTIN_TOOL_CATALOG.items():
+                try:
+                    # The column is VARCHAR(64), and a truncation would be a
+                    # silent contract change rather than a visible failure.
+                    if len(name) > 64:
+                        raise ValueError(
+                            f"handler name {name!r} exceeds the 64-character "
+                            "managed_tool_definitions.name limit"
+                        )
+
+                    # Deep copy: the catalog is module-level state. Handing its
+                    # dict to a driver (or to any caller inspecting the row)
+                    # must not make later mutations of that dict alter the
+                    # reviewed schema every future sync copies.
+                    input_schema = copy.deepcopy(spec.input_schema)
+                    if len(spec.network_hosts):
+                        # Narrowest policy that actually works: the handler's
+                        # own known hosts.
+                        network_policy = {
+                            "network_mode": "allowlist",
+                            "allowed_hosts": list(spec.network_hosts),
+                        }
+                    elif spec.uses_network:
+                        # `web_fetch` reaches arbitrary public hosts by design;
+                        # an empty allowlist would fail every call.
+                        network_policy = {"network_mode": "bridge", "allowed_hosts": []}
+                    else:
+                        network_policy = {"network_mode": "none", "allowed_hosts": []}
+
+                    timeout_seconds = int(
+                        spec.default_config.get("timeout_seconds", 60)
+                    )
+                    resource_limits = {
+                        "memory_limit": "512m",
+                        "cpu_limit": 1.0,
+                        "disk_limit": "1g",
+                        "timeout_seconds": timeout_seconds,
+                    }
+                    # No options: `runtime_config` names the handler and nothing
+                    # else, so a catalog change cannot leave a stale option that
+                    # the executor silently ignores.
+                    runtime_config = {"handler": spec.name}
+                    auth_policy = {
+                        "mode": "agent_grant",
+                        "require_user_access": True,
+                    }
+                    env_vars: dict[str, str] = {}
+
+                    self._validate_tool_shape(
+                        input_schema=input_schema,
+                        output_schema=None,
+                        runtime_type="builtin",
+                        source_code="",
+                        entrypoint=spec.name,
+                        requirements=[],
+                        runtime_config=runtime_config,
+                        env_vars=env_vars,
+                        auth_policy=auth_policy,
+                        network_policy=network_policy,
+                        resource_limits=resource_limits,
+                        timeout_seconds=timeout_seconds,
+                    )
+
+                    # Update-then-insert (a plain ON CONFLICT DO UPDATE would
+                    # fire the BEFORE INSERT auth_id trigger on the conflict
+                    # path, leaking an unused auth_ids row every sync).
+                    update_result = await conn.execute(
+                        """
+                        UPDATE managed_tool_definitions
+                        SET description = $2, input_schema = $3::text::jsonb,
+                            runtime_type = 'builtin',
+                            source_code = '', entrypoint = $4,
+                            requirements = '[]'::jsonb,
+                            runtime_config = $5::text::jsonb,
+                            env_vars = '{}'::jsonb,
+                            auth_policy = $6::text::jsonb,
+                            network_policy = $7::text::jsonb,
+                            resource_limits = $8::text::jsonb,
+                            timeout_seconds = $9,
+                            status = 'active', scope = 'built-in',
+                            updated_at = NOW()
+                        WHERE (name, organization_id) = ($1, $10)
+                          AND scope = 'built-in'
+                          AND origin = 'disk'
+                        """,
+                        name,
+                        spec.description,
+                        json.dumps(input_schema),
+                        spec.name,
+                        json.dumps(runtime_config),
+                        json.dumps(auth_policy),
+                        json.dumps(network_policy),
+                        json.dumps(resource_limits),
+                        timeout_seconds,
+                        org_id,
+                    )
+                    inserted_id = await conn.fetchval(
+                        """
+                        INSERT INTO managed_tool_definitions
+                            (name, description, input_schema, runtime_type,
+                             source_code, entrypoint, requirements, runtime_config,
+                             env_vars, auth_policy, network_policy,
+                             resource_limits, timeout_seconds, status, scope,
+                             organization_id)
+                        SELECT $1::varchar, $2, $3::text::jsonb, 'builtin',
+                               '', $4, '[]'::jsonb, $5::text::jsonb,
+                               '{}'::jsonb, $6::text::jsonb, $7::text::jsonb,
+                               $8::text::jsonb, $9, 'active', 'built-in', $10::uuid
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM managed_tool_definitions
+                            WHERE name = $1 AND organization_id = $10
+                        )
+                        RETURNING id
+                        """,
+                        name,
+                        spec.description,
+                        json.dumps(input_schema),
+                        spec.name,
+                        json.dumps(runtime_config),
+                        json.dumps(auth_policy),
+                        json.dumps(network_policy),
+                        json.dumps(resource_limits),
+                        timeout_seconds,
+                        org_id,
+                    )
+                    if inserted_id is None and update_result == "UPDATE 0":
+                        # The name is taken by a row this sync is not allowed to
+                        # touch (a user's instance tool). The unique constraint
+                        # makes coexistence impossible, so skip this handler
+                        # instead of failing every other tool.
+                        existing_scope = await conn.fetchval(
+                            "SELECT scope FROM managed_tool_definitions "
+                            "WHERE name = $1 AND organization_id = $2",
+                            name,
+                            org_id,
+                        )
+                        logger.warning(
+                            "Built-in tool %r skipped for org %s: the name is "
+                            "already used by a %s-scoped tool",
+                            name,
+                            org_id,
+                            existing_scope or "unknown",
+                        )
+                        skipped += 1
+                        continue
+                    synced += 1
+                except Exception:
+                    # Tolerant by design: one malformed handler (or a transient
+                    # write failure) must not cost the org the rest of the
+                    # catalog.
+                    logger.warning(
+                        "Failed to sync built-in tool %r for org %s",
+                        name,
+                        org_id,
+                        exc_info=True,
+                    )
+                    skipped += 1
+
+        if skipped:
+            logger.warning(
+                "Built-in tool sync for org %s: %d synced, %d skipped",
+                org_id,
+                synced,
+                skipped,
+            )
+        await self._prune_retired_builtin_tools(org_id, set(BUILTIN_TOOL_CATALOG))
+        return synced
+
+    async def _prune_retired_builtin_tools(
+        self, org_id: str, live_handlers: set[str]
+    ) -> int:
+        """Archive built-in tools whose handler no longer exists in the catalog.
+
+        Without this, removing a handler leaves its row behind forever: the row
+        is `active`, still granted to agents, and still resolvable by
+        `run_managed_tool` — where it fails at call time with "no built-in tool
+        named ...". A catalog entry that was cut for being redundant becomes a
+        permanently broken tool on every existing deployment.
+
+        Retired rows are *archived*, not deleted: the definition and its run
+        history stay auditable, and `status != 'active'` already blocks execution.
+        A user's instance-scoped tool of the same name is never touched.
+        """
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, runtime_type, runtime_config "
+                "FROM managed_tool_definitions "
+                "WHERE organization_id = $1 AND scope = 'built-in' "
+                "AND origin = 'disk' AND status <> 'archived'",
+                org_id,
+            )
+            retired: list[str] = []
+            for row in rows:
+                if row["runtime_type"] != "builtin":
+                    continue
+                config = self._decode_json(row["runtime_config"], {}) or {}
+                handler = str(config.get("handler") or row["name"] or "").strip()
+                if handler and handler not in live_handlers:
+                    retired.append(str(row["id"]))
+            if retired:
+                await conn.execute(
+                    "UPDATE managed_tool_definitions "
+                    "SET status = 'archived', updated_at = NOW() "
+                    "WHERE id = ANY($1::uuid[]) AND organization_id = $2",
+                    retired,
+                    org_id,
+                )
+                logger.info(
+                    "Archived %d retired built-in tool(s) for org %s",
+                    len(retired),
+                    org_id,
+                )
+            return len(retired)
+
+    # ── Instance catalog: operator-provisioned built-ins ──────────────────
+    #
+    # A hyperadmin provisions a tool *into a specific organization* rather than
+    # creating one shared NULL-org row. That costs one row per tenant and buys an
+    # explicit security boundary on every row: no cross-tenant read, no NULL-org
+    # special case in any ACL, and a per-tenant revoke that is a plain DELETE.
+    #
+    # The row is `scope='built-in'` (so it inherits consent-exemption, org-wide
+    # readability, daemon protection) but `origin='operator'` (so the disk sync
+    # never adopts, overwrites, or prunes it). Both facts are needed; see
+    # migration 160.
+
+    async def provision_catalog_mcp_server(
+        self,
+        *,
+        org_id: str,
+        name: str,
+        description: str,
+        server_type: str,
+        url: str | None,
+        created_by: str,
+        headers: dict | None = None,
+        command: str | None = None,
+        args: list | None = None,
+        env_vars: dict | None = None,
+        credential_slots: list | None = None,
+        status: str = "active",
+    ) -> dict:
+        """Create or replace an operator-provisioned MCP connector for one org.
+
+        Upsert on ``(name, org_id)`` restricted to operator rows, so re-running a
+        provisioning script is idempotent but never overwrites a disk-shipped
+        connector or a tenant's own definition of the same name — the caller gets
+        a clear error instead.
+        """
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            existing = await conn.fetchrow(
+                "SELECT id, scope, origin FROM mcp_server_configs "
+                "WHERE name = $1 AND organization_id = $2",
+                name,
+                org_id,
+            )
+            if existing is not None and existing["origin"] != "operator":
+                raise BuiltInProtectionError(
+                    f"'{name}' already exists in this organization as a "
+                    f"{existing['scope']}-scoped {existing['origin']} definition. "
+                    "Choose a different catalog name."
+                )
+            if existing is not None:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE mcp_server_configs
+                    SET description = $2, server_type = $3, url = $4,
+                        headers = $5::text::jsonb, command = $6,
+                        args = $7::text::jsonb, env_vars = $8::text::jsonb,
+                        credential_slots = $9::text::jsonb,
+                        status = $10, scope = 'built-in', origin = 'operator',
+                        updated_at = NOW()
+                    WHERE id = $1 AND organization_id = $11
+                    RETURNING *
+                    """,
+                    existing["id"],
+                    description,
+                    server_type,
+                    url,
+                    json.dumps(headers or {}),
+                    command,
+                    json.dumps(args or []),
+                    json.dumps(env_vars or {}),
+                    json.dumps(credential_slots or []),
+                    status,
+                    org_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO mcp_server_configs
+                        (name, description, server_type, url, headers, command,
+                         args, env_vars, credential_slots, status, scope, origin,
+                         organization_id, created_by)
+                    VALUES ($1, $2, $3, $4, $5::text::jsonb, $6, $7::text::jsonb,
+                            $8::text::jsonb, $9::text::jsonb, $10, 'built-in',
+                            'operator', $11, $12)
+                    RETURNING *
+                    """,
+                    name,
+                    description,
+                    server_type,
+                    url,
+                    json.dumps(headers or {}),
+                    command,
+                    json.dumps(args or []),
+                    json.dumps(env_vars or {}),
+                    json.dumps(credential_slots or []),
+                    status,
+                    org_id,
+                    created_by,
+                )
+        result = self._normalize_mcp_row(row)
+        await self._audit(
+            DEFINITION_CREATE,
+            org_id,
+            "mcp_server",
+            str(result["id"]),
+            user_id=created_by,
+            notes=(
+                f"Operator provisioned connector '{name}' "
+                f"({'replaced' if existing is not None else 'created'})"
+            ),
+        )
+        return result
+
+    async def revoke_catalog_mcp_server(
+        self, *, org_id: str, name: str, actor_id: str
+    ) -> bool:
+        """Remove a single operator-provisioned connector from one organization.
+
+        Refuses anything it did not create: a disk-shipped built-in must be
+        changed on disk, and a tenant's own definition belongs to that tenant.
+        """
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            deleted = await conn.fetchval(
+                "DELETE FROM mcp_server_configs "
+                "WHERE name = $1 AND organization_id = $2 "
+                "AND scope = 'built-in' AND origin = 'operator' "
+                "RETURNING id",
+                name,
+                org_id,
+            )
+        if not deleted:
+            return False
+        await self._audit(
+            DEFINITION_DELETE,
+            org_id,
+            "mcp_server",
+            str(deleted),
+            user_id=actor_id,
+            notes=f"Operator revoked connector '{name}'",
+        )
+        return True
+
+    async def list_catalog_definitions(
+        self, org_id: str, definition_type: str
+    ) -> list[dict]:
+        """Operator-provisioned definitions currently live in one organization."""
+        table, normalizer = {
+            "mcp_server": ("mcp_server_configs", self._normalize_mcp_row),
+            "managed_tool": ("managed_tool_definitions", self._normalize_tool_row),
+            "skill": ("skill_definitions", self._normalize_definition_row),
+            "agent": ("agent_definitions", self._normalize_definition_row),
+        }[definition_type]
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            rows = await conn.fetch(
+                f"SELECT * FROM {table} "
+                "WHERE organization_id = $1 AND origin = 'operator' "
+                "ORDER BY name",
+                org_id,
+            )
+        return [normalizer(row) for row in rows if row]
+
+    async def list_catalog_organizations(self, definition_type: str) -> list[dict]:
+        """Every organization that has at least one operator-provisioned row.
+
+        This is the operator's fleet view: what did I push, and where. Grouped in
+        SQL so it stays one query regardless of tenant count.
+        """
+        table = {
+            "mcp_server": "mcp_server_configs",
+            "managed_tool": "managed_tool_definitions",
+            "skill": "skill_definitions",
+            "agent": "agent_definitions",
+        }[definition_type]
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT organization_id, count(*) AS definition_count, "
+                f"   array_agg(name ORDER BY name) AS names "
+                f"FROM {table} WHERE origin = 'operator' "
+                f"GROUP BY organization_id ORDER BY organization_id"
+            )
+        return [
+            {
+                "organization_id": str(row["organization_id"]),
+                "definition_count": int(row["definition_count"]),
+                "names": list(row["names"] or []),
+            }
+            for row in rows
+        ]
+
+    async def sync_built_in_mcp_connectors(self, org_id: str) -> int:
+        """Seed the shipped hosted MCP connectors into an organization.
+
+        A built-in connector is created ``scope='built-in'`` and ``status='active'``
+        with **no owner**, so it is readable org-wide and consent-exempt exactly like
+        a built-in skill or managed tool. The point is that no administrator has to
+        author one per person: the endpoint is shared, and each user supplies their
+        own credential through the declared ``credential_slots``.
+
+        Credentials are stored as ``secret://`` references in ``headers``, which
+        resolve per *calling* user (own secret first, then a group share, then an
+        explicit grant). Nothing here holds a token.
+
+        Idempotent, and skips a connector whose name is already taken by a
+        user-authored definition rather than failing the whole sync.
+        """
+        from lucent.services.builtin_connectors import BUILTIN_CONNECTORS
+
+        synced = 0
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            for connector in BUILTIN_CONNECTORS:
+                try:
+                    if len(connector.name) > 64:
+                        raise ValueError(
+                            f"connector name {connector.name!r} exceeds the "
+                            "64-character mcp_server_configs.name limit"
+                        )
+                    headers = connector.header_templates()
+                    env_vars = connector.env_vars()
+                    slots = json.dumps(connector.descriptor()["credential_slots"])
+
+                    # Update-then-insert, matching the other built-in syncs: an
+                    # ON CONFLICT DO UPDATE would fire the BEFORE INSERT auth_id
+                    # trigger on the conflict path and leak a row each sync.
+                    updated = await conn.execute(
+                        """
+                        UPDATE mcp_server_configs
+                        SET description = $3, server_type = $4, url = $5,
+                            headers = $6::text::jsonb, env_vars = $7::text::jsonb,
+                            credential_slots = $8::text::jsonb,
+                            status = 'active', scope = 'built-in',
+                            updated_at = NOW()
+                        WHERE (name, organization_id) = ($1, $2)
+                          AND scope = 'built-in'
+                          AND origin = 'disk'
+                        """,
+                        connector.name,
+                        org_id,
+                        connector.summary,
+                        connector.transport,
+                        connector.effective_url,
+                        json.dumps(headers),
+                        json.dumps(env_vars),
+                        slots,
+                    )
+                    if updated != "UPDATE 0":
+                        synced += 1
+                        continue
+
+                    inserted = await conn.fetchval(
+                        """
+                        INSERT INTO mcp_server_configs
+                            (name, description, server_type, url, args, headers,
+                             env_vars, credential_slots, status, scope,
+                             organization_id)
+                        SELECT $1::varchar, $2, $3, $4, '[]'::jsonb,
+                               $5::text::jsonb, $6::text::jsonb, $7::text::jsonb,
+                               'active', 'built-in', $8::uuid
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM mcp_server_configs
+                            WHERE name = $1 AND organization_id = $8
+                        )
+                        RETURNING id
+                        """,
+                        connector.name,
+                        connector.summary,
+                        connector.transport,
+                        connector.effective_url,
+                        json.dumps(headers),
+                        json.dumps(env_vars),
+                        slots,
+                        org_id,
+                    )
+                    if inserted is None:
+                        logger.warning(
+                            "Built-in connector %r skipped for org %s: the name is "
+                            "already used by a non-built-in definition",
+                            connector.name,
+                            org_id,
+                        )
+                        continue
+                    synced += 1
+                except Exception:
+                    # One bad connector must not cost the org the rest.
+                    logger.warning(
+                        "Failed to sync built-in MCP connector %r for org %s",
+                        connector.name,
+                        org_id,
+                        exc_info=True,
+                    )
+        if synced:
+            logger.info(
+                "Seeded %d built-in MCP connector(s) for org %s", synced, org_id
+            )
+        return synced

@@ -117,7 +117,7 @@
                         <div class="flex items-center justify-end gap-2 flex-wrap">
                                 <form action="/settings/users/{{ u.id }}/reset-password" method="post" class="inline"
                                     data-confirm="Reset password for {{ u.display_name or u.email }}?">
-                                <button type="submit" class="text-xs text-amber-600 hover:text-amber-700 font-medium">Reset</button>
+                                <button type="submit" class="text-xs text-pink-600 hover:text-pink-700 font-medium">Reset</button>
                             </form>
                             {% if u.is_active %}
                                 <form action="/settings/users/{{ u.id }}/deactivate" method="post" class="inline"

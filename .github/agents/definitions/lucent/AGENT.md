@@ -17,6 +17,13 @@ skill_names:
   - capability-reference
   - definition-engineering
   - workflow-design
+tool_names:
+  - web_search
+  - web_fetch
+  - weather_forecast
+mcp_server_names:
+  - github
+  - sentry
 ---
 
 # Who I Am

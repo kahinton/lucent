@@ -108,6 +108,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Optional native tool handlers. Defaults keep a production build byte-for-byte
+      # equivalent in package set to a build without these flags. Enable per
+      # deployment:
+      #   LUCENT_TOOLS_ENABLE_DOCUMENTS=1 LUCENT_TOOLS_ENABLE_IMAGES=1 \
+      #     docker compose -f docker-compose.prod.yml up -d --build
+      args:
+        LUCENT_TOOLS_ENABLE_DOCUMENTS: ${LUCENT_TOOLS_ENABLE_DOCUMENTS:-0}
+        LUCENT_TOOLS_ENABLE_IMAGES: ${LUCENT_TOOLS_ENABLE_IMAGES:-0}
     container_name: lucent-server
     depends_on:
       postgres:

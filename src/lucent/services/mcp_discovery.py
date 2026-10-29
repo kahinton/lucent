@@ -13,6 +13,43 @@ from lucent.secrets import SecretRegistry, resolve_env_vars
 from lucent.url_validation import SSRFError, validate_url
 
 DISCOVERY_TIMEOUT_SECONDS = 10
+
+# The only host environment a spawned stdio MCP server may inherit.
+#
+# A stdio server is a third-party process launched from this server's own
+# process. Copying the whole environment into it hands an `npx -y <pkg>` supply
+# chain the database DSN, provider API keys, the OpenBao token, and every
+# LUCENT_* runtime secret. These are the variables a child process needs to
+# function (find binaries, resolve TLS, respect a proxy, render text); anything a
+# particular server actually requires must be declared on its definition and is
+# resolved through the secret store.
+_INHERITED_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "NPM_CONFIG_CACHE",
+    "npm_config_cache",
+    "UV_CACHE_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+)
 COPILOT_BUILTIN_GITHUB_TYPES = frozenset({
     "copilot_github",
     "copilot_builtin_github",
@@ -196,7 +233,9 @@ def _normalize_tool_obj(tool: Any) -> dict[str, Any]:
     }
 
 
-async def _discover_http(server_config: dict[str, Any]) -> list[dict[str, Any]]:
+async def _discover_http(
+    server_config: dict[str, Any], *, transport: str = "http"
+) -> list[dict[str, Any]]:
     url = server_config.get("url")
     if not isinstance(url, str) or not url:
         raise MCPDiscoveryError("Missing URL for HTTP MCP server")
@@ -213,6 +252,7 @@ async def _discover_http(server_config: dict[str, Any]) -> list[dict[str, Any]]:
         mcp_url=url,
         headers={str(k): str(v) for k, v in headers.items()},
         skip_url_validation=True,
+        transport=transport,
     )
     bridge._client.timeout = DISCOVERY_TIMEOUT_SECONDS  # type: ignore[attr-defined]
 
@@ -237,7 +277,15 @@ async def _discover_stdio(server_config: dict[str, Any]) -> list[dict[str, Any]]
     args = _coerce_list(server_config.get("args"))
 
     env_vars = _coerce_mapping(server_config.get("env_vars"))
-    env: dict[str, str] = os.environ.copy()
+    # Minimal environment only. A stdio MCP server is a third-party process
+    # (often `npx -y <pkg>`); inheriting the full server environment would hand it
+    # DATABASE_URL, the DAEMON_DATABASE_URL, every provider API key, the OpenBao
+    # token, and LUCENT_* runtime secrets — everything this process holds.
+    env: dict[str, str] = {
+        key: os.environ[key]
+        for key in _INHERITED_ENV_ALLOWLIST
+        if key in os.environ
+    }
     if env_vars:
         try:
             provider = SecretRegistry.get()
@@ -282,8 +330,10 @@ async def discover_mcp_tools(server_config: dict, db_pool) -> list[dict]:
     """Discover tools from an MCP server and update discovery cache."""
     server_type = (server_config.get("server_type") or "http").lower()
 
-    if server_type == "http":
-        tools = await _discover_http(server_config)
+    if server_type in ("http", "sse"):
+        # Both remote transports speak MCP tool discovery the same way; the
+        # difference is the wire framing, which the bridge handles.
+        tools = await _discover_http(server_config, transport=server_type)
     elif server_type == "stdio":
         tools = await _discover_stdio(server_config)
     elif server_type in COPILOT_BUILTIN_GITHUB_TYPES:

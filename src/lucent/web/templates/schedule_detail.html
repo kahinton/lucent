@@ -92,11 +92,11 @@
 
 <!-- Warnings -->
 {% if not sched.prompt and (not sched.task_template or sched.task_template == {}) and not sched.actions %}
-<div class="mb-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3">
-    <svg class="w-5 h-5 text-amber-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
+<div class="mb-4 px-4 py-3 bg-pink-50 border border-pink-200 rounded-lg flex items-start gap-3">
+    <svg class="w-5 h-5 text-pink-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
     <div>
-        <p class="text-sm font-medium text-amber-800">No prompt set</p>
-        <p class="text-xs text-amber-600 mt-0.5">This workflow has no prompt or action instructions. When triggered, the agent will only receive the title and description as context.</p>
+        <p class="text-sm font-medium text-pink-800">No prompt set</p>
+        <p class="text-xs text-pink-600 mt-0.5">This workflow has no prompt or action instructions. When triggered, the agent will only receive the title and description as context.</p>
     </div>
 </div>
 {% endif %}
@@ -172,17 +172,17 @@
             <p class="mt-1 text-xs text-emerald-700">Tasks can record links, PRs, files, docs, memories, deployments, and more.</p>
             {% endif %}
         </div>
-        <div class="rounded-lg border border-amber-100 bg-amber-50 p-4">
-            <p class="text-xs font-semibold uppercase tracking-wide text-amber-700">Review</p>
+        <div class="rounded-lg border border-pink-200 bg-pink-50 p-4">
+            <p class="text-xs font-semibold uppercase tracking-wide text-pink-700">Review</p>
             {% if sched.is_server_workflow %}
-            <p class="mt-2 text-sm font-semibold text-amber-950">No model review</p>
-            <p class="mt-1 text-xs text-amber-700">Operators validate by inspecting run history and task claim state.</p>
+            <p class="mt-2 text-sm font-semibold text-pink-950">No model review</p>
+            <p class="mt-1 text-xs text-pink-700">Operators validate by inspecting run history and task claim state.</p>
             {% elif inbox_only_workflow %}
-            <p class="mt-2 text-sm font-semibold text-amber-950">Human response optional</p>
-            <p class="mt-1 text-xs text-amber-700">If the handoff asks a question, Lucent can wait for and resume from the reply.</p>
+            <p class="mt-2 text-sm font-semibold text-pink-950">Human response optional</p>
+            <p class="mt-1 text-xs text-pink-700">If the handoff asks a question, Lucent can wait for and resume from the reply.</p>
             {% else %}
-            <p class="mt-2 text-sm font-semibold text-amber-950">Checklist enforced</p>
-            <p class="mt-1 text-xs text-amber-700">The post-completion reviewer sees this workflow’s success criteria.</p>
+            <p class="mt-2 text-sm font-semibold text-pink-950">Checklist enforced</p>
+            <p class="mt-1 text-xs text-pink-700">The post-completion reviewer sees this workflow’s success criteria.</p>
             {% endif %}
         </div>
     </div>
@@ -206,8 +206,8 @@
         {% set action_stage = (action.sequence_order + 1) if action.sequence_order is defined else loop.index %}
         {% if action.action_type == 'task' and action_stage > stage_state.previous + 1 %}
         {% for missing_stage in range(stage_state.previous + 1, action_stage) %}
-        <div class="flex items-center gap-3 border-y border-dashed border-amber-200 bg-amber-50/60 px-5 py-3 text-sm text-amber-700">
-            <span class="rounded border border-amber-200 bg-white px-2 py-0.5 text-xs font-medium">Stage {{ missing_stage }}</span>
+        <div class="flex items-center gap-3 border-y border-dashed border-pink-200 bg-pink-50 px-5 py-3 text-sm text-pink-700">
+            <span class="rounded border border-pink-200 bg-white px-2 py-0.5 text-xs font-medium">Stage {{ missing_stage }}</span>
             <span>No tasks configured</span>
         </div>
         {% endfor %}
@@ -223,7 +223,7 @@
                 {% elif action.action_type == 'user_interaction' %}
                 <span class="rounded bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700">Handoff</span>
                 <span class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{{ action.interaction_type or 'message' }}</span>
-                {% if action.requires_response %}<span class="rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">waits for reply</span>{% endif %}
+                {% if action.requires_response %}<span class="rounded bg-pink-50 px-2 py-0.5 text-xs text-pink-700">waits for reply</span>{% endif %}
                 {% else %}
                 <span class="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{{ action.agent_type or sched.agent_type }}</span>
                 {% if action.model %}<span class="rounded bg-purple-50 px-2 py-0.5 text-xs text-purple-700">{{ action.model }}</span>{% endif %}
@@ -237,7 +237,7 @@
                 {% set raw_min = dpq.get(q.name or '') %}
                 {% if raw_min is defined and raw_min is not none %}{% if raw_min is mapping %}{% set dp.min = raw_min.min if raw_min.min is defined else '' %}{% else %}{% set dp.min = raw_min %}{% endif %}{% endif %}
                 <span class="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{{ q.name or 'question' }} · {{ q.type or 'noul' }}</span>
-                {% if dp.min != '' %}<span class="rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">fails below min {{ dp.min }}</span>{% endif %}
+                {% if dp.min != '' %}<span class="rounded bg-pink-50 px-2 py-0.5 text-xs text-pink-700">fails below min {{ dp.min }}</span>{% endif %}
                 {% endif %}
                 {% endfor %}
                 {% endif %}
@@ -343,7 +343,7 @@
                 {% elif sched.sandbox_template_id %}
                 <div class="mt-4">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Sandbox Template</label>
-                    <div class="px-3 py-2 text-sm bg-amber-50 border border-amber-200 rounded-lg text-amber-600">
+                    <div class="px-3 py-2 text-sm bg-pink-50 border border-pink-200 rounded-lg text-pink-600">
                         <span class="font-mono text-xs">{{ sched.sandbox_template_id }}</span>
                         <span class="text-xs ml-1">(template not found)</span>
                     </div>
@@ -568,9 +568,9 @@
             <details class="rounded-lg border border-gray-200 bg-gray-50">
                 <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-gray-600">Advanced: edit raw JSON</summary>
                 <div class="space-y-4 border-t border-gray-200 p-4">
-                    <label class="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                        <input type="checkbox" name="use_raw_json" class="mt-0.5 rounded border-amber-300 text-amber-600 focus:ring-amber-500">
-                        <span><span class="font-medium">Use raw JSON when saving</span><span class="mt-0.5 block text-xs text-amber-700">This replaces the visual request and step values. Use it for advanced action types or fields not shown above.</span></span>
+                    <label class="flex items-start gap-2 rounded-lg border border-pink-200 bg-pink-50 p-3 text-sm text-pink-900">
+                        <input type="checkbox" name="use_raw_json" class="mt-0.5 rounded border-pink-300 text-pink-600 focus:ring-pink-500">
+                        <span><span class="font-medium">Use raw JSON when saving</span><span class="mt-0.5 block text-xs text-pink-700">This replaces the visual request and step values. Use it for advanced action types or fields not shown above.</span></span>
                     </label>
                     <div>
                         <label for="request_template_json" class="block text-sm font-medium text-gray-700 mb-1">Request template</label>
@@ -616,7 +616,7 @@ const workflowSaveButton = document.getElementById('workflow-save-button');
 function markWorkflowDirty() {
     if (!workflowSaveStatus || !workflowSaveButton) return;
     workflowSaveStatus.textContent = 'Unsaved changes';
-    workflowSaveStatus.className = 'mt-0.5 text-xs font-medium text-amber-700';
+    workflowSaveStatus.className = 'mt-0.5 text-xs font-medium text-pink-700';
     workflowSaveButton.classList.add('ring-2', 'ring-primary-200', 'ring-offset-2');
 }
 
@@ -760,7 +760,7 @@ refreshWorkflowSteps();
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="grantee_type" value="organization">
                 <input type="hidden" name="role" value="read">
-                <button type="submit" class="w-full rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 hover:bg-amber-100">Share with organization</button>
+                <button type="submit" class="w-full rounded-md border border-pink-200 bg-pink-50 px-3 py-2 text-sm font-medium text-pink-800 hover:bg-pink-100">Share with organization</button>
             </form>
             {% if access_users | selectattr('id', 'ne', sched.created_by|string) | list %}
             <form method="post" action="{{ base_path }}/{{ sched.id }}/access" class="flex gap-2">
@@ -858,8 +858,8 @@ refreshWorkflowSteps();
                     <svg class="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8.689c0-.864.933-1.405 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062A1.125 1.125 0 013 16.811V8.69zM12.75 8.689c0-.864.933-1.405 1.683-.977l7.108 4.062a1.125 1.125 0 010 1.953l-7.108 4.062a1.125 1.125 0 01-1.683-.977V8.69z" /></svg>
                 </div>
                 {% else %}
-                <div class="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center">
-                    <svg class="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <div class="w-8 h-8 rounded-full bg-pink-100 flex items-center justify-center">
+                    <svg class="w-4 h-4 text-pink-600" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                 </div>
                 {% endif %}
                 <div>

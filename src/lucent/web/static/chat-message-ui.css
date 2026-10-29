@@ -9,7 +9,7 @@
 }
 
 /* Hook-call chip variant — distinct identity via the brand-pink accent
-   (--lucent-pink #ff3f9b), never used by tool chips (amber/green/gray). */
+   (--lucent-pink #ff3f9b). Tool chips use green/gray only, never pink. */
 .hook-chip {
     border-left: 3px solid #ff3f9b !important;
 }

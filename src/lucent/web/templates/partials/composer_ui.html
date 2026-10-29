@@ -1,0 +1,152 @@
+{# Shared Agent Composer UI primitives.
+
+   The definitions page had drifted from the rest of the app in three ways that
+   actually mattered:
+
+   1. Each tab opened with an intro callout in a *different* accent colour
+      (teal, amber, orange, emerald, primary) and, worse, used `text-{colour}-900`
+      on a `bg-{colour}-50` panel. The app forces dark mode, so `bg-*-50` is
+      repainted to a translucent tint while `text-*-900` is left as a near-black
+      literal — measured contrast was 1.34:1 to 2.21:1 against a 4.5:1 floor. The
+      headings were effectively invisible.
+
+   2. Actions were tinted fills (`bg-purple-50 text-purple-700`,
+      `bg-primary-50 text-primary-700`) instead of the app's single primary
+      button, so no two tabs looked like they belonged to the same product.
+
+   3. There were four different type scales for the same object (card titles,
+      metadata rows, section headings).
+
+   Everything here uses the neutral card surface plus ONE accent, which is what
+   Memories, Files, Sandboxes, Projects, and Activity already do.
+#}
+
+{# ---------------------------------------------------------------------------
+   Page-level explanation.
+
+   A quiet neutral card, not a coloured banner. The left rule carries the accent
+   so the block still reads as an introduction without turning the top of every
+   tab into a different colour. Body copy is `text-gray-600`, which the dark theme
+   repaints to #b8b4b0 — legible. Never put `text-*-900` on a `bg-*-50` surface.
+--------------------------------------------------------------------------- #}
+{% macro panel_intro(title, body, points=None, icon=None) %}
+<section class="mb-6 rounded-lg border border-gray-200 border-l-2 border-l-primary-500 bg-white p-4">
+    <div class="flex items-start gap-3">
+        {% if icon %}
+        <svg class="mt-0.5 h-5 w-5 shrink-0 text-primary-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">{{ icon | safe }}</svg>
+        {% endif %}
+        <div class="min-w-0">
+            <h2 class="text-sm font-semibold text-gray-900">{{ title }}</h2>
+            <p class="mt-1 max-w-3xl text-sm text-gray-600">{{ body }}</p>
+            {% if points %}
+            <dl class="mt-3 grid gap-3 sm:grid-cols-3">
+                {% for point in points %}
+                <div class="min-w-0">
+                    <dt class="text-xs font-semibold text-gray-700">{{ point.title }}</dt>
+                    <dd class="mt-0.5 text-xs leading-relaxed text-gray-500">{{ point.body }}</dd>
+                </div>
+                {% endfor %}
+            </dl>
+            {% endif %}
+        </div>
+    </div>
+</section>
+{% endmacro %}
+
+{# ---------------------------------------------------------------------------
+   Toolbar: result count on the left, actions on the right.
+
+   One secondary (outlined) and one primary (filled) action, matching the
+   Memories/Files pattern. Anything more than two actions moves into an overflow.
+--------------------------------------------------------------------------- #}
+{% macro primary_button(label, attrs='', extra_class='') %}
+<button {{ attrs | safe }} class="inline-flex items-center justify-center gap-1.5 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary-700 {{ extra_class }}">{{ label }}</button>
+{% endmacro %}
+
+{% macro secondary_button(label, attrs='', extra_class='') %}
+<button {{ attrs | safe }} class="inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 {{ extra_class }}">{{ label }}</button>
+{% endmacro %}
+
+{# ---------------------------------------------------------------------------
+   Status / metadata pills.
+
+   Deliberately restrained: a tint is only used where it encodes state the reader
+   acts on (active, proposed, rejected). Everything else — scope, owner, counts —
+   is neutral gray, because a wall of coloured pills is what made the old tabs
+   read as a different product. Kept on `bg-*-100`/`text-*-700` pairs, which the
+   dark theme repaints as a matched translucent tint plus a light foreground.
+--------------------------------------------------------------------------- #}
+{% macro pill(label, tone='neutral') %}
+{% if tone == 'success' %}
+<span class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700">{{ label }}</span>
+{% elif tone == 'warning' %}
+<span class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-pink-100 text-pink-700">{{ label }}</span>
+{% elif tone == 'danger' %}
+<span class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-red-100 text-red-700">{{ label }}</span>
+{% elif tone == 'info' %}
+<span class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-700">{{ label }}</span>
+{% else %}
+<span class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600">{{ label }}</span>
+{% endif %}
+{% endmacro %}
+
+{# A neutral count/metadata chip — never a semantic colour. #}
+{% macro meta_chip(label) %}
+<span class="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600">{{ label }}</span>
+{% endmacro %}
+
+{# Monospace token chip for identifiers, transports, trigger names. #}
+{% macro code_chip(label) %}
+<span class="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-600">{{ label }}</span>
+{% endmacro %}
+
+{# ---------------------------------------------------------------------------
+   Approval actions.
+
+   Approve is the app's primary filled button and Reject is outlined — the
+   pairing used on the request detail page. Previously these were green and red
+   tinted fills.
+--------------------------------------------------------------------------- #}
+{% macro approval_actions(type, item, csrf_token) %}
+{% if item.can_approve %}
+<div class="flex shrink-0 gap-2">
+    <form method="POST" action="/definitions/{{ type }}/{{ item.id }}/approve">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="inline-flex items-center rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-700">{{ item.approval_label or 'Approve' }}</button>
+    </form>
+    <form method="POST" action="/definitions/{{ type }}/{{ item.id }}/reject">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="inline-flex items-center rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50">Reject</button>
+    </form>
+</div>
+{% endif %}
+{% endmacro %}
+
+{# ---------------------------------------------------------------------------
+   Result toolbar. Mirrors the count + action layout used on Memories/Files.
+--------------------------------------------------------------------------- #}
+{% macro result_toolbar(count_label, pagination='') %}
+<div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+    <div class="flex flex-wrap items-center gap-3 text-sm text-gray-500">
+        {{ pagination | safe }}
+        {% if count_label %}<span class="text-xs text-gray-500">{{ count_label }}</span>{% endif %}
+    </div>
+    <div class="flex w-full gap-2 sm:w-auto">{{ caller() }}</div>
+</div>
+{% endmacro %}
+
+{# ---------------------------------------------------------------------------
+   Empty state — one shared shape instead of four bespoke ones.
+--------------------------------------------------------------------------- #}
+{% macro empty_state(message) %}
+<div class="rounded-lg border border-gray-200 bg-white p-8 text-center">
+    <p class="text-sm text-gray-500">{{ message }}</p>
+</div>
+{% endmacro %}
+
+{# ---------------------------------------------------------------------------
+   Section label used inside expanded cards ("Skills", "Tools", …).
+--------------------------------------------------------------------------- #}
+{% macro section_label(text) %}
+<h4 class="mb-1.5 text-xs font-semibold uppercase tracking-wider text-gray-400">{{ text }}</h4>
+{% endmacro %}

@@ -82,7 +82,7 @@
         wrapper.innerHTML = `
             <button type="button" data-tool-toggle="${toolId}" class="tool-chip flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors text-xs group">
                 <div class="tool-status-icon w-4 h-4 shrink-0">
-                    <svg class="w-4 h-4 text-amber-500 animate-pulse" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766m0 0a4.5 4.5 0 0 0 6.229-6.476l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.049.58.025 1.194-.14 1.743Z" /></svg>
+                    <svg class="w-4 h-4 text-pink-500 animate-pulse" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766m0 0a4.5 4.5 0 0 0 6.229-6.476l-3.276 3.277a3.004 3.004 0 0 1-2.25-2.25l3.276-3.276a4.5 4.5 0 0 0-6.336 4.486c.049.58.025 1.194-.14 1.743Z" /></svg>
                 </div>
                 <div class="flex-1 min-w-0">
                     <span class="font-medium text-gray-900">${escapeHtml(displayToolName(toolName))}</span>
@@ -369,7 +369,7 @@
     const REPORT_ACCENTS = {
         success: { bar: 'bg-emerald-500', chip: 'bg-emerald-50 text-emerald-700 border-emerald-200', label: 'Completed' },
         attention: { bar: 'bg-red-500', chip: 'bg-red-50 text-red-700 border-red-200', label: 'Needs attention' },
-        review: { bar: 'bg-amber-500', chip: 'bg-amber-50 text-amber-700 border-amber-200', label: 'Ready for review' },
+        review: { bar: 'bg-pink-500', chip: 'bg-pink-100 text-pink-700 border-pink-200', label: 'Ready for review' },
         muted: { bar: 'bg-gray-400', chip: 'bg-gray-100 text-gray-600 border-gray-200', label: 'Stopped' },
         info: { bar: 'bg-primary-500', chip: 'bg-primary-50 text-primary-700 border-primary-200', label: 'Update' },
     };

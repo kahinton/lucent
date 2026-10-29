@@ -8,7 +8,7 @@
 
 {% macro type_badge(item) %}
 <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
-    {% if item.interaction_type == 'clarification' %}bg-amber-100 text-amber-800
+    {% if item.interaction_type == 'clarification' %}bg-pink-100 text-pink-800
     {% elif item.interaction_type == 'workflow_output' %}bg-blue-100 text-blue-700
     {% elif item.interaction_type == 'review' %}bg-purple-100 text-purple-700
     {% elif item.interaction_type == 'decision' %}bg-orange-100 text-orange-700

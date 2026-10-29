@@ -58,7 +58,7 @@
                 {% if hs == "ok" %}
                 <span class="px-2 py-0.5 text-[10px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full">healthy</span>
                 {% elif hs == "degraded" %}
-                <span class="px-2 py-0.5 text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-full">degraded</span>
+                <span class="px-2 py-0.5 text-[10px] font-medium text-pink-700 bg-pink-50 border border-pink-200 rounded-full">degraded</span>
                 {% elif hs == "failing" %}
                 <span class="px-2 py-0.5 text-[10px] font-medium text-red-700 bg-red-50 border border-red-200 rounded-full">failing</span>
                 {% else %}
@@ -105,7 +105,7 @@
     </div>
 
     {% if not encryption_available %}
-    <div class="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-700">
+    <div class="mb-4 px-3 py-2 bg-pink-50 border border-pink-200 rounded-lg text-[11px] text-pink-700">
         ⚠ Credential encryption backend not available. Tokens may not be safely stored — ensure Vault/OpenBao transit is configured.
     </div>
     {% endif %}

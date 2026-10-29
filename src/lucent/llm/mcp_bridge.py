@@ -59,14 +59,21 @@ class MCPToolBridge:
         excluded_tools: list[str] | None = None,
         skip_url_validation: bool = False,
         audit_context: dict[str, Any] | None = None,
+        transport: str = "http",
     ):
         if not skip_url_validation:
             validate_url(mcp_url, purpose="MCP bridge")
+        kind = str(transport or "http").strip().lower()
+        if kind not in {"http", "sse"}:
+            raise ValueError(
+                f"Unsupported MCP transport {transport!r}; expected 'http' or 'sse'"
+            )
         self._mcp_url = mcp_url
         self._headers = headers or {}
         self._allowed_tools = set(allowed_tools or ["*"])
         self._excluded_tools = set(excluded_tools or [])
         self._audit_context = audit_context or {}
+        self._transport = kind
         self._tools: list[dict[str, Any]] = []
         self._exit_stack: AsyncExitStack | None = None
         self._session: Any | None = None
@@ -92,9 +99,21 @@ class MCPToolBridge:
         )
 
     async def _ensure_session(self) -> Any:
-        """Open an MCP streamable HTTP session if one is not already active."""
+        """Open an MCP session if one is not already active.
+
+        Streamable HTTP is the current MCP transport. The legacy HTTP+SSE transport
+        is still what many hosted servers publish, so it is supported as an
+        explicit opt-in via ``transport='sse'`` rather than silently guessed: a
+        wrong guess produces a confusing protocol error, and retrying the other
+        transport automatically would double every failed connection.
+        """
         if self._session is not None:
             return self._session
+
+        await self._preflight_connection()
+
+        if self._transport == "sse":
+            return await self._ensure_sse_session()
 
         try:
             from mcp import ClientSession
@@ -105,7 +124,6 @@ class MCPToolBridge:
         except ImportError as exc:
             raise RuntimeError("MCP client package is required for MCP tool bridge") from exc
 
-        await self._preflight_connection()
         stack = AsyncExitStack()
         try:
             http_client = await stack.enter_async_context(
@@ -113,6 +131,29 @@ class MCPToolBridge:
             )
             read_stream, write_stream = await stack.enter_async_context(
                 streamable_http_client(self._mcp_url, http_client=http_client)
+            )
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+        except Exception:
+            await stack.aclose()
+            raise
+
+        self._exit_stack = stack
+        self._session = session
+        return session
+
+    async def _ensure_sse_session(self) -> Any:
+        """Open a legacy HTTP+SSE MCP session."""
+        try:
+            from mcp import ClientSession
+            from mcp.client.sse import sse_client
+        except ImportError as exc:
+            raise RuntimeError("MCP client package is required for MCP tool bridge") from exc
+
+        stack = AsyncExitStack()
+        try:
+            read_stream, write_stream = await stack.enter_async_context(
+                sse_client(self._mcp_url, headers=self._headers)
             )
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()

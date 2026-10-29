@@ -41,7 +41,7 @@
                     {% if entry.action_type == 'create' %}bg-emerald-100 text-emerald-600
                     {% elif entry.action_type == 'update' %}bg-blue-100 text-blue-600
                     {% elif entry.action_type == 'delete' %}bg-red-100 text-red-600
-                    {% elif entry.action_type == 'share' %}bg-amber-100 text-amber-600
+                    {% elif entry.action_type == 'share' %}bg-pink-100 text-pink-600
                     {% elif entry.action_type == 'unshare' %}bg-gray-100 text-gray-600
                     {% else %}bg-gray-100 text-gray-600{% endif %}">
                     {% if entry.action_type == 'create' %}
@@ -76,11 +76,11 @@
                         <a href="/memories/{{ entry.memory_id }}" class="text-sm font-mono text-primary-600 hover:text-primary-700">{{ entry.memory_id | string | truncate(12) }}</a>
                         {% endif %}
                         {% if entry.outcome and entry.outcome != 'success' %}
-                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium {% if entry.outcome == 'denied' %}bg-amber-100 text-amber-700{% else %}bg-rose-100 text-rose-700{% endif %}">{{ entry.outcome }}</span>
+                        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium {% if entry.outcome == 'denied' %}bg-pink-100 text-pink-700{% else %}bg-rose-100 text-rose-700{% endif %}">{{ entry.outcome }}</span>
                         {% endif %}
                     </div>
                     {% if entry.actor_display_name or entry.actor_email %}
-                    <p class="text-xs text-gray-500 mt-1">By <span class="font-medium text-gray-700">{{ entry.actor_display_name or entry.actor_email }}</span>{% if entry.impersonator_display_name %} <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-medium">impersonated by {{ entry.impersonator_display_name }}</span>{% endif %}</p>
+                    <p class="text-xs text-gray-500 mt-1">By <span class="font-medium text-gray-700">{{ entry.actor_display_name or entry.actor_email }}</span>{% if entry.impersonator_display_name %} <span class="inline-flex items-center px-1.5 py-0.5 rounded bg-pink-100 text-pink-700 text-[10px] font-medium">impersonated by {{ entry.impersonator_display_name }}</span>{% endif %}</p>
                     {% endif %}
                     
                     {% if entry.changed_fields %}

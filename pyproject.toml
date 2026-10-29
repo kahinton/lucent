@@ -88,6 +88,18 @@ otel = [
     "opentelemetry-instrumentation-asyncpg>=0.65b0",
     "opentelemetry-instrumentation-logging>=0.65b0",
 ]
+# Optional native tool handlers. Deliberately NOT base dependencies: they are
+# pulled in only when a Docker build sets the matching LUCENT_TOOLS_ENABLE_*
+# build arg (see Dockerfile), so the default image stays lean and the
+# supply-chain surface of a deployment is unchanged unless it opts in.
+tools-documents = [
+    "pypdf>=6.1.0,<7.0",
+    "python-docx>=1.2.0,<2.0",
+    "openpyxl>=3.1.5,<4.0",
+]
+tools-images = [
+    "Pillow>=13.0.0,<14.0",
+]
 
 [project.scripts]
 lucent = "lucent.server:main"

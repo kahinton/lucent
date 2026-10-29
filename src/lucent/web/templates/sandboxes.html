@@ -36,10 +36,10 @@
     <!-- ═══════════════ REMOTES VIEW (Agent Control Protocol) ═══════════════ -->
     <div class="space-y-4">
         {% if remote_token %}
-        <div class="border border-amber-300 bg-amber-50 px-4 py-3 rounded-lg" role="alert">
-            <p class="text-sm font-semibold text-amber-900">Copy this token now — it will not be shown again.</p>
-            <p class="text-xs text-amber-800 mt-1">Give it to the remote agent as <code class="font-mono">LUCENT_REMOTE_TOKEN</code>.</p>
-            <pre class="mt-2 p-3 bg-white border border-amber-200 rounded font-mono text-xs overflow-x-auto select-all">{{ remote_token }}</pre>
+        <div class="border border-pink-300 bg-pink-50 px-4 py-3 rounded-lg" role="alert">
+            <p class="text-sm font-semibold text-pink-900">Copy this token now — it will not be shown again.</p>
+            <p class="text-xs text-pink-800 mt-1">Give it to the remote agent as <code class="font-mono">LUCENT_REMOTE_TOKEN</code>.</p>
+            <pre class="mt-2 p-3 bg-white border border-pink-200 rounded font-mono text-xs overflow-x-auto select-all">{{ remote_token }}</pre>
         </div>
         {% endif %}
 
@@ -176,7 +176,7 @@
                         <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">Owner: {{ tpl.owner_group_name }}</span>
                         {% endif %}
                     {% endif %}
-                    <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs font-medium {% if tpl.status == 'approved' %}bg-green-100 text-green-700{% elif tpl.status == 'proposed' %}bg-amber-100 text-amber-700{% elif tpl.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ tpl.status }}</span>
+                    <span class="inline-block mt-1 px-2 py-0.5 rounded text-xs font-medium {% if tpl.status == 'approved' %}bg-green-100 text-green-700{% elif tpl.status == 'proposed' %}bg-pink-100 text-pink-700{% elif tpl.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ tpl.status }}</span>
                     {% if tpl.description %}
                     <p class="text-xs text-gray-500 mt-0.5 line-clamp-2">{{ tpl.description }}</p>
                     {% endif %}
@@ -219,7 +219,7 @@
                 </div>
             </div>
             {% if tpl.status == 'proposed' %}
-            <div class="mt-3 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <div class="mt-3 border border-pink-200 bg-pink-50 px-3 py-2 text-xs text-pink-800">
                 Approval required before use.
             </div>
             {% endif %}
@@ -296,7 +296,7 @@
                         {% elif sb.status == 'creating' %}
                         <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700 font-medium">{{ sb.status }}</span>
                         {% elif sb.status == 'stopped' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-700 font-medium">{{ sb.status }}</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-700 font-medium">{{ sb.status }}</span>
                         {% elif sb.status == 'destroyed' %}
                         <span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-500 font-medium">{{ sb.status }}</span>
                         {% else %}
@@ -319,7 +319,7 @@
                             <button type="button" data-open-terminal="{{ sb.id }}" class="px-2.5 py-1 text-xs bg-gray-800 text-white rounded hover:bg-gray-700 font-medium">Terminal</button>
                             <form method="POST" action="/sandboxes/{{ sb.id }}/stop" class="inline">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button type="submit" class="px-2.5 py-1 text-xs bg-amber-50 text-amber-700 rounded hover:bg-amber-100 font-medium">Stop</button>
+                                <button type="submit" class="px-2.5 py-1 text-xs bg-pink-100 text-pink-700 rounded hover:bg-pink-200 font-medium">Stop</button>
                             </form>
                             <form method="POST" action="/sandboxes/{{ sb.id }}/destroy" class="inline" data-confirm="Destroy this sandbox?">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

@@ -8,6 +8,132 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Four managed-tool runtime kinds (`python`, `http`, `openapi`, `builtin`) and a
+  built-in tool catalog (migration 158).**
+  - **Only `python` needs a sandbox.** A deployment with
+    `features.sandboxes_enabled` off can now offer tools at all; the feature gate is
+    per-kind rather than a blanket refusal.
+  - **`http` and `openapi` execute in the server, behind one shared egress policy:**
+    the tool's own `allowed_hosts` plus SSRF validation on every redirect hop, no
+    HTTPS→HTTP downgrade, credential headers dropped on a cross-origin redirect (with
+    httpx's cookie jar disabled so `Set-Cookie` cannot re-attach them), and bounded
+    request/response bodies read as a stream.
+  - **`openapi` stores the document at approval time.** Fetching a spec per call
+    would let an approved tool change behaviour underneath the model and would turn
+    every invocation into a request to an endpoint the approver never saw.
+  - **`builtin` runs a handler from a reviewed catalog**, and its `input_schema` is
+    the catalog's — a definition cannot widen it. **Seven** handlers, chosen on one
+    rule: a handler earns a slot only if the model structurally cannot do the thing
+    or must not. `web_search`, `web_fetch`, `weather_forecast` (needs egress), plus
+    `pdf_extract_text`, `docx_extract_text`, `xlsx_read`, `image_info` (binary
+    parsing). Anything a model can do in a couple of lines of sandboxed code — date
+    math, arithmetic, JSON walking, regex, unit conversion, CSV, UUIDs — was
+    **cut**, along with the ~120 lines of ReDoS pattern analysis that only existed
+    to defend one of them. The four package-backed handlers are gated behind
+    `LUCENT_TOOLS_ENABLE_DOCUMENTS` / `LUCENT_TOOLS_ENABLE_IMAGES` build args and
+    report themselves as unavailable, with the flag needed, when absent.
+  - **Retired built-in tools are archived, not left callable.** Removing a handler
+    from the catalog previously left its row `active` and granted, so it failed at
+    call time with "no built-in tool named ...". The sync now archives any built-in
+    whose handler no longer exists (definition and run history preserved; a user's
+    instance tool of the same name is never touched).
+  - **The catalog syncs into every organization as built-in tools** and is attached
+    to the default `lucent` agent, so a fresh deployment is useful immediately.
+  - **New `list_tool_runtime_kinds` MCP tool** and
+    `GET /api/definitions/tools/runtime-kinds` so both agents and the UI can
+    discover what a build supports.
+- **Instance catalog: hyperadmins can provision tools into an organization
+  (migration 160).** This is how you host a tool and offer it to tenants without
+  asking each one to author it — and the foundation a marketplace would sit on.
+  - **A separate API surface**, not part of `/api/definitions`. Those routes answer
+    *"what may I use in my organization?"* and derive the tenant from the caller's
+    membership; these answer *"what am I pushing into someone else's organization?"*
+    They live under `/api/organizations/{id}/catalog/...`, require
+    `org.manage.instance`, and a tenant owner is rejected (tested).
+  - **One row per target organization**, deliberately. A single shared `NULL`-org
+    row would be cheaper and worse: every authorization predicate would have to
+    special-case `NULL`, and a per-tenant revoke would become a visibility flag some
+    query might miss. One row per tenant keeps the boundary in the column.
+  - **Provisioned rows behave like shipped built-ins** — `scope='built-in'`, so they
+    are consent-exempt, readable org-wide, daemon-protected, and not editable by the
+    tenant.
+  - **`origin='operator'` keeps them safe from the disk sync.** Without it, a row
+    sharing a name with a file on disk would be overwritten on the next restart, and
+    a name the disk catalogue does not carry would be archived as "retired". Both
+    failures are silent; both are covered by tests, and every built-in sync
+    (skills, agents, managed tools, connectors) plus the retired-tool prune now
+    reconciles `origin='disk'` only.
+  - **Provisioning grants nothing.** It makes a connector available in a tenant; a
+    tenant admin still decides which agents may use it, users still consent, and each
+    user supplies their own credential via `credential_slots`.
+- **Built-in MCP connectors with per-user credentials (migration 159).** A vendor
+  that publishes a *hosted* MCP server at a stable URL now ships as a built-in
+  connector: seeded into every organization, already active, granted to the default
+  agent, and requiring **no administrator**.
+  - **The endpoint is shared; the credential is not.** A shipped connector stores no
+    token — only a `secret://` reference plus a declared `credential_slots` entry.
+    Resolution is clearance-driven **for the calling user**: their own secret first,
+    then a group share, then an explicit grant. So "add your GitHub PAT and it works"
+    is literal, and an admin can instead add one organization-wide secret and the
+    whole team shares it.
+  - **GitHub ships as the read-only endpoint** (`api.githubcopilot.com/mcp/readonly`)
+    with `github.mcp.token`. A built-in that can push to every repo the token reaches
+    is a poor first-run default; an owner can point it at `/mcp/` for writes. Sentry
+    ships alongside it.
+  - **The connector page shows your access, computed from the same resolution the
+    runtime uses** — green *Connected*, or red *Needs your token* with the exact
+    secret key and a link to the vendor's token page. It cannot claim readiness when a
+    call would fail.
+  - **`mcp_server_names` frontmatter** grants shipped connectors to an agent, mirroring
+    `tool_names`.
+- **Curated connector catalog: 24 verified remote MCP servers across 9 categories.**
+  The "Connect Tool Provider" modal now offers a service picker instead of
+  expecting the user to know that a company publishes an MCP server or to guess its
+  URL — Zapier, Stripe, PayPal, Linear, Notion, Atlassian, Asana, monday, ClickUp,
+  GitHub, GitLab, Cloudflare, Netlify, Vercel, Supabase, Neon, HubSpot, Slack, Box,
+  Sentry, PagerDuty, Make, Google Maps, and Twilio.
+  - **Every endpoint was verified against the vendor's own documentation.** Roughly
+    60% of the consumer services surveyed have no official remote server; those are
+    absent rather than guessed, and documented as such, because a plausible URL that
+    404s fails *after* the user has committed.
+  - **Entries are ordered and badged by onboarding cost**, which is what actually
+    decides whether connecting is a click or an admin project: `sign_in` (DCR/CIMD
+    — nothing to configure) sorts first, then `api_key`, then `admin_app` (the vendor
+    requires a pre-registered OAuth application). Admin-gated entries carry a
+    banner naming what the admin must do, so nobody starts a flow they cannot
+    finish.
+  - **A preset only fills the form.** The posted URL is discarded and the endpoint is
+    resolved server-side from the slug, so a tampered field cannot make a preset
+    claim a different host. Read-only variants (`Linear`, `GitHub`) are offered as a
+    checkbox.
+- **MCP `sse` transport.** Legacy HTTP+SSE servers — still a large share of hosted
+  MCP endpoints — are now connectable in addition to Streamable HTTP and stdio.
+- **Widened SSRF blocklist.** IPv6 unique-local (`fc00::/7`), carrier-grade NAT,
+  `0.0.0.0/8`, benchmarking, NAT64, and multicast/reserved ranges are now blocked.
+  IPv6 ULA in particular was reachable before: `http://[fd00::1]/` resolved to an
+  internal host.
+
+### Fixed
+
+- **A missing per-user credential no longer takes down the whole chat turn.** Config
+  assembly raised a bare `KeyError` when a `secret://` reference could not resolve,
+  so a user who had not yet added their token lost *every* tool in the turn and got
+  an error that named no fix. The connector is now skipped, the rest of the tool
+  surface survives, and the model is told which connector needs which secret so it
+  asks the user to add it instead of reporting a capability gap.
+- **The daemon had the same defect, plus a transport bug.** A missing credential
+  aborted task dispatch entirely, and an `sse` MCP connector fell through into the
+  stdio branch and tried to spawn a command that does not exist.
+- **Agent MCP server URLs from the Copilot, Claude Code, and Codex engines are now
+  SSRF-validated.** Validation previously lived only inside the LangChain bridge;
+  the other engines receive the config dict and open the connection themselves, so an
+  `http`/`sse` server URL reached an unvalidated server-side request path.
+- **Editing a tool in the web UI no longer rewrites its kind.** `runtime_type` was
+  hardcoded to `python` on update, so editing any declarative or built-in tool either
+  failed validation or silently converted it into a sandboxed Python tool.
+- **Managed-tool list payloads no longer carry a full OpenAPI document.** The list
+  endpoint strips `runtime_config.spec`; the detail endpoint still returns it.
+
 - **Self-serve signup, invitation links, OIDC/GitHub/SAML single sign-on, and
   SCIM 2.0 provisioning (migration 157).** Four user-management gaps closed in
   one wave, all sharing the property that a party outside the tenant asserts an

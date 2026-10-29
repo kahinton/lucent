@@ -46,7 +46,36 @@ _BLOCKED_NETWORKS = [
     ipaddress.ip_network("169.254.169.254/32"),
     # IPv4-mapped IPv6 loopback
     ipaddress.ip_network("::ffff:127.0.0.0/104"),
+    # "This network" and broadcast forms. 0.0.0.0 resolves to the local host on
+    # Linux, so it is a loopback alias, not a public address.
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("255.255.255.255/32"),
+    # IPv6 unspecified / IPv4-compatible mapped space
+    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("::ffff:0.0.0.0/96"),
+    # IPv6 unique local addresses (RFC 4193). These are the IPv6 equivalent of
+    # RFC 1918 and were missing: `http://[fd00::1]/` reached internal hosts.
+    ipaddress.ip_network("fc00::/7"),
+    # Carrier-grade NAT (RFC 6598) — routable inside many cloud VPCs.
+    ipaddress.ip_network("100.64.0.0/10"),
+    # Carrier-grade NAT (RFC 6598) — routable inside many cloud VPCs.
+    ipaddress.ip_network("100.64.0.0/10"),
+    # Benchmarking range (RFC 2544). Some clouds route it to internal hosts.
+    ipaddress.ip_network("198.18.0.0/15"),
+    # Multicast and reserved. Link-local multicast is the mDNS/SSDP discovery
+    # surface; SSDP on 239.255.255.250 is an amplifier.
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("ff00::/8"),
+    # NAT64 well-known prefix: `64:ff9b::/96` embeds an IPv4 address, so
+    # `64:ff9b::a9fe:a9fe` is 169.254.169.254.
+    ipaddress.ip_network("64:ff9b::/96"),
 ]
+
+# Deliberately *not* blocked: the documentation prefixes (192.0.2.0/24,
+# 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32). They are not routable, so
+# blocking them would add no security while making the function unusable for
+# anyone testing against the addresses the RFCs reserve for exactly that.
+
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
@@ -69,13 +98,21 @@ def _get_allowlist() -> set[str]:
 
 
 def _is_ip_blocked(ip_str: str) -> bool:
-    """Return True if *ip_str* falls within any blocked network."""
+    """Return True if *ip_str* must not be contacted."""
     try:
         addr = ipaddress.ip_address(ip_str)
     except ValueError:
         # If we can't parse it, block it defensively.
         return True
-    return any(addr in net for net in _BLOCKED_NETWORKS)
+    if any(addr in net for net in _BLOCKED_NETWORKS):
+        return True
+    # Defence in depth for anything the explicit list does not name. These
+    # predicates are *added* to the list, never a replacement for it: they are
+    # intentionally narrower than `is_global` so the documentation prefixes (used
+    # by the RFCs, by tests, and by this project's own fixtures) stay usable.
+    if addr.is_multicast or addr.is_unspecified:
+        return True
+    return False
 
 
 def validate_url(url: str, *, purpose: str = "MCP server") -> str:

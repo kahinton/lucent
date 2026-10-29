@@ -1,10 +1,10 @@
 """Built-in definition syncing.
 
-Seeds the database with the preconfigured skills, agents, hooks, and sandbox
-templates that ship in ``.github/``. This is the single source of truth for that
-logic so it can run both at server startup and immediately when a new
-organization is created (e.g. first-run user registration), rather than relying
-on an arbitrarily-selected organization existing when the server boots.
+Seeds the database with the preconfigured skills, agents, hooks, managed tools,
+and sandbox templates that ship in ``.github/``. This is the single source of
+truth for that logic so it can run both at server startup and immediately when
+a new organization is created (e.g. first-run user registration), rather than
+relying on an arbitrarily-selected organization existing when the server boots.
 """
 
 from __future__ import annotations
@@ -42,7 +42,14 @@ async def sync_built_in_definitions_for_org(pool, org_id: str) -> dict[str, int]
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
     repo = DefinitionRepository(pool)
-    summary = {"skills": 0, "agents": 0, "hooks": 0, "sandbox_templates": 0}
+    summary = {
+        "skills": 0,
+        "agents": 0,
+        "hooks": 0,
+        "managed_tools": 0,
+        "mcp_connectors": 0,
+        "sandbox_templates": 0,
+    }
 
     github = _repo_github_dir()
 
@@ -52,6 +59,11 @@ async def sync_built_in_definitions_for_org(pool, org_id: str) -> dict[str, int]
     if skills_dir:
         summary["skills"] = await repo.sync_built_in_skills(org_id, str(skills_dir))
 
+    # Managed tools come before agents: an agent's frontmatter declares tool
+    # names, and those names have to resolve to rows before the agent sync tries
+    # to grant them.
+    summary["managed_tools"] = await repo.sync_built_in_managed_tools(org_id)
+
     agents_dir = _first_existing_dir(
         [Path("/app/.github/agents/definitions"), github / "agents" / "definitions"]
     )
@@ -59,6 +71,12 @@ async def sync_built_in_definitions_for_org(pool, org_id: str) -> dict[str, int]
         summary["agents"] = await repo.sync_built_in_agents(org_id, str(agents_dir))
 
     summary["hooks"] = await repo.sync_built_in_hooks(org_id)
+
+    # Hosted connectors are seeded as built-in MCP server definitions. They carry
+    # no credential of their own: each declares the secret keys it needs, and the
+    # value is resolved per calling user. This is what makes "add your GitHub PAT
+    # and it works" possible without an admin creating anything.
+    summary["mcp_connectors"] = await repo.sync_built_in_mcp_connectors(org_id)
 
     templates_dir = _first_existing_dir(
         [Path("/app/.github/sandbox-templates"), github / "sandbox-templates"]

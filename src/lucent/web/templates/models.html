@@ -28,8 +28,8 @@
 {% endif %}
 
 {% if request.query_params.get('warning') %}
-<div class="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
-    <p class="text-sm font-medium text-amber-800">{{ request.query_params.get('warning') }}</p>
+<div class="mb-4 bg-pink-50 border border-pink-200 rounded-xl p-4">
+    <p class="text-sm font-medium text-pink-800">{{ request.query_params.get('warning') }}</p>
 </div>
 {% endif %}
 
@@ -60,7 +60,7 @@
                         {% if provider_config.source == 'database' %}
                         <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">saved</span>
                         {% elif provider_config.source == 'environment' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">env</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-800">env</span>
                         {% endif %}
                     </div>
                     <p class="mt-1 text-sm text-gray-600">{{ provider_config.credential_label }}</p>
@@ -131,7 +131,7 @@
                         {% if engine.credential_status.source == 'database' %}
                         <span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">saved</span>
                         {% elif engine.credential_status.source == 'environment' %}
-                        <span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">env</span>
+                        <span class="px-2 py-0.5 rounded text-xs bg-pink-100 text-pink-800">env</span>
                         {% endif %}
                     </div>
                     {% if engine.credential_status.env_vars %}
@@ -259,7 +259,7 @@
                                 {% if model.category == 'reasoning' %}bg-purple-100 text-purple-700
                                 {% elif model.category == 'agentic' %}bg-blue-100 text-blue-700
                                 {% elif model.category == 'fast' %}bg-green-100 text-green-700
-                                {% elif model.category == 'visual' %}bg-amber-100 text-amber-700
+                                {% elif model.category == 'visual' %}bg-pink-100 text-pink-700
                                 {% elif model.category == 'frontier' %}bg-rose-100 text-rose-700
                                 {% elif model.category == 'research' %}bg-teal-100 text-teal-700
                                 {% elif model.category == 'decision' %}bg-indigo-100 text-indigo-700

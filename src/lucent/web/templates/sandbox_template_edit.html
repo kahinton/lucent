@@ -23,7 +23,7 @@
 
     <div class="bg-white rounded-lg border border-gray-200 p-6">
         <div class="flex items-center justify-between gap-3 mb-4">
-            <span class="px-2.5 py-1 rounded text-sm font-medium {% if template.status == 'approved' %}bg-green-100 text-green-700{% elif template.status == 'proposed' %}bg-amber-100 text-amber-700{% elif template.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ template.status }}</span>
+            <span class="px-2.5 py-1 rounded text-sm font-medium {% if template.status == 'approved' %}bg-green-100 text-green-700{% elif template.status == 'proposed' %}bg-pink-100 text-pink-700{% elif template.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ template.status }}</span>
             {% if template.status == 'proposed' and user.role.value in ('admin', 'owner') %}
             <div class="flex gap-2">
                 <form method="POST" action="/sandboxes/templates/{{ template.id }}/approve">
@@ -38,9 +38,9 @@
             {% endif %}
         </div>
         {% if template.status == 'proposed' %}
-        <div class="mb-4 border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        <div class="mb-4 border border-pink-200 bg-pink-50 px-4 py-3 text-sm text-pink-900">
             <p class="font-medium">Approval required before this template can launch or be assigned to a task.</p>
-            {% if template.proposal_reason %}<p class="mt-1 text-amber-800">{{ template.proposal_reason }}</p>{% endif %}
+            {% if template.proposal_reason %}<p class="mt-1 text-pink-800">{{ template.proposal_reason }}</p>{% endif %}
         </div>
         {% elif template.status == 'rejected' %}
         <div class="mb-4 border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">This template is rejected and cannot launch or be assigned to a task.</div>

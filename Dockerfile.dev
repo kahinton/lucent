@@ -2,6 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Optional native tool handlers — same gating as the production Dockerfile.
+# Defaults keep the dev image's package set unchanged.
+ARG LUCENT_TOOLS_ENABLE_DOCUMENTS=0
+ARG LUCENT_TOOLS_ENABLE_IMAGES=0
+ENV LUCENT_TOOLS_ENABLE_DOCUMENTS=${LUCENT_TOOLS_ENABLE_DOCUMENTS} \
+    LUCENT_TOOLS_ENABLE_IMAGES=${LUCENT_TOOLS_ENABLE_IMAGES}
+
 # Install runtime + build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -23,8 +30,21 @@ COPY .github/ /app/.github/
 # Keep pip patched in development images as well as local virtualenvs.
 RUN python -m pip install --no-cache-dir --upgrade pip
 
-# Install in editable mode so volume-mounted source changes are live
-RUN pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e .
+# Install in editable mode so volume-mounted source changes are live.
+# Extras are assembled first so the optional tool packages follow the same
+# LUCENT_TOOLS_ENABLE_* gating as the production image; with both flags at
+# their default of 0 the specifier is exactly `.[dev]`, as before. The
+# `|| pip install -e .` fallback only applies to that default case — if an
+# operator explicitly opted into extras, a resolution failure must be visible
+# rather than silently producing an image without the requested tools.
+RUN EXTRAS="dev" ; \
+    if [ "$LUCENT_TOOLS_ENABLE_DOCUMENTS" = "1" ]; then EXTRAS="$EXTRAS,tools-documents" ; fi ; \
+    if [ "$LUCENT_TOOLS_ENABLE_IMAGES" = "1" ]; then EXTRAS="$EXTRAS,tools-images" ; fi ; \
+    if [ "$EXTRAS" = "dev" ]; then \
+        pip install --no-cache-dir -e ".[dev]" 2>/dev/null || pip install --no-cache-dir -e . ; \
+    else \
+        pip install --no-cache-dir -e ".[${EXTRAS}]" ; \
+    fi
 
 EXPOSE 8766
 

@@ -15,7 +15,7 @@
 </div>
 {% endif %}
 {% if request.query_params.get('warning') %}
-<div class="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="alert">
+<div class="mb-4 rounded-lg border border-pink-200 bg-pink-50 p-3 text-sm text-pink-800" role="alert">
     {{ request.query_params.get('warning') }}
 </div>
 {% endif %}
@@ -25,9 +25,9 @@
         <div class="flex-1 min-w-0">
             <div class="flex items-center gap-3 flex-wrap">
                 <h1 class="text-2xl font-bold text-gray-900">{{ definition.name }}</h1>
-                <span class="px-2.5 py-1 rounded text-sm font-medium {% if definition.status == 'active' %}bg-green-100 text-green-700{% elif definition.status == 'proposed' %}bg-amber-100 text-amber-700{% elif definition.status == 'owner_approved' %}bg-blue-100 text-blue-700{% elif definition.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ definition.status | replace('_', ' ') }}</span>
+                <span class="px-2.5 py-1 rounded text-sm font-medium {% if definition.status == 'active' %}bg-green-100 text-green-700{% elif definition.status == 'proposed' %}bg-pink-100 text-pink-700{% elif definition.status == 'owner_approved' %}bg-blue-100 text-blue-700{% elif definition.status == 'rejected' %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">{{ definition.status | replace('_', ' ') }}</span>
                 <span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500 capitalize">{{ definition_type | replace('-', ' ') }}</span>
-                {% if definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'persona' %}<span class="px-2.5 py-1 rounded text-sm bg-pink-50 text-pink-700">persona</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'hybrid' %}<span class="px-2.5 py-1 rounded text-sm bg-violet-50 text-violet-700">hybrid</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'functional' %}<span class="px-2.5 py-1 rounded text-sm bg-slate-100 text-slate-600">functional</span>{% endif %}
+                {% if definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'persona' %}<span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-600">persona</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'hybrid' %}<span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-600">hybrid</span>{% elif definition_type == 'agent' and definition.proposal_evidence and definition.proposal_evidence.agent_kind == 'functional' %}<span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-600">functional</span>{% endif %}
                 {% if definition.scope == 'built-in' %}<span class="px-2.5 py-1 rounded text-sm bg-indigo-100 text-indigo-700 font-medium">built-in</span>{% elif definition.scope == 'instance' %}<span class="px-2.5 py-1 rounded text-sm bg-gray-100 text-gray-500">instance</span>{% endif %}
                 {% if definition.scope != 'built-in' %}
                     {% if definition.owner_user_name %}
@@ -52,7 +52,7 @@
             {% endif %}
         </div>
     </div>
-    <div class="flex flex-wrap gap-x-6 gap-y-1 mt-4 text-xs text-gray-400">
+    <div class="flex flex-wrap gap-x-6 gap-y-1 mt-4 text-xs text-gray-500">
         <span>Created {{ definition.created_at.strftime('%b %d, %Y at %H:%M') if definition.created_at else 'unknown' }}</span>
         {% if definition.approved_at %}<span>Approved {{ definition.approved_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
         {% if definition.owner_approved_at %}<span>Owner approved{% if definition.owner_approved_by_name %} by {{ definition.owner_approved_by_name }}{% endif %} {{ definition.owner_approved_at.strftime('%b %d, %Y at %H:%M') }}</span>{% endif %}
@@ -64,7 +64,7 @@
 {% if definition_type == 'agent' %}
 <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6">
     <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Skills</h2>
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Granted Skills</h2>
         {% if skills %}
         <div class="space-y-2 mb-3">
             {% for skill in skills %}
@@ -82,7 +82,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="text-sm text-gray-400 italic mb-3">No skills granted.</p>
+        <p class="text-sm text-gray-500 italic mb-3">No skills granted.</p>
         {% endif %}
         {% if all_skills %}
         <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-skill" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
@@ -97,7 +97,7 @@
     </div>
 
     <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Custom Tools</h2>
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Granted Custom Tools</h2>
         {% if managed_tools %}
         <div class="space-y-2 mb-3">
             {% for tool in managed_tools %}
@@ -105,7 +105,7 @@
                 <a href="/definitions/tools/{{ tool.id }}" class="flex items-center gap-2 flex-1 min-w-0">
                     <svg class="w-4 h-4 text-orange-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.472-2.472a3.375 3.375 0 0 0-4.773-4.773L6.75 10.294m4.67 4.876-4.875 4.875a2.121 2.121 0 0 1-3-3l4.875-4.875"/></svg>
                     <span class="text-sm font-medium text-gray-800 truncate">{{ tool.name }}</span>
-                    <span class="text-xs text-gray-400 font-mono">{{ tool.runtime_type }}</span>
+                    <span class="text-xs text-gray-500 font-mono">{{ tool.runtime_type }}</span>
                     {% if tool.scope == 'built-in' %}<span class="px-1.5 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700">built-in</span>{% endif %}
                 </a>
                 <form method="POST" action="/definitions/agents/{{ definition.id }}/revoke-tool/{{ tool.id }}" class="opacity-0 group-hover:opacity-100 transition-opacity">
@@ -116,7 +116,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="text-sm text-gray-400 italic mb-3">No custom tools granted.</p>
+        <p class="text-sm text-gray-500 italic mb-3">No custom tools granted.</p>
         {% endif %}
         {% if all_tools %}
         <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-tool" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
@@ -125,21 +125,21 @@
                 <option value="">Add a tool...</option>
                 {% for t in all_tools %}{% if t.id|string not in granted_tool_ids %}<option value="{{ t.id }}">{{ t.name }} ({{ t.runtime_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-700">Grant</button>
         </form>
         {% endif %}
     </div>
 
     <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted Hooks</h2>
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Granted Hooks</h2>
         {% if hooks %}
         <div class="space-y-2 mb-3">
             {% for hook in hooks %}
-            <div class="flex items-center justify-between p-2 rounded-md border border-gray-100 group hover:border-emerald-200">
+            <div class="group flex items-center justify-between rounded-md border border-gray-100 p-2 hover:border-gray-300">
                 <a href="/definitions/hooks/{{ hook.id }}" class="flex items-center gap-2 flex-1 min-w-0">
                     <svg class="w-4 h-4 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a7.723 7.723 0 010 .255c-.007.379.138.752.43.992l1.005.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.379-.138-.752-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.28z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
                     <span class="text-sm font-medium text-gray-800 truncate">{{ hook.name }}</span>
-                    <span class="text-xs text-gray-400 font-mono">{{ hook.action_type }}</span>
+                    <span class="text-xs text-gray-500 font-mono">{{ hook.action_type }}</span>
                     {% if hook.scope == 'built-in' %}<span class="px-1.5 py-0.5 rounded text-xs bg-indigo-100 text-indigo-700">built-in</span>{% endif %}
                 </a>
                 <form method="POST" action="/definitions/agents/{{ definition.id }}/revoke-hook/{{ hook.id }}" class="opacity-0 group-hover:opacity-100 transition-opacity">
@@ -150,7 +150,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="text-sm text-gray-400 italic mb-3">No hooks granted.</p>
+        <p class="text-sm text-gray-500 italic mb-3">No hooks granted.</p>
         {% endif %}
         {% if all_hooks %}
         <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-hook" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
@@ -159,13 +159,13 @@
                 <option value="">Add a hook...</option>
                 {% for h in all_hooks %}{% if h.id|string not in granted_hook_ids %}<option value="{{ h.id }}">{{ h.name }} ({{ h.action_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-700">Grant</button>
         </form>
         {% endif %}
     </div>
 
     <div class="bg-white rounded-lg border border-gray-200 p-5 min-w-0">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Granted External Providers</h2>
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Granted External Providers</h2>
         {% if mcp_servers %}
         <div class="space-y-2 mb-3">
             {% for mcp in mcp_servers %}
@@ -174,7 +174,7 @@
                     <a href="/definitions/mcp-servers/{{ mcp.id }}" class="flex items-center gap-2 flex-1">
                         <svg class="w-4 h-4 text-purple-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/></svg>
                         <span class="text-sm font-medium text-gray-800">{{ mcp.name }}</span>
-                        <span class="text-xs text-gray-400 font-mono">{{ mcp.server_type }}</span>
+                        <span class="text-xs text-gray-500 font-mono">{{ mcp.server_type }}</span>
                     </a>
                     <form method="POST" action="/definitions/agents/{{ definition.id }}/revoke-mcp/{{ mcp.id }}" class="opacity-0 group-hover:opacity-100 transition-opacity">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -204,7 +204,7 @@
                         {% set discovered_names = mcp.discovered_tools | map(attribute='name') | list %}
                         <div id="tools-checklist-{{ mcp.id }}" class="{% if mcp.allowed_tools is none %}opacity-40 pointer-events-none{% endif %}">
                             <div class="flex gap-1 mb-1">
-                                <button type="button" data-tool-action="select-all" data-server-id="{{ mcp.id }}" class="text-xs text-purple-600 hover:text-purple-800 px-1.5 py-0.5 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
+                                <button type="button" data-tool-action="select-all" data-server-id="{{ mcp.id }}" class="rounded border border-gray-300 px-1.5 py-0.5 text-xs text-gray-600 transition-colors hover:border-primary-400 hover:text-primary-700">Select All</button>
                                 <button type="button" data-tool-action="clear-all" data-server-id="{{ mcp.id }}" class="text-xs text-gray-500 hover:text-gray-700 px-1.5 py-0.5 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
                             </div>
                             <div class="space-y-0.5 max-h-48 overflow-y-auto border border-gray-100 rounded p-1.5 mb-2">
@@ -216,7 +216,7 @@
                                            {% if mcp.allowed_tools is none or (mcp.allowed_tools and tool.name in mcp.allowed_tools) %}checked{% endif %}>
                                     <div class="min-w-0 flex-1">
                                         <span class="text-xs font-medium text-gray-800">{{ tool.name }}</span>
-                                        {% if tool.description %}<p class="text-xs text-gray-400 leading-tight truncate" title="{{ tool.description }}">{{ tool.description }}</p>{% endif %}
+                                        {% if tool.description %}<p class="text-xs text-gray-500 leading-tight truncate" title="{{ tool.description }}">{{ tool.description }}</p>{% endif %}
                                     </div>
                                 </label>
                                 {% endfor %}
@@ -230,7 +230,7 @@
                                     <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                         value="{{ tool_name }}" data-tool-action="update-summary" data-server-id="{{ mcp.id }}">
                                 <span class="text-xs font-medium text-gray-800">{{ tool_name }}</span>
-                                <span class="text-xs text-gray-400 italic">(custom)</span>
+                                <span class="text-xs text-gray-500 italic">(custom)</span>
                                 <button type="button" data-tool-action="remove-custom" data-server-id="{{ mcp.id }}" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
                             </label>
                             {% endif %}
@@ -241,7 +241,7 @@
                         {% endif %}
                         {% else %}
                         <div id="tools-checklist-{{ mcp.id }}" class="{% if mcp.allowed_tools is none %}opacity-40 pointer-events-none{% endif %}">
-                            <p class="text-xs text-gray-400 italic mb-2">No tools discovered — <a href="/definitions/mcp-servers/{{ mcp.id }}" class="text-purple-600 hover:underline">discover tools on the MCP server page</a></p>
+                            <p class="text-xs text-gray-500 italic mb-2">No tools discovered — <a href="/definitions/mcp-servers/{{ mcp.id }}" class="text-purple-600 hover:underline">discover tools on the MCP server page</a></p>
                         </div>
                         {% if mcp.allowed_tools %}
                         <div id="custom-tools-{{ mcp.id }}" class="space-y-0.5 mb-2">
@@ -250,7 +250,7 @@
                                     <input type="checkbox" checked class="tool-cb tool-cb-{{ mcp.id }} rounded border-gray-300 text-purple-600 focus:ring-purple-500"
                                         value="{{ tool_name }}" data-tool-action="update-summary" data-server-id="{{ mcp.id }}">
                                 <span class="text-xs font-medium text-gray-800">{{ tool_name }}</span>
-                                <span class="text-xs text-gray-400 italic">(custom)</span>
+                                <span class="text-xs text-gray-500 italic">(custom)</span>
                                 <button type="button" data-tool-action="remove-custom" data-server-id="{{ mcp.id }}" class="text-xs text-red-400 hover:text-red-600 ml-auto">&times;</button>
                             </label>
                             {% endfor %}
@@ -261,10 +261,10 @@
                         {% endif %}
                         <div class="flex gap-1 mt-2 {% if mcp.allowed_tools is none %}hidden{% endif %}" id="custom-tool-section-{{ mcp.id }}">
                             <input id="custom-input-{{ mcp.id }}" class="flex-1 px-2 py-1 border border-gray-200 rounded text-xs font-mono" placeholder="Custom tool name...">
-                            <button type="button" data-tool-action="add-custom" data-server-id="{{ mcp.id }}" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Add</button>
+                            <button type="button" data-tool-action="add-custom" data-server-id="{{ mcp.id }}" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 transition-colors hover:border-primary-400 hover:text-primary-700">Add</button>
                         </div>
                         <div class="mt-2">
-                            <button type="submit" class="text-xs text-purple-600 hover:text-purple-800 px-3 py-1 border border-purple-200 rounded hover:bg-purple-50 font-medium">Save</button>
+                            <button type="submit" class="rounded border border-gray-300 px-3 py-1 text-xs font-medium text-gray-600 transition-colors hover:border-primary-400 hover:text-primary-700">Save</button>
                         </div>
                     </form>
                 </div>
@@ -272,7 +272,7 @@
             {% endfor %}
         </div>
         {% else %}
-        <p class="text-sm text-gray-400 italic mb-3">No external tool providers granted.</p>
+        <p class="text-sm text-gray-500 italic mb-3">No external tool providers granted.</p>
         {% endif %}
         {% if all_mcp %}
         <form method="POST" action="/definitions/agents/{{ definition.id }}/grant-mcp" class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
@@ -281,7 +281,7 @@
                 <option value="">Add an MCP server...</option>
                 {% for m in all_mcp %}{% if m.id|string not in granted_mcp_ids %}<option value="{{ m.id }}">{{ m.name }} ({{ m.server_type }})</option>{% endif %}{% endfor %}
             </select>
-            <button type="submit" class="shrink-0 px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Grant</button>
+            <button type="submit" class="shrink-0 rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-700">Grant</button>
         </form>
         {% endif %}
     </div>
@@ -291,11 +291,11 @@
    for you until you approve them, so they are surfaced here as an explicit
    decision rather than silently appearing in — or vanishing from — the lists. #}
 {% if pending_capabilities %}
-<div class="bg-amber-50 border border-amber-200 rounded-lg p-5 mb-6">
+<div class="bg-pink-50 border border-pink-200 rounded-lg p-5 mb-6">
     <div class="flex flex-wrap items-start justify-between gap-3 mb-3">
         <div class="min-w-0">
-            <h2 class="text-sm font-semibold text-amber-800 uppercase tracking-wider">Awaiting your approval</h2>
-            <p class="text-xs text-amber-700 mt-1">
+            <h2 class="text-sm font-semibold text-pink-800 uppercase tracking-wider">Awaiting your approval</h2>
+            <p class="text-xs text-pink-700 mt-1">
                 These are attached to this agent by other people. They stay inactive for you until you approve them.
             </p>
         </div>
@@ -308,13 +308,13 @@
             <form method="POST" action="/definitions/agents/{{ definition.id }}/consent/bulk">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="decision" value="declined">
-                <button type="submit" class="px-3 py-1.5 text-sm bg-white text-amber-800 border border-amber-300 rounded-md hover:bg-amber-100 font-medium">Decline all</button>
+                <button type="submit" class="px-3 py-1.5 text-sm bg-white text-pink-800 border border-pink-300 rounded-md hover:bg-pink-100 font-medium">Decline all</button>
             </form>
         </div>
     </div>
     <div class="space-y-2">
         {% for item in pending_capabilities %}
-        <div class="flex flex-wrap items-center justify-between gap-2 bg-white p-2 rounded-md border border-amber-100">
+        <div class="flex flex-wrap items-center justify-between gap-2 bg-white p-2 rounded-md border border-pink-200">
             <div class="min-w-0 flex-1">
                 <span class="text-sm font-medium text-gray-800">{{ item.capability_name }}</span>
                 <span class="ml-2 px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600">{{ item.capability_type | replace('_', ' ') }}</span>
@@ -326,7 +326,7 @@
                     <input type="hidden" name="capability_type" value="{{ item.capability_type }}">
                     <input type="hidden" name="capability_id" value="{{ item.capability_id }}">
                     <input type="hidden" name="decision" value="approved">
-                    <button type="submit" class="px-3 py-1 text-xs bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Approve</button>
+                    <button type="submit" class="rounded-lg bg-primary-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-primary-700">Approve</button>
                 </form>
                 <form method="POST" action="/definitions/agents/{{ definition.id }}/consent">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -344,7 +344,7 @@
 
 {% if declined_capabilities %}
 <div class="bg-white border border-gray-200 rounded-lg p-5 mb-6">
-    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-1">Declined by you</h2>
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-1">Declined by you</h2>
     <p class="text-xs text-gray-500 mb-3">These stay inactive for you. Approving one turns it back on for your runs only.</p>
     <div class="space-y-2">
         {% for item in declined_capabilities %}
@@ -358,7 +358,7 @@
                 <input type="hidden" name="capability_type" value="{{ item.capability_type }}">
                 <input type="hidden" name="capability_id" value="{{ item.capability_id }}">
                 <input type="hidden" name="decision" value="approved">
-                <button type="submit" class="px-3 py-1 text-xs bg-emerald-50 text-emerald-700 rounded-md hover:bg-emerald-100 font-medium">Re-approve</button>
+                <button type="submit" class="rounded-lg bg-primary-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-primary-700">Re-approve</button>
             </form>
         </div>
         {% endfor %}
@@ -368,25 +368,53 @@
 {% endif %}
 
 {% if definition_type == 'mcp-server' %}
+{% if credential_status %}
+<div class="rounded-lg border {% if credential_status | selectattr('resolved', 'equalto', false) | selectattr('required') | list %}border-pink-300 bg-pink-50{% else %}border-gray-200 bg-white{% endif %} p-5 mb-6">
+    <h2 class="text-sm font-semibold uppercase tracking-wider {% if credential_status | selectattr('resolved', 'equalto', false) | selectattr('required') | list %}text-pink-800{% else %}text-emerald-800{% endif %} mb-2">Your access to this connector</h2>
+    <p class="text-xs {% if credential_status | selectattr('resolved', 'equalto', false) | selectattr('required') | list %}text-pink-800{% else %}text-emerald-800{% endif %} mb-3">
+        This connector is shared with your organization, but each person connects with their own credential. Values are never stored on this definition.
+    </p>
+    <ul class="space-y-2">
+        {% for slot in credential_status %}
+        <li class="rounded-md bg-white/70 border border-white px-3 py-2">
+            <div class="flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <p class="text-sm font-medium text-gray-900">{{ slot.label or slot.name }}</p>
+                    <p class="text-xs text-gray-500 mt-0.5">Add a secret named <code class="px-1 py-0.5 bg-gray-100 rounded font-mono">{{ slot.secret_key }}</code> in Settings → Secrets.</p>
+                    {% if slot.help %}<p class="text-xs text-gray-600 mt-1">{{ slot.help }}</p>{% endif %}
+                </div>
+                <span class="shrink-0 px-2 py-0.5 rounded text-xs font-medium {% if slot.resolved %}bg-emerald-100 text-emerald-800{% elif slot.required %}bg-red-100 text-red-700{% else %}bg-gray-100 text-gray-600{% endif %}">
+                    {% if slot.resolved %}Connected{% elif slot.required %}Needs your token{% else %}Optional{% endif %}
+                </span>
+            </div>
+            {% if slot.create_url and not slot.resolved %}
+            <a href="{{ slot.create_url }}" target="_blank" rel="noopener noreferrer" class="mt-1 inline-block text-xs text-primary-600 hover:underline">Create this credential</a>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    <a href="/settings" class="mt-3 inline-block text-xs font-medium text-primary-600 hover:underline">Open Settings to add your secret →</a>
+</div>
+{% endif %}
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
-    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Connection Details</h2>
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Connection Details</h2>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div><dt class="text-xs font-medium text-gray-400 uppercase">Server Type</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.server_type }}</dd></div>
-        {% if definition.url %}<div><dt class="text-xs font-medium text-gray-400 uppercase">URL</dt><dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ definition.url }}</dd></div>{% endif %}
-        {% if definition.command %}<div><dt class="text-xs font-medium text-gray-400 uppercase">Command</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.command }}</dd></div>{% endif %}
-        {% if definition.args %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Args</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.args | tojson(indent=2) if definition.args is sequence and definition.args is not string else definition.args }}</pre></dd></div>{% endif %}
-        {% if definition.env_vars %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Environment</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.env_vars | tojson(indent=2) if definition.env_vars is mapping else definition.env_vars }}</pre></dd></div>{% endif %}
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Server Type</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.server_type }}</dd></div>
+        {% if definition.url %}<div><dt class="text-xs font-medium text-gray-500 uppercase">URL</dt><dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ definition.url }}</dd></div>{% endif %}
+        {% if definition.command %}<div><dt class="text-xs font-medium text-gray-500 uppercase">Command</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.command }}</dd></div>{% endif %}
+        {% if definition.args %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Args</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.args | tojson(indent=2) if definition.args is sequence and definition.args is not string else definition.args }}</pre></dd></div>{% endif %}
+        {% if definition.env_vars %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Environment</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.env_vars | tojson(indent=2) if definition.env_vars is mapping else definition.env_vars }}</pre></dd></div>{% endif %}
         {% if definition.headers %}
-        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Headers</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else definition.headers }}</pre></dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Headers</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.headers | tojson(indent=2) if definition.headers is mapping else definition.headers }}</pre></dd></div>
         {% endif %}
     </div>
 </div>
 
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
     <div class="flex items-center justify-between mb-3">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Discover Tools</h2>
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider">Discover Tools</h2>
         <div class="flex gap-2" id="discover-actions-top">
-            <button type="button" data-discover-tools="false" id="discover-btn" class="px-4 py-2 text-sm bg-purple-50 text-purple-700 rounded-md hover:bg-purple-100 font-medium">Discover Tools</button>
+            <button type="button" data-discover-tools="false" id="discover-btn" class="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50">Discover Tools</button>
             <button type="button" data-discover-tools="true" id="refresh-btn" class="hidden px-3 py-2 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 font-medium">Refresh</button>
         </div>
     </div>
@@ -404,38 +432,49 @@
         <div class="flex items-center justify-between mb-3">
             <span class="text-sm text-gray-500" id="discover-count"></span>
             <div class="flex gap-2">
-                <button type="button" data-select-all-discovered-tools class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Select All</button>
+                <button type="button" data-select-all-discovered-tools class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 transition-colors hover:border-primary-400 hover:text-primary-700">Select All</button>
                 <button type="button" data-clear-all-discovered-tools class="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-200 rounded hover:bg-gray-50">Clear All</button>
-                <button type="button" data-copy-selected-tools id="copy-tools-btn" class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1 border border-purple-200 rounded hover:bg-purple-50">Copy Selected</button>
+                <button type="button" data-copy-selected-tools id="copy-tools-btn" class="rounded border border-gray-300 px-2 py-1 text-xs text-gray-600 transition-colors hover:border-primary-400 hover:text-primary-700">Copy Selected</button>
             </div>
         </div>
         <div id="discover-tools-list" class="space-y-1 max-h-96 overflow-y-auto"></div>
-        <div id="discover-meta" class="mt-3 text-xs text-gray-400"></div>
+        <div id="discover-meta" class="mt-3 text-xs text-gray-500"></div>
     </div>
     <div id="discover-empty" class="hidden py-4 text-center">
-        <p class="text-sm text-gray-400 italic">No tools discovered. The server may not expose any tools.</p>
+        <p class="text-sm text-gray-500 italic">No tools discovered. The server may not expose any tools.</p>
     </div>
 </div>
 {% endif %}
 
 {% if definition_type == 'tool' %}
-<div class="bg-orange-50 rounded-lg border border-orange-200 p-5 mb-6">
+<div class="mb-6 rounded-lg border border-gray-200 bg-white p-5">
     <div class="flex items-start gap-3">
         <svg class="w-5 h-5 text-orange-500 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17 17.25 21A2.652 2.652 0 0 0 21 17.25l-5.877-5.877M11.42 15.17l2.472-2.472a3.375 3.375 0 0 0-4.773-4.773L6.75 10.294m4.67 4.876-4.875 4.875a2.121 2.121 0 0 1-3-3l4.875-4.875"/></svg>
         <div>
-            <h2 class="text-sm font-semibold text-orange-900 uppercase tracking-wider">Sandbox-managed tool</h2>
-            <p class="text-sm text-orange-800 mt-1">This tool runs in an isolated container. The default auth wrapper requires caller access to the tool definition, and agent invocations require an explicit grant on the agent detail page.</p>
+            <div class="flex items-center gap-2 flex-wrap">
+                <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">
+                    {% if tool_kind.kind == 'python' %}Sandbox-managed tool{% elif tool_kind.kind == 'http' %}Declarative HTTP tool{% elif tool_kind.kind == 'openapi' %}OpenAPI operation tool{% elif tool_kind.kind == 'builtin' %}Built-in action tool{% else %}Managed tool{% endif %}
+                </h2>
+                <span class="px-2 py-0.5 rounded text-xs bg-orange-100 text-orange-700 font-mono">{{ tool_kind.kind }}</span>
+            </div>
+            <p class="text-sm text-orange-800 mt-1">
+                {% if tool_kind.kind == 'python' %}
+                This tool runs your entrypoint in an isolated container. The default auth wrapper requires caller access to the tool definition, and agent invocations require an explicit grant on the agent detail page.
+                {% else %}
+                This tool needs no sandbox: the server sends one fixed, pre-approved request (or runs one reviewed Lucent-native handler) in-process. The default auth wrapper still requires caller access to the tool definition, and agent invocations require an explicit grant on the agent detail page.
+                {% endif %}
+            </p>
         </div>
     </div>
 </div>
 {% if definition.runtime_config and definition.runtime_config.mcp_proxy %}
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
     <div class="flex items-center justify-between gap-3 mb-3">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Native MCP Tools</h2>
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider">Native MCP Tools</h2>
         {% if definition.status == 'active' %}
         <form method="POST" action="/definitions/tools/{{ definition.id }}/discover-tools">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="px-3 py-1.5 text-sm bg-orange-50 text-orange-700 rounded-md hover:bg-orange-100 font-medium">{% if definition.discovered_tools %}Refresh{% else %}Discover Tools{% endif %}</button>
+            <button type="submit" class="rounded-lg bg-primary-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-700">{% if definition.discovered_tools %}Refresh{% else %}Discover Tools{% endif %}</button>
         </form>
         {% endif %}
     </div>
@@ -448,62 +487,109 @@
         </div>
         {% endfor %}
     </div>
-    {% if definition.tools_discovered_at %}<p class="mt-3 text-xs text-gray-400">Updated {{ definition.tools_discovered_at.strftime('%b %d, %Y at %H:%M') }}</p>{% endif %}
+    {% if definition.tools_discovered_at %}<p class="mt-3 text-xs text-gray-500">Updated {{ definition.tools_discovered_at.strftime('%b %d, %Y at %H:%M') }}</p>{% endif %}
     {% else %}
-    <p class="text-sm text-gray-400">No native tools have been discovered.</p>
+    <p class="text-sm text-gray-500">No native tools have been discovered.</p>
     {% endif %}
 </div>
 {% endif %}
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
-    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Tool Contract &amp; Runtime</h2>
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Tool Contract &amp; Runtime</h2>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div><dt class="text-xs font-medium text-gray-400 uppercase">Runtime</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.runtime_type }}</dd></div>
-        <div><dt class="text-xs font-medium text-gray-400 uppercase">Entrypoint</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.entrypoint }}</dd></div>
-        <div><dt class="text-xs font-medium text-gray-400 uppercase">Timeout</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.timeout_seconds }}s</dd></div>
-        <div><dt class="text-xs font-medium text-gray-400 uppercase">Network</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.network_policy.network_mode if definition.network_policy else 'none' }}</dd></div>
-        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Input Schema</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.input_schema | tojson(indent=2) if definition.input_schema is mapping else '{}' }}</pre></dd></div>
-        {% if definition.output_schema %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Output Schema</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.output_schema | tojson(indent=2) if definition.output_schema is mapping else definition.output_schema }}</pre></dd></div>{% endif %}
-        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Auth Policy</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.auth_policy | tojson(indent=2) if definition.auth_policy is mapping else '{}' }}</pre></dd></div>
-        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Network Policy</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.network_policy | tojson(indent=2) if definition.network_policy is mapping else '{}' }}</pre></dd></div>
-        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Resource Limits</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.resource_limits | tojson(indent=2) if definition.resource_limits is mapping else '{}' }}</pre></dd></div>
-        {% if definition.requirements %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Requirements</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.requirements | join('\n') }}</pre></dd></div>{% endif %}
-        {% if definition.env_vars %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Environment</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.env_vars | tojson(indent=2) if definition.env_vars is mapping else definition.env_vars }}</pre></dd></div>{% endif %}
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Runtime</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.runtime_type }}</dd></div>
+        <div>
+            <dt class="text-xs font-medium text-gray-500 uppercase">Network</dt>
+            <dd class="mt-1 text-sm text-gray-900">{{ network_policy_summary }}</dd>
+        </div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Timeout</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.timeout_seconds }}s</dd></div>
+        {% if tool_kind.kind == 'python' %}
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Entrypoint</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.entrypoint }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Image</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.image }}</dd></div>
+        {% elif tool_kind.kind == 'http' %}
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Method &amp; URL</dt><dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ tool_kind.method }} {{ tool_kind.url }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Query keys</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.query_keys | join(', ') if tool_kind.query_keys else '—' }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Header names</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.header_names | join(', ') if tool_kind.header_names else '—' }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Response</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.response_format }}{% if tool_kind.response_path %} &middot; path <code>{{ tool_kind.response_path }}</code>{% endif %}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Allowed status</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.allowed_status | join(', ') }}</dd></div>
+        {% elif tool_kind.kind == 'openapi' %}
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Operation</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.operation_id or '—' }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Method &amp; path</dt><dd class="mt-1 text-sm text-gray-900 font-mono break-all">{% if tool_kind.method %}{{ tool_kind.method }} {{ tool_kind.path }}{% else %}—{% endif %}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Server base URL</dt><dd class="mt-1 text-sm text-gray-900 font-mono break-all">{{ tool_kind.base_url or '—' }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Response</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.response_format }}{% if tool_kind.response_path %} &middot; path <code>{{ tool_kind.response_path }}</code>{% endif %}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Allowed status</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.allowed_status | join(', ') }}</dd></div>
+        {% if tool_kind.header_names %}<div><dt class="text-xs font-medium text-gray-500 uppercase">Static header names</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.header_names | join(', ') }}</dd></div>{% endif %}
+        {% if tool_kind.query_keys %}<div><dt class="text-xs font-medium text-gray-500 uppercase">Static query keys</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.query_keys | join(', ') }}</dd></div>{% endif %}
+        {% elif tool_kind.kind == 'builtin' %}
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Handler</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ tool_kind.handler or '—' }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Handler label</dt><dd class="mt-1 text-sm text-gray-900">{{ tool_kind.label or '—' }}</dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Handler description</dt><dd class="mt-1 text-sm text-gray-700">{{ tool_kind.handler_description or '—' }}</dd></div>
+        <div class="sm:col-span-2">
+            <dt class="text-xs font-medium text-gray-500 uppercase">Availability in this image</dt>
+            <dd class="mt-1 text-sm">
+                {% if tool_kind.handler_available %}
+                <span class="px-2 py-0.5 rounded text-xs bg-green-100 text-green-700 font-medium">available</span>
+                {% else %}
+                <span class="px-2 py-0.5 rounded text-xs bg-red-100 text-red-700 font-medium">unavailable</span>
+                {% if tool_kind.handler_unavailable_reason %}<span class="ml-2 text-xs text-red-700">{{ tool_kind.handler_unavailable_reason }}</span>{% endif %}
+                {% endif %}
+            </dd>
+        </div>
+        {% endif %}
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Input Schema</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.input_schema | tojson(indent=2) if definition.input_schema is mapping else '{}' }}</pre></dd></div>
+        {% if definition.output_schema %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Output Schema</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.output_schema | tojson(indent=2) if definition.output_schema is mapping else definition.output_schema }}</pre></dd></div>{% endif %}
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Auth Policy</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.auth_policy | tojson(indent=2) if definition.auth_policy is mapping else '{}' }}</pre></dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Network Policy</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.network_policy | tojson(indent=2) if definition.network_policy is mapping else '{}' }}</pre></dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Resource Limits</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.resource_limits | tojson(indent=2) if definition.resource_limits is mapping else '{}' }}</pre></dd></div>
+        {% if definition.requirements %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Requirements</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.requirements | join('\n') }}</pre></dd></div>{% endif %}
+        {% if definition.env_vars %}<div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Environment</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.env_vars | tojson(indent=2) if definition.env_vars is mapping else definition.env_vars }}</pre></dd></div>{% endif %}
+        {% if tool_kind.kind == 'openapi' and tool_kind.spec_text %}
+        <div class="sm:col-span-2">
+            <dt class="text-xs font-medium text-gray-500 uppercase">Stored OpenAPI document <span class="normal-case text-gray-500 font-normal">({{ tool_kind.spec_bytes }} bytes{% if tool_kind.operation_count %}, {{ tool_kind.operation_count }} operation{{ 's' if tool_kind.operation_count != 1 }}{% endif %})</span></dt>
+            <dd class="mt-1">
+                {% if tool_kind.spec_error %}<p class="mb-2 text-xs text-red-700">{{ tool_kind.spec_error }}</p>{% endif %}
+                <details class="rounded-md border border-gray-200">
+                    <summary class="cursor-pointer px-3 py-2 text-xs font-medium text-gray-600 hover:text-gray-900">Show document</summary>
+                    <pre class="max-h-80 overflow-auto whitespace-pre-wrap border-t border-gray-200 bg-gray-50 p-3 text-xs text-gray-700 font-mono">{{ tool_kind.spec_text }}</pre>
+                </details>
+            </dd>
+        </div>
+        {% endif %}
     </div>
 </div>
 {% endif %}
 
 {% if definition_type == 'hook' %}
 {% if definition.name == 'file-memory-lookup' %}
-<div class="bg-emerald-50 rounded-lg border border-emerald-200 p-5 mb-6">
+<div class="mb-6 rounded-lg border border-gray-200 bg-white p-5">
     <div class="flex items-start justify-between gap-4 mb-4">
         <div>
-            <h2 class="text-sm font-semibold text-emerald-900 uppercase tracking-wider">Default memory hook</h2>
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-gray-500">Default memory hook</h2>
             <p class="text-sm text-emerald-800 mt-1">This built-in hook is granted to every agent automatically. It helps agents bring the right Lucent memories into context when they work with files.</p>
         </div>
         <span class="px-2.5 py-1 rounded text-xs bg-emerald-100 text-emerald-700 font-medium shrink-0">on all agents by default</span>
     </div>
     <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
         <div class="rounded-md bg-white/70 border border-emerald-100 p-3">
-            <h3 class="font-medium text-emerald-900">1. Watches file-related tool calls</h3>
+            <h3 class="font-medium text-gray-900">1. Watches file-related tool calls</h3>
             <p class="text-emerald-800 mt-1">When an agent reads, searches, edits, or opens a path, the hook extracts likely file references from the tool arguments.</p>
         </div>
         <div class="rounded-md bg-white/70 border border-emerald-100 p-3">
-            <h3 class="font-medium text-emerald-900">2. Searches accessible memories</h3>
+            <h3 class="font-medium text-gray-900">2. Searches accessible memories</h3>
             <p class="text-emerald-800 mt-1">It queries Lucent memory using the current user/org context, so normal access controls still apply.</p>
         </div>
         <div class="rounded-md bg-white/70 border border-emerald-100 p-3">
-            <h3 class="font-medium text-emerald-900">3. Injects model-visible context</h3>
+            <h3 class="font-medium text-gray-900">3. Injects model-visible context</h3>
             <p class="text-emerald-800 mt-1">Relevant notes are appended to the tool result the model sees. This built-in memory hook does not run shell commands; custom approved command hooks can.</p>
         </div>
     </div>
 </div>
 {% endif %}
 <div class="bg-white rounded-lg border border-gray-200 p-5 mb-6">
-    <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Hook Details</h2>
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Hook Details</h2>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div><dt class="text-xs font-medium text-gray-400 uppercase">Trigger Event</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.trigger_event }}</dd></div>
-        <div><dt class="text-xs font-medium text-gray-400 uppercase">Action Type</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.action_type }}</dd></div>
-        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-400 uppercase">Config</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.config | tojson(indent=2) if definition.config is mapping else (definition.config or '{}') }}</pre></dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Trigger Event</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.trigger_event }}</dd></div>
+        <div><dt class="text-xs font-medium text-gray-500 uppercase">Action Type</dt><dd class="mt-1 text-sm text-gray-900 font-mono">{{ definition.action_type }}</dd></div>
+        <div class="sm:col-span-2"><dt class="text-xs font-medium text-gray-500 uppercase">Config</dt><dd class="mt-1"><pre class="text-xs text-gray-700 bg-gray-50 rounded-md p-3 overflow-x-auto">{{ definition.config | tojson(indent=2) if definition.config is mapping else (definition.config or '{}') }}</pre></dd></div>
     </div>
 </div>
 {% endif %}
@@ -511,8 +597,8 @@
 {% if definition.content %}
 <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
     <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">{% if definition_type == 'agent' %}Agent Definition{% elif definition_type == 'skill' %}Skill Content{% elif definition_type == 'tool' %}Tool Source Code{% elif definition_type == 'hook' %}Hook Content{% else %}Content{% endif %}</h2>
-        <button type="button" id="toggle-raw-btn" class="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">Toggle raw</button>
+        <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wider">{% if definition_type == 'agent' %}Agent Definition{% elif definition_type == 'skill' %}Skill Content{% elif definition_type == 'tool' %}Tool Source Code{% elif definition_type == 'hook' %}Hook Content{% else %}Content{% endif %}</h2>
+        <button type="button" id="toggle-raw-btn" class="text-xs text-gray-500 hover:text-gray-600 px-2 py-1 rounded border border-gray-200 hover:border-gray-300">Toggle raw</button>
     </div>
     <div id="content-rendered" class="p-6 prose prose-gray prose-sm max-w-none"></div>
     <div id="content-raw" class="p-6 hidden">
@@ -520,7 +606,13 @@
     </div>
 </div>
 {% else %}
-<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-400"><p>No content defined.</p></div>
+{% if definition_type != 'tool' %}
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No content defined.</p></div>
+{% elif definition_type == 'tool' and tool_kind is defined and tool_kind.kind == 'python' %}
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>This tool has no source code yet.</p></div>
+{% else %}
+<div class="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500"><p>No source code: this tool is defined entirely by its {% if tool_kind is defined and tool_kind.kind == 'openapi' %}OpenAPI document{% elif tool_kind is defined and tool_kind.kind == 'http' %}request template{% else %}built-in handler{% endif %}.</p></div>
+{% endif %}
 {% endif %}
 
 {% if definition.scope != 'built-in' %}
@@ -538,7 +630,7 @@
         <form method="POST" action="/definitions/mcp-servers/{{ definition.id }}/update">
         {% endif %}
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">Edit {{ definition_type | replace('-', ' ') | title }}</h2><button type="button" class="js-close-edit-modal text-gray-400 hover:text-gray-600 text-xl">&times;</button></div></div>
+            <div class="p-6 border-b border-gray-200"><div class="flex items-center justify-between"><h2 class="text-lg font-semibold text-gray-900">Edit {{ definition_type | replace('-', ' ') | title }}</h2><button type="button" class="js-close-edit-modal text-gray-500 hover:text-gray-600 text-xl">&times;</button></div></div>
             <div class="p-6 space-y-4">
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Name</label><input name="name" value="{{ definition.name }}" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Description</label><input name="description" value="{{ definition.description or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
@@ -548,8 +640,8 @@
                     <div><label class="block text-sm font-medium text-gray-700 mb-1">URL</label><input name="url" value="{{ definition.url or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
                 </div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Command</label><input name="command" value="{{ definition.command or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Args <span class="text-xs text-gray-400 font-normal">(one per line)</span></label><textarea name="args" rows="6" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="run&#10;-i&#10;--rm">{{ definition.args_text or '' }}</textarea></div>
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Environment <span class="text-xs text-gray-400 font-normal">(KEY=VALUE per line)</span></label><textarea name="env_vars" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="GITHUB_PERSONAL_ACCESS_TOKEN=credential://github/access_token">{{ definition.env_vars_text or '' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Args <span class="text-xs text-gray-500 font-normal">(one per line)</span></label><textarea name="args" rows="6" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="run&#10;-i&#10;--rm">{{ definition.args_text or '' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Environment <span class="text-xs text-gray-500 font-normal">(KEY=VALUE per line)</span></label><textarea name="env_vars" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="GITHUB_PERSONAL_ACCESS_TOKEN=credential://github/access_token">{{ definition.env_vars_text or '' }}</textarea></div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (JSON)</label><textarea name="headers" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.headers_text or '{}' }}</textarea></div>
                 {% elif definition_type == 'hook' %}
                 <div class="grid grid-cols-2 gap-4">
@@ -557,27 +649,82 @@
                     <div><label class="block text-sm font-medium text-gray-700 mb-1">Action</label><select name="action_type" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"><option value="static_context" {% if definition.action_type == 'static_context' %}selected{% endif %}>static_context — inject content</option><option value="memory_lookup" {% if definition.action_type == 'memory_lookup' %}selected{% endif %}>memory_lookup — search memories</option><option value="command" {% if definition.action_type == 'command' %}selected{% endif %}>command — run shell command/script</option></select></div>
                 </div>
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Content</label><textarea name="content" rows="6" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono" placeholder="Static context, or shell script body for command hooks.">{{ definition.content }}</textarea></div>
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Config (JSON)</label><textarea name="config" rows="8" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.config | tojson(indent=2) if definition.config is mapping else (definition.config or '{}') }}</textarea><p class="text-xs text-gray-400 mt-1">Command hooks receive JSON on stdin. Use <code>command</code>, <code>timeout_seconds</code>, <code>max_output_chars</code>, <code>env</code>, <code>cwd</code>, and <code>pass_input</code> to control execution.</p></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Config (JSON)</label><textarea name="config" rows="8" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.config | tojson(indent=2) if definition.config is mapping else (definition.config or '{}') }}</textarea><p class="text-xs text-gray-500 mt-1">Command hooks receive JSON on stdin. Use <code>command</code>, <code>timeout_seconds</code>, <code>max_output_chars</code>, <code>env</code>, <code>cwd</code>, and <code>pass_input</code> to control execution.</p></div>
                 {% elif definition_type == 'tool' %}
+                <input type="hidden" name="runtime_type" value="{{ tool_kind.kind }}">
+                <div class="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                    Runtime kind: <span class="font-mono font-medium text-gray-900">{{ tool_kind.kind }}</span>
+                    <span class="text-xs text-gray-500">— editing keeps this kind; only the fields below are submitted.</span>
+                </div>
                 <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Timeout seconds</label><input name="timeout_seconds" type="number" min="1" max="{% if tool_kind.kind in ('http', 'openapi') %}120{% else %}3600{% endif %}" value="{{ definition.timeout_seconds or 300 }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
+                    {% if tool_kind.kind == 'python' %}
                     <div><label class="block text-sm font-medium text-gray-700 mb-1">Entrypoint</label><input name="entrypoint" value="{{ definition.entrypoint or 'handler' }}" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Timeout seconds</label><input name="timeout_seconds" type="number" min="1" max="3600" value="{{ definition.timeout_seconds or 300 }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"></div>
+                    {% else %}
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Network Policy</label><textarea name="network_policy" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.network_policy_text or '{}' }}</textarea></div>
+                    {% endif %}
                 </div>
+                {% if tool_kind.kind == 'python' %}
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Input Schema</label><textarea name="input_schema" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.input_schema_text or '{}' }}</textarea></div>
-                <div><label class="block text-sm font-medium text-gray-700 mb-1">Output Schema</label><textarea name="output_schema" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.output_schema_text or '{}' }}</textarea></div>
+                {% endif %}
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Output Schema</label><textarea name="output_schema" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.output_schema_text or '{}' }}</textarea></div>
+                {% if tool_kind.kind == 'python' %}
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Source Code</label><textarea name="source_code" rows="14" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.source_code or definition.content or '' }}</textarea></div>
-                <div class="grid grid-cols-2 gap-4">
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Requirements</label><textarea name="requirements" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.requirements_text or '' }}</textarea></div>
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Environment</label><textarea name="env_vars" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.env_vars_text or '' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Requirements</label><textarea name="requirements" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.requirements_text or '' }}</textarea></div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Image</label><input name="python_image" value="{{ tool_kind.image }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                {% elif tool_kind.kind == 'http' %}
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Method</label><select name="http_method" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">{% for method in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD') %}<option value="{{ method }}" {% if tool_kind.method == method %}selected{% endif %}>{{ method }}</option>{% endfor %}</select></div>
+                    <div class="sm:col-span-2"><label class="block text-sm font-medium text-gray-700 mb-1">URL template</label><input name="http_url" value="{{ tool_kind.url }}" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Auth Policy</label><textarea name="auth_policy" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.auth_policy_text or '{}' }}</textarea></div>
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Network Policy</label><textarea name="network_policy" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.network_policy_text or '{}' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Query (KEY=VALUE or JSON)</label><textarea name="http_query" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ tool_kind.config.get('query') | tojson(indent=2) if tool_kind.config.get('query') else '' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Headers (Name: value or JSON)</label><textarea name="http_headers" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ tool_kind.config.get('headers') | tojson(indent=2) if tool_kind.config.get('headers') else '' }}</textarea></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Resource Limits</label><textarea name="resource_limits" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.resource_limits_text or '{}' }}</textarea></div>
-                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Runtime Config</label><textarea name="runtime_config" rows="5" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.runtime_config_text or '{}' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Body (JSON or raw)</label><textarea name="http_body" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{% set http_body = tool_kind.config.get('body') %}{% if http_body is mapping or (http_body is iterable and http_body is not string) %}{{ http_body | tojson(indent=2) }}{% elif http_body is not none %}{{ http_body }}{% endif %}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Form</label><textarea name="http_form" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ tool_kind.config.get('form') | tojson(indent=2) if tool_kind.config.get('form') else '' }}</textarea></div>
                 </div>
+                <div class="grid grid-cols-3 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Response path</label><input name="http_response_path" value="{{ tool_kind.response_path }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Response format</label><select name="http_response_format" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">{% for fmt in ('json', 'text') %}<option value="{{ fmt }}" {% if tool_kind.response_format == fmt %}selected{% endif %}>{{ fmt }}</option>{% endfor %}</select></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Allowed status</label><input name="http_allowed_status" value="{{ tool_kind.allowed_status | join(', ') }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Content type <span class="text-xs text-gray-500 font-normal">(optional, for raw bodies)</span></label><input name="http_content_type" value="{{ tool_kind.config.get('content_type') or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                {% elif tool_kind.kind == 'openapi' %}
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">OpenAPI document (JSON or YAML)</label><textarea name="openapi_spec" rows="10" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ tool_kind.spec_text }}</textarea></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Operation ID</label><input name="openapi_operation_id" value="{{ tool_kind.operation_id }}" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Base URL override</label><input name="openapi_base_url" value="{{ tool_kind.config.get('base_url') or '' }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                </div>
+                <div class="grid grid-cols-3 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Response path</label><input name="openapi_response_path" value="{{ tool_kind.response_path }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Response format</label><select name="openapi_response_format" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">{% for fmt in ('json', 'text') %}<option value="{{ fmt }}" {% if tool_kind.response_format == fmt %}selected{% endif %}>{{ fmt }}</option>{% endfor %}</select></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Allowed status</label><input name="openapi_allowed_status" value="{{ tool_kind.allowed_status | join(', ') }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Static headers</label><textarea name="openapi_headers" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ tool_kind.config.get('headers') | tojson(indent=2) if tool_kind.config.get('headers') else '' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Static query</label><textarea name="openapi_query" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ tool_kind.config.get('query') | tojson(indent=2) if tool_kind.config.get('query') else '' }}</textarea></div>
+                </div>
+                {% elif tool_kind.kind == 'builtin' %}
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Built-in handler</label>
+                    <select name="builtin_handler" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        {% for handler in tool_kind.handlers %}
+                        <option value="{{ handler.handler }}" {% if handler.handler == tool_kind.handler %}selected{% endif %} {% if not handler.available %}disabled{% endif %}>{{ handler.label }} ({{ handler.handler }}){% if not handler.available %} — unavailable{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                    <p class="mt-1 text-xs text-gray-500">The argument schema is owned by Lucent's catalog and cannot be edited here.</p>
+                </div>
+                {% endif %}
+                {% if tool_kind.kind == 'python' %}
+                <div class="grid grid-cols-2 gap-4">
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Auth Policy</label><textarea name="auth_policy" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.auth_policy_text or '{}' }}</textarea></div>
+                    <div><label class="block text-sm font-medium text-gray-700 mb-1">Network Policy</label><textarea name="network_policy" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.network_policy_text or '{}' }}</textarea></div>
+                </div>
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Resource Limits</label><textarea name="resource_limits" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.resource_limits_text or '{}' }}</textarea></div>
+                {% endif %}
+                <div><label class="block text-sm font-medium text-gray-700 mb-1">Environment <span class="text-xs text-gray-500 font-normal">(KEY=VALUE per line)</span></label><textarea name="env_vars" rows="4" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.env_vars_text or '' }}</textarea></div>
                 {% else %}
                 <div><label class="block text-sm font-medium text-gray-700 mb-1">Content (Markdown)</label><textarea name="content" rows="15" required class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono">{{ definition.content }}</textarea></div>
                 {% endif %}
@@ -585,12 +732,12 @@
                     <label class="block text-sm font-medium text-gray-700 mb-1">Owner</label>
                     <select name="owner_scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
                         <option value="me" {% if definition.owner_user_id and not definition.owner_group_id %}selected{% endif %}>Me ({{ user.display_name or user.email or 'you' }})</option>
-                        <option value="org" class="font-semibold text-amber-700" {% if not definition.owner_user_id and not definition.owner_group_id %}selected{% endif %}>⚠ Entire Organization — shared with everyone</option>
+                        <option value="org" class="font-semibold text-pink-700" {% if not definition.owner_user_id and not definition.owner_group_id %}selected{% endif %}>⚠ Entire Organization — shared with everyone</option>
                         {% for group in owner_groups %}
                         <option value="group:{{ group.id }}" {% if definition.owner_group_id and definition.owner_group_id|string == group.id|string %}selected{% endif %}>{{ group.name }}</option>
                         {% endfor %}
                     </select>
-                    <p class="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"><span class="font-medium">Use care:</span> Entire Organization makes this {{ definition_type | replace('-', ' ') }} readable and usable by everyone in your organization.</p>
+                    <p class="mt-2 rounded-md border border-pink-200 bg-pink-50 px-3 py-2 text-xs text-pink-800"><span class="font-medium">Use care:</span> Entire Organization makes this {{ definition_type | replace('-', ' ') }} readable and usable by everyone in your organization.</p>
                 </div>
             </div>
             <div class="p-6 border-t border-gray-200 flex justify-end gap-3"><button type="button" class="js-close-edit-modal px-4 py-2 text-sm text-gray-600">Cancel</button><button type="submit" class="px-4 py-2 text-sm bg-primary-600 text-white rounded-md hover:bg-primary-700 font-medium">Save Changes</button></div>
@@ -710,7 +857,7 @@
         nameLabel.className = 'text-xs font-medium text-gray-800';
         nameLabel.textContent = name;
         var customLabel = document.createElement('span');
-        customLabel.className = 'text-xs text-gray-400 italic';
+        customLabel.className = 'text-xs text-gray-500 italic';
         customLabel.textContent = '(custom)';
         var removeButton = document.createElement('button');
         removeButton.type = 'button';

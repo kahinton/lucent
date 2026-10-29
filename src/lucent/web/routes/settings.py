@@ -105,7 +105,7 @@ def _runtime_source_badge(source: str) -> dict[str, str]:
     if source == "database":
         return {"label": "Saved in DB", "class_name": f"{base} bg-green-100 text-green-700"}
     if source == "environment":
-        return {"label": "From env", "class_name": f"{base} bg-amber-100 text-amber-800"}
+        return {"label": "From env", "class_name": f"{base} bg-pink-100 text-pink-800"}
     return {"label": "Default", "class_name": f"{base} bg-gray-100 text-gray-600"}
 
 

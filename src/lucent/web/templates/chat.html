@@ -561,7 +561,7 @@
             <span data-delegated-count class="hidden"></span><span class="hidden sm:inline">delegated</span>
         </button>
         <span class="flex items-center gap-1.5 px-2 py-1 text-gray-500" title="Daemon status: {{ daemon_status_label }}">
-            <span class="h-1.5 w-1.5 rounded-full {% if daemon_status_level == 'online' %}bg-emerald-400{% elif daemon_status_level == 'stale' %}bg-amber-400{% else %}bg-red-400{% endif %}"></span>
+            <span class="h-1.5 w-1.5 rounded-full {% if daemon_status_level == 'online' %}bg-emerald-400{% elif daemon_status_level == 'stale' %}bg-pink-400{% else %}bg-red-400{% endif %}"></span>
             Lucent {{ daemon_status_label | lower }}
         </span>
         <div id="chat-overview-panel" class="chat-overview-panel absolute right-0 top-9 hidden rounded-lg border border-gray-200 bg-white text-left shadow-xl" aria-hidden="true">
@@ -1812,18 +1812,18 @@ function createReasoningBlock(container) {
     const div = document.createElement('div');
     div.className = 'reasoning-wrapper mb-2';
     div.innerHTML = `
-        <button data-reasoning-toggle="true" class="flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 transition-colors text-xs group">
-            <svg class="w-3.5 h-3.5 text-amber-600 animate-pulse reasoning-icon" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+        <button data-reasoning-toggle="true" class="flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-pink-200 bg-pink-50 hover:bg-pink-100 transition-colors text-xs group">
+            <svg class="w-3.5 h-3.5 text-pink-600 animate-pulse reasoning-icon" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
             </svg>
-            <span class="font-medium text-amber-800">Thinking</span>
-            <span class="reasoning-preview flex-1 text-amber-600 truncate ml-1"></span>
-            <svg class="w-3 h-3 text-amber-500 transition-transform reasoning-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+            <span class="font-medium text-pink-800">Thinking</span>
+            <span class="reasoning-preview flex-1 text-pink-600 truncate ml-1"></span>
+            <svg class="w-3 h-3 text-pink-500 transition-transform reasoning-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
             </svg>
         </button>
         <div class="reasoning-block">
-            <div class="reasoning-content mt-1 ml-6 p-3 rounded-lg border border-amber-100 bg-amber-50/50 text-xs text-amber-900 leading-relaxed whitespace-pre-wrap"></div>
+            <div class="reasoning-content mt-1 ml-6 p-3 rounded-lg border border-pink-200 bg-pink-50 text-xs text-pink-900 leading-relaxed whitespace-pre-wrap"></div>
         </div>`;
     container.appendChild(div);
     return div;
@@ -1976,7 +1976,7 @@ function updateContextUsage(sessionTokens) {
     if (!contextWindow) {
         // Context window unknown — bar stays empty/primary; hover shows raw token count only.
         bar.style.width = '0%';
-        bar.className = bar.className.replace(/bg-(primary|amber|orange|red)-\d00/g, 'bg-primary-500');
+        bar.className = bar.className.replace(/bg-(primary|pink|orange|red)-\d00/g, 'bg-primary-500');
         track.title = state.contextTokens > 0
             ? `${state.contextTokens.toLocaleString()} tokens (context window unknown)`
             : '';
@@ -1989,8 +1989,8 @@ function updateContextUsage(sessionTokens) {
     let colorClass = 'bg-primary-500';          // < 75%
     if (pct >= 100) colorClass = 'bg-red-400';  // full
     else if (pct >= 90) colorClass = 'bg-orange-400';
-    else if (pct >= 75) colorClass = 'bg-amber-400';
-    bar.className = bar.className.replace(/bg-(primary|amber|orange|red)-\d00/g, colorClass);
+    else if (pct >= 75) colorClass = 'bg-pink-400';
+    bar.className = bar.className.replace(/bg-(primary|pink|orange|red)-\d00/g, colorClass);
     track.title = `${state.contextTokens.toLocaleString()} of ${contextWindow.toLocaleString()} tokens · ${pct}% of context`;
     wrapper.classList.remove('hidden');
 }
@@ -2100,7 +2100,7 @@ const DELEGATED_TASK_DOT = {
     completed: 'bg-emerald-400',
     failed: 'bg-red-400',
     cancelled: 'bg-gray-500',
-    needs_review: 'bg-amber-400',
+    needs_review: 'bg-pink-400',
 };
 
 const DELEGATED_REQUEST_LABELS = {
