@@ -2580,6 +2580,10 @@ async function refreshDelegatedWork(options = {}) {
         state.delegatedRevision = data.revision || null;
         state.delegatedActiveCount = data.active_task_count || 0;
         renderDelegatedWork(previousRevision === null);
+        // The revision covers request/task rows *and* the report cards written
+        // for them. Cards are separate rows in a separate table, so without
+        // folding them in, a card written after the request already settled
+        // produced no revision change and the transcript never refreshed.
         const changed = previousRevision !== null && previousRevision !== state.delegatedRevision;
         if (changed && options.resync !== false) {
             requestDelegatedResync();
@@ -2647,6 +2651,8 @@ async function stopDelegatedTask(taskId, button) {
 }
 
 document.addEventListener('lucent:live-refresh', function() {
+    // The activity revision includes report-card state, so a newly written card
+    // shows up as a revision change here and triggers a transcript resync.
     refreshDelegatedWork();
 });
 

@@ -597,6 +597,58 @@ async def test_activity_endpoint_payload_shape(db_pool, test_user):
 
 
 @pytest.mark.asyncio
+async def test_revision_changes_when_a_report_card_is_written(db_pool, test_user):
+    """A new report card must move the revision.
+
+    Cards live in ``llm_session_events``, not in the request/task rows the
+    revision used to hash. The card is written ~8s AFTER the request settles
+    (report debounce), so by then the request status is already final — the
+    revision did not change, the poller concluded "nothing new", and the chat
+    kept showing the superseded "in review" card until a manual reload.
+    """
+    from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.db.requests import RequestRepository
+
+    org_id = str(test_user["organization_id"])
+    sessions = LLMSessionRepository(db_pool)
+    session = await sessions.create_session(
+        org_id=org_id, user_id=str(test_user["id"]), kind="chat"
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title=f"revision {uuid.uuid4().hex[:8]}",
+        org_id=org_id,
+        created_by=str(test_user["id"]),
+        source="user",
+    )
+    await sessions.link_request(
+        str(session["id"]), str(request["id"]), org_id=org_id, relation="created"
+    )
+
+    before = await repo.list_delegated_work_for_session(str(session["id"]), org_id)
+
+    await sessions.add_event(
+        str(session["id"]),
+        event_type="subagent_report",
+        org_id=org_id,
+        detail="This request is complete.",
+        raw={
+            "report_kind": "request.completed",
+            "request_id": str(request["id"]),
+            "headline": "This request is complete.",
+            "request": {"id": str(request["id"]), "status": "completed"},
+        },
+    )
+
+    after = await repo.list_delegated_work_for_session(str(session["id"]), org_id)
+
+    assert before["revision"] != after["revision"], (
+        "a newly written report card must change the revision, or the chat "
+        "never learns that a fresher card exists"
+    )
+
+
+@pytest.mark.asyncio
 async def test_report_prefers_actual_result_over_terse_summary(db_pool, test_user):
     """The report must surface real output, not a remote's status line.
 

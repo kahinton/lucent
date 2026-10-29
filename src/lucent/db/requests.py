@@ -3805,6 +3805,23 @@ class RequestRepository:
                 return {"requests": [], "active_task_count": 0, "revision": "empty"}
 
             request_ids = [row["id"] for row in request_rows]
+            # Report cards are written *after* a request settles (the report
+            # service debounces for ~8s), so they are not reflected in
+            # request/task rows. Folding them into the revision is what lets a
+            # poller notice "a new card for this session exists" and refresh the
+            # transcript — without it the thread kept showing the superseded
+            # "in review" card until a manual reload.
+            report_rows = await conn.fetch(
+                """SELECT raw->>'request_id' AS request_id,
+                          COALESCE(raw->>'report_kind', '') AS report_kind,
+                          created_at
+                   FROM llm_session_events
+                   WHERE session_id = $1
+                     AND event_type = 'subagent_report'
+                   ORDER BY created_at DESC
+                   LIMIT 50""",
+                UUID(session_id),
+            )
             task_rows = await conn.fetch(
                 """SELECT id::text AS id, request_id::text AS request_id,
                           title, status, agent_type, sequence_order,
@@ -3868,6 +3885,15 @@ class RequestRepository:
                 revision_parts.append(
                     f"{task['id']}:{task.get('status')}:{task.get('updated_at')}"
                 )
+
+        # Report cards fold into the revision: they are written after the
+        # request/task rows settle, so they would otherwise be invisible to a
+        # revision-diffing poller.
+        for report in report_rows:
+            revision_parts.append(
+                f"report:{report['request_id']}:{report['report_kind']}:"
+                f"{report['created_at']}"
+            )
 
         revision = sha256("\x1f".join(revision_parts).encode()).hexdigest()[:16]
         return {
