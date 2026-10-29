@@ -129,7 +129,113 @@
         backdrop-filter: blur(2px);
     }
 
-    /* Chat container fills the viewport below the sidebar header */
+    /* ── Composer control row ────────────────────────────────────────────
+       Matches the Activity/Workflows control-row convention: bordered controls,
+       muted text, teal focus.
+
+       Sizing is INTRINSIC, not viewport-based. The composer is capped at
+       max-w-3xl (48rem), so viewport media queries describe the wrong box: on a
+       wide monitor the controls still only have 768px. One flat flex row (no
+       growing wrapper — that would claim the full width and push the actions
+       onto their own line) shares the space between four selectors and two
+       actions, and wraps only when the space is genuinely gone. Selects shrink
+       with ellipsis rather than overflowing, which is what used to push four of
+       six controls off the right edge. */
+    .chat-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.375rem;
+        margin-top: 0.5rem;
+        padding: 0 0.25rem;
+        /* The row is its own size container. Viewport queries are the wrong
+           signal here: the composer is capped at 48rem, so the controls have the
+           same width on a 14" laptop and a 32" monitor. `inline-size` containment
+           also means the children can no longer widen this box, which is a
+           structural guard against the original bug where long option text pushed
+           the row past the screen edge. */
+        container-type: inline-size;
+        container-name: composer-controls;
+    }
+    .config-select {
+        /* Share the row instead of each claiming its widest option. A native
+           select sizes to its widest option, so without a small basis the four
+           selects consume the whole 48rem composer and push the actions onto a
+           second line. With a 6.5rem basis they divide the space, the actions
+           keep their place on the right, and `min-width: 0` lets a long model
+           name shrink rather than overflow. */
+        flex: 1 1 6.5rem;
+        min-width: 0;
+        max-width: 16rem;
+        text-overflow: ellipsis;
+        padding: 0.3rem 0.45rem;
+        border: 1px solid #d8d3cc;
+        border-radius: 0.5rem;
+        background-color: #ffffff;
+        color: #6b6560;
+        font-size: 0.75rem;
+        line-height: 1.15rem;
+        cursor: pointer;
+    }
+    .config-select:hover { border-color: #00cfc1; }
+    .config-select:focus { outline: none; border-color: #00cfc1; box-shadow: 0 0 0 2px rgba(0, 207, 193, 0.18); }
+    /* Reasoning only exists for models that publish levels; a yellow accent
+       marks it as the one selector that changes the model's behavior. It needs
+       the most width because "Reasoning: default" is a long label. */
+    #reasoning-select {
+        flex-grow: 1.4;
+        background-color: #fff3b5;
+        border-color: #ffd84d;
+        color: #4b3900;
+    }
+    #reasoning-select:hover, #reasoning-select:focus { border-color: #d8b400; }
+    /* Model and agent names are the longest labels in the row, so they get a
+       larger share than the two short fixed-label selects. */
+    #model-select { flex-grow: 1.6; }
+    #agent-select { flex-grow: 1.2; }
+    .chat-controls-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.3rem 0.5rem;
+        border-radius: 0.5rem;
+        font-size: 0.75rem;
+        font-weight: 500;
+        color: #78736f;
+        white-space: nowrap;
+        /* Pushed to the trailing edge while there is room; wraps naturally once
+           there is not. */
+        margin-left: auto;
+        transition: background-color 120ms ease, color 120ms ease;
+    }
+    .chat-controls-button:hover { background-color: rgba(0, 207, 193, 0.1); color: #007f78; }
+    #new-conversation-btn { margin-left: 0; }
+
+    /* Phones: two selectors per row reads far better than four slivers, and the
+       actions keep their own right-aligned row. Labels drop so the actions stay
+       compact and the selectors keep their width. */
+    @media (max-width: 480px) {
+        .chat-controls { gap: 0.35rem; }
+        .config-select { flex: 1 1 calc(50% - 0.5rem); max-width: none; }
+        .chat-controls-button { margin-left: 0; }
+        .chat-controls-button > span { display: none; }
+        #session-menu-btn { margin-left: auto; }
+    }
+
+    /* Below ~45rem of ROW width, four selectors plus two labelled actions stop
+       fitting on one line and the selects squeeze until their labels clip. Give
+       every select half the row so they form a tidy 2×2 grid instead. Container
+       queries key off the composer's real width, so this stays correct on a wide
+       monitor with a narrow window and on a phone alike. */
+    @container composer-controls (max-width: 45rem) {
+        .config-select { flex: 1 1 calc(50% - 0.25rem); max-width: none; }
+        .chat-controls-button { margin-left: 0; }
+        #session-menu-btn { margin-left: auto; }
+    }
+    @container composer-controls (max-width: 22rem) {
+        .config-select { flex: 1 1 100%; }
+    }
+
     .chat-container {
         display: flex;
         flex-direction: column;
@@ -411,6 +517,9 @@
         .chat-input-field { background-color: transparent !important; border-color: transparent !important; color: #f7f5f1 !important; }
         .chat-input-field::placeholder { color: #77736f !important; }
         .config-select { background-color: #181818 !important; border-color: #3d3d3d !important; color: #d5d2ce !important; }
+        .config-select:hover, .config-select:focus { border-color: #00cfc1 !important; }
+        .chat-controls-button { color: #94908c !important; }
+        .chat-controls-button:hover { background-color: rgba(0, 207, 193, 0.12) !important; color: #7feee4 !important; }
         .empty-state-text { color: #94908c !important; }
         .intro-summary { max-width: 42rem; white-space: pre-line; }
         .intro-summary .intro-summary-loading { display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 9999px; background: currentColor; opacity: 0.45; animation: intro-pulse 1s ease-in-out infinite; }
@@ -476,11 +585,6 @@
         border: 1px solid #007f78;
         box-shadow: 0 4px 0 #007f78, 0 10px 22px rgba(0, 207, 193, 0.22) !important;
     }
-    #reasoning-select {
-        background: #fff3b5 !important;
-        border-color: #ffd84d !important;
-        color: #4b3900 !important;
-    }
 
     @media (max-width: 767px) {
         main { height: 100dvh; }
@@ -494,11 +598,6 @@
         .lucent-mark { width: 96px; height: 96px; margin-bottom: 1rem !important; }
         .chat-input-area { padding: 0.75rem !important; }
         .input-glow { gap: 0.35rem; padding: 0.65rem !important; }
-        .chat-input-area .relative.flex.items-center { flex-wrap: wrap; gap: 0.4rem; }
-        .config-select { min-width: 0; max-width: calc(50vw - 1.25rem); }
-        #agent-select, #model-select { flex: 1 1 calc(50% - 0.25rem); }
-        #tool-approval-select { flex: 1 1 100%; }
-        .chat-input-area .relative.flex.items-center > .ml-auto { margin-left: 0; }
         .input-footer { display: none; }
         .msg-enter { padding: 0.85rem 1rem; }
         .chat-user-bubble { max-width: 88%; }
@@ -721,34 +820,39 @@
             </form>
             <!-- Pending attachment previews -->
             <div id="attachment-previews" class="hidden flex flex-wrap gap-2 mt-2 px-1"></div>
-            <!-- Controls toolbar below input -->
-            <div class="relative flex items-center gap-3 mt-2 px-1">
-                <select id="agent-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
+            <!-- Controls toolbar below input.
+                 ONE flex context, no nested groups: a wrapper that grows would
+                 claim the full row and bump the actions onto a second line. Every
+                 child here shares the same line-breaking, so the row fills a
+                 single line at the composer's 48rem cap and only wraps when the
+                 space is genuinely gone. Selects shrink (with ellipsis) rather
+                 than overflowing — long agent/model names used to push four of
+                 six controls past the viewport edge. -->
+            <div class="chat-controls">
+                <select id="agent-select" class="config-select" title="Agent for this conversation">
                     <option value="">Lucent</option>
                 </select>
-                <select id="model-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer">
+                <select id="model-select" class="config-select" title="Model for this conversation">
                     <option value="">Loading...</option>
                 </select>
-                <select id="reasoning-select" class="config-select hidden text-xs rounded-lg border px-2 py-1 focus:outline-none cursor-pointer" title="Reasoning effort">
+                <select id="reasoning-select" class="config-select hidden" title="Reasoning effort">
                     <option value="">Reasoning: default</option>
                 </select>
-                <select id="tool-approval-select" class="config-select text-xs rounded-lg border border-gray-200 bg-white px-2 py-1 text-gray-500 focus:border-primary-300 focus:ring-1 focus:ring-primary-100 focus:outline-none cursor-pointer" title="Whether the agent may run tools on its own">
+                <select id="tool-approval-select" class="config-select" title="Whether the agent may run tools on its own">
                     <option value="auto">Tools: auto-run</option>
                     <option value="ask">Tools: ask first</option>
                 </select>
-                <div class="ml-auto flex items-center gap-2">
-                    <button type="button" id="session-menu-btn" class="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="Conversation history" aria-expanded="false">
-                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        History
-                    </button>
-                </div>
-                <button type="button" id="new-conversation-btn" class="flex items-center gap-1 px-2 py-1 text-xs font-medium text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors" title="New conversation">
-                    <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+                <button type="button" id="session-menu-btn" class="chat-controls-button" title="Conversation history" aria-expanded="false">
+                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span>History</span>
+                </button>
+                <button type="button" id="new-conversation-btn" class="chat-controls-button" title="New conversation">
+                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
                     </svg>
-                    New
+                    <span>New</span>
                 </button>
             </div>
             <p class="input-footer text-[10px] text-gray-400 text-center mt-1">Shift+Enter for new line</p>
@@ -1065,7 +1169,13 @@ function applySessionConfig(session) {
             for (const a of agents) {
                 const opt = document.createElement('option');
                 opt.value = a.id;
-                opt.textContent = a.name + (a.description ? ` — ${a.description.slice(0, 50)}` : '');
+                // Name only. An inline description made the widest option ~590px,
+                // and a native select sizes itself to its widest option — that is
+                // what forced the whole control row (and every control after it)
+                // past the viewport edge. The description is kept as the title so
+                // hovering still explains each agent.
+                opt.textContent = a.name;
+                if (a.description) opt.title = a.description;
                 select.appendChild(opt);
             }
         }
