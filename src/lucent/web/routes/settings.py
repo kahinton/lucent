@@ -569,15 +569,25 @@ async def revoke_api_key(request: Request, key_id: UUID):
 @router.get("/settings/api-access", response_class=HTMLResponse)
 async def settings_api_access(request: Request):
     user = await get_user_context(request)
-    # Build a base URL that matches the host that served this request so users
-    # can copy/paste straight into clients without editing.
-    scheme = request.url.scheme
-    host = request.headers.get("host") or "localhost:8766"
-    base_url = f"{scheme}://{host}"
+    # The URL clients should use is the deployment's PUBLIC origin, not whatever
+    # host header this request arrived with. Behind Docker/a proxy those differ,
+    # and the page was showing "http://localhost:8766" to every user on a
+    # deployment that had LUCENT_PUBLIC_URL configured.
+    from lucent.public_url import public_base_url
+
+    base_url = public_base_url(request)
+    # Flag a loopback URL so the page can tell the user the value is not usable
+    # from another machine instead of letting them copy a dead endpoint.
+    from lucent.public_url import is_localhost_origin
+
     return templates.TemplateResponse(
         request,
         "settings/api_access.html",
-        {"user": user, "base_url": base_url},
+        {
+            "user": user,
+            "base_url": base_url,
+            "base_url_is_local": is_localhost_origin(base_url),
+        },
     )
 
 

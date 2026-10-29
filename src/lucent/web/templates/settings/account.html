@@ -16,19 +16,19 @@
                 <div class="flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-primary-400 to-primary-600 text-white text-2xl font-bold shadow-lg flex-shrink-0">
                     {{ (user.display_name or user.email or 'U')[0] | upper }}
                 </div>
-                <div class="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="flex-1 min-w-0 grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-2xl">
                     <div>
-                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Display Name</label>
-                        <input type="text" name="display_name" value="{{ user.display_name or '' }}" maxlength="120"
+                        <label for="display-name" class="block text-sm font-medium text-gray-700 mb-1">Display Name</label>
+                        <input type="text" name="display_name" id="display-name" value="{{ user.display_name or '' }}" maxlength="120"
                             class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500">
                     </div>
                     <div>
-                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Email</label>
+                        <p class="block text-sm font-medium text-gray-700 mb-1">Email</p>
                         <p class="px-3 py-2 text-sm text-gray-700 bg-gray-50 rounded-lg border border-gray-200">{{ user.email or '—' }}</p>
                         <p class="mt-1 text-xs text-gray-400">Email is set by your identity provider.</p>
                     </div>
                     <div>
-                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Role</label>
+                        <p class="block text-sm font-medium text-gray-700 mb-1">Role</p>
                         <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
                             {% set rv = (user.role.value if user.role.__class__.__name__ == 'Role' else user.role) %}
                             {% if rv == 'owner' %}bg-purple-100 text-purple-700
@@ -38,8 +38,8 @@
                         </span>
                     </div>
                     <div>
-                        <label class="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">User ID</label>
-                        <p class="text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded inline-block select-all">{{ user.id }}</p>
+                        <p class="block text-sm font-medium text-gray-700 mb-1">User ID</p>
+                        <p class="break-all px-3 py-2 text-sm font-mono text-gray-700 bg-gray-50 rounded-lg border border-gray-200 select-all">{{ user.id }}</p>
                     </div>
                 </div>
             </div>

@@ -1839,11 +1839,9 @@ async def create_organization_invitation(
     # The base URL is taken from configuration rather than the request, because
     # this endpoint is called by a server (an external signup site), where the
     # request's own host is not the URL a browser should open.
-    import os
+    from lucent.public_url import public_base_url
 
-    base_url = (
-        os.environ.get("LUCENT_PUBLIC_URL") or "http://localhost:8766"
-    ).rstrip("/")
+    base_url = public_base_url()
 
     return OrganizationInvitationCreated(
         id=record["id"],

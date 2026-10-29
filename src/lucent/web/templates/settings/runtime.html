@@ -30,27 +30,27 @@
         {% for item in setting_items %}
         {% set d = item.definition %}
         <div class="p-6" data-runtime-setting-card="{{ d.key }}">
-            <div class="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
+            <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
                 <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-2">
                         <h4 class="text-sm font-semibold text-gray-900">{{ d.title }}</h4>
                         {% if item.source == 'database' %}
-                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-[11px] font-medium text-green-700">Saved in DB</span>
+                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">Saved in DB</span>
                         {% elif item.source == 'environment' %}
-                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-pink-100 px-2 py-0.5 text-[11px] font-medium text-pink-800">From env</span>
+                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-pink-100 px-2 py-0.5 text-xs font-medium text-pink-800">From env</span>
                         {% else %}
-                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[11px] font-medium text-gray-600">Default</span>
+                        <span data-runtime-source-badge class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-600">Default</span>
                         {% endif %}
                         {% if not d.editable %}
-                        <span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">Locked</span>
+                        <span class="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-700">Locked</span>
                         {% elif item.locked %}
-                        <span class="inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">Managed by your administrator</span>
+                        <span class="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">Managed by your administrator</span>
                         {% endif %}
                         {% if d.sensitive %}
-                        <span class="inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-medium text-rose-700">Hidden</span>
+                        <span class="inline-flex items-center rounded-full bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700">Hidden</span>
                         {% endif %}
                         {% if d.requires_restart %}
-                        <span class="inline-flex items-center rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-medium text-indigo-700">Restart may be required</span>
+                        <span class="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">Restart may be required</span>
                         {% endif %}
                     </div>
                     <p class="mt-1 text-sm text-gray-600">{{ d.description }}</p>
@@ -58,15 +58,15 @@
                     <p class="mt-1 text-xs text-gray-500">{{ d.help_text }}</p>
                     {% endif %}
                     <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
-                        <span>Key: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ d.key }}</code></span>
-                        <span>Env fallback: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ d.env_var }}</code>{% if item.env_var_set %} <span class="text-pink-700">set</span>{% endif %}</span>
-                        <span>Default: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ item.default_display }}</code></span>
+                        <span class="min-w-0">Key: <code class="break-all font-mono bg-gray-100 px-1 py-0.5 rounded">{{ d.key }}</code></span>
+                        <span class="min-w-0">Env fallback: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ d.env_var }}</code>{% if item.env_var_set %} <span class="text-pink-700">set</span>{% endif %}</span>
+                        <span class="min-w-0">Default: <code class="font-mono bg-gray-100 px-1 py-0.5 rounded">{{ item.default_display }}</code></span>
                     </div>
                 </div>
 
-                <div class="w-full xl:w-[28rem]">
+                <div class="w-full lg:w-96">
                     <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                        <p class="text-[11px] uppercase tracking-wider text-gray-500">Effective value</p>
+                        <p class="text-xs uppercase tracking-wider text-gray-500">Effective value</p>
                         <p data-runtime-display-value class="mt-1 text-sm font-semibold text-gray-900 break-all">{{ item.display_value }}</p>
                     </div>
 
@@ -116,7 +116,7 @@
                             {% endif %}
                         </p>
                         {% if item.lock and item.lock.locked_by_name %}
-                        <p class="mt-1 text-[11px] text-violet-700">Locked by {{ item.lock.locked_by_name }}</p>
+                        <p class="mt-1 text-xs text-blue-700">Locked by {{ item.lock.locked_by_name }}</p>
                         {% endif %}
                     </div>
                     {% else %}

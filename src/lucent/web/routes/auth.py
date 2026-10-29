@@ -31,6 +31,7 @@ from lucent.db import SsoConnectionRepository, get_pool
 # this module; the model-listing/enabling logic itself now lives in
 # ``lucent.bootstrap`` (shared with the non-interactive CLI).
 from lucent.db.models import ModelRepository  # noqa: F401
+from lucent.public_url import mcp_endpoint_url
 
 from ._shared import (
     _check_csrf,
@@ -367,7 +368,13 @@ async def setup_submit(request: Request):
     response = templates.TemplateResponse(
         request,
         "setup_complete.html",
-        {"display_name": display_name, "api_key": api_key},
+        {
+            "display_name": display_name,
+            "api_key": api_key,
+            # The MCP endpoint the person should paste into their client: the
+            # deployment's public origin, not the container's host header.
+            "mcp_url": mcp_endpoint_url(request),
+        },
     )
     params = get_cookie_params()
     response.set_cookie(

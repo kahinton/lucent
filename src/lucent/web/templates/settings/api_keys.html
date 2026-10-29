@@ -5,7 +5,7 @@
 
 {% block settings_content %}
 {% if new_api_key %}
-<div class="bg-green-50 border border-green-200 rounded-xl p-6">
+<div class="bg-green-50 border border-green-200 rounded-xl p-4">
     <div class="flex items-start gap-4">
         <svg class="w-6 h-6 text-green-500 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
         <div class="flex-1">
@@ -26,7 +26,7 @@
         <h3 class="text-base font-semibold text-gray-900">Create a new key</h3>
     </div>
     <div class="p-6">
-        <form action="/settings/api-keys" method="post" class="flex gap-3 max-w-2xl">
+        <form action="/settings/api-keys" method="post" class="flex flex-col sm:flex-row gap-3 max-w-md">
             <input type="text" name="name" placeholder="e.g. VS Code, Claude Desktop, CLI" required maxlength="64"
                 class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary-500">
             <button type="submit" class="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-medium whitespace-nowrap">Create</button>
@@ -45,23 +45,23 @@
             <table class="w-full">
                 <thead>
                     <tr class="border-b border-gray-100">
-                        <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                        <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Prefix</th>
-                        <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
-                        <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Last Used</th>
-                        <th class="text-left py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Uses</th>
-                        <th class="text-right py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        <th class="text-left px-4 py-3 first:pl-0 text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                        <th class="text-left px-4 py-3 first:pl-0 text-xs font-medium text-gray-500 uppercase tracking-wider">Prefix</th>
+                        <th class="text-left px-4 py-3 first:pl-0 text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                        <th class="text-left px-4 py-3 first:pl-0 text-xs font-medium text-gray-500 uppercase tracking-wider">Last Used</th>
+                        <th class="text-left px-4 py-3 first:pl-0 text-xs font-medium text-gray-500 uppercase tracking-wider">Uses</th>
+                        <th class="text-right px-4 py-3 last:pr-0 text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-100">
                     {% for key in api_keys %}
                     <tr class="{% if not key.is_active %}opacity-50{% endif %}">
-                        <td class="py-3 text-sm font-medium text-gray-900">{{ key.name }}</td>
-                        <td class="py-3"><code class="text-xs font-mono bg-gray-100 text-gray-600 px-2 py-1 rounded">{{ key.key_prefix }}…</code></td>
-                        <td class="py-3 text-sm text-gray-600">{{ key.created_at | datetime }}</td>
-                        <td class="py-3 text-sm text-gray-600">{{ key.last_used_at | datetime if key.last_used_at else 'Never' }}</td>
-                        <td class="py-3 text-sm text-gray-600">{{ key.use_count }}</td>
-                        <td class="py-3 text-right">
+                        <td class="px-4 py-3 first:pl-0 text-sm font-medium text-gray-900">{{ key.name }}</td>
+                        <td class="whitespace-nowrap px-4 py-3"><code class="text-xs font-mono bg-gray-100 text-gray-600 px-2 py-1 rounded">{{ key.key_prefix }}…</code></td>
+                        <td class="whitespace-nowrap px-4 py-3 text-sm text-gray-600">{{ key.created_at | datetime }}</td>
+                        <td class="whitespace-nowrap px-4 py-3 text-sm text-gray-600">{{ key.last_used_at | datetime if key.last_used_at else 'Never' }}</td>
+                        <td class="whitespace-nowrap px-4 py-3 text-sm text-gray-600">{{ key.use_count }}</td>
+                        <td class="px-4 py-3 last:pr-0 text-right">
                             {% if key.is_active %}
                             <form action="/settings/api-keys/{{ key.id }}/revoke" method="post" class="inline" data-confirm="Revoke this API key? Clients using it will stop working immediately.">
                                 <button type="submit" class="text-sm text-red-600 hover:text-red-700 font-medium">Revoke</button>
