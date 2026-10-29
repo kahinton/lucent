@@ -1474,6 +1474,13 @@ function eventTypeMatches(event, ...types) {
     return types.includes(event.event_type || event.type);
 }
 
+function eventTime(row) {
+    const raw = row && row.created_at;
+    if (!raw) return 0;
+    const stamp = Date.parse(raw);
+    return Number.isNaN(stamp) ? 0 : stamp;
+}
+
 function replaySessionEvents(assistantEl, events) {
     if (!events.length) return;
     const toolsEl = assistantEl.querySelector('.tools-container');
@@ -1527,9 +1534,21 @@ function renderSessionMessages(messages, events = []) {
             .map(m => m.turn_id)
     );
     const eventsByTurn = new Map();
+    // Background report cards are written when work settles — before, and
+    // independently of, any assistant turn that might acknowledge them. A card
+    // that could not get a reply turn (rate limit, in-flight user turn, idle
+    // session) has no turn id and used to be dropped from the transcript
+    // entirely: the work visibly finished with no acknowledgement. Unhomed
+    // report cards are collected here and rendered in their own row after the
+    // turns. Other turnless events keep the old skip behavior.
+    const ORPHAN_TURN = '__delegated_report__';
     for (const event of events) {
-        const turnId = event.turn_id || turnIdByMessageId.get(event.message_id);
-        if (event.visible === false || !turnId) continue;
+        if (event.visible === false) continue;
+        const isReport = eventTypeMatches(event, 'subagent_report');
+        const turnId = event.turn_id
+            || turnIdByMessageId.get(event.message_id)
+            || (isReport ? ORPHAN_TURN : null);
+        if (!turnId) continue;
         const turnEvents = eventsByTurn.get(turnId) || [];
         turnEvents.push(event);
         eventsByTurn.set(turnId, turnEvents);
@@ -1542,7 +1561,26 @@ function renderSessionMessages(messages, events = []) {
         return;
     }
     document.getElementById('chat-root').classList.remove('empty-mode');
+    // Unhomed report cards are emitted in transcript order, interleaved with the
+    // turns they precede: a card written before a later turn must not be
+    // reordered to the bottom of the thread. Messages and events have separate
+    // sequence counters (they are different tables), so created_at is the only
+    // shared ordering key. Each card is flushed just before the first message
+    // that was created after it.
+    const orphanCards = (eventsByTurn.get(ORPHAN_TURN) || [])
+        .slice()
+        .sort((left, right) => eventTime(left) - eventTime(right));
+    const flushOrphanCardsBefore = (stamp) => {
+        const due = [];
+        while (orphanCards.length && eventTime(orphanCards[0]) < stamp) {
+            due.push(orphanCards.shift());
+        }
+        if (!due.length) return;
+        const assistantEl = appendAssistantMessage('');
+        replaySessionEvents(assistantEl, due);
+    };
     for (const msg of visible) {
+        flushOrphanCardsBefore(eventTime(msg));
         state.messages.push({ role: msg.role, content: msg.content || '' });
         if (msg.role === 'user') {
             const att = msg.metadata && msg.metadata.attachments;
@@ -1558,6 +1596,11 @@ function renderSessionMessages(messages, events = []) {
             const autoInfo = msg.metadata && msg.metadata.auto_selection;
             if (autoInfo) appendAutoSelectionNote(assistantEl, autoInfo);
         }
+    }
+    // Cards newer than the last message still need a row of their own.
+    if (orphanCards.length) {
+        const assistantEl = appendAssistantMessage('');
+        replaySessionEvents(assistantEl, orphanCards);
     }
     hideStatus();
     updateButtons();

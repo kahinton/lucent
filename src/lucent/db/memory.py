@@ -163,6 +163,19 @@ class MemoryRepository:
 
     TRUNCATE_LENGTH = 1000
 
+    # Hybrid retrieval requires a candidate memory to match a minimum share of
+    # the query's distinct terms. The proportional rule alone
+    # (``ceil(terms * 0.67)``) scales badly for long natural-language queries:
+    # a 9-term question demanded 7 co-occurring terms in a single memory, so
+    # every memory in the corpus was rejected and the caller saw
+    # ``total_count: 0`` — indistinguishable from "no such memory exists".
+    # Capping the floor at 3 keeps short-query behavior byte-identical
+    # (1→1, 2→2, 3→3) while letting long queries match on the strongest few
+    # terms. Calibrated against the live corpus: off-domain queries
+    # ("xylophone quantum banana zeppelin") still match 0 rows because none of
+    # their terms occur at all.
+    TERM_COVERAGE_FLOOR_CAP = 3
+
     # Mapping from goal metadata.status → lifecycle_stage.
     # Only applied for goal-type memories.  Other types may have different
     # lifecycle semantics and are left untouched.
@@ -1524,6 +1537,137 @@ class MemoryRepository:
                 exc_info=True,
             )
 
+    async def _diagnose_empty_search(
+        self,
+        conn: Any,
+        *,
+        query: str,
+        where_clause: str,
+        where_params: list[Any],
+    ) -> dict[str, Any]:
+        """Explain *why* a text search returned nothing.
+
+        An empty result is ambiguous to a caller: it can mean "no memory holds
+        this fact", "your filters excluded everything", or "the query matched
+        the corpus but too weakly to pass the term-coverage gate". The last
+        case is the dangerous one — it silently reads as "this does not exist".
+        This runs one aggregate over the same filtered set and reports which
+        situation applies, so tool responses can say so instead of returning a
+        bare ``total_count: 0``.
+        """
+        query_param = len(where_params) + 1
+        # NOTE: ``overlaps`` is a reserved word in SQL — the CTE is named
+        # ``term_overlap`` to keep this parseable.
+        sql = f"""
+            WITH search_input AS (
+                SELECT tsvector_to_array(
+                    to_tsvector('english', ${query_param}::text)
+                ) AS query_terms
+            ), term_overlap AS (
+                SELECT (
+                    SELECT COUNT(*)
+                    FROM unnest(search_input.query_terms) AS query_term
+                    WHERE COALESCE(memories.search_vector, ''::tsvector)
+                          @@ plainto_tsquery('english', query_term)
+                ) AS overlap
+                FROM memories
+                CROSS JOIN search_input
+                WHERE {where_clause}
+            )
+            SELECT COUNT(*) AS filtered_total,
+                   COUNT(*) FILTER (WHERE overlap > 0) AS matching_any,
+                   COALESCE(MAX(overlap), 0) AS best_overlap,
+                   (SELECT query_terms FROM search_input) AS query_terms
+            FROM term_overlap
+        """
+        try:
+            row = await conn.fetchrow(sql, *where_params, query)
+        except Exception:
+            logger.warning(
+                "Empty-search diagnostics failed; omitting match_quality",
+                exc_info=True,
+            )
+            return {}
+        if row is None:
+            return {}
+
+        try:
+            filtered_total = int(row["filtered_total"] or 0)
+            matching_any = int(row["matching_any"] or 0)
+            best_overlap = int(row["best_overlap"] or 0)
+            # Postgres owns the stemming; never re-derive terms in Python or
+            # the count could disagree with what the gate actually compared.
+            terms = list(row["query_terms"] or [])
+        except (KeyError, IndexError, TypeError, ValueError):
+            # A non-conforming connection (test double) — degrade quietly
+            # rather than failing a search that succeeded.
+            logger.debug("Empty-search diagnostics row malformed", exc_info=True)
+            return {}
+
+        required_overlap = min(
+            max(1, ceil(len(terms) * 0.67)),
+            int(self.TERM_COVERAGE_FLOOR_CAP),
+        )
+
+        if not terms:
+            reason = "query_has_no_searchable_terms"
+            hint = (
+                "The query contains only stop words, so there was nothing to "
+                "match. Search with content keywords (nouns, identifiers, tags)."
+            )
+        elif filtered_total == 0:
+            reason = "no_memories_match_filters"
+            hint = (
+                "No memory matches the non-text filters you passed (type, "
+                "tags, username, importance or date range), so the query text "
+                "was never evaluated. Widen or drop a filter."
+            )
+        elif matching_any == 0:
+            reason = "no_memory_contains_any_query_term"
+            hint = (
+                "None of the query terms appear in any accessible memory. This "
+                "is a genuine no-match, not a ranking cut. Try different "
+                "vocabulary or browse by tag with get_existing_tags."
+            )
+        elif best_overlap <= 1:
+            # Reaching here means the gate required >= 2 terms together (a
+            # single-term requirement would have matched), yet no memory shares
+            # even two query terms. The handful of single-term hits are
+            # incidental word reuse, not a relevant memory the gate suppressed.
+            reason = "query_vocabulary_not_in_corpus"
+            hint = (
+                f"Only {matching_any} memory(ies) contain even one query term, "
+                "and none share two of them, so nothing relevant was cut — the "
+                "wording simply does not appear in memory. This is a genuine "
+                "no-match. Try the vocabulary used when the fact was recorded, "
+                "or browse by tag with get_existing_tags."
+            )
+        elif best_overlap < required_overlap:
+            reason = "terms_too_scattered"
+            hint = (
+                f"{matching_any} memory(ies) contain at least one query term, "
+                f"but none contain {required_overlap} of the "
+                f"{len(terms)} terms together, so all were cut by the "
+                "term-coverage gate. Relevant memories may exist — retry with "
+                "fewer, more specific keywords."
+            )
+        else:
+            reason = "no_rows_after_scoring"
+            hint = (
+                "Filtered memories matched the query terms but no row survived "
+                "retrieval. Retry with different keywords."
+            )
+
+        return {
+            "reason": reason,
+            "hint": hint,
+            "query_terms": terms,
+            "terms_required_together": required_overlap,
+            "memories_matching_filters": filtered_total,
+            "memories_matching_any_term": matching_any,
+            "best_term_overlap": best_overlap,
+        }
+
     async def search(
         self,
         query: str | None = None,
@@ -1666,6 +1810,11 @@ class MemoryRepository:
         )
         boost_alpha = search_vitality_boost_alpha()
 
+        # Snapshot the filter-only parameter list: the diagnostics query below
+        # reuses exactly these predicates so its counts describe the same set
+        # the search just searched.
+        filter_params = list(params)
+
         # Build the query with hybrid lexical matching.
         if query:
             query_param = param_idx
@@ -1697,6 +1846,10 @@ class MemoryRepository:
                 FROM unnest(search_input.query_terms) AS query_term
                 WHERE {document} @@ plainto_tsquery('english', query_term)
             )"""
+            term_coverage_floor = f"""GREATEST(1, LEAST(
+                    CEIL(cardinality(search_input.query_terms) * 0.67)::integer,
+                    {int(self.TERM_COVERAGE_FLOOR_CAP)}
+                ))"""
             relevance_score = f"""(
                 0.50 * ts_rank_cd({document}, search_input.any_query, 32)
                 + 0.20 * CASE
@@ -1710,11 +1863,9 @@ class MemoryRepository:
                   END
             )"""
             match_condition = f"""(
-                {matched_terms} >= CEIL(
-                    cardinality(search_input.query_terms) * 0.67
-                )::integer
+                {matched_terms} >= {term_coverage_floor}
                 OR (
-                    cardinality(search_input.query_terms) <= 2
+                    cardinality(search_input.query_terms) BETWEEN 1 AND 2
                     AND length(search_input.query_text) <= 32
                     AND {fuzzy_score} >= 0.6
                 )
@@ -1797,13 +1948,37 @@ class MemoryRepository:
 
         memories = [self._row_to_search_dict(row) for row in rows]
 
-        return {
+        result = {
             "memories": memories,
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
             "has_more": offset + len(memories) < total_count,
         }
+        # An empty page is reported with its cause so callers can distinguish
+        # "no such memory" from "the query matched but was cut for match
+        # quality". Only computed when it can be observed: a text query was
+        # supplied and this page is genuinely empty at offset 0.
+        if query and total_count == 0 and offset == 0 and usage is not None:
+            async with usage.acquire() as conn:
+                result["match_quality"] = await self._diagnose_empty_search(
+                    conn,
+                    query=query,
+                    where_clause=where_clause,
+                    where_params=filter_params,
+                )
+        elif query and total_count == 0 and offset == 0:
+            async with scoped_acquire_on(
+                self.pool,
+                organization_id=requesting_org_id, user_id=requesting_user_id
+            ) as conn:
+                result["match_quality"] = await self._diagnose_empty_search(
+                    conn,
+                    query=query,
+                    where_clause=where_clause,
+                    where_params=filter_params,
+                )
+        return result
 
     async def list_recent_goal_milestones(
         self, *, user_id: str, organization_id: str, limit: int
@@ -1994,6 +2169,9 @@ class MemoryRepository:
         )
         boost_alpha = search_vitality_boost_alpha()
 
+        # See ``search``: the diagnostics query reuses these exact predicates.
+        filter_params = list(params)
+
         # Use the same hybrid retrieval as search(); this endpoint remains a
         # required-query convenience for broad discovery.
         query_param = param_idx
@@ -2025,6 +2203,10 @@ class MemoryRepository:
             FROM unnest(search_input.query_terms) AS query_term
             WHERE {document} @@ plainto_tsquery('english', query_term)
         )"""
+        term_coverage_floor = f"""GREATEST(1, LEAST(
+                CEIL(cardinality(search_input.query_terms) * 0.67)::integer,
+                {int(self.TERM_COVERAGE_FLOOR_CAP)}
+            ))"""
         relevance_score = f"""(
             0.50 * ts_rank_cd({document}, search_input.any_query, 32)
             + 0.20 * CASE
@@ -2038,11 +2220,9 @@ class MemoryRepository:
               END
         )"""
         match_condition = f"""(
-            {matched_terms} >= CEIL(
-                cardinality(search_input.query_terms) * 0.67
-            )::integer
+            {matched_terms} >= {term_coverage_floor}
             OR (
-                cardinality(search_input.query_terms) <= 2
+                cardinality(search_input.query_terms) BETWEEN 1 AND 2
                 AND length(search_input.query_text) <= 32
                 AND {fuzzy_score} >= 0.6
             )
@@ -2110,13 +2290,36 @@ class MemoryRepository:
 
         memories = [self._row_to_search_dict(row) for row in rows]
 
-        return {
+        result = {
             "memories": memories,
             "total_count": total_count,
             "offset": offset,
             "limit": limit,
             "has_more": offset + len(memories) < total_count,
         }
+        # See ``search``: explain an empty result rather than returning a bare
+        # ``total_count: 0`` that reads as "this memory does not exist".
+        if total_count == 0 and offset == 0:
+            if usage is not None:
+                async with usage.acquire() as conn:
+                    result["match_quality"] = await self._diagnose_empty_search(
+                        conn,
+                        query=query,
+                        where_clause=where_clause,
+                        where_params=filter_params,
+                    )
+            else:
+                async with scoped_acquire_on(
+                    self.pool,
+                    organization_id=requesting_org_id, user_id=requesting_user_id
+                ) as conn:
+                    result["match_quality"] = await self._diagnose_empty_search(
+                        conn,
+                        query=query,
+                        where_clause=where_clause,
+                        where_params=filter_params,
+                    )
+        return result
 
     async def get_existing_tags(
         self,

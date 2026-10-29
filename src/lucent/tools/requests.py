@@ -1015,6 +1015,15 @@ registered remote instead of locally. Call `list_remotes` first, use only an
 fenced sh/bash/shell/zsh/console code blocks. `remote_target_id` cannot be
 combined with `sandbox_template_id` or `sandbox_overrides`.
 
+WHAT HAPPENS AFTER YOU CREATE THIS: the request does not disappear. The daemon
+executes it, and results are pushed back into the conversation that created it:
+a report card is appended to the transcript when a task or the request settles,
+and when the conversation is idle a reply turn is generated so the person is
+told without asking. Every later turn also carries a `--- DELEGATED WORK ---`
+block describing this request and its live task state. So: do not tell the
+person you cannot know what happened to work you started, and do not poll for
+status — the answer arrives on its own.
+
     Args:
     title: Short descriptive title (e.g. "Improve search performance")
     description: Detailed description of what needs to be done
@@ -1261,6 +1270,30 @@ do."""
             "decomposition_mode": req.get("decomposition_mode")
             or DECOMPOSITION_MODE_PLANNER,
         }
+        # What happens next. The daemon owns execution, but results are pushed
+        # back INTO this conversation: a report card lands in the transcript and
+        # (when the conversation is idle) a reply turn is generated. Say so,
+        # because a caller that does not know this will either poll the
+        # Requests UI or — worse — tell the person it has no way to know what
+        # happened to work it started itself.
+        if llm_context.get("session_id"):
+            result["reporting"] = {
+                "to": "this conversation",
+                "how": (
+                    "When the request or any of its tasks settles, a report card "
+                    "is appended to this conversation's transcript and, if the "
+                    "conversation is idle, a reply turn is generated."
+                ),
+                "answer_from": (
+                    "The `--- DELEGATED WORK ---` block in your context already "
+                    "describes this request and its live task state. Do not say you "
+                    "have no way to know; do not poll for status."
+                ),
+                "next_turn_note": (
+                    "Do not wait for it in this turn. Continue the conversation; the "
+                    "result will arrive on its own."
+                ),
+            }
         # Planning outcome. Reporting it is not cosmetic: without these the
         # caller cannot tell whether its plan actually landed, and will be
         # tempted to "verify" by adding the tasks again — the exact duplication

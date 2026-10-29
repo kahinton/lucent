@@ -435,11 +435,33 @@ def test_chat_history_rehydrates_persisted_tool_events():
 
     assert "renderSessionMessages(session.messages || [], session.events || [])" in template
     assert "function replaySessionEvents(assistantEl, events)" in template
-    assert "const turnId = event.turn_id || turnIdByMessageId.get(event.message_id);" in template
+    assert "const turnId = event.turn_id" in template
+    assert "turnIdByMessageId.get(event.message_id)" in template
     assert "turnEvents.length && !assistantTurns.has(msg.turn_id)" in template
     assert "appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input)" in template
     assert "updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output)" in template
     assert "replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || [])" in template
+
+
+def test_chat_renders_unacknowledged_report_cards():
+    """A report card with no turn must still render.
+
+    Background reports are written when work settles, independently of any
+    assistant turn. When the reply turn could not run (rate limit, user turn in
+    flight, idle session) the card keeps a NULL ``turn_id``; the replay used to
+    drop such events entirely, so finished delegated work showed no
+    acknowledgement until a reload by which point it sat in an unrelated row.
+    """
+    template = Path("src/lucent/web/templates/chat.html").read_text()
+
+    assert "const ORPHAN_TURN = '__delegated_report__';" in template
+    # Only report cards are rehomed; other turnless events keep the old skip.
+    assert "const isReport = eventTypeMatches(event, 'subagent_report');" in template
+    assert "(isReport ? ORPHAN_TURN : null)" in template
+    assert "const orphanCards = (eventsByTurn.get(ORPHAN_TURN) || [])" in template
+    # Interleaved chronologically, not dumped at the end of the thread.
+    assert "function eventTime(row)" in template
+    assert "flushOrphanCardsBefore(eventTime(msg));" in template
 
 
 def test_chat_history_supports_soft_deleting_sessions():

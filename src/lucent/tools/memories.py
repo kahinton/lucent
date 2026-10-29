@@ -742,6 +742,16 @@ Returns:
             - offset: Current pagination offset
             - limit: Results per page
             - has_more: Whether more results are available
+            - match_quality: ONLY on an empty text search. Explains WHY nothing
+              came back so a zero is never mistaken for proof a memory does not
+              exist. Carries ``reason``, a human-readable ``hint`` (also mirrored
+              as ``notice``), the stemmed ``query_terms``,
+              ``terms_required_together``, ``memories_matching_filters``,
+              ``memories_matching_any_term`` and ``best_term_overlap``. Key
+              reasons: ``no_memory_contains_any_query_term`` and
+              ``query_vocabulary_not_in_corpus`` mean a genuine no-match, while
+              ``terms_too_scattered`` means memories DID match but were cut for
+              match quality — retry with fewer, more specific keywords.
         """
         try:
             # Parse and validate input
@@ -809,6 +819,7 @@ Returns:
                 "limit": result["limit"],
                 "has_more": result["has_more"],
             }
+            _attach_match_quality(serialized, result)
 
             return json.dumps(serialized, indent=2)
 
@@ -854,6 +865,10 @@ Returns:
             - offset: Current pagination offset
             - limit: Results per page
             - has_more: Whether more results are available
+            - match_quality: ONLY on an empty text search — see
+              ``search_memories``. Explains whether the zero was a genuine
+              no-match or a match-quality cut, so an empty page is never read as
+              proof the fact does not exist.
         """
         try:
             if not query or not query.strip():
@@ -893,6 +908,7 @@ Returns:
                 "limit": result["limit"],
                 "has_more": result["has_more"],
             }
+            _attach_match_quality(serialized, result)
 
             return json.dumps(serialized, indent=2)
 
@@ -2218,6 +2234,23 @@ def _serialize_memory(memory: dict[str, Any]) -> dict[str, Any]:
         if memory.get("vitality_computed_at")
         else None,
     }
+
+
+def _attach_match_quality(
+    serialized: dict[str, Any], result: dict[str, Any]
+) -> None:
+    """Copy empty-result diagnostics into a tool response, if present.
+
+    ``total_count: 0`` on its own is ambiguous — it can mean "no memory holds
+    this" or "memories matched but were cut for match quality". The repository
+    computes ``match_quality`` for empty text searches; surface it so the model
+    can tell the difference instead of asserting a fact doesn't exist.
+    """
+    match_quality = result.get("match_quality")
+    if not match_quality:
+        return
+    serialized["match_quality"] = match_quality
+    serialized["notice"] = match_quality.get("hint")
 
 
 def _serialize_truncated_memory(memory: dict[str, Any]) -> dict[str, Any]:

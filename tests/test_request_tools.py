@@ -1567,6 +1567,60 @@ class TestRemoteTargeting:
         assert result["tasks_created"] == 1
 
     @pytest.mark.asyncio
+    async def test_create_request_from_chat_explains_reporting(
+        self, mcp, auth_user, db_pool
+    ):
+        """A chat-authored request must say its results come back to the chat.
+
+        The daemon owns execution but the conversation stays the supervisor:
+        report cards land in the transcript and a reply turn is generated. A
+        caller that is not told this will poll the Requests UI — or tell the
+        person it has no way to know what happened to work it started itself.
+        """
+        from lucent.db.llm_sessions import LLMSessionRepository
+        from lucent.llm.context import clear_llm_context, set_llm_context
+
+        repo = LLMSessionRepository(db_pool)
+        session = await repo.create_session(
+            kind="chat",
+            org_id=str(auth_user["organization_id"]),
+            user_id=str(auth_user["id"]),
+            model="test-model",
+        )
+        set_llm_context(session_id=str(session["id"]))
+        try:
+            result = await _call(
+                mcp,
+                "create_request",
+                {"title": "Work delegated from a chat", "description": "Do the thing."},
+            )
+        finally:
+            clear_llm_context()
+
+        assert "error" not in result, result
+        reporting = result.get("reporting")
+        assert reporting, result
+        assert reporting["to"] == "this conversation"
+        # The model must be told the result arrives on its own, and that it
+        # already has a digest — the two behaviours that were missing.
+        assert "report card" in reporting["how"]
+        assert "DELEGATED WORK" in reporting["answer_from"]
+        assert "Do not wait" in reporting["next_turn_note"]
+
+    @pytest.mark.asyncio
+    async def test_create_request_outside_chat_has_no_reporting_block(
+        self, mcp, auth_user
+    ):
+        """No chat session means nowhere to report back to — stay silent."""
+        result = await _call(
+            mcp,
+            "create_request",
+            {"title": "Daemon-authored work", "description": "Planner territory."},
+        )
+        assert "error" not in result, result
+        assert "reporting" not in result
+
+    @pytest.mark.asyncio
     async def test_task_plan_entry_rejects_bad_remote(
         self, mcp, auth_user, remote, agent_def
     ):
