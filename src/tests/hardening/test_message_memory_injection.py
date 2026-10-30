@@ -305,7 +305,7 @@ async def test_message_hook_dedups_across_turns_via_session_state() -> None:
     # didn't-run turn.
     assert len(second.executions) == 1
     silence = second.executions[0]
-    assert silence.text == "memory-lookup: 0 injected (1 deduped, 0 below threshold)"
+    assert silence.text == "memory-lookup: 0 injected (1 deduped, 0 below threshold, 0 outside score spread)"
     assert silence.metadata["deduped"] == 1
     assert silence.metadata["below_threshold"] == 0
     # The silence line IS injectable hook output: the engine renders it into
@@ -328,7 +328,7 @@ async def test_message_hook_all_below_threshold_is_silent() -> None:
     # line stating why nothing was injected. It renders via injectable path.
     assert len(outcome.executions) == 1
     silence = outcome.executions[0]
-    assert silence.text == "memory-lookup: 0 injected (0 deduped, 2 below threshold)"
+    assert silence.text == "memory-lookup: 0 injected (0 deduped, 2 below threshold, 0 outside score spread)"
     assert len(outcome.injectable_executions) == 1
 
 
@@ -342,7 +342,7 @@ async def test_message_hook_no_hits_emits_silence_line() -> None:
     )
     assert len(outcome.executions) == 1
     silence = outcome.executions[0]
-    assert silence.text == "memory-lookup: 0 injected (0 deduped, 0 below threshold)"
+    assert silence.text == "memory-lookup: 0 injected (0 deduped, 0 below threshold, 0 outside score spread)"
     # The silence line is still hook output: metadata carries the query for
     # observability, and it renders via the injectable path.
     assert silence.metadata["memory_count"] == 0
@@ -701,7 +701,7 @@ async def test_message_hook_fires_on_first_turn_with_explicit_text() -> None:
     ]
     assert len(outcome.executions) == 1
     assert outcome.executions[0].text == (
-        "memory-lookup: 0 injected (0 deduped, 0 below threshold)"
+        "memory-lookup: 0 injected (0 deduped, 0 below threshold, 0 outside score spread)"
     )
 
 
@@ -769,7 +769,7 @@ async def test_message_hook_silence_line_all_filtered_results() -> None:
     )
     assert len(outcome.executions) == 1
     execution = outcome.executions[0]
-    assert execution.text == "memory-lookup: 0 injected (0 deduped, 2 below threshold)"
+    assert execution.text == "memory-lookup: 0 injected (0 deduped, 2 below threshold, 0 outside score spread)"
     assert execution.metadata["below_threshold"] == 2
     assert execution.metadata["deduped"] == 0
     assert execution.metadata["memory_count"] == 0
@@ -809,7 +809,7 @@ async def test_message_hook_silence_line_after_dedup_suppression() -> None:
     # the deduped counter naming the reason.
     assert len(outcome.executions) == 1
     assert outcome.executions[0].text == (
-        "memory-lookup: 0 injected (1 deduped, 0 below threshold)"
+        "memory-lookup: 0 injected (1 deduped, 0 below threshold, 0 outside score spread)"
     )
     assert outcome.executions[0].metadata["deduped"] == 1
 

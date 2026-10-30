@@ -1053,10 +1053,15 @@ async def _run_message_memory_lookup_hook(
     if not candidates:
         # Search ran and returned nothing injectable: emit the explicit
         # silence line (hook-UX) so this turn is distinguishable from a
-        # turn where the hook did not run at all.
+        # turn where the hook did not run at all. The reason counters are
+        # present even though they must be zero here — one line format means a
+        # reader never has to guess which fields a given shape omits.
         return HookExecution(
             hook_name=str(hook.get("name") or "message_memory_lookup"),
-            text="memory-lookup: 0 injected (0 deduped, 0 below threshold)",
+            text=(
+                "memory-lookup: 0 injected (0 deduped, 0 below threshold, "
+                "0 outside score spread)"
+            ),
             metadata={
                 "terms": terms,
                 "query": queries[0],
@@ -1190,16 +1195,22 @@ async def _run_message_memory_lookup_hook(
             decision_overflow = 0
     injected = injected[:max_memories]
     if not injected:
+        # Every reason must appear here. ``below_score_spread`` used to be
+        # omitted, so a turn where candidates were cut for relevance spread read
+        # exactly like a turn where nothing matched — the caller could not tell a
+        # deliberate precision cut from an empty corpus.
         if gate_ran and decision_gated > 0 and not decision_gate_failure:
             silence_text = (
                 "memory-lookup: 0 injected "
                 f"({decision_gated} gated, {decision_overflow} overflow, "
-                f"{deduped} deduped, {below_threshold} below threshold)"
+                f"{deduped} deduped, {below_threshold} below threshold, "
+                f"{below_score_spread} outside score spread)"
             )
         else:
             silence_text = (
                 "memory-lookup: 0 injected "
-                f"({deduped} deduped, {below_threshold} below threshold)"
+                f"({deduped} deduped, {below_threshold} below threshold, "
+                f"{below_score_spread} outside score spread)"
             )
         metadata = {
             "terms": terms,

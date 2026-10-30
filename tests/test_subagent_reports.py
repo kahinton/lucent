@@ -6,6 +6,7 @@ real transcript message, the reply turn has no tools, and a resumed provider
 session is abandoned once an unseen report reply exists.
 """
 
+import asyncio
 import inspect
 import uuid
 
@@ -81,6 +82,432 @@ def test_report_turn_runs_without_tools_and_without_resume():
     assert "mcp_config={}" in source
     assert "resume=False" in source
     assert "provider_session_id=None" in source
+
+
+@pytest.mark.asyncio
+async def test_deferred_reply_fires_after_the_interval(monkeypatch):
+    """The scheduled retry must actually deliver the answer."""
+    from lucent.services import subagent_reports
+
+    # Collapse the wait so the test does not sleep a real interval.
+    monkeypatch.setattr(subagent_reports, "REPLY_MIN_INTERVAL_SECONDS", 0.01)
+    service = subagent_reports.SubagentReportService()
+    service._awaiting_user_turn = lambda sid: False  # type: ignore[method-assign]
+
+    delivered: list[dict] = []
+
+    async def _fake_reply(signal, card, context, event_row):
+        delivered.append(signal)
+
+    service._maybe_generate_reply = _fake_reply  # type: ignore[method-assign]
+
+    signal = {"kind": "request.completed", "session_id": "s1", "organization_id": "o"}
+    service._reply_pending["s1"] = {
+        "signal": signal,
+        "card": {"headline": "done"},
+        "context": {"session": {"id": "s1"}},
+        "event_row": {"id": "e1"},
+    }
+    service._schedule_deferred_reply_retry("s1")
+    # The retry has a hard 1s floor (never fire immediately, or a burst of
+    # suppressions would immediately re-enter the gate).
+    await asyncio.sleep(1.4)
+
+    assert delivered == [signal], "the deferred reply must be delivered"
+    assert "s1" not in service._reply_pending
+
+
+def test_review_status_is_not_treated_as_a_final_outcome():
+    """`review` is Lucent's automatic gate, not a person's decision.
+
+    Only a terminal status earns an unconditional reply. Treating `review` as
+    final was the other half of the starvation bug: it is what consumed the one
+    reply the interval allowed.
+    """
+    from lucent.services.subagent_reports import _is_terminal_request_status
+
+    assert _is_terminal_request_status("completed")
+    assert _is_terminal_request_status("failed")
+    assert _is_terminal_request_status("cancelled")
+    assert not _is_terminal_request_status("review")
+    assert not _is_terminal_request_status("needs_rework")
+    assert not _is_terminal_request_status("in_progress")
+
+
+def test_review_headline_does_not_claim_a_human_decision():
+    """The review card must not say the work is waiting on the person.
+
+    "The work is ready for your review" is what made the model describe
+    finished work as unfinished — it reads as a pending human gate.
+    """
+    from lucent.services.delegated_work import (
+        request_status_label,
+        summarize_report_event,
+    )
+
+    headline = summarize_report_event(
+        kind="request.review", request={"status": "review"}, task=None
+    )
+    assert "your review" not in headline.lower()
+    assert "automatic" in headline.lower()
+    # The digest label must not imply a human gate either.
+    assert "review" not in request_status_label("review").lower()
+
+
+def test_reply_prompt_forbids_calling_a_populated_report_empty():
+    """The reply turn must be told to quote output, not deny it exists.
+
+    Live replies claimed the report was "empty" while the card body carried the
+    task output, because the status sentence preceded the excerpts and the model
+    read the headline alone.
+    """
+    from lucent.services.subagent_reports import REPORT_SYSTEM_PREAMBLE
+
+    assert "NEVER describe the result as missing, thin, empty" in REPORT_SYSTEM_PREAMBLE
+    # Both milestones must be reported; the person asked to be told when work
+    # finishes AND when it is approved.
+    assert "different milestones" in REPORT_SYSTEM_PREAMBLE
+
+
+@pytest.mark.asyncio
+async def test_completed_request_retracts_the_review_state(db_pool, test_user):
+    """The reported bug: a finished request kept showing "ready for review".
+
+    Cards are a projection of the request's current state, not an append-only
+    log. Before this, `review` and `completed` each appended a card, so the
+    transcript showed BOTH — and the stale "ready for review" card never went
+    away. The agent then told the person work was awaiting their decision when
+    it had already finished.
+    """
+    from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.db.requests import RequestRepository
+    from lucent.services.subagent_reports import SubagentReportService
+
+    org_id = str(test_user["organization_id"])
+    sessions = LLMSessionRepository(db_pool)
+    session = await sessions.create_session(
+        org_id=org_id, user_id=str(test_user["id"]), kind="chat"
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title=f"stale review {uuid.uuid4().hex[:8]}",
+        org_id=org_id,
+        created_by=str(test_user["id"]),
+        source="user",
+    )
+    rid = str(request["id"])
+    task = await repo.create_task(
+        request_id=rid,
+        title="Do the work",
+        org_id=org_id,
+        description="work",
+        agent_type="code",
+    )
+    await repo.claim_task(str(task["id"]), "i", org_id=org_id)
+    await repo.complete_task(str(task["id"]), "the actual output", org_id=org_id)
+
+    service = SubagentReportService()
+
+    async def no_reply(*args, **kwargs):
+        return None
+
+    service._maybe_generate_reply = no_reply  # type: ignore[method-assign]
+
+    def signal(kind: str) -> dict:
+        return {
+            "session_id": str(session["id"]),
+            "request_id": rid,
+            "task_id": None,
+            "kind": kind,
+            "organization_id": org_id,
+            "user_id": str(test_user["id"]),
+        }
+
+    await repo.update_request_status(rid, "review", org_id=org_id)
+    await service._handle_batch([signal("request.review")])
+
+    await repo.update_request_status(rid, "completed", org_id=org_id)
+    await service._handle_batch([signal("request.completed")])
+
+    events = await sessions.list_events(
+        str(session["id"]), org_id, visible_only=True
+    )
+    reports = [e for e in events if e["event_type"] == "subagent_report"]
+
+    assert len(reports) == 1, (
+        "a request must keep exactly one card; an appended review card is what "
+        "left finished work showing as 'ready for review'"
+    )
+    only = reports[0]["raw"]
+    assert only["report_kind"] == "request.completed"
+    assert only["request"]["status"] == "completed"
+    # The stale marker must be gone from the transcript entirely.
+    assert "review" not in (only.get("headline") or "").lower()
+    assert "the actual output" in (only.get("body") or "")
+
+
+@pytest.mark.asyncio
+async def test_review_and_completion_each_earn_a_direct_message():
+    """The person asked to be told when work finishes AND when it is approved.
+
+    These are distinct milestones, so neither may be suppressed by the reply
+    interval; intermediate bookkeeping still defers. Asserted on the gating
+    decision in the source so the test cannot depend on a live engine.
+    """
+    from lucent.services import subagent_reports
+
+    source = inspect.getsource(
+        subagent_reports.SubagentReportService._maybe_generate_reply
+    )
+
+    milestone_block = source.split("milestone_outcome =", 1)
+    assert len(milestone_block) == 2, (
+        "the interval gate must distinguish milestone outcomes"
+    )
+    declared = milestone_block[1].split("if self._reply_too_soon", 1)[0]
+    # Both milestones the person asked for must be explicit members.
+    for kind in ("review", "completed", "failed", "cancelled"):
+        assert f'"{kind}"' in declared, (
+            f"{kind} must bypass the reply interval, or its direct message is "
+            "silently deferred"
+        )
+    # And the gate must actually be skipped for them.
+    assert "and not milestone_outcome" in source
+
+    # `review` is the "work finished" milestone but is NOT terminal — the two
+    # concepts must stay distinct or review messages get starved again.
+    assert not subagent_reports._is_terminal_request_status("review")
+
+
+def test_terminal_outcomes_outrank_intermediate_ones():
+    """A burst must summarise where the request ENDED UP, not how far it got.
+
+    Live case: a burst carried both `request.review` and `request.cancelled`.
+    `review` outranked `cancelled`, so the surviving card said "checking the
+    finished work" for a request that had been cancelled — the card contradicted
+    its own request block and the reader had no way to resolve it.
+    """
+    from lucent.services.subagent_reports import SubagentReportService
+
+    rank = SubagentReportService._rank
+    for kind in ("request.completed", "request.failed", "request.cancelled"):
+        assert rank({"kind": kind}) > rank({"kind": "request.review"}), (
+            f"{kind} is more final than request.review and must win the burst"
+        )
+    assert rank({"kind": "task.cancelled"}) > rank({"kind": "task.completed"})
+
+
+def test_card_fields_follow_the_reread_status_not_the_signal():
+    """Headline, kind and severity must all describe the same state.
+
+    The card's request block is re-read from the database while the headline used
+    to come from the signal. When those disagreed the card was self-contradictory.
+    """
+    from lucent.services import subagent_reports
+
+    service = subagent_reports.SubagentReportService()
+    context = {
+        "request": {"id": "r1", "title": "T", "status": "cancelled"},
+        "task": None,
+        "counts": {"total": 1, "completed": 1},
+        "task_results": [],
+    }
+    card = service._build_card(
+        {"kind": "request.review", "request_id": "r1"}, context
+    )
+
+    assert card["kind"] == "request.cancelled"
+    assert card["severity"] == "muted"
+    assert "review" not in card["headline"].lower()
+    assert "automatic" not in card["body"].lower()
+
+
+def test_reported_result_is_the_prompt_not_a_system_appendix():
+    """The result must ride in the user prompt, not behind the agent definition.
+
+    Sending only the headline meant the actual output sat at the tail of a long
+    system prompt (agent definition + preamble). Replies then reliably said "the
+    report came back empty" while the card body carried the full result.
+    """
+    from lucent.services import subagent_reports
+
+    source = inspect.getsource(
+        subagent_reports.SubagentReportService._maybe_generate_reply
+    )
+    assert "card.get('body')" in source or 'card.get("body")' in source
+    run_session_prompt = source.split("prompt=(", 1)
+    assert len(run_session_prompt) == 2, "run_session must pass an explicit prompt"
+    assert "card['headline']" in run_session_prompt[1]
+
+    # The system message must NOT re-embed the body.
+    builder = inspect.getsource(
+        subagent_reports.SubagentReportService._build_system_message
+    )
+    assert 'REPORT_SYSTEM_PREAMBLE + card' not in builder
+
+
+# ---------------------------------------------------------------------------
+# Silent-suppression audit (2026-10-29)
+#
+# Every path that cannot answer immediately must either say why in the log or
+# park the reply for retry. A bare ``return`` here is permanent silence about
+# work the person is waiting on, because the card is already durable and nothing
+# re-generates it.
+# ---------------------------------------------------------------------------
+
+
+def _audit_service():
+    from lucent.services import subagent_reports
+
+    service = subagent_reports.SubagentReportService()
+    deferrals: list[str] = []
+    service._defer_reply = (  # type: ignore[method-assign]
+        lambda session_id, **kwargs: deferrals.append(kwargs.get("reason")) or True
+    )
+    return service, deferrals
+
+
+def _audit_args(kind="task.completed"):
+    session = {
+        "id": "s1",
+        "kind": "chat",
+        "status": "active",
+        "model": "m",
+        "user_id": "u",
+        "last_message_at": None,
+    }
+    signal = {
+        "kind": kind,
+        "session_id": "s1",
+        "organization_id": "o",
+        "request_id": "r",
+    }
+    return signal, {"headline": "h", "body": ""}, {"session": session}, {"id": "e1"}
+
+
+@pytest.mark.asyncio
+async def test_busy_conversation_defers_the_reply_instead_of_dropping_it():
+    """The person being *present* is when the acknowledgement matters most."""
+    service, deferrals = _audit_service()
+    service._awaiting_user_turn = lambda sid: True  # type: ignore[method-assign]
+
+    async def _never_finishes(sid):
+        return False
+
+    service._wait_for_user_turn = _never_finishes  # type: ignore[method-assign]
+    signal, card, context, event_row = _audit_args()
+    await service._maybe_generate_reply(signal, card, context, event_row)
+
+    assert deferrals == ["user turn still active"]
+
+
+@pytest.mark.asyncio
+async def test_failed_access_check_defers_instead_of_dropping():
+    """A broken check is not evidence the model is unavailable."""
+    service, deferrals = _audit_service()
+    service._awaiting_user_turn = lambda sid: False  # type: ignore[method-assign]
+    service._reply_too_soon = lambda sid: False  # type: ignore[method-assign]
+
+    signal, card, context, event_row = _audit_args()
+
+    import lucent.api.routers.chat as chat_router
+
+    async def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch_target = chat_router._can_user_access_model
+    chat_router._can_user_access_model = _boom  # type: ignore[assignment]
+    try:
+        await service._maybe_generate_reply(signal, card, context, event_row)
+    finally:
+        chat_router._can_user_access_model = monkeypatch_target  # type: ignore[assignment]
+
+    assert deferrals == ["model access check failed"]
+
+
+@pytest.mark.asyncio
+async def test_deferral_budget_is_bounded(monkeypatch):
+    """A permanently unreachable session must not retry forever."""
+    from lucent.services import subagent_reports
+
+    monkeypatch.setattr(subagent_reports, "REPLY_MAX_DEFERRALS", 2)
+    service = subagent_reports.SubagentReportService()
+    scheduled: list[str] = []
+    service._schedule_deferred_reply_retry = (  # type: ignore[method-assign]
+        lambda sid: scheduled.append(sid)
+    )
+    signal, card, context, event_row = _audit_args()
+
+    results = [
+        service._defer_reply(
+            "s1",
+            signal=signal,
+            card=card,
+            context=context,
+            event_row=event_row,
+            reason="test",
+        )
+        for _ in range(3)
+    ]
+
+    assert results == [True, True, False], "the third deferral must be refused"
+    assert len(scheduled) == 2
+    assert service._reply_deferrals["s1"] == 2
+
+
+@pytest.mark.asyncio
+async def test_transient_context_failure_requeues_the_burst(monkeypatch):
+    """A database blip during context load must not lose the report."""
+    from lucent.services import subagent_reports
+
+    service = subagent_reports.SubagentReportService()
+    handled: list[list] = []
+
+    async def _broken(signals):
+        handled.append(signals)
+        raise RuntimeError("connection reset")
+
+    service._handle_batch = _broken  # type: ignore[method-assign]
+    signal, _card, _context, _event_row = _audit_args()
+    service._pending[service._pending_key(signal)] = signal
+
+    # One debounce window: the flush fails and must put the signal back.
+    monkeypatch.setattr(subagent_reports, "DEBOUNCE_SECONDS", 0)
+    await service._flush_after_debounce()
+
+    assert handled, "the burst was attempted"
+    assert service._pending, "a failed burst must be re-queued, not dropped"
+
+
+@pytest.mark.asyncio
+async def test_context_load_propagates_database_failure(monkeypatch):
+    """``_load_context`` returns None only for a genuinely absent session.
+
+    Returning None on a transient failure made a database hiccup look like
+    "nothing to report", and the card was never written — the one outcome with
+    no recovery path.
+    """
+    from contextlib import asynccontextmanager
+
+    from lucent.services import subagent_reports
+
+    @asynccontextmanager
+    async def _broken_acquire(**_kwargs):
+        raise RuntimeError("connection reset by peer")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(subagent_reports, "scoped_acquire", _broken_acquire)
+
+    signal = {
+        "session_id": str(uuid.uuid4()),
+        "request_id": str(uuid.uuid4()),
+        "task_id": None,
+        "kind": "request.completed",
+        "organization_id": str(uuid.uuid4()),
+    }
+    service = subagent_reports.SubagentReportService()
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await service._load_context(signal)
 
 
 @pytest.mark.asyncio
@@ -204,26 +631,38 @@ async def test_distinct_bursts_with_same_kind_set_do_not_collide(
     assert sorted([first_signal["kind"]]) == sorted([second_signal["kind"]])
 
     await service._handle_batch([first_signal])
-    await service._handle_batch([second_signal])
+    events_first = await sessions.list_events(
+        str(session["id"]), org_id, visible_only=True
+    )
+    reports_first = [e for e in events_first if e["event_type"] == "subagent_report"]
+    assert len(reports_first) == 1
+    key_after_first = reports_first[0]["raw"]["dedupe_key"]
 
+    await service._handle_batch([second_signal])
     events = await sessions.list_events(
         str(session["id"]), org_id, visible_only=True
     )
     reports = [e for e in events if e["event_type"] == "subagent_report"]
-    assert len(reports) == 2, (
-        "two distinct bursts with the same kind set must both reach the conversation"
+    # One card per request: the second task's completion is reflected in the
+    # same card rather than appended as a peer, so the transcript always shows
+    # one current state instead of several stale ones.
+    assert len(reports) == 1, "a request keeps exactly one card"
+    assert reports[0]["raw"]["dedupe_key"] != key_after_first, (
+        "the second burst must be reflected — not swallowed as a replay"
     )
-    assert len({e["raw"]["dedupe_key"] for e in reports}) == 2
+    assert "2" in (reports[0]["raw"].get("body") or ""), (
+        "the refreshed card must carry the second task's outcome"
+    )
 
-    # A genuine replay of the first burst still de-duplicates.
-    await service._handle_batch([first_signal])
+    # A genuine replay of the current outcome still de-duplicates.
+    await service._handle_batch([second_signal])
     events_after = await sessions.list_events(
         str(session["id"]), org_id, visible_only=True
     )
     reports_after = [
         e for e in events_after if e["event_type"] == "subagent_report"
     ]
-    assert len(reports_after) == 2, "a replayed burst must not add a second card"
+    assert len(reports_after) == 1, "a replayed burst must not add a card"
 
 
 @pytest.mark.asyncio
@@ -429,8 +868,12 @@ async def test_repeated_request_level_burst_is_not_dropped(db_pool, test_user):
         str(session["id"]), org_id, visible_only=True
     )
     reports = [e for e in events if e["event_type"] == "subagent_report"]
-    assert len(reports) == 2, (
-        "the second review must be reported; it is not a replay of the first"
+    # The request keeps ONE card, refreshed. What must not happen is the second
+    # review being treated as a replay of the first and silently ignored — that
+    # was the original defect. The card must now carry the second task.
+    assert len(reports) == 1, "a request keeps exactly one card"
+    assert "2" in (reports[0]["raw"].get("body") or ""), (
+        "the second review must refresh the card; it is not a replay of the first"
     )
 
 
@@ -502,6 +945,46 @@ async def test_delegated_work_digest_lists_open_requests(db_pool, test_user):
     assert str(request["id"]) in digest
 
 
+def test_digest_uses_the_read_models_result_excerpt():
+    """The digest must carry real output, not the remote's terse status line.
+
+    The read model returns `result_excerpt`; the raw `result` column is not
+    selected. Reading only `result` meant the digest always fell back to
+    "Completed on remote X in 5.7s", so a model with the full text in its card
+    still reported the work as having no output.
+    """
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "r1",
+                    "title": "Probe",
+                    "status": "completed",
+                    "task_counts": {"completed": 1},
+                    "task_total": 1,
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "title": "Do the probe",
+                            "status": "completed",
+                            "result_excerpt": "ACTUAL HOST OUTPUT: claude=2.1.292",
+                            "result_summary": "Completed on remote X in 5.7s",
+                        }
+                    ],
+                }
+            ],
+            "active_task_count": 0,
+            "revision": "rev",
+        }
+    )
+
+    assert "ACTUAL HOST OUTPUT" in digest, (
+        "the digest must surface the real result the read model provides"
+    )
+
+
 @pytest.mark.asyncio
 async def test_digest_is_empty_without_delegation(db_pool, test_user):
     """No delegation must leave the system prompt byte-identical."""
@@ -518,6 +1001,133 @@ async def test_digest_is_empty_without_delegation(db_pool, test_user):
         )
         == ""
     )
+
+
+def test_digest_flags_all_review_work_as_about_to_finish():
+    """A request in the automatic check must not read as "still running".
+
+    The digest label for `review` used to be "in review", which the model read
+    as unfinished work. This note states the gate's real nature so later turns
+    stop describing completed work as pending.
+    """
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "r1",
+                    "title": "Probe the remote",
+                    "status": "review",
+                    "task_counts": {"completed": 1},
+                    "task_total": 1,
+                    "tasks": [],
+                }
+            ],
+            "active_task_count": 0,
+            "revision": "rev",
+        }
+    )
+    assert "automatic post-completion check" in digest
+    assert "do not describe them as still running" in digest
+    # It must not claim the work is finished/awaiting a human instead.
+    assert "ready for your review" not in digest
+
+
+def test_digest_omits_review_note_when_other_work_is_active():
+    """The note is scoped to the all-in-review case only."""
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "r1",
+                    "title": "Finishing",
+                    "status": "review",
+                    "task_counts": {"completed": 1},
+                    "task_total": 1,
+                    "tasks": [],
+                },
+                {
+                    "id": "r2",
+                    "title": "Running",
+                    "status": "in_progress",
+                    "task_counts": {"running": 1},
+                    "task_total": 1,
+                    "tasks": [],
+                },
+            ],
+            "active_task_count": 1,
+            "revision": "rev",
+        }
+    )
+    assert "automatic post-completion check" not in digest
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_reply_is_retried_not_dropped():
+    """A suppressed reply must be re-armed, not forgotten.
+
+    The reply interval is a cost control. Dropping the reply outright meant a
+    request's completion could go unacknowledged forever while the earlier
+    interim notice kept the single reply. Verified live: gaps of 29/44/46/50s
+    against a 60s interval, so completion always lost.
+    """
+    from lucent.services import subagent_reports
+
+    service = subagent_reports.SubagentReportService()
+    scheduled: list[str] = []
+    service._schedule_deferred_reply_retry = lambda sid: scheduled.append(sid)  # type: ignore[method-assign]
+
+    session = {"id": "s1", "kind": "chat", "status": "active", "model": "m", "user_id": "u"}
+    context = {"session": session}
+    signal = {"kind": "task.completed", "session_id": "s1", "organization_id": "o", "request_id": "r"}
+    card = {"headline": "Finished: x", "body": ""}
+
+    service._reply_too_soon = lambda sid: True  # type: ignore[method-assign]
+    service._awaiting_user_turn = lambda sid: False  # type: ignore[method-assign]
+
+    await service._maybe_generate_reply(signal, card, context, {"id": "e1"})
+
+    assert scheduled == ["s1"], "the suppressed reply must be scheduled for retry"
+    assert service._reply_pending["s1"]["signal"]["kind"] == "task.completed"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_outcome_bypasses_the_reply_interval(monkeypatch):
+    """A request's final outcome is never rate-limited away.
+
+    The interim `review` notice normally lands 30-55s before completion, inside
+    the 60s window — so without this exception the completion reply was always
+    the one that lost.
+    """
+    from lucent.services import subagent_reports
+
+    service = subagent_reports.SubagentReportService()
+    service._reply_too_soon = lambda sid: True  # type: ignore[method-assign]
+    service._awaiting_user_turn = lambda sid: False  # type: ignore[method-assign]
+
+    # The staleness check is the next guard after the interval gate. Making it
+    # raise proves the gate admitted us, without running a real model turn.
+    def _sentinel(_value):
+        raise RuntimeError("reached past the interval gate")
+
+    monkeypatch.setattr(subagent_reports, "_stale_beyond_age_hours", _sentinel)
+
+    session = {"id": "s1", "kind": "chat", "status": "active", "model": "m", "user_id": "u"}
+    context = {"session": session}
+    signal = {
+        "kind": "request.completed",
+        "session_id": "s1",
+        "organization_id": "o",
+        "request_id": "r",
+    }
+    card = {"headline": "This request is complete.", "body": ""}
+
+    with pytest.raises(RuntimeError, match="reached past the interval gate"):
+        await service._maybe_generate_reply(signal, card, context, {"id": "e1"})
+    assert not service._reply_pending, "a terminal outcome must not be deferred"
 
 
 @pytest.mark.asyncio

@@ -369,7 +369,11 @@
     const REPORT_ACCENTS = {
         success: { bar: 'bg-emerald-500', chip: 'bg-emerald-50 text-emerald-700 border-emerald-200', label: 'Completed' },
         attention: { bar: 'bg-red-500', chip: 'bg-red-50 text-red-700 border-red-200', label: 'Needs attention' },
-        review: { bar: 'bg-pink-500', chip: 'bg-pink-100 text-pink-700 border-pink-200', label: 'Ready for review' },
+        // `review` is Lucent's own automatic post-completion check, which
+        // resolves on its own within about a minute. It is NOT a human approval
+        // gate, so the label must not read as "waiting on you" — that wording
+        // left finished work looking like it needed a decision.
+        review: { bar: 'bg-sky-500', chip: 'bg-sky-100 text-sky-700 border-sky-200', label: 'Finishing up' },
         muted: { bar: 'bg-gray-400', chip: 'bg-gray-100 text-gray-600 border-gray-200', label: 'Stopped' },
         info: { bar: 'bg-primary-500', chip: 'bg-primary-50 text-primary-700 border-primary-200', label: 'Update' },
     };

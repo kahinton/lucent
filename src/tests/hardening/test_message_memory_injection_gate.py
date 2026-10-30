@@ -210,7 +210,7 @@ async def test_gate_filtering_everything_emits_gated_silence_line(monkeypatch):
     )
     silence = outcome.executions[0]
     assert silence.text == (
-        "memory-lookup: 0 injected (2 gated, 0 overflow, 0 deduped, 0 below threshold)"
+        "memory-lookup: 0 injected (2 gated, 0 overflow, 0 deduped, 0 below threshold, 0 outside score spread)"
     )
     assert silence.metadata["decision_gated"] == 2
     assert silence.metadata["skipped"] == 2

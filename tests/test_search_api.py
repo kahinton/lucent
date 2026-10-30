@@ -348,12 +348,16 @@ class TestSearchPost:
             assert "organization_id" in m
 
     async def test_search_no_results(self, srch_client, srch_prefix):
-        """Search for nonexistent content returns empty results."""
+        """Search for nonexistent content returns empty results.
+
+        The query must not reuse ``srch_prefix``: every fixture user gets an
+        auto-created individual memory whose content contains that prefix, so a
+        prefixed query legitimately matches it. Using the prefix here tested the
+        old term-coverage precision accident rather than "no results".
+        """
         resp = await srch_client.post(
             "/api/search",
-            json={
-                "query": f"{srch_prefix}completely_nonexistent_zzzzzzz",
-            },
+            json={"query": f"zzzq_nonexistent_{uuid4().hex[:10]}_zzzzzzz"},
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -622,12 +626,15 @@ class TestSearchFull:
             assert m["importance"] >= 8
 
     async def test_search_full_no_results(self, srch_client, srch_prefix):
-        """Full search for nonexistent content returns empty."""
+        """Full search for nonexistent content returns empty.
+
+        See ``test_search_no_results``: a ``srch_prefix`` query matches the
+        auto-created individual memory for the fixture user, so this must use a
+        genuinely absent string.
+        """
         resp = await srch_client.post(
             "/api/search/full",
-            json={
-                "query": f"{srch_prefix}absolutely_nonexistent_xyzzy_99999",
-            },
+            json={"query": f"zzzq_absent_{uuid4().hex[:10]}_xyzzy99999"},
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -799,10 +806,13 @@ class TestSearchAccessLogging:
         assert row["last_accessed_at"] is None
 
     async def test_empty_search_does_not_log(self, srch_client, srch_prefix):
-        """Search returning no results does not log any access."""
+        """Search returning no results does not log any access.
+
+        Uses a query with no fixture overlap — see ``test_search_no_results``.
+        """
         resp = await srch_client.post(
             "/api/search",
-            json={"query": f"{srch_prefix}nonexistent_zzzzz"},
+            json={"query": f"zzzq_missing_{uuid4().hex[:10]}_zzzzz"},
         )
         assert resp.status_code == 200
         assert resp.json()["memories"] == []

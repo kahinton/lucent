@@ -176,6 +176,16 @@ class MemoryRepository:
     # their terms occur at all.
     TERM_COVERAGE_FLOOR_CAP = 3
 
+    # Absolute relevance floor for the term-coverage branch. Capping the
+    # coverage requirement at 3 trades precision for recall: a long junk query
+    # whose terms happen to include two common words ("test", "user") can clear
+    # 3 co-occurring terms in an unrelated memory. Measured on the live corpus,
+    # the weighted relevance score separates those cleanly — junk queries top
+    # out around 0.19 while genuine matches start around 0.27 — so a 0.30 floor
+    # removes the false positives and keeps ~98% of real hits. 0.30 is the same
+    # floor the message-lookup hook already uses for injection.
+    MIN_RELEVANCE_SCORE = 0.30
+
     # Mapping from goal metadata.status → lifecycle_stage.
     # Only applied for goal-type memories.  Other types may have different
     # lifecycle semantics and are left untouched.
@@ -1863,7 +1873,10 @@ class MemoryRepository:
                   END
             )"""
             match_condition = f"""(
-                {matched_terms} >= {term_coverage_floor}
+                (
+                    {matched_terms} >= {term_coverage_floor}
+                    AND {relevance_score} >= {float(self.MIN_RELEVANCE_SCORE)}
+                )
                 OR (
                     cardinality(search_input.query_terms) BETWEEN 1 AND 2
                     AND length(search_input.query_text) <= 32
@@ -2220,7 +2233,10 @@ class MemoryRepository:
               END
         )"""
         match_condition = f"""(
-            {matched_terms} >= {term_coverage_floor}
+            (
+                {matched_terms} >= {term_coverage_floor}
+                AND {relevance_score} >= {float(self.MIN_RELEVANCE_SCORE)}
+            )
             OR (
                 cardinality(search_input.query_terms) BETWEEN 1 AND 2
                 AND length(search_input.query_text) <= 32

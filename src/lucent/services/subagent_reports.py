@@ -53,10 +53,15 @@ REPORT_REPLY_KIND = "subagent_report_reply"
 # Coalesce a burst of transitions (a task finishing usually moves its request
 # too) into a single report rather than a card per row.
 DEBOUNCE_SECONDS = float(os.environ.get("LUCENT_SUBAGENT_REPORT_DEBOUNCE_SECONDS", "8"))
-# One generated reply per session per window. A card is still written for every
-# distinct event, so nothing is lost — only the number of model calls is capped.
+# One generated reply per session per window. Every distinct outcome still gets
+# a durable card, and anything suppressed by this window is re-armed through
+# ``_defer_reply`` rather than dropped — so this is purely a cost control and
+# never a correctness rule. A request's terminal outcome bypasses it entirely.
+# Kept well above the ~40-55s review→completed gap so the two do not compete for
+# the single slot, and because a collaboration reply arriving a minute or two
+# late is far better than a wrong or missing one.
 REPLY_MIN_INTERVAL_SECONDS = float(
-    os.environ.get("LUCENT_SUBAGENT_REPORT_REPLY_INTERVAL_SECONDS", "60")
+    os.environ.get("LUCENT_SUBAGENT_REPORT_REPLY_INTERVAL_SECONDS", "180")
 )
 # Do not start a turn on a conversation nobody has touched in a long time. The
 # card still lands; the person sees it next time they open the thread.
@@ -66,27 +71,55 @@ REPLY_TURN_WAIT_SECONDS = float(
     os.environ.get("LUCENT_SUBAGENT_REPORT_TURN_WAIT_SECONDS", "20")
 )
 REPLY_HISTORY_LIMIT = 20
+# Fallback only. The live value comes from the organization's
+# ``chat.timeout_seconds`` so a report turn is bounded the same way a normal
+# chat turn is — an unattended turn must not outlive the interactive setting.
 REPLY_TIMEOUT_SECONDS = int(os.environ.get("LUCENT_SUBAGENT_REPORT_TIMEOUT_SECONDS", "300"))
 REPLY_MAX_CHARS = 1200
 _MAX_REPORT_TEXT = 1600
+# How many times a reply may be re-deferred before it is abandoned. Unbounded
+# retries on a permanently-broken session (no model, revoked access) would spin
+# forever; a handful of attempts covers transient causes (a busy conversation,
+# a momentary engine failure) without turning a durable card into a task queue.
+REPLY_MAX_DEFERRALS = int(os.environ.get("LUCENT_SUBAGENT_REPORT_MAX_DEFERRALS", "6"))
 
 REPORT_SYSTEM_PREAMBLE = """\
 You are Lucent, continuing a conversation in which you delegated work to the daemon.
 
-A background sub-agent just reported a result. Write the short message you would
-naturally say to the person now — as their collaborator, not as a status system.
+A background sub-agent just reported. Write the short message you would naturally
+say to the person now — as their collaborator, not as a status system.
 
 Rules:
-- Lead with what happened in plain language, then what it means for their goal.
-- Use the reported result, not speculation. If the work failed or needs review,
-  say so directly and name the concrete next step.
-- Do not claim work is still running when the report says it finished.
+- Lead with what the work PRODUCED, quoting the concrete result below. The person
+  asked for an outcome, not a status.
+- Use the reported result, not speculation. If it failed, say so directly and name
+  the concrete next step.
 - Do not list internal IDs, task statuses as statuses, or tool names.
 - Do not call tools. This turn is a report, not a work session.
-- Keep it under 120 words. No greeting, no sign-off.
+- Keep it under 150 words. No greeting, no sign-off.
+- NEVER describe the result as missing, thin, empty, or unavailable when the
+  REPORTED RESULT below contains work output. Quote the finding.
+- The REPORTED RESULT is the authoritative content of THIS report. Earlier turns
+  may have said a report was empty; that referred to an earlier report and must
+  not be repeated.
+- "The work finished" and "the request was approved" are different milestones and
+  both are reported. When the request is complete, say plainly that it is finished
+  and approved — do not leave the person wondering whether a further approval step
+  is still owed to them.
 
 --- REPORTED RESULT ---
 """
+
+
+def _is_terminal_request_status(status: str | None) -> bool:
+    """Whether a request status is a final outcome worth a reply.
+
+    ``review`` is deliberately excluded: it is Lucent's own post-completion
+    quality gate, which runs automatically and resolves within seconds. It is an
+    internal step, not a decision the person makes, so answering it produces a
+    reply that describes work as unfinished moments before it completes.
+    """
+    return str(status or "") in {"completed", "failed", "cancelled"}
 
 
 def _as_uuid(value: Any) -> UUID | None:
@@ -115,6 +148,12 @@ class SubagentReportService:
         self._pending: dict[str, dict[str, Any]] = {}
         self._session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_reply_at: dict[str, float] = {}
+        # Reports whose card was written but whose reply was suppressed by the
+        # reply interval. Without a retry these are answered never.
+        self._reply_pending: dict[str, dict[str, Any]] = {}
+        # Re-deferral counters per session, so a permanently unreachable session
+        # cannot retry forever.
+        self._reply_deferrals: dict[str, int] = {}
         self._debounce_task: asyncio.Task | None = None
         self._shutdown = asyncio.Event()
 
@@ -173,6 +212,19 @@ class SubagentReportService:
         self._connection = connection
         logger.info("Subagent report listener connected on %s", REPORT_CHANNEL)
 
+    @staticmethod
+    def _pending_key(signal: dict[str, Any]) -> str:
+        """Coalescing key for one pending outcome.
+
+        Keyed on *outcome*, not session: a task finishing usually moves its
+        request too, and those are two distinct reports a person wants to see.
+        Keying on the session alone silently dropped one of them.
+        """
+        return (
+            f"{signal['session_id']}:{signal['request_id']}:"
+            f"{signal.get('task_id') or ''}:{signal.get('kind', '')}"
+        )
+
     def _on_notification(self, _conn, _pid, _channel, payload: str) -> None:
         """Queue a report signal (sync callback — must not block)."""
         try:
@@ -187,11 +239,7 @@ class SubagentReportService:
             return
         task_id = event.get("task_id")
         kind = str(event.get("kind") or "")
-        # Coalesce by *outcome*, not by session: a task finishing usually moves
-        # its request too, and those are two distinct reports a person wants to
-        # see. Keying on the session alone would silently drop one of them.
-        key = f"{session_id}:{request_id}:{task_id or ''}:{kind}"
-        self._pending[key] = {
+        signal = {
             "session_id": session_id,
             "request_id": request_id,
             "task_id": str(task_id) if task_id else None,
@@ -199,6 +247,7 @@ class SubagentReportService:
             "organization_id": org_id,
             "user_id": str(event["user_id"]) if event.get("user_id") else None,
         }
+        self._pending[self._pending_key(signal)] = signal
         if self._debounce_task is None or self._debounce_task.done():
             self._debounce_task = asyncio.create_task(
                 self._flush_after_debounce(), name="subagent-reports-flush"
@@ -226,10 +275,17 @@ class SubagentReportService:
                 raise
             except Exception:
                 logger.warning(
-                    "Subagent report handling failed for session %s",
+                    "Subagent report handling failed for session %s; re-queuing",
                     session_id,
                     exc_info=True,
                 )
+                # Put the burst back so it is retried instead of lost. A failure
+                # here is usually transient (a database blip, a lock timeout), and
+                # the card this would have produced is the only record the person
+                # gets — dropping it silently is the worst possible outcome.
+                for signal in signals:
+                    key = self._pending_key(signal)
+                    self._pending.setdefault(key, signal)
 
         # Handling a burst can take a while (it generates a reply turn), and new
         # signals that arrive meanwhile land in the fresh _pending dict without
@@ -240,6 +296,103 @@ class SubagentReportService:
             self._debounce_task = asyncio.create_task(
                 self._flush_after_debounce(), name="subagent-reports-flush"
             )
+
+    # -- deferred replies ----------------------------------------------
+
+    def _defer_reply(
+        self,
+        session_id: str,
+        *,
+        signal: dict[str, Any],
+        card: dict[str, Any],
+        context: dict[str, Any],
+        event_row: dict[str, Any],
+        reason: str,
+    ) -> bool:
+        """Park a reply that could not be generated now, and re-arm it.
+
+        Every path that cannot answer immediately must come through here. The
+        card is already durable, so nothing would ever retry it: a drop here is
+        permanent silence about work the person is waiting on. Returning False
+        means the retry budget is spent and the silence is accepted (the card
+        remains the record).
+        """
+        attempts = self._reply_deferrals.get(session_id, 0)
+        if attempts >= REPLY_MAX_DEFERRALS:
+            logger.warning(
+                "Subagent report for session %s: giving up on the reply after "
+                "%s deferrals (last reason: %s); the card remains in the transcript",
+                session_id,
+                attempts,
+                reason,
+            )
+            return False
+        self._reply_deferrals[session_id] = attempts + 1
+        self._reply_pending[session_id] = {
+            "signal": signal,
+            "card": card,
+            "context": context,
+            "event_row": event_row,
+        }
+        self._schedule_deferred_reply_retry(session_id)
+        logger.info(
+            "Subagent report for session %s: reply deferred (%s, attempt %s/%s)",
+            session_id,
+            reason,
+            attempts + 1,
+            REPLY_MAX_DEFERRALS,
+        )
+        return True
+
+    def _schedule_deferred_reply_retry(self, session_id: str) -> None:
+        """Answer a suppressed report once the blocking condition has cleared.
+
+        ``_reply_too_soon`` used to drop the reply outright, and nothing ever
+        retried: the card was already written, so no further notification would
+        arrive for it. A request's completion could therefore go unacknowledged
+        forever while an interim notice got the single reply. This re-arms the
+        answer after the window.
+        """
+        delay = max(1.0, REPLY_MIN_INTERVAL_SECONDS + 1.0)
+
+        async def _retry() -> None:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            entry = self._reply_pending.get(session_id)
+            if not entry or self._shutdown.is_set():
+                return
+            if self._awaiting_user_turn(session_id):
+                # Still busy — re-arm through the shared helper so the re-defer
+                # is counted and cannot loop forever.
+                self._defer_reply(
+                    session_id,
+                    signal=entry["signal"],
+                    card=entry["card"],
+                    context=entry["context"],
+                    event_row=entry["event_row"],
+                    reason="user turn still active",
+                )
+                return
+            self._reply_pending.pop(session_id, None)
+            try:
+                await self._maybe_generate_reply(
+                    entry["signal"],
+                    entry["card"],
+                    entry["context"],
+                    entry["event_row"],
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "Deferred subagent reply failed for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+
+        asyncio.create_task(_retry(), name="subagent-report-deferred-reply")
 
     @staticmethod
     def _signal_identity(signal: dict[str, Any]) -> str:
@@ -304,17 +457,26 @@ class SubagentReportService:
 
     @staticmethod
     def _rank(signal: dict[str, Any]) -> int:
-        """Higher wins when collapsing a burst into one report."""
+        """Higher wins when collapsing a burst into one report.
+
+        Ordered by how final the outcome is, NOT by how urgent it feels.
+        ``cancelled`` must outrank ``review``: a burst carrying both means the
+        request was reviewed and then cancelled (or vice versa) in one window,
+        and the surviving card must describe where it actually ended up. Ranking
+        ``review`` above ``cancelled`` produced a card that said "checking the
+        finished work" for a cancelled request — a contradiction the reader
+        cannot resolve.
+        """
         rank = {
             "request.completed": 100,
-            "request.failed": 95,
+            "request.failed": 97,
+            "request.cancelled": 95,
             "request.needs_rework": 90,
             "request.review": 85,
-            "request.cancelled": 80,
             "task.needs_review": 60,
-            "task.failed": 55,
+            "task.failed": 57,
+            "task.cancelled": 55,
             "task.completed": 50,
-            "task.cancelled": 40,
         }
         return rank.get(signal.get("kind", ""), 0)
 
@@ -455,7 +617,14 @@ class SubagentReportService:
             return
 
     async def _load_context(self, signal: dict[str, Any]) -> dict[str, Any] | None:
-        """Re-read the real state. The notification payload is never trusted."""
+        """Re-read the real state. The notification payload is never trusted.
+
+        Returns ``None`` only when the session genuinely no longer exists, or the
+        conversation opted out of reports — both permanent, intentional no-report
+        cases. Transient database failures RAISE instead: returning ``None`` for
+        them used to drop the report entirely, so a momentary hiccup lost a card
+        that nothing would ever regenerate.
+        """
         org_id = signal["organization_id"]
         repo = RequestRepository(await _get_pool())
         try:
@@ -470,6 +639,10 @@ class SubagentReportService:
                     _as_uuid(org_id),
                 )
                 if not session_row:
+                    logger.info(
+                        "Subagent report for session %s: session no longer exists",
+                        signal["session_id"],
+                    )
                     return None
                 request_row = await conn.fetchrow(
                     """SELECT id::text AS id, title, status, created_by::text AS created_by
@@ -521,11 +694,22 @@ class SubagentReportService:
                     _as_uuid(signal["request_id"]),
                 )
         except Exception:
-            logger.debug("Failed to load report context", exc_info=True)
-            return None
+            # Transient failure: let it propagate so the flush's per-session
+            # guard retries the burst. Swallowing it here turned a momentary
+            # database hiccup into a permanently lost report.
+            logger.warning(
+                "Failed to load report context for session %s; will retry",
+                signal["session_id"],
+                exc_info=True,
+            )
+            raise
 
         metadata = session_row["metadata"] if isinstance(session_row["metadata"], dict) else {}
         if metadata.get("subagent_reports_disabled"):
+            logger.info(
+                "Subagent report for session %s: reports disabled for this conversation",
+                signal["session_id"],
+            )
             return None
         return {
             "session": dict(session_row),
@@ -549,7 +733,31 @@ class SubagentReportService:
         counts = context.get("counts") or {}
         kind = signal["kind"]
 
-        headline = summarize_report_event(kind=kind, request=request, task=task)
+        # The card describes the request's state as RE-READ, not as the signal
+        # claimed. A burst can carry several transitions, and the signal that won
+        # the ranking is not always the one that decided the final status — a
+        # card whose headline says "review" while its own request block says
+        # "cancelled" is unresolvable for the reader.
+        authoritative_status = (
+            str(request.get("status") or "") if kind.startswith("request.") else ""
+        )
+        headline_kind = (
+            f"request.{authoritative_status}"
+            if authoritative_status and not kind.startswith("task.")
+            else kind
+        )
+        if headline_kind != kind:
+            logger.info(
+                "Report card headline follows the re-read status (%s) rather "
+                "than the signal (%s) for request %s",
+                headline_kind,
+                kind,
+                signal.get("request_id"),
+            )
+
+        headline = summarize_report_event(
+            kind=headline_kind, request=request, task=task
+        )
         details: list[str] = []
         if kind.startswith("task."):
             status = kind.split(".", 1)[1]
@@ -565,16 +773,10 @@ class SubagentReportService:
             # A request-level report is the headline, but the person still wants
             # to know what the work actually produced. Otherwise the reply turn
             # has nothing concrete to say and degrades into a status sentence.
-            if kind == "request.review":
-                details.append("The work is ready for your review.")
-            elif kind == "request.needs_rework":
-                details.append("Review sent the work back for another pass.")
-            elif kind == "request.completed":
-                details.append("All tasks finished and the result was approved.")
-            elif kind == "request.failed":
-                details.append("The work stopped on a failed task.")
-            elif kind == "request.cancelled":
-                details.append("The request was cancelled.")
+            # NOTE: the result excerpts are appended BEFORE the status sentence
+            # so a 1200-char reply prompt cannot truncate the result away and
+            # leave only "the work is ready" — which produced replies that
+            # correctly complained the report was empty.
             for result in context.get("task_results") or []:
                 title = _clip(result.get("title"), 90)
                 excerpt = _clip(
@@ -582,6 +784,19 @@ class SubagentReportService:
                 )
                 if excerpt:
                     details.append(f'"{title}": {excerpt}')
+            if headline_kind == "request.review":
+                details.append(
+                    "This is Lucent's automatic post-completion check; it is not "
+                    "a human decision and it resolves on its own."
+                )
+            elif headline_kind == "request.needs_rework":
+                details.append("Review sent the work back for another pass.")
+            elif headline_kind == "request.completed":
+                details.append("All tasks finished and the result was approved.")
+            elif headline_kind == "request.failed":
+                details.append("The work stopped on a failed task.")
+            elif headline_kind == "request.cancelled":
+                details.append("The request was cancelled.")
 
         total = int(counts.get("total") or 0)
         if total:
@@ -592,9 +807,9 @@ class SubagentReportService:
                 summary += f", {running} running"
             details.append(summary + ".")
 
-        status = kind.split(".", 1)[1] if "." in kind else ""
+        status = headline_kind.split(".", 1)[1] if "." in headline_kind else ""
         return {
-            "kind": kind,
+            "kind": headline_kind,
             "severity": _severity_for(status),
             "headline": headline,
             "body": " ".join(part for part in details if part).strip(),
@@ -624,49 +839,59 @@ class SubagentReportService:
         card: dict[str, Any],
         context: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Append the visible report event, de-duplicated by event identity."""
+        """Create or refresh the one visible card for this request.
+
+        Cards are a projection of a request's CURRENT state, not an audit trail:
+        the same row is updated as the request advances. Appending a card per
+        status change is what left the thread showing "READY FOR REVIEW" for work
+        that had already completed, because nothing ever retracted the earlier
+        card.
+
+        ``None`` means exactly one thing: this exact card content is already
+        stored (a replay of the same outcome). A failure to WRITE raises, because
+        the caller treats ``None`` as "nothing to do" and would otherwise discard
+        a report that was never stored.
+        """
         session = context["session"]
         org_id = signal["organization_id"]
         repo = LLMSessionRepository(await _get_pool())
-        try:
-            existing = await repo.list_events(
-                session["id"],
-                org_id,
-                user_id=session.get("user_id"),
-                limit=200,
-                newest_first=True,
-            )
-        except Exception:
-            logger.debug("Could not read recent events for dedupe", exc_info=True)
-            existing = []
-        key = card["dedupe_key"]
-        for row in existing:
-            if row.get("event_type") != REPORT_EVENT_TYPE:
-                continue
-            raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
-            if raw.get("dedupe_key") == key:
-                return None
-
         raw = {**card, "request_id": signal["request_id"], "report_kind": signal["kind"]}
         if signal.get("task_id"):
             raw["task_id"] = signal["task_id"]
         try:
-            return await repo.add_event(
+            row, changed = await repo.upsert_report_card(
                 session["id"],
-                event_type=REPORT_EVENT_TYPE,
+                request_id=signal["request_id"],
                 org_id=org_id,
                 user_id=session.get("user_id"),
                 detail=card["headline"],
                 raw=raw,
-                visible=True,
             )
         except Exception:
             logger.warning(
-                "Failed to persist subagent report card for session %s",
+                "Failed to persist subagent report card for session %s; retrying",
                 session["id"],
                 exc_info=True,
             )
+            raise
+        if not changed:
+            logger.debug(
+                "Subagent report for session %s: card for request %s already "
+                "reflects this outcome",
+                session["id"],
+                signal["request_id"],
+            )
             return None
+        if row is None:
+            return None
+        if card.get("headline"):
+            logger.info(
+                "Subagent report card updated for session %s request %s: %s",
+                session["id"],
+                signal["request_id"],
+                card["headline"],
+            )
+        return row
 
     async def _maybe_generate_reply(
         self,
@@ -686,21 +911,65 @@ class SubagentReportService:
             return
         if self._awaiting_user_turn(session_id):
             if not await self._wait_for_user_turn(session_id):
-                logger.info(
-                    "Subagent report for session %s: user turn still active, card only",
+                # A busy conversation used to end the reply for good. Defer
+                # instead: the person is actively here, which is exactly when
+                # an acknowledgement matters most.
+                self._defer_reply(
                     session_id,
+                    signal=signal,
+                    card=card,
+                    context=context,
+                    event_row=event_row,
+                    reason="user turn still active",
                 )
                 return
-        if self._reply_too_soon(session_id):
+        # Which outcomes earn a direct message. A request's meaningful
+        # milestones are "the work finished" (review) and "it was approved"
+        # (completed) — the person asked to be told about BOTH, so neither is a
+        # rate-limit casualty. Intermediate bookkeeping (needs_rework on a step,
+        # individual task rows) still rides the interval so a long request cannot
+        # produce a message per row. The card is the streaming progress view; the
+        # message is the substantive report.
+        kind = str(signal.get("kind", ""))
+        status = kind.split(".", 1)[-1]
+        milestone_outcome = kind.startswith("request.") and status in {
+            "review",
+            "completed",
+            "failed",
+            "cancelled",
+        }
+        if self._reply_too_soon(session_id) and not milestone_outcome:
+            self._defer_reply(
+                session_id,
+                signal=signal,
+                card=card,
+                context=context,
+                event_row=event_row,
+                reason=f"reply interval for {kind}",
+            )
             return
         if _stale_beyond_age_hours(session.get("last_message_at")):
+            logger.info(
+                "Subagent report for session %s: conversation idle beyond %sh, "
+                "card only (the person sees it when they return)",
+                session_id,
+                REPLY_MAX_AGE_HOURS,
+            )
             return
 
         model = session.get("model")
         if not model:
+            logger.info(
+                "Subagent report for session %s: no model on the session, card only",
+                session_id,
+            )
             return
         user_id = session.get("user_id")
         if not user_id:
+            logger.info(
+                "Subagent report for session %s: no session owner, card only",
+                session_id,
+            )
             return
 
         from lucent.api.routers.chat import _can_user_access_model
@@ -718,6 +987,22 @@ class SubagentReportService:
                 )
                 return
         except Exception:
+            # The access check itself failed — that is not evidence the model is
+            # unavailable, so defer rather than silently dropping the reply.
+            logger.warning(
+                "Subagent report for session %s: model access check failed; "
+                "deferring the reply",
+                session_id,
+                exc_info=True,
+            )
+            self._defer_reply(
+                session_id,
+                signal=signal,
+                card=card,
+                context=context,
+                event_row=event_row,
+                reason="model access check failed",
+            )
             return
 
         repo = LLMSessionRepository(pool)
@@ -735,7 +1020,22 @@ class SubagentReportService:
                 )
             )[-REPLY_HISTORY_LIMIT:]
         except Exception:
+            # Without history the reply loses conversational continuity but can
+            # still report the result, which is the point. Log it so a persistent
+            # history failure is visible rather than merely degraded.
+            logger.warning(
+                "Subagent report for session %s: could not load history; "
+                "replying without it",
+                session_id,
+                exc_info=True,
+            )
             history = []
+
+        try:
+            reply_timeout = chat_timeout_seconds(organization_id=org_id)
+        except Exception:
+            logger.debug("Could not resolve chat timeout; using default", exc_info=True)
+            reply_timeout = REPLY_TIMEOUT_SECONDS
 
         system_prompt = await self._build_system_message(session, org_id, card)
         engine = get_engine_for_model(model)
@@ -744,9 +1044,17 @@ class SubagentReportService:
             result = await engine.run_session(
                 model=model,
                 system_message=system_prompt,
-                prompt=card["headline"],
+                # The reported content is the *prompt*, not a trailing appendix
+                # on the system message. Sending only the headline left the
+                # actual result at the far end of a long system prompt, and the
+                # reply reliably reported "the report came back empty" while the
+                # card body carried the full output.
+                prompt=(
+                    f"{card['headline']}\n\n"
+                    f"{card.get('body') or ''}".strip()
+                ),
                 mcp_config={},
-                timeout=REPLY_TIMEOUT_SECONDS,
+                timeout=reply_timeout,
                 # No tools: an unattended turn must not be able to act.
                 message_history=[
                     {"role": m["role"], "content": m["content"]} for m in history
@@ -766,7 +1074,17 @@ class SubagentReportService:
             )
         except Exception:
             logger.warning(
-                "Subagent report reply failed for session %s", session_id, exc_info=True
+                "Subagent report reply failed for session %s; will retry",
+                session_id,
+                exc_info=True,
+            )
+            self._defer_reply(
+                session_id,
+                signal=signal,
+                card=card,
+                context=context,
+                event_row=event_row,
+                reason="reply turn failed",
             )
             return
         finally:
@@ -774,6 +1092,16 @@ class SubagentReportService:
 
         reply = _clip(result, REPLY_MAX_CHARS)
         if not reply:
+            # An empty completion is usually a transient engine hiccup, not a
+            # verdict. Retry rather than silently leaving the card unanswered.
+            self._defer_reply(
+                session_id,
+                signal=signal,
+                card=card,
+                context=context,
+                event_row=event_row,
+                reason="reply turn returned nothing",
+            )
             return
         # One turn id stitches the card and the reply into a single unit: the
         # transcript renders the card inside the reply's row, and a reload shows
@@ -838,7 +1166,11 @@ class SubagentReportService:
                     parts.append(agent["content"])
             except Exception:
                 logger.debug("Could not load agent content for report turn", exc_info=True)
-        parts.append(REPORT_SYSTEM_PREAMBLE + card["headline"] + "\n" + (card.get("body") or ""))
+        # The reported content rides in the *prompt* (see run_session above), so
+        # the system message carries only the instructions. Appending the body
+        # here as well would duplicate it and push it behind a long agent
+        # definition, where it went unread.
+        parts.append(REPORT_SYSTEM_PREAMBLE)
         return "\n\n".join(parts)
 
     # -- concurrency helpers -------------------------------------------

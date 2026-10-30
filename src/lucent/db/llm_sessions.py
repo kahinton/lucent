@@ -676,6 +676,103 @@ class LLMSessionRepository:
             rows = await conn.fetch(query, *params)
         return [dict(r) for r in rows]
 
+    async def upsert_report_card(
+        self,
+        session_id: str | UUID,
+        *,
+        request_id: str | UUID,
+        org_id: str | UUID,
+        user_id: str | UUID | None = None,
+        detail: str | None = None,
+        raw: dict[str, Any] | None = None,
+        turn_id: str | UUID | None = None,
+        message_id: str | UUID | None = None,
+    ) -> tuple[dict | None, bool]:
+        """Create or refresh the single report card for one request.
+
+        Deliberately the ONE mutable event type. ``llm_session_events`` is an
+        append-only log for tool calls, messages and reasoning, because those are
+        historical facts. A report card is not a historical fact — it is a
+        *projection* of where one request currently stands. Appending a second
+        card per status change left the transcript showing "ready for review"
+        forever whenever the request later completed, and every reader had to
+        reconcile several cards to learn one current state.
+
+        Returns ``(row, created)``. ``created`` is False when the card already
+        carried this exact ``dedupe_key`` (a replay), in which case nothing is
+        written and the caller should treat it as a no-op.
+        """
+        key = (raw or {}).get("dedupe_key")
+        async with scoped_acquire(
+            organization_id=org_id,
+            user_id=user_id,
+        ) as conn:
+            async with conn.transaction():
+                existing = await conn.fetchrow(
+                    """SELECT * FROM llm_session_events
+                       WHERE session_id = $1
+                         AND event_type = 'subagent_report'
+                         AND raw->>'request_id' = $2
+                       ORDER BY sequence DESC
+                       LIMIT 1
+                       FOR UPDATE""",
+                    _uuid(session_id),
+                    str(request_id),
+                )
+                if existing is not None:
+                    existing_raw = (
+                        existing["raw"] if isinstance(existing["raw"], dict) else {}
+                    )
+                    if key and existing_raw.get("dedupe_key") == key:
+                        return dict(existing), False
+                    updated = await conn.fetchrow(
+                        """UPDATE llm_session_events
+                           SET detail = $2,
+                               raw = $3,
+                               message_id = COALESCE($4, message_id),
+                               turn_id = COALESCE($5, turn_id),
+                               visible = TRUE
+                           WHERE id = $1
+                           RETURNING *""",
+                        existing["id"],
+                        detail,
+                        raw or {},
+                        _uuid(message_id),
+                        _uuid(turn_id),
+                    )
+                    await conn.execute(
+                        "UPDATE llm_sessions SET updated_at = NOW() WHERE id = $1",
+                        _uuid(session_id),
+                    )
+                    return dict(updated), True
+
+                sequence = await conn.fetchval(
+                    """SELECT COALESCE(MAX(sequence), 0) + 1
+                       FROM llm_session_events WHERE session_id = $1""",
+                    _uuid(session_id),
+                )
+                row = await conn.fetchrow(
+                    """INSERT INTO llm_session_events
+                           (session_id, message_id, turn_id, sequence, event_type,
+                            detail, raw, visible)
+                       VALUES ($1, $2, $3, $4, 'subagent_report', $5, $6, TRUE)
+                       ON CONFLICT (session_id, sequence) DO NOTHING
+                       RETURNING *""",
+                    _uuid(session_id),
+                    _uuid(message_id),
+                    _uuid(turn_id),
+                    sequence,
+                    detail,
+                    raw or {},
+                )
+                if row is None:
+                    return None, False
+                await conn.execute(
+                    "UPDATE llm_sessions SET updated_at = NOW() WHERE id = $1",
+                    _uuid(session_id),
+                )
+                return dict(row), True
+
     async def link_request(
         self,
         session_id: str | UUID,

@@ -241,18 +241,77 @@ this conversation.
 - [ ] Stands alone — no "the thing we discussed", no implicit prior context
 - [ ] Names the target repo and paths for code work
 
-## Step 6: Report What Will Run
+## Step 6: Tell the Person What Will Happen
 
-After creating the plan, tell the person in their own language:
+After creating the plan, state three things in the person's own language:
 
-- what is now queued, and
+- what is now queued,
 - in what order it will run, and
-- what they will see when it finishes (a result in this conversation and an entry
-  in Activity).
+- that **the result comes back here on its own** — they do not need to ask, and
+  they do not need to open Activity.
 
 Do not enumerate internal statuses or tool names. Do not ask them to approve the
 task list unless the request itself needs approval — that is what the approval
 gate is for.
+
+Do **not** end the turn by watching the request. The daemon is now the executor;
+your job in this turn is finished.
+
+## Step 7: Understand What Comes Back (and When)
+
+This is the part agents get wrong, so read it before creating any request. The
+conversation stays the **supervisor** of every request it created, and results
+are pushed back **into this thread**. Three things happen, none of which you
+trigger:
+
+| What | When | Where you see it |
+|---|---|---|
+| Report card | ~8s after a task or request settles | A card in this transcript |
+| Reply turn | With a final outcome, or after the reply interval | An assistant message in this thread |
+| Context digest | Every later turn | The `--- DELEGATED WORK ---` block in your context |
+
+**`create_request` tells you this in its response.** When the call is made from
+a chat session the result carries a `reporting` block. Read it rather than
+inferring the behaviour.
+
+### The request lifecycle you will actually observe
+
+```
+pending → planned → in_progress → review → completed
+                                      │
+                                      └── automatic, resolves in seconds
+```
+
+`review` is **Lucent's own post-completion quality check**, performed by an
+internal `request-review` task. It is not a person's approval, it is not a
+decision anyone must make, and it does not need to be reported to the person as
+"awaiting review". It normally resolves within a minute. Treat it as an internal
+step that is about to become `completed`.
+
+### Rules that follow from this
+
+- **Never say you cannot know what happened to work you started.** The digest in
+  your context describes it, and the result will arrive in the thread. Polling
+  `get_request_details` mid-flight to narrate progress is noise.
+- **Never tell the person to check the Requests/Activity UI** for a result that
+  arrives here.
+- **Never claim work is still running after a `completed` card** or after the
+  digest says all delegated work has finished.
+- **Do not wait for the result in the same turn.** Say what you queued and stop.
+  The reply arrives on its own; you will see it in a later turn.
+- **Do not re-create the request because a result has not appeared yet.** Absence
+  of a card is not failure — it may be inside the ~8s debounce, or the reply may
+  be waiting on the reply interval.
+- **Report the real result, not that there is one.** When the card or reply
+  arrives, quote the actual output. "The report came back empty" is nearly always
+  wrong — read the card body before saying so.
+
+### If a report looks thin
+
+Read the card body, which carries up to five task result excerpts. If it truly
+lacks the output, the correct move is `get_request_details(request_id)` and then
+quoting the task `result` field — not asking the person to re-run the work, and
+not describing the report as missing.
 
 ## Adding to a Plan Later
 

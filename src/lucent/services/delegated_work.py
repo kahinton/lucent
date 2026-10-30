@@ -42,7 +42,7 @@ _REQUEST_STATUS_LABELS = {
     "pending": "waiting to be planned",
     "planned": "planned",
     "in_progress": "running",
-    "review": "in review",
+    "review": "finishing up",
     "needs_rework": "sent back for rework",
     "rejection_processing": "closing out after rejection",
     "completed": "completed",
@@ -84,7 +84,18 @@ def _task_line(task: dict[str, Any]) -> str:
         status = "stopping"
     # Prefer the actual output; a remote executor's result_summary is a terse
     # status line that would mask the host output the person asked for.
-    detail = _clip(task.get("result") or task.get("result_summary") or task.get("error"))
+    #
+    # ``result_excerpt`` is what the read model actually returns — the raw
+    # ``result`` column is not selected. Checking only ``result`` meant this
+    # always fell through to the terse summary, so the digest told the model
+    # "Completed on remote X in 5.7s" and it reported the work as having no
+    # output while the card body held the full text.
+    detail = _clip(
+        task.get("result_excerpt")
+        or task.get("result")
+        or task.get("result_summary")
+        or task.get("error")
+    )
     line = f"    - {title} [{status}]"
     return f"{line}\n      {detail}" if detail else line
 
@@ -161,6 +172,17 @@ def build_delegated_work_digest(data: dict[str, Any]) -> str:
             "All delegated work has finished. Report results when asked; do not "
             "claim anything is still running."
         )
+    elif all(str(r.get("status")) == "review" for r in open_requests):
+        # `review` is the automatic post-completion quality check, not a human
+        # gate. Without this note a model reads "in review"/"finishing up" as
+        # work still running and tells the person it has not finished yet.
+        lines.append("")
+        lines.append(
+            "Every remaining request above is in the automatic post-completion "
+            "check, which resolves on its own within about a minute. Their work "
+            "itself is done — do not describe them as still running, and do not "
+            "present the check as a decision the person needs to make."
+        )
     return "\n".join(lines)
 
 
@@ -189,7 +211,11 @@ def summarize_report_event(
     if kind.startswith("request."):
         status = kind.split(".", 1)[1]
         if status == "review":
-            return "The work is ready for your review."
+            # Lucent's own post-completion quality gate runs automatically and
+            # resolves in seconds. Calling it "ready for your review" told both
+            # the person and the model that a human decision was pending, so
+            # replies described finished work as unfinished.
+            return "Checking the finished work automatically."
         if status == "needs_rework":
             return "Review sent the work back for another pass."
         if status == "completed":
