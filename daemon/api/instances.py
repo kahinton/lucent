@@ -42,7 +42,10 @@ class InstanceAPI:
 
     @staticmethod
     async def heartbeat_instance(
-        instance_id: str, metadata: dict | None = None
+        instance_id: str,
+        metadata: dict | None = None,
+        *,
+        active_task_ids: list[str] | None = None,
     ) -> dict | None:
         from daemon.runtime.module_proxy import runtime
 
@@ -50,7 +53,17 @@ class InstanceAPI:
             async with httpx.AsyncClient(timeout=InstanceAPI.API_TIMEOUT) as client:
                 response = await client.post(
                     f"{runtime.API_BASE}/requests/instances/{instance_id}/heartbeat",
-                    json={"metadata": metadata or {}},
+                    # Scoping the lease renewal to live work is what lets a lost
+                    # write-back become recoverable: the orphaned claim stops
+                    # being renewed and the reaper can requeue it.
+                    json={
+                        "metadata": metadata or {},
+                        **(
+                            {"active_task_ids": sorted(active_task_ids)}
+                            if active_task_ids is not None
+                            else {}
+                        ),
+                    },
                     headers=runtime.API_HEADERS,
                 )
                 if response.status_code in (200, 201):

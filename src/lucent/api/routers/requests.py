@@ -283,6 +283,12 @@ class InstanceRegistrationBody(BaseModel):
 
 class InstanceHeartbeatBody(BaseModel):
     metadata: dict | None = None
+    # Task IDs this instance currently considers its own active work. When
+    # present, the claim heartbeat is scoped to them: a task this instance has
+    # already finished and detached must NOT keep being renewed, or a lost
+    # write-back becomes invisible and the reaper never recovers it. None means
+    # "legacy callers, refresh every claim I own".
+    active_task_ids: list[str] | None = None
 
 
 class InstanceStopBody(BaseModel):
@@ -1574,7 +1580,13 @@ async def release_stale(
 
     repo = RequestRepository(pool)
     count = await repo.release_stale_tasks(stale_minutes, org_id=str(user.organization_id))
-    return {"released": count}
+    # Same pass also corrects instance liveness bookkeeping. A killed worker never
+    # calls mark_instance_stopped, so `status='active'` accumulated rows whose
+    # last_seen_at was days old — misleading when diagnosing dispatch.
+    reconciled = await repo.reconcile_stale_instances(
+        org_id=str(user.organization_id)
+    )
+    return {"released": count, "instances_reconciled": reconciled}
 
 
 @router.post("/queue/reconcile")
@@ -1624,6 +1636,7 @@ async def heartbeat_instance(
         org_id=str(user.organization_id),
         instance_id=instance_id,
         metadata=body.metadata,
+        active_task_ids=body.active_task_ids,
     )
     if not row:
         raise HTTPException(404, "Instance not found")

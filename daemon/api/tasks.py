@@ -2,7 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 import httpx
+
+# Result-bearing writes get their own retry policy. A plain poll (claim, list)
+# can simply be retried on the next tick, but losing a COMPLETION destroys work
+# that already ran: the session finished, the model answered, and the only copy
+# of that output is in this process's memory. Observed live: the server
+# restarted mid-task, every write returned "All connection attempts failed",
+# and a 2,114-character result was lost while the task row stayed `running`
+# forever.
+#
+# The window deliberately exceeds a normal server restart (migrations included)
+# so a routine deploy between "session finished" and "result written" is not
+# enough to lose the work.
+RESULT_WRITE_RETRY_ATTEMPTS = int(
+    os.environ.get("LUCENT_RESULT_WRITE_RETRY_ATTEMPTS", "12")
+)
+RESULT_WRITE_RETRY_DELAY_SECONDS = float(
+    os.environ.get("LUCENT_RESULT_WRITE_RETRY_DELAY_SECONDS", "5")
+)
 
 
 class TaskAPI:
@@ -27,6 +48,69 @@ class TaskAPI:
                 )
         except Exception as error:
             runtime.log(f"API {operation} failed: {error}", "WARN")
+        return None
+
+    @staticmethod
+    async def _post_result(
+        path: str,
+        body: dict,
+        operation: str,
+        *,
+        attempts: int = RESULT_WRITE_RETRY_ATTEMPTS,
+        delay_seconds: float = RESULT_WRITE_RETRY_DELAY_SECONDS,
+    ) -> dict | None:
+        """POST a result-bearing write, retrying transient failures.
+
+        Unlike ``_post`` this MUST NOT swallow a failure silently: callers rely
+        on the return value to decide whether the result is durably recorded.
+        Returns the payload on success, ``None`` after the retry budget is spent
+        (with a loud ERROR so the loss is visible in the log).
+        """
+        from daemon.runtime.module_proxy import runtime
+
+        attempts = max(1, int(attempts))
+        last_error = "no attempt made"
+        for attempt in range(1, attempts + 1):
+            try:
+                async with httpx.AsyncClient(timeout=TaskAPI.API_TIMEOUT) as client:
+                    response = await client.post(
+                        f"{runtime.API_BASE}{path}",
+                        json=body,
+                        headers=runtime.API_HEADERS,
+                    )
+                if response.status_code in (200, 201):
+                    if attempt > 1:
+                        runtime.log(
+                            f"API {operation} succeeded on attempt {attempt}/{attempts}"
+                        )
+                    return response.json()
+                # 4xx means the request itself is wrong (already completed,
+                # wrong owner, validation): retrying cannot help. 5xx and
+                # connection errors can clear.
+                if 400 <= response.status_code < 500:
+                    runtime.log(
+                        f"API {operation} rejected with {response.status_code} "
+                        f"(not retried): {response.text[:200]}",
+                        "ERROR",
+                    )
+                    return None
+                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+            except Exception as error:  # connection refused, timeout, DNS
+                last_error = str(error)
+
+            if attempt < attempts:
+                runtime.log(
+                    f"API {operation} failed (attempt {attempt}/{attempts}): "
+                    f"{last_error}; retrying in {delay_seconds}s",
+                    "WARN",
+                )
+                await asyncio.sleep(delay_seconds)
+
+        runtime.log(
+            f"API {operation} FAILED after {attempts} attempts: {last_error}. "
+            "The task result could not be persisted.",
+            "ERROR",
+        )
         return None
 
     @staticmethod
@@ -121,7 +205,7 @@ class TaskAPI:
         validation_status: str = "not_applicable",
         validation_errors: list | None = None,
     ) -> dict | None:
-        return await TaskAPI._post(
+        return await TaskAPI._post_result(
             f"/requests/tasks/{task_id}/complete",
             {
                 "result": result[:50000],
@@ -144,7 +228,11 @@ class TaskAPI:
         body = {"error": error[:10000], "instance_id": instance_id}
         if result is not None:
             body["result"] = result[:200000]
-        return await TaskAPI._post(f"/requests/tasks/{task_id}/fail", body, "fail_task")
+        # A failure report usually carries the partial output and the diagnosis,
+        # so it is just as unrecoverable as a completion if it is dropped.
+        return await TaskAPI._post_result(
+            f"/requests/tasks/{task_id}/fail", body, "fail_task"
+        )
 
     @staticmethod
     async def mark_task_needs_review(
@@ -156,7 +244,7 @@ class TaskAPI:
         body = {"error": error[:10000], "instance_id": instance_id}
         if result is not None:
             body["result"] = result[:200000]
-        return await TaskAPI._post(
+        return await TaskAPI._post_result(
             f"/requests/tasks/{task_id}/needs-review",
             body,
             "mark_task_needs_review",

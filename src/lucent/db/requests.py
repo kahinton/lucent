@@ -1467,8 +1467,19 @@ class RequestRepository:
         instance_id: str,
         metadata: dict | None = None,
         lease_seconds: int = DEFAULT_TASK_LEASE_SECONDS,
+        active_task_ids: list[str] | None = None,
     ) -> dict | None:
-        """Update daemon last_seen and renew leases on claimed/running tasks."""
+        """Update daemon last_seen and renew leases on claimed/running tasks.
+
+        ``active_task_ids`` scopes the lease renewal to the tasks the instance
+        still considers its own. This matters for recovery, not bookkeeping: an
+        instance that finished a task but failed to write the result back has
+        *detached* it, and continuing to renew its claim keeps the row looking
+        busy forever. The stale-task reaper reads "recent heartbeat" as "work in
+        progress", so an orphaned claim that keeps being renewed can never be
+        recovered. Passing ``None`` preserves the legacy "renew everything I own"
+        behaviour for callers that do not track active sessions.
+        """
         now = datetime.now(timezone.utc)
         metadata_json = json.dumps(metadata or {})
         expires_at = now + timedelta(seconds=lease_seconds)
@@ -1522,11 +1533,13 @@ class RequestRepository:
                            updated_at = $3
                        WHERE organization_id = $1
                           AND claimed_by = $2
-                          AND status IN ('claimed', 'running')""",
+                          AND status IN ('claimed', 'running')
+                          AND ($5::uuid[] IS NULL OR id = ANY($5::uuid[]))""",
                     UUID(org_id),
                     instance_id,
                     now,
                     expires_at,
+                    [UUID(t) for t in active_task_ids] if active_task_ids is not None else None,
                 )
         return dict(row)
 
@@ -1548,6 +1561,44 @@ class RequestRepository:
                 now,
             )
         return dict(row) if row else None
+
+    async def reconcile_stale_instances(
+        self,
+        *,
+        org_id: str | None = None,
+        stale_seconds: int = DEFAULT_INSTANCE_STALE_SECONDS,
+    ) -> int:
+        """Mark long-silent instances ``stopped``; returns how many changed.
+
+        Only a graceful shutdown calls ``mark_instance_stopped``, so an instance
+        killed by the container runtime (OOM, ``docker kill``, a reaped worker)
+        keeps ``status='active'`` forever. That leaves a graveyard of "active"
+        rows whose ``last_seen_at`` is days old, which makes the table actively
+        misleading when diagnosing a dispatch problem — you have to know to
+        cross-check timestamps to tell a live dispatcher from a dead one.
+
+        Deliberately narrow: this only corrects the reported STATUS. Claim
+        recovery does not depend on it — ``release_stale_tasks`` already judges
+        liveness by ``last_seen_at`` age rather than trusting this column, so the
+        reaper keeps working even if this reconcile never runs.
+        """
+        params: list[Any] = [max(60, int(stale_seconds))]
+        org_clause = ""
+        if org_id:
+            params.append(UUID(org_id))
+            org_clause = f"AND organization_id = ${len(params)}"
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            rows = await conn.fetch(
+                f"""UPDATE daemon_instances
+                    SET status = 'stopped',
+                        updated_at = NOW()
+                    WHERE status = 'active'
+                      AND last_seen_at < NOW() - make_interval(secs := $1)
+                      {org_clause}
+                    RETURNING instance_id""",
+                *params,
+            )
+        return len(rows)
 
     # ── Requests ──────────────────────────────────────────────────────────
 

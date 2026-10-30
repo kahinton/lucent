@@ -723,6 +723,136 @@ class TestReleaseStaleTasks:
         assert len(reaper_events) == 1
         assert "Claim expired (was claimed by inst-reaper)" in (reaper_events[0]["detail"] or "")
 
+    async def test_heartbeat_renews_only_the_tasks_still_held(self, repo, org_id, db_pool):
+        """An orphaned claim must stop being renewed so it can be recovered.
+
+        Live failure this encodes: a task finished, its result write-back failed
+        during a server restart, and the worker detached it. The instance
+        heartbeat kept renewing the claim anyway, so the stale-task reaper saw
+        "recent heartbeat" and never requeued it — the row sat `running` for over
+        an hour while the result was already lost.
+        """
+        req = await _make_request(repo, org_id)
+        kept = await _make_task(repo, str(req["id"]), org_id)
+        orphan = await _make_task(repo, str(req["id"]), org_id)
+        instance_id = "inst-scoped-heartbeat"
+        await repo.register_instance(
+            org_id=org_id,
+            instance_id=instance_id,
+            hostname="host-a",
+            pid=1234,
+            roles=["dispatcher"],
+        )
+        await repo.claim_task(str(kept["id"]), instance_id, org_id=org_id)
+        await repo.claim_task(str(orphan["id"]), instance_id, org_id=org_id)
+
+        # Both claims are old to begin with.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE tasks
+                   SET last_heartbeat_at = NOW() - INTERVAL '2 hours'
+                   WHERE id = ANY($1::uuid[])""",
+                [kept["id"], orphan["id"]],
+            )
+
+        # Heartbeat naming only the task this instance still holds.
+        await repo.heartbeat_instance(
+            org_id=org_id,
+            instance_id=instance_id,
+            active_task_ids=[str(kept["id"])],
+        )
+
+        kept_row = await repo.get_task(str(kept["id"]), org_id=org_id)
+        orphan_row = await repo.get_task(str(orphan["id"]), org_id=org_id)
+        assert kept_row["last_heartbeat_at"] > kept_row["claimed_at"]
+        assert orphan_row["last_heartbeat_at"] < orphan_row["claimed_at"], (
+            "a detached task's claim must not be renewed, or the reaper can "
+            "never recover it"
+        )
+
+    async def test_heartbeat_without_task_scope_stays_backwards_compatible(
+        self, repo, org_id
+    ):
+        """Omitting active_task_ids keeps the legacy renew-everything behaviour."""
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id)
+        instance_id = "inst-legacy-heartbeat"
+        await repo.register_instance(
+            org_id=org_id,
+            instance_id=instance_id,
+            hostname="host-a",
+            pid=1234,
+            roles=["dispatcher"],
+        )
+        await repo.claim_task(str(task["id"]), instance_id, org_id=org_id)
+        await repo.heartbeat_instance(org_id=org_id, instance_id=instance_id)
+        row = await repo.get_task(str(task["id"]), org_id=org_id)
+        assert row["last_heartbeat_at"] is not None
+
+    async def test_reconcile_marks_silent_instances_stopped(self, repo, org_id, db_pool):
+        """A killed worker must not stay `active` forever.
+
+        Only a graceful shutdown calls ``mark_instance_stopped``, so a container
+        killed by the runtime kept ``status='active'`` indefinitely. That made the
+        instance table claim several dispatchers were alive when only one was —
+        actively misleading when diagnosing a dispatch problem.
+        """
+        dead = "inst-killed-by-runtime"
+        alive = "inst-still-beating"
+        for instance_id in (dead, alive):
+            await repo.register_instance(
+                org_id=org_id,
+                instance_id=instance_id,
+                hostname="host-a",
+                pid=1,
+                roles=["dispatcher"],
+            )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE daemon_instances
+                   SET last_seen_at = NOW() - INTERVAL '3 hours'
+                   WHERE organization_id = $1 AND instance_id = $2""",
+                UUID(org_id),
+                dead,
+            )
+
+        reconciled = await repo.reconcile_stale_instances(
+            org_id=org_id, stale_seconds=60
+        )
+
+        assert reconciled == 1
+        rows = {
+            r["instance_id"]: r["status"]
+            for r in await db_pool.fetch(
+                """SELECT instance_id, status FROM daemon_instances
+                   WHERE organization_id = $1 AND instance_id = ANY($2::text[])""",
+                UUID(org_id),
+                [dead, alive],
+            )
+        }
+        assert rows[dead] == "stopped"
+        assert rows[alive] == "active", "a live instance must not be reaped"
+
+    async def test_reconcile_is_idempotent(self, repo, org_id, db_pool):
+        """Re-running must report zero, not keep rewriting the same rows."""
+        instance_id = "inst-reconciled-twice"
+        await repo.register_instance(
+            org_id=org_id, instance_id=instance_id, hostname="host-a", pid=1,
+            roles=["dispatcher"],
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE daemon_instances
+                   SET last_seen_at = NOW() - INTERVAL '3 hours'
+                   WHERE organization_id = $1 AND instance_id = $2""",
+                UUID(org_id),
+                instance_id,
+            )
+        first = await repo.reconcile_stale_instances(org_id=org_id, stale_seconds=60)
+        second = await repo.reconcile_stale_instances(org_id=org_id, stale_seconds=60)
+        assert first == 1
+        assert second == 0
+
 
 class TestDaemonInstanceRegistry:
     async def test_heartbeat_registers_missing_instance(self, repo, org_id):

@@ -23,6 +23,12 @@ class SchedulingMixin:
                 "roles": sorted(self.roles),
                 "max_sessions": runtime.MAX_CONCURRENT_SESSIONS,
             },
+            # Only the tasks this instance still believes it is working on.
+            # A task that finished but whose result failed to persist has been
+            # removed from this map, so its claim stops being renewed and the
+            # stale-task reaper can recover it. Without this the row looked
+            # "busy" forever and the work was silently orphaned.
+            active_task_ids=sorted(self._active_task_sessions),
         )
 
     async def _heartbeat_once(self) -> bool:

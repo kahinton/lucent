@@ -4457,7 +4457,7 @@ class LucentDaemon(
                         else result_summary_prefix
                     )
 
-                await _complete_owned(
+                completed = await _complete_owned(
                     task_id,
                     result,
                     result_structured=stored_structured,
@@ -4465,6 +4465,27 @@ class LucentDaemon(
                     validation_status=output_result.get("validation_status", "not_applicable"),
                     validation_errors=output_result.get("validation_errors"),
                 )
+                if completed is None:
+                    # The write-back failed after its retry budget. The result
+                    # only exists in this process, so say so loudly — a silent
+                    # None here is how a finished task became a task that looked
+                    # like it was still running for an hour.
+                    log(
+                        f"Task {task_id[:8]} finished but its result could NOT be "
+                        "persisted; the claim is released so it can be retried",
+                        "ERROR",
+                    )
+                    await RequestAPI.add_event(
+                        task_id,
+                        "result_persist_failed",
+                        "Session finished but the completion could not be written "
+                        "to the server. The claim was released for retry.",
+                    )
+                    # Releasing the claim lets the reaper/queue pick it up again
+                    # instead of leaving a row that heartbeats forever.
+                    with contextlib.suppress(Exception):
+                        await _release_owned(task_id)
+                    return
 
                 if self._is_request_review_task(task):
                     try:
