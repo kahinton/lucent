@@ -322,6 +322,166 @@ def test_card_fields_follow_the_reread_status_not_the_signal():
     assert "automatic" not in card["body"].lower()
 
 
+def test_digest_truncation_says_how_to_get_the_full_text():
+    """A cut result must be distinguishable from a short one, and actionable.
+
+    A bare ellipsis reads as "the output was short", so the model reports the
+    work as having produced nothing — when the text was merely longer than the
+    digest. The marker must name the escape hatch.
+    """
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    long_output = "REAL OUTPUT " * 400  # well past MAX_RESULT_CHARS
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "req-123",
+                    "title": "Long result",
+                    "status": "completed",
+                    "task_counts": {"completed": 1},
+                    "task_total": 1,
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "title": "Produce a long report",
+                            "status": "completed",
+                            "result_excerpt": long_output,
+                        }
+                    ],
+                }
+            ],
+            "active_task_count": 0,
+            "revision": "rev",
+        }
+    )
+
+    assert "truncated" in digest.lower()
+    assert "get_request_details" in digest, (
+        "the digest must say how to read the rest"
+    )
+    assert "REAL OUTPUT" in digest, "the visible part must still be the real output"
+
+
+def test_digest_short_result_has_no_truncation_noise():
+    """Don't cry wolf on results that fit."""
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "req-9",
+                    "title": "Short",
+                    "status": "completed",
+                    "task_counts": {"completed": 1},
+                    "task_total": 1,
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "title": "Quick check",
+                            "status": "completed",
+                            "result_excerpt": "exit=0 all good",
+                        }
+                    ],
+                }
+            ],
+            "active_task_count": 0,
+            "revision": "rev",
+        }
+    )
+    # Scope to the result line: the digest preamble explains the marker on every
+    # turn, so the assertion is about the RESULT itself not being marked.
+    result_lines = [ln for ln in digest.splitlines() if "exit=0 all good" in ln]
+    assert result_lines, "the short result must appear verbatim"
+    assert not any("truncated" in ln.lower() for ln in result_lines)
+
+
+def test_chat_renders_live_progress_cards():
+    """Running work must be visible in the transcript without a reload.
+
+    The panel existed but was hidden behind a button, and the only live signal
+    rebuilt the whole transcript — which is what caused the visible page jump.
+    """
+    from pathlib import Path
+
+    js = Path("src/lucent/web/static/chat-message-ui.js").read_text()
+    html = Path("src/lucent/web/templates/chat.html").read_text()
+
+    # In-place progress rendering exists and is exported.
+    assert "function upsertDelegatedProgress" in js
+    assert "function pruneDelegatedProgress" in js
+    assert "upsertDelegatedProgress," in js
+    assert "pruneDelegatedProgress," in js
+    # The fingerprint guard is what prevents a flicker every poll.
+    assert "dataset.fingerprint" in js
+
+    # chat.html patches the transcript instead of rebuilding it.
+    assert "function syncDelegatedProgressCards" in html
+    assert "syncDelegatedProgressCards();" in html
+    resync = html.split("function requestDelegatedResync", 1)[1][:700]
+    assert "loadSession(" not in resync, (
+        "the resync path must not reload the whole transcript; that is the jump"
+    )
+
+
+def test_progress_card_is_collapsible_and_matches_the_report_card_family():
+    """The live box must be collapsible and visually consistent, not a floating overlay.
+
+    Constraints encoded here, all of which were reported as defects:
+      * it must collapse (it sits inline in a conversation),
+      * a chosen collapse must survive the per-poll re-render,
+      * it must reuse the report card's design tokens (paper/line/muted/teal)
+        rather than inventing a second visual language,
+      * the overview header must be opaque, because chat text scrolled
+        underneath it and made the buttons unreadable.
+    """
+    from pathlib import Path
+
+    js = Path("src/lucent/web/static/chat-message-ui.js").read_text()
+    html = Path("src/lucent/web/templates/chat.html").read_text()
+
+    # Collapsible, with the state stored on the transcript host so a rebuild
+    # cannot spring it back open.
+    assert '<details class="delegated-progress-card"' in js
+    assert "progressCollapsedIds" in js
+    assert "__delegatedCollapsed" in js
+    # The listener must NOT be `once`: the card is rebuilt on status change.
+    toggle_block = js.split("details.addEventListener('toggle'", 1)[1][:320]
+    assert "once: true" not in toggle_block, (
+        "a once-listener is consumed by the first toggle, so later collapses "
+        "never persist"
+    )
+
+    # Design tokens shared with .subagent-report-card. The window covers the
+    # whole progress-card block, not just its opening rule: the tokens are used
+    # in the nested rules (task rows, meta line) further down.
+    progress_block = html.split(".delegated-progress-card {", 1)[1]
+    progress_block = progress_block.split("\n    /* ", 1)[0]
+    for token in (
+        "var(--lucent-paper)",
+        "var(--lucent-line)",
+        "var(--lucent-muted)",
+        "var(--lucent-teal)",
+        "var(--lucent-ink)",
+    ):
+        assert token in progress_block, token
+
+    # Opaque header bar spanning the chat width, with no floating-card chrome.
+    shell_block = html.split(".chat-overview-shell {", 1)[1][:700]
+    assert "background: #080808" in shell_block, "the bar must be solid"
+    assert "left: 0" in shell_block and "right: 0" in shell_block, (
+        "the bar must span the full chat width, not float as a pill"
+    )
+    assert "box-shadow: none" in shell_block, "no drop shadow under the bar"
+    assert "border-radius: 0" in shell_block, "no rounding on a full-width bar"
+    # The fade element under the old floating plate must be gone.
+    assert "chat-overview-shell::after" not in html
+
+    # No auto-opened floating panel covering the conversation.
+    assert "toggleOverviewPanel('work');\n            state.delegatedAutoOpened" not in html
+
+
 def test_reported_result_is_the_prompt_not_a_system_appendix():
     """The result must ride in the user prompt, not behind the agent definition.
 

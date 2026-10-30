@@ -253,7 +253,7 @@
         flex-direction: column;
         justify-content: center;
         align-items: center;
-        padding-top: 4rem;
+        padding-top: 3.25rem;
         padding-bottom: 0;
     }
     .chat-input-area.drag-active .input-glow {
@@ -273,6 +273,30 @@
         width: min(30rem, calc(100vw - 2rem));
         max-height: min(34rem, calc(100vh - 5rem));
         overflow-y: auto;
+    }
+    /* Full-bleed header bar. The chrome floats over the transcript, so it is a
+       solid plate spanning the whole chat width — not a floating pill. No
+       radius, no ring, no drop shadow and no fade below: any of those made it
+       read as a detached card hovering above the text instead of the top of
+       the page. */
+    .chat-overview-shell {
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 3.25rem;
+        padding: 0 1rem;
+        justify-content: flex-end;
+        border-radius: 0;
+        background: #080808;
+        border-bottom: 1px solid #1e1e1e;
+        box-shadow: none;
+    }
+    .chat-overview-shell [data-overview-trigger] {
+        color: var(--lucent-muted);
+    }
+    .chat-overview-shell [data-overview-trigger]:hover {
+        color: var(--lucent-ink);
+        background: #1e1e1e;
     }
     .chat-overview-shell [data-overview-trigger][aria-expanded="true"] {
         background: #1c1c1c;
@@ -417,6 +441,189 @@
         opacity: 0.5;
         cursor: default;
     }
+
+    /* ── Live delegated-work progress card (in transcript) ──
+       Shows where running work is *right now*, patched in place on each poll so
+       the transcript never has to be rebuilt to show progress. Deliberately the
+       same visual family as .subagent-report-card (accent stripe, chip, paper
+       surface, muted meta) so a live box and a result box read as one object
+       type rather than two unrelated widgets. Collapsible, because it sits
+       inline in the conversation and should not dominate it. */
+    .delegated-progress-card {
+        position: relative;
+        max-width: 48rem;
+        margin: 0 auto;
+        border: 1px solid var(--lucent-line);
+        border-radius: 0.75rem;
+        background: var(--lucent-paper);
+        overflow: hidden;
+    }
+    .delegated-progress-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        background: var(--lucent-teal);
+    }
+    .delegated-progress[data-state="attention"] .delegated-progress-card::before {
+        background: var(--lucent-pink);
+    }
+    .delegated-progress-summary {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        min-width: 0;
+        padding: 0.6rem 0.875rem 0.6rem 1rem;
+        cursor: pointer;
+        list-style: none;
+    }
+    .delegated-progress-summary::-webkit-details-marker { display: none; }
+    .delegated-progress-chevron {
+        width: 0.75rem;
+        height: 0.75rem;
+        flex: none;
+        color: var(--lucent-muted);
+        transition: transform 0.15s ease;
+    }
+    .delegated-progress-card[open] .delegated-progress-chevron {
+        transform: rotate(90deg);
+    }
+    .delegated-progress-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        flex-shrink: 0;
+        padding: 0.125rem 0.4rem;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: rgba(0, 207, 193, 0.12);
+        border-color: rgba(0, 207, 193, 0.35);
+        color: var(--lucent-teal);
+    }
+    .delegated-progress[data-state="attention"] .delegated-progress-chip {
+        background: rgba(255, 63, 155, 0.12);
+        border-color: rgba(255, 63, 155, 0.35);
+        color: var(--lucent-pink);
+    }
+    .delegated-progress-spinner {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        border: 1.5px solid currentColor;
+        border-right-color: transparent;
+        animation: delegated-spin 0.8s linear infinite;
+    }
+    @keyframes delegated-spin {
+        to { transform: rotate(360deg); }
+    }
+    .delegated-progress-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 11px;
+        color: var(--lucent-muted);
+    }
+    .delegated-progress-count {
+        margin-left: auto;
+        flex: none;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: var(--lucent-muted);
+    }
+    .delegated-progress-detail {
+        padding: 0 0.875rem 0.7rem 1rem;
+    }
+    .delegated-progress-bar {
+        height: 3px;
+        border-radius: 999px;
+        background: var(--lucent-line);
+        overflow: hidden;
+    }
+    .delegated-progress-fill {
+        display: block;
+        height: 100%;
+        border-radius: 999px;
+        background: var(--lucent-teal);
+        transition: width 0.4s ease;
+    }
+    .delegated-progress[data-state="attention"] .delegated-progress-fill {
+        background: var(--lucent-pink);
+    }
+    .delegated-progress-tasks {
+        margin: 0.55rem 0 0;
+        padding: 0;
+        list-style: none;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+    }
+    .delegated-progress-task {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        min-width: 0;
+        font-size: 0.75rem;
+        color: var(--lucent-ink);
+    }
+    .delegated-progress-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        flex: none;
+        background: var(--lucent-line);
+    }
+    .delegated-progress-dot.is-done { background: var(--lucent-teal); }
+    .delegated-progress-dot.is-failed { background: var(--lucent-pink); }
+    .delegated-progress-dot.is-cancelled { background: var(--lucent-muted); }
+    .delegated-progress-dot.is-running {
+        background: var(--lucent-teal);
+        animation: delegated-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes delegated-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+    }
+    .delegated-progress-task-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .delegated-progress-task-status {
+        margin-left: auto;
+        flex: none;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--lucent-muted);
+    }
+    .delegated-progress-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-top: 0.55rem;
+    }
+    .delegated-progress-meta {
+        font-size: 10px;
+        color: var(--lucent-muted);
+        font-variant-numeric: tabular-nums;
+    }
+    .delegated-progress-link {
+        flex-shrink: 0;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--lucent-teal);
+        text-decoration: none;
+    }
+    .delegated-progress-link:hover { text-decoration: underline; }
+
     .delegated-empty-row {
         margin: 0;
         padding: 0 1rem 0.75rem 2rem;
@@ -443,7 +650,9 @@
         flex: 1;
         overflow-y: auto;
         scroll-behavior: smooth;
-        padding-top: 3.5rem;
+        /* Clear the header bar: it is opaque, so text under it would be hidden
+           rather than merely cluttered. Matches the bar's 3.25rem height. */
+        padding-top: 3.25rem;
     }
     
     /* Typing indicator animation */
@@ -589,7 +798,7 @@
     @media (max-width: 767px) {
         main { height: 100dvh; }
         .chat-shell { padding-top: 3.75rem; }
-        .chat-container.empty-mode .messages-area { justify-content: flex-start; overflow-y: auto; padding-top: 0; }
+        .chat-container.empty-mode .messages-area { justify-content: flex-start; overflow-y: auto; padding-top: 3.25rem; }
         .chat-container.empty-mode .messages-area #empty-state { transform: none; padding-top: 2rem; }
         .chat-container.empty-mode .chat-input-area { transform: none; }
         #empty-state { padding-left: 1rem; padding-right: 1rem; }
@@ -641,7 +850,7 @@
 {% block content %}
 <div class="chat-shell">
 <div class="chat-container empty-mode" id="chat-root">
-    <div class="chat-overview-shell absolute right-4 top-4 z-30 flex items-center gap-1 text-xs">
+    <div class="chat-overview-shell absolute z-30 flex items-center gap-1 text-xs">
         <button type="button" data-overview-trigger="approvals" class="flex items-center gap-1.5 rounded-md px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800 transition-colors" title="Show requests awaiting approval" aria-expanded="false">
             <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
@@ -664,7 +873,7 @@
             <span class="h-1.5 w-1.5 rounded-full {% if daemon_status_level == 'online' %}bg-emerald-400{% elif daemon_status_level == 'stale' %}bg-pink-400{% else %}bg-red-400{% endif %}"></span>
             Lucent {{ daemon_status_label | lower }}
         </span>
-        <div id="chat-overview-panel" class="chat-overview-panel absolute right-0 top-9 hidden rounded-lg border border-gray-200 bg-white text-left shadow-xl" aria-hidden="true">
+        <div id="chat-overview-panel" class="chat-overview-panel absolute right-0 top-full mt-2 hidden rounded-lg border border-gray-200 bg-white text-left shadow-xl" aria-hidden="true">
             <section data-overview-pane="approvals" class="hidden">
                 <div class="flex items-center justify-between border-b border-gray-200 px-4 py-3">
                     <h2 class="text-sm font-semibold text-gray-900">Pending approval</h2>
@@ -2580,14 +2789,12 @@ async function refreshDelegatedWork(options = {}) {
         state.delegatedRevision = data.revision || null;
         state.delegatedActiveCount = data.active_task_count || 0;
         renderDelegatedWork(previousRevision === null);
-        // The revision covers request/task rows *and* the report cards written
-        // for them. Cards are separate rows in a separate table, so without
-        // folding them in, a card written after the request already settled
-        // produced no revision change and the transcript never refreshed.
-        const changed = previousRevision !== null && previousRevision !== state.delegatedRevision;
-        if (changed && options.resync !== false) {
-            requestDelegatedResync();
-        }
+        // Patch the transcript in place instead of rebuilding it. This is what
+        // makes live progress visible without the page jumping.
+        syncDelegatedProgressCards();
+        // Nothing further to reload: the only thing the transcript renders for
+        // delegated work is the progress card above (live) and the report card
+        // (which arrives over the live-refresh channel when it is written).
     } catch (err) {
         /* Live updates are best-effort. */
     } finally {
@@ -2608,16 +2815,30 @@ function scheduleDelegatedPoll() {
 }
 
 function requestDelegatedResync() {
-    // Reloading the transcript mid-stream would throw away the reply the user
-    // is watching. Defer until the stream settles.
-    if (state.streaming) {
-        state.delegatedResyncPending = true;
-        return;
-    }
+    // Progress is patched IN PLACE from the activity payload (see
+    // syncDelegatedProgressCards). Reloading the whole transcript to reflect a
+    // status change destroyed and rebuilt every message, which reset scroll
+    // position and produced the visible jump while work was running — and it
+    // ran every few seconds because a live request bumps the revision
+    // constantly. Only a *new settled outcome* needs the transcript re-read.
+    if (state.streaming) return;
     if (!state.sessionId) return;
-    loadSession(state.sessionId).then(() => {
-        refreshDelegatedWork({ resync: false });
-    });
+    refreshDelegatedWork({ resync: false });
+}
+
+/**
+ * Mirror the live delegated-work tree into the transcript.
+ *
+ * Runs on every activity poll. Cost is one fingerprint comparison per running
+ * request, so a 4s poll while work is running cannot disturb the page.
+ */
+function syncDelegatedProgressCards() {
+    const msgs = document.getElementById('messages');
+    if (!msgs) return;
+    const requests = state.delegatedRequests || [];
+    const live = requests.filter(r => DELEGATED_OPEN_REQUEST_STATUSES.has(String(r.status || '')));
+    live.forEach(request => LucentChatMessageUI.upsertDelegatedProgress(msgs, request));
+    LucentChatMessageUI.pruneDelegatedProgress(msgs, live.map(r => r.id));
 }
 
 async function stopDelegatedTask(taskId, button) {

@@ -26,7 +26,7 @@ from lucent.db.requests import RequestRepository
 # the UI is the unbounded view.
 MAX_DIGEST_REQUESTS = 5
 MAX_DIGEST_TASKS_PER_REQUEST = 3
-MAX_RESULT_CHARS = 240
+MAX_RESULT_CHARS = 1200
 
 _ACTIVE_TASK_STATUSES = ("claimed", "running")
 _OPEN_REQUEST_STATUSES = (
@@ -77,7 +77,30 @@ def _clip(text: str | None, limit: int = MAX_RESULT_CHARS) -> str:
     return collapsed[: limit - 1].rstrip() + "…"
 
 
-def _task_line(task: dict[str, Any]) -> str:
+def _clip_result(text: str | None, request_id: str | None) -> str:
+    """Clip a task result, saying how to get the rest when it is cut.
+
+    A bare ellipsis is indistinguishable from "the output was short". The model
+    then reports the work as having produced nothing useful, when in fact the
+    text was simply longer than the digest. Naming the escape hatch — and that it
+    is truncated — is what turns a cut into an actionable instruction.
+    """
+    collapsed = " ".join(str(text or "").split())
+    if not collapsed:
+        return ""
+    if len(collapsed) <= MAX_RESULT_CHARS:
+        return collapsed
+    clipped = collapsed[: MAX_RESULT_CHARS - 1].rstrip()
+    hint = (
+        "… [truncated — full output is on the request page or via "
+        f"get_request_details('{request_id}')]"
+        if request_id
+        else "… [truncated — full output via get_request_details]"
+    )
+    return f"{clipped}{hint}"
+
+
+def _task_line(task: dict[str, Any], request_id: str | None = None) -> str:
     status = task_status_label(task.get("status"))
     title = _clip(task.get("title"), 90)
     if task.get("cancel_requested_at") and task.get("status") in _ACTIVE_TASK_STATUSES:
@@ -90,11 +113,12 @@ def _task_line(task: dict[str, Any]) -> str:
     # always fell through to the terse summary, so the digest told the model
     # "Completed on remote X in 5.7s" and it reported the work as having no
     # output while the card body held the full text.
-    detail = _clip(
+    detail = _clip_result(
         task.get("result_excerpt")
         or task.get("result")
         or task.get("result_summary")
-        or task.get("error")
+        or task.get("error"),
+        request_id,
     )
     line = f"    - {title} [{status}]"
     return f"{line}\n      {detail}" if detail else line
@@ -139,6 +163,10 @@ def build_delegated_work_digest(data: dict[str, Any]) -> str:
         "— do not tell the person you have no way to know, and do not call tools "
         "just to restate it. Use list_active_work or get_request_details only "
         "when you need more detail than this summary.",
+        "Below each request is one line per task, including its RESULT. When a "
+        "result ends with a 'truncated' marker, the rest is real output you have "
+        "not seen — call get_request_details(<request id>) to read all of it "
+        "before describing the work as having no output.",
         "",
     ]
     for req in ordered:
@@ -156,7 +184,7 @@ def build_delegated_work_digest(data: dict[str, Any]) -> str:
             f"(request {req.get('id')})"
         )
         for task in (req.get("tasks") or [])[:MAX_DIGEST_TASKS_PER_REQUEST]:
-            lines.append(_task_line(task))
+            lines.append(_task_line(task, req.get("id")))
         remaining = total - min(total, MAX_DIGEST_TASKS_PER_REQUEST)
         if remaining > 0:
             lines.append(f"    … and {remaining} more task(s)")

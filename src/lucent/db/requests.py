@@ -3830,7 +3830,12 @@ class RequestRepository:
                           -- Prefer the actual output. A remote executor reports a
                           -- terse result_summary ("Completed on remote X in 0.3s")
                           -- that would otherwise mask the host output.
-                          left(COALESCE(NULLIF(result, ''), result_summary, ''), 600) AS result_excerpt
+                          -- Generous enough that a normal task result survives intact.
+                          -- A truncated excerpt is worse than a long one: the model
+                          -- reports the work as having no output when the text it needs
+                          -- was cut. Callers that need the whole thing use
+                          -- get_request_details, which returns full result text.
+                          left(COALESCE(NULLIF(result, ''), result_summary, ''), 4000) AS result_excerpt
                    FROM (
                        SELECT t.*,
                               row_number() OVER (

@@ -76,7 +76,7 @@ REPLY_HISTORY_LIMIT = 20
 # chat turn is — an unattended turn must not outlive the interactive setting.
 REPLY_TIMEOUT_SECONDS = int(os.environ.get("LUCENT_SUBAGENT_REPORT_TIMEOUT_SECONDS", "300"))
 REPLY_MAX_CHARS = 1200
-_MAX_REPORT_TEXT = 1600
+_MAX_REPORT_TEXT = 4000
 # How many times a reply may be re-deferred before it is abandoned. Unbounded
 # retries on a permanently-broken session (no model, revoked access) would spin
 # forever; a handful of attempts covers transient causes (a busy conversation,
@@ -660,7 +660,7 @@ class SubagentReportService:
                                   -- reports a terse result_summary ("Completed on
                                   -- remote X in 0.3s") that would otherwise mask
                                   -- the host output the person asked for.
-                                  left(COALESCE(NULLIF(result, ''), result_summary, ''), 900) AS result_excerpt,
+                                  left(COALESCE(NULLIF(result, ''), result_summary, ''), 4000) AS result_excerpt,
                                   cancel_requested_at
                            FROM tasks
                            WHERE id = $1::uuid AND organization_id = $2::uuid""",
@@ -684,7 +684,7 @@ class SubagentReportService:
                 # sentence. Bounded so a large request cannot flood the prompt.
                 result_rows = await conn.fetch(
                     """SELECT title, error,
-                              left(COALESCE(NULLIF(result, ''), result_summary, ''), 600) AS result_excerpt
+                              left(COALESCE(NULLIF(result, ''), result_summary, ''), 2000) AS result_excerpt
                        FROM tasks
                        WHERE request_id = $1::uuid
                          AND title <> 'Post-completion review'

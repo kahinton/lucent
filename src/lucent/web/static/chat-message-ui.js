@@ -383,6 +383,153 @@
     }
 
     /**
+     * Which progress cards the person has explicitly collapsed.
+     *
+     * Kept on the transcript element so it survives re-renders without a
+     * module-level global: the card is rebuilt on every status change, and a
+     * collapse the user chose must not spring back open.
+     */
+    function progressCollapsedIds() {
+        const host = document.getElementById('messages');
+        if (!host) return new Set();
+        if (!host.__delegatedCollapsed) host.__delegatedCollapsed = new Set();
+        return host.__delegatedCollapsed;
+    }
+
+    /**
+     * Render (or refresh) the live progress card for one running request.
+     *
+     * This is a *projection of current state*, not a report. It is deliberately
+     * separate from `appendSubagentReport`: that one renders a settled outcome,
+     * this one shows where the work is right now and is updated in place as the
+     * task tree advances. It disappears from the transcript once the request
+     * settles, because the report card takes over at that point.
+     *
+     * Markup mirrors `.subagent-report-card` (accent bar, chip, paper surface)
+     * so a progress box and a result box read as the same family of object
+     * rather than two different widgets.
+     *
+     * @param {HTMLElement} container - transcript container (messages list)
+     * @param {object} request - delegated-work request entry from the activity API
+     */
+    function upsertDelegatedProgress(container, request) {
+        if (!container || !request || !request.id) return null;
+        const id = String(request.id);
+        const selector = `.delegated-progress[data-request-id="${CSS.escape(id)}"]`;
+        let wrapper = container.querySelector(selector);
+        const counts = request.task_counts || {};
+        const total = Number(request.task_total || 0);
+        const done = Number(counts.completed || 0);
+        const running = Number(counts.running || 0) + Number(counts.claimed || 0);
+        const failed = Number(counts.failed || 0);
+        const pct = total ? Math.round(((done + failed) / total) * 100) : 0;
+
+        if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'delegated-progress msg-enter px-6 py-2';
+            wrapper.dataset.requestId = id;
+            container.appendChild(wrapper);
+        }
+        const collapsed = progressCollapsedIds();
+        // Only rewrite when the visible facts changed — a no-op render would
+        // restart the progress-bar animation and read as a flicker.
+        const fingerprint = [
+            String(request.status || ''),
+            String(total),
+            String(done),
+            String(running),
+            String(failed),
+            String(request.title || ''),
+            collapsed.has(id) ? 'closed' : 'open',
+            (request.tasks || []).map((t) => `${t.id}:${t.status}`).join(','),
+        ].join('|');
+        if (wrapper.dataset.fingerprint === fingerprint) return wrapper;
+        wrapper.dataset.fingerprint = fingerprint;
+
+        const isOpen = !collapsed.has(id);
+        const state = running ? 'running' : failed ? 'attention' : 'success';
+        const statusText = request.status_label
+            || (running ? 'running'
+                : request.status === 'review' ? 'finishing up'
+                    : String(request.status || ''));
+        const taskRows = (request.tasks || [])
+            .map((task) => {
+                const st = String(task.status || '');
+                const dot = st === 'completed' ? 'is-done'
+                    : st === 'failed' ? 'is-failed'
+                        : st === 'cancelled' ? 'is-cancelled'
+                            : st === 'claimed' || st === 'running' ? 'is-running'
+                                : 'is-queued';
+                const label = st === 'completed' ? 'done'
+                    : st === 'failed' ? 'failed'
+                        : st === 'cancelled' ? 'cancelled'
+                            : st === 'needs_review' ? 'needs a check'
+                                : st === 'claimed' ? 'starting'
+                                    : st === 'running' ? 'running'
+                                        : 'queued';
+                return `<li class="delegated-progress-task">
+                    <span class="delegated-progress-dot ${dot}"></span>
+                    <span class="delegated-progress-task-title">${escapeHtml(task.title || 'Task')}</span>
+                    <span class="delegated-progress-task-status">${escapeHtml(label)}</span>
+                </li>`;
+            })
+            .join('');
+
+        wrapper.dataset.state = state;
+        wrapper.innerHTML = `
+            <details class="delegated-progress-card"${isOpen ? ' open' : ''}>
+                <summary class="delegated-progress-summary">
+                    <svg class="delegated-progress-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m9 18 6-6-6-6" />
+                    </svg>
+                    <span class="delegated-progress-chip">
+                        ${running ? '<span class="delegated-progress-spinner" aria-hidden="true"></span>' : ''}
+                        ${escapeHtml(statusText)}
+                    </span>
+                    <span class="delegated-progress-title" title="${escapeHtml(request.title || '')}">${escapeHtml(request.title || 'Delegated work')}</span>
+                    <span class="delegated-progress-count">${done}/${total || 0}</span>
+                </summary>
+                <div class="delegated-progress-detail">
+                    <div class="delegated-progress-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+                        <span class="delegated-progress-fill" style="width:${pct}%"></span>
+                    </div>
+                    ${taskRows ? `<ul class="delegated-progress-tasks">${taskRows}</ul>` : ''}
+                    <div class="delegated-progress-footer">
+                        <span class="delegated-progress-meta">${done}/${total || 0} tasks done${running ? ` · ${running} running` : ''}${failed ? ` · ${failed} failed` : ''}</span>
+                        <a href="/activity/${escapeHtml(id)}" class="delegated-progress-link">Open request</a>
+                    </div>
+                </div>
+            </details>`;
+
+        const details = wrapper.querySelector('details');
+        if (details) {
+            // No `once` here: the card is rebuilt whenever the status
+            // fingerprint changes, so each rebuild needs its own listener. The
+            // element is replaced on rebuild, so listeners cannot accumulate.
+            details.addEventListener('toggle', () => {
+                const set = progressCollapsedIds();
+                if (details.open) set.delete(id);
+                else set.add(id);
+            });
+        }
+        return wrapper;
+    }
+
+    /**
+     * Drop progress cards whose request is no longer live.
+     *
+     * The report card is the settled record, so leaving a progress card behind
+     * would show two competing views of the same request.
+     */
+    function pruneDelegatedProgress(container, liveRequestIds) {
+        if (!container) return;
+        const live = new Set((liveRequestIds || []).map(String));
+        container.querySelectorAll('.delegated-progress').forEach((node) => {
+            if (!live.has(String(node.dataset.requestId || ''))) node.remove();
+        });
+    }
+
+    /**
      * Render a delegated-work report card.
      *
      * @param {HTMLElement} container - per-assistant tools container
@@ -772,6 +919,8 @@
         appendHookCall,
         appendInteractionRequest,
         appendSubagentReport,
+        upsertDelegatedProgress,
+        pruneDelegatedProgress,
         appendToolCall,
         displayToolName,
         escapeHtml,
