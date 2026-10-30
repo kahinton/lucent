@@ -48,9 +48,23 @@ def test_validate_task_kind_payload():
     validate_task_kind_payload("agent", None)
     with pytest.raises(ValueError, match="requires"):
         validate_task_kind_payload("decision", None)
-    with pytest.raises(ValueError, match="does not accept execution_config"):
+    with pytest.raises(ValueError, match="may only set"):
         validate_task_kind_payload("agent", {"anything": True})
     with pytest.raises(ValueError):
         validate_task_kind_payload(
             "decision", {"questions": [{"name": "q", "type": "bogus", "instructions": "x"}]}
+        )
+
+
+def test_agent_kind_accepts_only_the_executor_hint():
+    """An agent task's config is a placement hint, not a second config surface."""
+    validate_task_kind_payload("agent", {"executor": "engine"})
+    validate_task_kind_payload(
+        "agent", {"executor": "engine", "timeout_seconds": 1200}
+    )
+    with pytest.raises(ValueError, match="Supported"):
+        validate_task_kind_payload("agent", {"executor": "shell"})
+    with pytest.raises(ValueError, match="between 60 and 86400"):
+        validate_task_kind_payload(
+            "agent", {"executor": "engine", "timeout_seconds": 5}
         )

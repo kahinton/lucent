@@ -8,6 +8,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Remote engine sessions (`engine` executor).** A task pinned to a remote can
+  now run a full model-driven agent session on that machine instead of only
+  executing a fenced shell block. `scripts/lucent_remote_agent.py` gains an
+  `engine` executor, and the controller composes the session — agent
+  definition, skills, managed tools, model, and provider — so the remote chooses
+  none of it.
+  - **Two switches, both off by default:** the remote operator sets
+    `LUCENT_REMOTE_EXECUTOR=engine`, and an owner enables
+    `features.remote_engine_session_enabled`. A remote only advertises `engine`
+    when Lucent's package actually imports there.
+  - **The remote receives a per-task `hs_` key scoped to `remote-session`.** It
+    authenticates `/mcp` only — every REST route returns 403 — expires with the
+    task, and is bound to the requesting user's memory scope. It is not a
+    daemon credential and carries no request-mutation rights.
+  - **Granted third-party MCP servers abort composition.** Their credentials
+    would have to be decrypted and shipped to a host Lucent does not control, so
+    the task fails with that reason instead. Only Lucent's own `/mcp` is wired.
+  - **Composition failures fail the task visibly** (`execution_plan_error`), never
+    falling back to shell execution or local dispatch — both would run the wrong
+    thing in the wrong place.
+  - Tasks set `execution_config={"executor": "engine"}` with `remote_target_id`,
+    `backend_id`, and `model`. The `agent` task kind now accepts exactly those
+    two config keys and rejects anything else.
+  - Claude Code sessions honor an explicit `permission_mode`; unattended remote
+    sessions use `bypassPermissions` (overridable per host with
+    `LUCENT_REMOTE_PERMISSION_MODE`) so a prompt with nobody to answer it cannot
+    silently deny the model's tool calls.
+  - Remote tool calls carry `X-Lucent-Task-Id` / `X-Lucent-Request-Id` lineage
+    headers. Note: the Claude Code engine does not currently emit
+    `tool_call_audit_log` rows for any session, so those calls appear in events
+    and memory-access logs but not in the tool audit table.
+
 - **Four managed-tool runtime kinds (`python`, `http`, `openapi`, `builtin`) and a
   built-in tool catalog (migration 158).**
   - **Only `python` needs a sandbox.** A deployment with

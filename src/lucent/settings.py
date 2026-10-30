@@ -71,6 +71,27 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         ),
     ),
     RuntimeSettingDefinition(
+        key="features.remote_engine_session_enabled",
+        env_var="LUCENT_REMOTE_ENGINE_SESSION",
+        value_type="boolean",
+        default=False,
+        title="Remote engine sessions",
+        section="Features",
+        description=(
+            "Allow a task pinned to a registered remote to run a full "
+            "model-driven agent session on that machine."
+        ),
+        help_text=(
+            "A remote is a host Lucent does not control. Enabling this lets a "
+            "task sent to one run a real agent — the model chooses commands and "
+            "file edits with no human present to approve them — instead of "
+            "running commands the task already carried. A per-task, "
+            "MCP-only scoped key is minted for each session and the controller "
+            "still decides the agent, model, and tool surface. Leave off unless "
+            "you trust the registered remotes."
+        ),
+    ),
+    RuntimeSettingDefinition(
         key="memory.shadow_forget_enabled",
         env_var="LUCENT_SHADOW_FORGET_ENABLED",
         value_type="boolean",

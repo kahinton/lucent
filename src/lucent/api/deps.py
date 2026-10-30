@@ -38,6 +38,7 @@ class CurrentUser:
         api_key_name: str | None = None,
         sandbox_task_id: str | None = None,
         remote_agent_id: str | None = None,
+        remote_session_task_id: str | None = None,
     ):
         self.id = id
         self.organization_id = organization_id
@@ -55,6 +56,7 @@ class CurrentUser:
         self.api_key_name = api_key_name
         self.sandbox_task_id = sandbox_task_id
         self.remote_agent_id = remote_agent_id
+        self.remote_session_task_id = remote_session_task_id
 
     @property
     def effective_memory_user_id(self) -> UUID:
@@ -179,6 +181,18 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         if match:
             sandbox_task_id = match.group(1)
 
+    # Remote engine sessions mint a key per task, named
+    # ``remote-engine-{task_id}-{hex}``. Parsing the name binds the key to
+    # exactly one task so a compromised remote cannot report on, or link
+    # memory to, work that is not its own.
+    remote_session_task_id = None
+    if isinstance(key_name, str):
+        session_match = re.match(
+            r"^remote-engine-([0-9a-fA-F-]{36})-[0-9a-fA-F]+$", key_name
+        )
+        if session_match:
+            remote_session_task_id = session_match.group(1)
+
     # Remote agent keys are named ``remote-agent-{remote_id}``. Parsing the
     # name (rather than trusting a request parameter) binds the key to exactly
     # one remote: the path ``/api/remotes/{remote_id}/...`` must match it.
@@ -204,6 +218,7 @@ async def _authenticate_with_api_key(api_key: str) -> CurrentUser | None:
         api_key_name=key_name,
         sandbox_task_id=sandbox_task_id,
         remote_agent_id=remote_agent_id,
+        remote_session_task_id=remote_session_task_id,
     )
 
 
@@ -339,6 +354,25 @@ async def get_current_user(
                 and "remote-agent" in user.api_key_scopes
             ):
                 _enforce_remote_agent_allowlist(request, user)
+
+            # Remote *engine session* keys are minted per task and ship to a
+            # host Lucent does not control, so they must be useless off the MCP
+            # endpoint. They exist for one reason: to let the agent running on
+            # that host call Lucent's own tools. MCP has its own auth
+            # middleware, so denying every REST route here is the whole
+            # restriction — and it is what stops a leaked session key from
+            # being usable as a daemon-role REST credential.
+            if (
+                user.auth_method == "api_key"
+                and "remote-session" in user.api_key_scopes
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "A remote engine session key is only valid on the MCP "
+                        "endpoint"
+                    ),
+                )
 
             set_user_id(str(user.id))
             return user

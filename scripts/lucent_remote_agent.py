@@ -37,6 +37,8 @@ testing and cron-style deployments).
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 import http.client
 import json
 import os
@@ -200,9 +202,9 @@ def config_from_env(args: argparse.Namespace) -> AgentConfig:
             "LUCENT_REMOTE_ID is required (the remote instance UUID shown in "
             "the Lucent UI when the remote was created)"
         )
-    if executor not in {"command", "noop", "shell"}:
+    if executor not in {"command", "noop", "shell", "engine"}:
         raise ConfigError(
-            f"Unknown executor {executor!r}. Available: command, noop, shell"
+            f"Unknown executor {executor!r}. Available: command, noop, shell, engine"
         )
     if executor == "command" and not command:
         raise ConfigError(
@@ -220,6 +222,20 @@ def config_from_env(args: argparse.Namespace) -> AgentConfig:
                 f"Shell for the 'shell' executor not found: {candidate!r}"
             )
         resolved_shell = candidate
+    if executor == "engine":
+        # Fail at startup, not when the first agent task arrives. A remote that
+        # advertises 'engine' and then cannot import the engine stack silently
+        # fails every agent task after the controller has already pinned work
+        # to it, which looks like flaky dispatch rather than a setup mistake.
+        try:
+            import lucent.llm.remote_session  # noqa: F401
+        except Exception as exc:  # noqa: BLE001 — surfaced as a config error
+            raise ConfigError(
+                "The 'engine' executor needs Lucent's Python package available "
+                "to this interpreter, including the engine SDKs. Install it "
+                "with `pip install lucent`, run this agent from a Lucent "
+                f"checkout, or use 'shell'. Import failed: {exc}"
+            ) from exc
 
     return AgentConfig(
         controller_url=validate_controller_url(
@@ -603,10 +619,124 @@ def execute_shell(config: AgentConfig, task: dict, workdir: str) -> ExecutionRes
     )
 
 
+def execute_engine(config: AgentConfig, task: dict, workdir: str) -> ExecutionResult:
+    """Run a Lucent agent session on this host using the claimed execution plan.
+
+    Unlike ``shell``, this executor does not execute text the task carries. The
+    controller sends a composed *session* — agent definition, skills, model,
+    provider, and a task-scoped MCP key — and this runs it with a real engine
+    so the model decides what commands to run and what files to edit.
+
+    SECURITY: this is the largest grant a remote can be given. The engine runs
+    unattended with tool permissions approved, because there is no human on
+    this machine to prompt. Enabling it is an operator decision
+    (``LUCENT_REMOTE_EXECUTOR=engine``) and the controller still refuses to
+    compose a session unless the deployment opted in
+    (``LUCENT_REMOTE_ENGINE_SESSION=1``).
+
+    The plan is treated as untrusted input even though it comes from the
+    controller: a truncated or corrupted claim must fail loudly rather than run
+    a half-built session.
+    """
+    started = time.monotonic()
+    plan_payload = task.get("execution_plan")
+    plan_error = task.get("execution_plan_error")
+    if not plan_payload:
+        return ExecutionResult(
+            ok=False,
+            output=(
+                "This task asked its remote to run an agent session, but the "
+                "controller did not send one"
+                + (f": {plan_error}" if plan_error else ".")
+                + "\n\nNo commands were executed. Either the deployment has "
+                "remote engine sessions disabled, or the task is missing the "
+                "agent/backend/model needed to compose a session."
+            ),
+            exit_code=2,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    try:
+        from lucent.llm.remote_session import (
+            RemoteSessionError,
+            decode_plan_from_transport,
+            run_task_session,
+        )
+    except Exception as exc:  # noqa: BLE001 — executor isolation boundary
+        return ExecutionResult(
+            ok=False,
+            output=(
+                "The 'engine' executor could not import Lucent's LLM stack, so "
+                f"no agent session ran: {exc}"
+            ),
+            exit_code=127,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    try:
+        plan = decode_plan_from_transport(plan_payload)
+    except RemoteSessionError as exc:
+        return ExecutionResult(
+            ok=False,
+            output=f"The controller's execution plan was not usable: {exc}",
+            exit_code=2,
+            duration_seconds=time.monotonic() - started,
+        )
+
+    # Run the session in the operator's real HOME so git/ssh/npm configs and
+    # any repo the model touches resolve as the person editing this machine
+    # expects. TMPDIR still points at the per-task directory.
+    previous_cwd = os.getcwd()
+    previous_tmpdir = os.environ.get("TMPDIR")
+    try:
+        os.chdir(config.home or os.path.expanduser("~"))
+        os.environ["TMPDIR"] = workdir
+    except OSError:
+        pass
+
+    try:
+        output = asyncio.run(run_task_session(plan))
+    except Exception as exc:  # noqa: BLE001 — executor isolation boundary
+        return ExecutionResult(
+            ok=False,
+            output=f"The agent session failed on this host: {exc}",
+            exit_code=1,
+            duration_seconds=time.monotonic() - started,
+        )
+    finally:
+        with contextlib.suppress(OSError):
+            os.chdir(previous_cwd)
+        if previous_tmpdir is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = previous_tmpdir
+
+    stripped = (output or "").strip()
+    return ExecutionResult(
+        ok=bool(stripped),
+        output=(
+            stripped
+            or "The agent session finished without producing any text output."
+        ),
+        exit_code=0 if stripped else 1,
+        duration_seconds=time.monotonic() - started,
+    )
+
+
+def _engine_stack_available() -> bool:
+    """Whether the 'engine' executor can actually run on this host."""
+    try:
+        import lucent.llm.remote_session  # noqa: F401
+    except Exception:  # noqa: BLE001 — any import failure means "not available"
+        return False
+    return True
+
+
 EXECUTORS = {
     "command": execute_command,
     "noop": execute_noop,
     "shell": execute_shell,
+    "engine": execute_engine,
 }
 
 
@@ -636,11 +766,24 @@ class RemoteAgent:
         except OSError:
             pass
 
+    def _available_executors(self) -> list[str]:
+        """Executors this host can actually run right now."""
+        available = [name for name in EXECUTORS if name != "engine"]
+        if _engine_stack_available():
+            available.append("engine")
+        return sorted(available)
+
     def heartbeat(self) -> dict:
         info = self.client.heartbeat(
             {
                 "hostname": socket.gethostname(),
                 "executor": self.config.executor,
+                # Report the full executor list, but only claim 'engine' when
+                # Lucent's package really imports here. A controller composes an
+                # agent session for any remote that advertises it, so an
+                # inaccurate advertisement would pin agent work to a host that
+                # can never run it.
+                "executors": self._available_executors(),
                 "pid": os.getpid(),
                 # Report the execution contract so task authors know what a
                 # description must look like to run here. A `shell` remote only

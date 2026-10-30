@@ -65,6 +65,12 @@ concentrated in one check.
 | Token replay after revoke | Revoking a remote revokes its API key in the same transaction |
 | Oversized payloads | Events capped at 64 KiB, results at 1 MiB, truncated with a visible marker |
 | Shell injection via task text | Task text is delivered on **stdin**; argv is a fixed operator-configured template and never interpolates task content |
+| Session key used as a REST credential | A `remote-session` key is rejected by every REST route; it only authenticates `/mcp` |
+| Session key outliving its task | Minted per task with a TTL bounded by the task timeout plus a fixed grace period |
+| Session key reaching other users' data | Bound to the requesting user's memory scope; the remote cannot widen it |
+| Third-party credentials shipped to a remote | Granted MCP servers abort composition; only Lucent's own `/mcp` is wired |
+| Remote choosing its own agent/model | The controller composes the whole session; the remote receives no choices |
+| Unattended tool use | Off by default; requires both a remote-side executor choice and an owner-level controller setting |
 
 ### Authorization
 
@@ -118,6 +124,12 @@ tests). Use `--executor noop` to verify connectivity without running anything.
 | `noop` | Echoes the task back as the result. Connectivity smoke test. |
 | `command` | Runs a fixed argv template, passing the rendered task text on stdin. Exit code 0 = success. |
 | `shell` | Runs the commands the task itself carries, in a per-task directory. Opt-in. |
+| `engine` | Runs a full model-driven agent session on the remote host. Opt-in, and the controller must also allow it. |
+
+The remote reports its executor and the full executor list it can actually run
+in each heartbeat, so task authors and the controller know what a given machine
+supports. `engine` is only advertised when Lucent's Python package imports on
+that host — a remote that cannot run a session never claims it can.
 
 The task text includes the title, parent request title, task id, agent type,
 priority, and description — enough context to act without a round trip.
@@ -169,6 +181,94 @@ Guard rails on `shell`:
 
 A `lucent` executor (where the remote runs the task in its own sandboxes via a
 local daemon) fits the same interface and is the natural next step.
+
+#### The `engine` executor
+
+`shell` runs commands the task already carries. `engine` is different: the
+remote runs a **real agent session** — a model with tools — and decides for
+itself which commands to run and which files to edit. That is what makes
+open-ended work ("fix the flaky test", "add the endpoint") possible on a remote
+machine instead of only pre-written scripts.
+
+Two independent switches must agree before this happens:
+
+1. **On the remote host** — run the agent with
+   `LUCENT_REMOTE_EXECUTOR=engine`. The client refuses to start if Lucent's
+   Python package (with the engine SDKs) is not importable, rather than
+   advertising a capability it cannot deliver.
+2. **On the controller** — an owner enables **Settings → Features → Remote
+   engine sessions** (`features.remote_engine_session_enabled`, env
+   `LUCENT_REMOTE_ENGINE_SESSION`). Off by default.
+
+When a task pinned to that remote also carries
+`execution_config={"executor": "engine"}`, the controller composes the session
+and ships it in the claim response:
+
+```json
+{
+  "execution_plan": {
+    "kind": "task-session",
+    "engine": "claude_code",
+    "model": "…",
+    "system_message_b64": "…",
+    "backend": {"engine": "claude_code", "provider": "ollama", "config": {}},
+    "mcp_config": {"memory-server": {"type": "http", "url": "…/mcp", "headers": {}}},
+    "timeout": 3600
+  }
+}
+```
+
+**The controller composes, the remote executes.** That split is the security
+model:
+
+- The agent definition, skills, managed tools, model, and provider are resolved
+  by the controller. The remote chooses none of them.
+- The remote receives a **per-task `hs_` key scoped to `remote-session`**. It is
+  valid **only on `/mcp`** — every REST route rejects it — and it expires with
+  the task. It is not the daemon's key and it carries no request-mutation rights.
+- The key is bound to the requesting user's memory scope, so an agent on the
+  remote can read and write only what that person could.
+- Third-party MCP servers granted to the agent are **not** sent: their
+  credentials would have to be decrypted and shipped to a host Lucent does not
+  control. A task that needs one runs locally or in a sandbox, and composition
+  fails with that reason rather than silently dropping the server.
+
+Sessions run unattended, so tool permissions are approved without a prompt
+(`LUCENT_REMOTE_PERMISSION_MODE` overrides this on the remote host). This is
+the same trust level the `shell` executor already carries — both run code on
+the operator's machine — and it is why the feature is off by default and gated
+behind an owner decision.
+
+Requires `backend_id` and `model` on the task so the remote knows which engine
+to run. `remote_target_id` remains mutually exclusive with
+`sandbox_template_id` / `sandbox_overrides`.
+
+Limits worth knowing:
+
+- Only `copilot`, `claude_code`, and `codex` can run remotely. `langchain` owns
+  no tool loop of its own, so a task pinned to it must use `shell`.
+- Composition failures are reported in the claim payload as
+  `execution_plan_error` and the task fails with that reason. It never falls back
+  to shell execution or to local dispatch, because either would run the wrong
+  thing in the wrong place.
+
+```bash
+# remote host
+export LUCENT_REMOTE_EXECUTOR=engine
+export LUCENT_REMOTE_PERMISSION_MODE=bypassPermissions   # default; unattended
+```
+
+```python
+create_task(
+    request_id="…",
+    title="Add the missing endpoint",
+    description="Implement GET /api/widgets and its test.",
+    backend_id="<coding backend id>",
+    model="<model id>",
+    remote_target_id="<remote id>",
+    execution_config={"executor": "engine"},
+)
+```
 
 ## Operations
 

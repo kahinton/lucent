@@ -201,6 +201,48 @@ def validate_task_kind_payload(
         spec.validate(config)
 
 
+#: The only execution_config an ``agent`` task may carry: a placement hint that
+#: tells dispatch *where* the agent session runs. Everything about running the
+#: session (agent, model, tools) still comes from the task's own fields.
+_AGENT_EXECUTOR_VALUES = frozenset({"", "engine", "agent"})
+
+
+def _validate_agent_execution_config(config: dict[str, Any] | None) -> None:
+    """Restrict an agent task's execution_config to a narrow executor hint.
+
+    The ``agent`` kind deliberately has no decision/fusion-style config: its
+    behaviour is fully described by ``agent_type``, ``model``, and
+    ``backend_id``. The one thing it cannot express in those fields is that a
+    remote-pinned task should run a real agent session on the remote rather
+    than raw shell, so ``executor`` is allowed and nothing else. Rejecting
+    unknown keys keeps this from becoming a second, undocumented config surface
+    that shadow execution ignores.
+    """
+    if config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError("execution_config must be an object")
+    unknown = set(config) - {"executor", "timeout_seconds"}
+    if unknown:
+        raise ValueError(
+            "An agent task's execution_config may only set 'executor' and "
+            f"'timeout_seconds'; got {sorted(unknown)}"
+        )
+    executor = str(config.get("executor") or "").strip().lower()
+    if executor not in _AGENT_EXECUTOR_VALUES:
+        raise ValueError(
+            f"Unknown agent executor {config.get('executor')!r}. Supported: "
+            "'engine' (run a model-driven session on a remote host)."
+        )
+    if "timeout_seconds" in config:
+        try:
+            timeout = int(config["timeout_seconds"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timeout_seconds must be an integer") from exc
+        if not 60 <= timeout <= 24 * 3600:
+            raise ValueError("timeout_seconds must be between 60 and 86400")
+
+
 # ── Built-in kinds ─────────────────────────────────────────────────────────
 
 
@@ -212,7 +254,7 @@ register_task_kind(
             "Run an approved agent definition in a chat session with MCP tools. "
             "This is the default kind."
         ),
-        config_field=None,
+        config_field="execution_config",
         requires_agent_definition=True,
         model_class="chat",
         model_requires_tools=True,
@@ -220,11 +262,18 @@ register_task_kind(
         backend_allowed=True,
         output_contract_allowed=True,
         sandbox="optional",
+        validate=_validate_agent_execution_config,
         examples=(
             {
                 "agent_type": "code",
                 "model": "<optional chat model>",
                 "backend_id": "<optional coding backend>",
+            },
+            {
+                "agent_type": "code",
+                "backend_id": "<coding backend>",
+                "remote_target_id": "<remote id>",
+                "execution_config": {"executor": "engine"},
             },
         ),
     )

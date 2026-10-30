@@ -331,7 +331,7 @@ class RemoteRepository:
         Only a small allowlist is persisted. Heartbeats are remote-controlled
         input; the row must not become a place to stash arbitrary payloads.
         """
-        allowed = {"executor", "hostname", "pid", "shell", "command"}
+        allowed = {"executor", "hostname", "pid", "shell", "command", "executors"}
         patch: dict[str, Any] = {}
         for key in allowed:
             if key not in reported:

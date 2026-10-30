@@ -302,7 +302,13 @@ async def remote_claim(
         from fastapi import Response
 
         return Response(status_code=204)
-    return _task_payload_for_remote(task, remote, str(user.organization_id))
+    return await _task_payload_for_remote(
+        task,
+        remote,
+        str(user.organization_id),
+        pool=pool,
+        request=None,
+    )
 
 
 @remote_protocol_router.post("/remotes/{remote_id}/heartbeat")
@@ -374,9 +380,83 @@ async def remote_heartbeat(
     }
 
 
-def _task_payload_for_remote(task: dict, remote: dict, org_id: str) -> dict:
-    """Shape the claim response and stamp the claim as remote-attributed."""
+async def _task_payload_for_remote(
+    task: dict,
+    remote: dict,
+    org_id: str,
+    *,
+    pool,
+    request: dict | None = None,
+) -> dict:
+    """Shape the claim response and stamp the claim as remote-attributed.
+
+    A task whose ``execution_config.executor`` is ``engine`` carries a composed
+    session plan instead of prose: the remote runs a real agent on its own
+    machine with the agent definition, skills, and scoped tool access the
+    controller resolved. Everything else stays the plain execution payload the
+    shipped client already understands.
+
+    Composition failure is reported in-band (``execution_plan_error``) rather
+    than raised. The remote has already claimed the task at this point, so
+    dropping the response would leave it claimed with no work handed over; the
+    client fails the task with the reason, which is what the person needs to see.
+    """
     payload = dict(task)
     payload.pop("sandbox_config", None)  # remote contract: plain execution
     payload["remote_instance_id"] = f"remote:{remote['id']}"
+
+    from lucent.llm.remote_planner import (
+        RemotePlanError,
+        compose_remote_session_plan,
+        task_is_engine_session,
+    )
+
+    if not task_is_engine_session(task):
+        return payload
+
+    if request is None:
+        from lucent.db.requests import RequestRepository
+
+        try:
+            request = await RequestRepository(pool).get_request(
+                str(task.get("request_id")), org_id
+            )
+        except Exception:  # noqa: BLE001 — composition reports a precise reason
+            request = None
+    request = request or {}
+
+    requesting_user_id = (
+        task.get("requesting_user_id")
+        or request.get("created_by")
+        or task.get("model_requesting_user_id")
+    )
+    if not requesting_user_id:
+        payload["execution_plan_error"] = (
+            "Task has no requesting user, so a remote engine session cannot be "
+            "composed with a scoped identity."
+        )
+        return payload
+
+    from lucent.public_url import mcp_endpoint_url
+
+    try:
+        plan = await compose_remote_session_plan(
+            pool=pool,
+            task=task,
+            request=request,
+            remote=remote,
+            mcp_endpoint=mcp_endpoint_url(None),
+            requesting_user_id=str(requesting_user_id),
+        )
+    except RemotePlanError as exc:
+        payload["execution_plan_error"] = str(exc)
+        return payload
+    except Exception as exc:  # noqa: BLE001 — never lose the claim silently
+        logger.exception("Remote engine session composition failed")
+        payload["execution_plan_error"] = (
+            f"Remote engine session could not be composed: {exc}"
+        )
+        return payload
+
+    payload["execution_plan"] = plan
     return payload

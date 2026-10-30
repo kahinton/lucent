@@ -191,6 +191,44 @@ observes:
   execute in-process.
 - A remote receives the task title/description and runs its configured
   executor. It does not get sandbox credentials or Lucent secrets.
+- **Check the remote's `executor` before writing the description.** A remote
+  whose executor is `shell` runs **only** the fenced sh/bash/shell/zsh/console
+  blocks in the description; prose executes nothing and the task fails with exit
+  code 2. A remote whose `executor` is `engine` runs a real agent session, so
+  write a normal work request.
+
+#### Letting the remote run a real agent (`engine`)
+
+A remote that advertises `"engine"` in its `capabilities.executors` can run a
+full model-driven session on that machine — the model decides which commands to
+run and which files to edit, instead of executing a script you wrote in advance.
+This is the right choice for open-ended work ("fix the failing test", "add the
+endpoint"); use a fenced shell block when you already know the exact commands.
+
+```python
+create_task(
+    request_id=...,
+    title="Add the widgets endpoint",
+    description="Implement GET /api/widgets and its test.",   # ordinary prose
+    agent_type="code",
+    backend_id="<coding backend id from list_engines>",        # required
+    model="<model id>",                                        # required
+    remote_target_id="<remote id>",
+    execution_config={"executor": "engine"},                   # the switch
+)
+```
+
+- `backend_id` and `model` are **required**; the remote cannot pick its own
+  engine. Only `copilot`, `claude_code`, and `codex` can run remotely.
+- The controller composes the agent definition, skills, model, and tool access,
+  and mints a task-scoped key that works on Lucent's MCP endpoint only. The
+  remote gets no long-lived credential.
+- An agent granted a **third-party MCP server** cannot run this way — its
+  credentials would have to be shipped to that host, so composition is refused.
+  Use a local task or a sandbox for those.
+- If the deployment has remote engine sessions turned off, the task fails with
+  that reason in `execution_plan_error`. Do not retry it as a shell task without
+  telling the person what changed.
 
 If `list_remotes()` returns no active remote, do **not** invent an id. Either
 create the task without a remote pin so local execution handles it, or tell the

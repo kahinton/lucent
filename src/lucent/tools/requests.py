@@ -571,33 +571,53 @@ def _remote_description_contract(capabilities: Any) -> str:
     """
     caps = _remote_capabilities(capabilities)
     executor = str(caps.get("executor") or "").lower()
+    executors = caps.get("executors")
+    engine_ready = (
+        executor == "engine"
+        or (isinstance(executors, list) and "engine" in executors)
+    )
 
-    if executor == "shell":
+    if executor == "engine":
         return (
+            "This remote runs a full agent session on its own machine: it "
+            "executes the task as a model-driven agent with tool access, so "
+            "write the description as a normal work request, NOT as a shell "
+            "script. Set executor='engine' on the task so the controller "
+            "composes the session."
+        )
+    if executor == "shell":
+        contract = (
             "This remote runs shell commands taken from fenced code blocks in "
             "the task description. Tag the fence sh, bash, shell, zsh, or "
             "console. A description with no fenced block executes nothing."
         )
-    if executor == "command":
+    elif executor == "command":
         argv = caps.get("command")
         detail = (
             f" It runs {argv!r} (argv)." if isinstance(argv, list) and argv else ""
         )
-        return (
+        contract = (
             "This remote runs one fixed configured command, passing the task "
             f"text on stdin.{detail} Write the description as instructions for "
             "that program, not as a shell script."
         )
-    if executor == "noop":
-        return (
+    elif executor == "noop":
+        contract = (
             "This remote is a connectivity smoke test: it echoes the task back "
             "and runs nothing."
         )
-    return (
-        "This remote has not reported its executor yet, so its command "
-        "contract is unknown. If the work is specific, check with the operator "
-        "or use a host you know runs the `shell` executor."
-    )
+    else:
+        contract = (
+            "This remote has not reported its executor yet, so its command "
+            "contract is unknown. If the work is specific, check with the operator "
+            "or use a host you know runs the `shell` executor."
+        )
+    if engine_ready:
+        contract += (
+            " This remote can ALSO run a full agent session (executor='engine'), "
+            "which needs a backend_id and model on the task."
+        )
+    return contract
 
 
 async def _resolve_remote_target(
@@ -755,6 +775,41 @@ async def _prepare_task_spec(
         if remote_error:
             return None, remote_error
         remote_name = remote["name"]
+
+        # A remote can run a model-driven agent session, but only if it
+        # advertised that executor. Check at authoring time: a task that gets
+        # pinned and then fails after dispatch costs a full round trip.
+        requested_executor = ""
+        if isinstance(effective_config, dict):
+            requested_executor = str(
+                effective_config.get("executor") or ""
+            ).strip().lower()
+        if requested_executor in {"engine", "agent"}:
+            caps = _remote_capabilities(remote.get("capabilities"))
+            advertised = caps.get("executors")
+            can_engine = str(caps.get("executor") or "").lower() == "engine" or (
+                isinstance(advertised, list) and "engine" in advertised
+            )
+            if not can_engine:
+                return None, (
+                    f"Remote '{remote_name}' has not reported that it can run an "
+                    f"agent session (executor={caps.get('executor')!r}, "
+                    f"executors={advertised!r}). Run an updated remote agent with "
+                    "the 'engine' executor, or write the work as a fenced shell "
+                    "block."
+                )
+            if not (backend_id or model):
+                return None, (
+                    "A remote engine session needs an explicit backend_id (see "
+                    "list_engines) and usually a model."
+                )
+    elif isinstance(effective_config, dict) and str(
+        effective_config.get("executor") or ""
+    ).strip().lower() in {"engine", "agent"}:
+        return None, (
+            "execution_config.executor='engine' only applies to a task pinned to "
+            "a remote via remote_target_id."
+        )
 
     # --- Decision steps -------------------------------------------------
     if resolved_kind == "decision":
@@ -1431,6 +1486,12 @@ Args:
         remote claims it. Cannot be combined with ``sandbox_template_id`` or
         ``sandbox_overrides``. Agent tasks only — decision/fusion tasks execute
         in-process.
+    execution_config: For an ``agent`` task, only ``{"executor": "engine"}``
+        (plus an optional ``timeout_seconds``) is accepted, and it is meaningful
+        only together with ``remote_target_id``. It makes the remote run a real
+        model-driven agent session rather than executing a fenced shell block,
+        and requires ``backend_id`` and ``model``. Decision/fusion tasks pass
+        their own config here instead.
 
 Returns: JSON with the created task including its ID, or an error
 if the agent type is not approved or the sandbox template is invalid."""
@@ -1564,6 +1625,57 @@ if the agent type is not approved or the sandbox template is invalid."""
             if remote_error:
                 return json.dumps({"error": remote_error})
             remote_name = remote["name"]
+
+        # --- Remote engine sessions ---------------------------------------
+        # Asking a remote to run a model-driven session is only meaningful for
+        # a pinned agent task, and only if that remote reported it can execute
+        # one. Checking here means the model gets a specific reason instead of
+        # a task that fails after dispatch.
+        requested_executor = ""
+        if isinstance(effective_config, dict):
+            requested_executor = str(
+                effective_config.get("executor") or ""
+            ).strip().lower()
+        if requested_executor in {"engine", "agent"}:
+            if not remote_target_id:
+                return json.dumps(
+                    {
+                        "error": (
+                            "execution_config.executor='engine' only applies to "
+                            "a task pinned to a remote via remote_target_id."
+                        )
+                    }
+                )
+            caps = _remote_capabilities(
+                (remote or {}).get("capabilities")
+            )
+            advertised = caps.get("executors")
+            can_engine = str(caps.get("executor") or "").lower() == "engine" or (
+                isinstance(advertised, list) and "engine" in advertised
+            )
+            if not can_engine:
+                return json.dumps(
+                    {
+                        "error": (
+                            f"Remote '{remote_name}' has not reported that it can "
+                            "run an agent session. Its executor is "
+                            f"{caps.get('executor')!r} and its advertised "
+                            f"executors are {advertised!r}. Update the remote "
+                            "agent to an executor list including 'engine', or "
+                            "write the work as a fenced shell block instead."
+                        )
+                    }
+                )
+            if not (backend_id or model):
+                return json.dumps(
+                    {
+                        "error": (
+                            "A remote engine session needs an explicit backend_id "
+                            "(see list_engines) and usually a model, so the "
+                            "remote knows which engine to run."
+                        )
+                    }
+                )
 
         if sequence_order < 0:
             return json.dumps({"error": "sequence_order must be >= 0"})
@@ -2099,7 +2211,11 @@ sandboxed."""
                 "writing the task description — the contract decides what the "
                 "remote can execute. A remote whose executor is 'shell' only "
                 "runs fenced sh/bash/shell/zsh/console code blocks, so put the "
-                "actual commands in one."
+                "actual commands in one. A remote whose capabilities include "
+                "'engine' can instead run a real agent session: set "
+                "execution_config={'executor': 'engine'} together with "
+                "backend_id and model, and write the description as ordinary "
+                "prose."
             )
         elif remotes:
             hint = (

@@ -67,6 +67,36 @@ def _attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+#: Permission modes the Claude Agent SDK accepts.
+_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"}
+)
+
+
+def _resolve_permission_mode(
+    audit_context: dict[str, Any] | None, *, approve_permissions: bool
+) -> str:
+    """Pick the permission mode for this session.
+
+    Precedence: an explicit ``permission_mode`` in the audit context (used by an
+    unattended remote session, which has no human to approve anything) →
+    ``CLAUDE_PERMISSION_MODE`` env → ``acceptEdits`` when permissions were
+    granted, else ``default``.
+
+    ``acceptEdits`` auto-approves file edits but still prompts for shell
+    commands. A daemon or remote session has nobody to answer that prompt, so it
+    must not rely on the default; callers that know they are unattended pass
+    ``bypassPermissions`` explicitly.
+    """
+    requested = str((audit_context or {}).get("permission_mode") or "").strip()
+    if requested in _PERMISSION_MODES:
+        return requested
+    env_value = os.environ.get("CLAUDE_PERMISSION_MODE", "").strip()
+    if env_value in _PERMISSION_MODES:
+        return env_value
+    return "acceptEdits" if approve_permissions else "default"
+
+
 def _claude_approval_callback(approval: Any) -> Any:
     """Build the SDK's ``can_use_tool`` callback around an ``EngineApproval``.
 
@@ -164,7 +194,9 @@ class ClaudeCodeEngine(LLMEngine):
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "permission_mode": "acceptEdits" if approve_permissions else "default",
+            "permission_mode": _resolve_permission_mode(
+                audit_context, approve_permissions=approve_permissions
+            ),
             "include_partial_messages": include_partial,
         }
         # The SDK's can_use_tool callback is the native seam for "may this run?".
