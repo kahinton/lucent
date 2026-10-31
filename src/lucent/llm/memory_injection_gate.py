@@ -40,6 +40,7 @@ question-name limit; the id stays inside the state field body.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import Any
@@ -54,20 +55,50 @@ from lucent.llm.decision import (
 )
 
 # The merged multi-query candidate pool can exceed the server's 64-question
-# limit (up to 8 query windows x ~30 results), so the gate window is capped
-# and candidates beyond it are dropped (never allowed to backfill the cap —
-# the model already judged the conversation does not call for that many).
-MEMORY_INJECT_DECISION_MAX_QUESTIONS = 16
+# limit (up to 8 query windows x ~30 results), so the gate window is capped and
+# candidates beyond it are dropped (never allowed to backfill the cap — the
+# model already judged the conversation does not call for that many).
+#
+# The cap is also the dominant latency control. The endpoint answers each
+# question in its own pass over the state, so cost is roughly linear in the
+# question count AND in the state size. Measured on the reference machine
+# (nimble, num_ctx 8192, trimmed budgets below):
+#
+#     questions | input tokens | warm wall
+#           1    |        610   |   4.0s   (includes a cold load)
+#           3    |      3,261   |   6.6s
+#           4    |      5,308   |   8.2s
+#           6    |     10,830   |  11.5s
+#           8    |     18,264   |  15.0s
+#          16    |      ~67,000 |  28s     (also exceeds the 8192-token context)
+#
+# Six is the largest window whose worst case still leaves room under the default
+# timeout for a cold model load. It costs nothing in practice: production turns
+# inject 0-3 memories, and the injection cap is 10, so candidates past the sixth
+# were going to be dropped by rank anyway.
+MEMORY_INJECT_DECISION_MAX_QUESTIONS = 6
 # Pre-model-call latency budget: this gate runs inline before the model
 # answers the user (the request pre-review gate is a background path and
-# can afford 30s; this one cannot). Warm inference is
-# tens-of-milliseconds; the budget is set so a COLD model load (measured
-# ~7s for nimble on the reference machine, held warm by keep_alive)
-# still completes instead of tripping into fail-open on the first turn.
+# can afford 30s; this one cannot). Overridable per org with
+# ``memory.inject_decision_gate_timeout_seconds``.
 MEMORY_INJECT_DECISION_TIMEOUT_SECONDS = 15.0
 _MEMORY_INJECT_DECISION_KEEP_ALIVE = "30m"
-_MEMORY_INJECT_DECISION_USER_TEXT_BUDGET = 4000
-_MEMORY_INJECT_DECISION_HISTORY_BUDGET = 4000
+# Payload budgets. These are a LATENCY control, not just a size control.
+#
+# The decision endpoint is quadratic in the question count: measured input
+# tokens are ~64 x questions^2 for a fixed state, and wall time tracks input
+# tokens at roughly 1.5-2 ms/token on the reference machine. A 16-question
+# screen built from the original budgets (4000-char user text + 4000-char
+# history + 16 x 500-char memories) came to ~67k input tokens, needed ~28s, and
+# -- because the model's context is 8192 tokens -- could not be answered at
+# all: the server rejects an oversized prompt instead of truncating it.
+#
+# The budgets below hold a full 16-candidate screen inside what the model can
+# accept and what the inline path can absorb. This is a coarse yes/no about
+# topical relevance between one message and one memory preview; a couple of
+# sentences of context resolve it, and the extra characters only cost time.
+_MEMORY_INJECT_DECISION_USER_TEXT_BUDGET = 1200
+_MEMORY_INJECT_DECISION_HISTORY_BUDGET = 1200
 # Keep the conversation window short. The decision model is a small classifier
 # and long meta-conversations (especially ones discussing gating/injection)
 # bleed into the relevance judgment: with the previous 8-message window a
@@ -75,9 +106,29 @@ _MEMORY_INJECT_DECISION_HISTORY_BUDGET = 4000
 # 0.02-0.59 and was filtered, while the same state with the last 4 messages
 # scored 0.98-0.99. Two turns are enough to resolve pronouns; more is noise.
 _MEMORY_INJECT_DECISION_HISTORY_MESSAGES = 4
-_MEMORY_INJECT_DECISION_PROJECT_BUDGET = 300
-_MEMORY_INJECT_DECISION_MEMORY_BUDGET = 600
-_MEMORY_INJECT_DECISION_CONTENT_BUDGET = 500
+_MEMORY_INJECT_DECISION_PROJECT_BUDGET = 200
+_MEMORY_INJECT_DECISION_MEMORY_BUDGET = 360
+_MEMORY_INJECT_DECISION_CONTENT_BUDGET = 280
+
+# The endpoint rejects an oversized prompt outright ("prompt 0 has N tokens;
+# expected 1-M") rather than truncating it, so an over-budget screen is a hard
+# failure, not a slow one. Decision models are small (nimble runs at num_ctx
+# 8192) and the request grows with the SQUARE of the question count, so the
+# gate checks the assembled prompt against the model's context before sending
+# and drops candidates until it fits. Dropping candidates fails open in the
+# only direction that matters: the survivors are still screened, and the
+# dropped ones are injected unfiltered because the gate never saw them.
+_MEMORY_INJECT_DECISION_CONTEXT_TOKENS = 8192
+# Deliberately loose: ~3.4 characters per token under-counts prose tokenization,
+# so this is a ceiling on characters, not a token estimate. It exists to stop a
+# pathological payload, not to tune throughput.
+_MEMORY_INJECT_DECISION_CONTEXT_CHARS = int(
+    _MEMORY_INJECT_DECISION_CONTEXT_TOKENS * 2.6
+)
+
+
+def _state_chars(state: dict[str, str]) -> int:
+    return sum(len(str(value)) for value in state.values())
 
 
 def _single_line(text: str) -> str:
@@ -101,6 +152,11 @@ class InjectionGateOutcome:
     error: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    #: Wall time for the decision call. Recorded because the gate runs inline
+    #: before the model answers: a slow screen is a latency regression and,
+    #: past the timeout, a silent loss of filtering. Without this number the
+    #: only visible symptom is a fail-open warning with no magnitude.
+    duration_ms: int = 0
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -110,6 +166,7 @@ class InjectionGateOutcome:
             "question_count": len(self.scores),
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "duration_ms": self.duration_ms,
         }
 
 
@@ -224,11 +281,14 @@ def _memory_state(memory: dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
+# One question per candidate, and the instruction is repeated for every one of
+# them. At 16 candidates a 260-character instruction is ~4.2k tokens of pure
+# duplication -- more than half the model's context -- so it is deliberately
+# terse. The fields are already named ``memory_<n>``; the question only has to
+# ask whether that field is worth injecting.
 _QUESTION_TEMPLATE = (
-    "The memory shown in field {field} contains information that is directly "
-    "relevant to the user's message and the surrounding conversation shown in "
-    "the other fields — information worth placing in the model's context for "
-    "this turn — not merely topically adjacent to it."
+    "Is the memory in field {field} directly relevant to this turn's user "
+    "message and conversation, and worth injecting?"
 )
 
 
@@ -279,22 +339,72 @@ def evaluate_gate_response(
     return scores, kept_fields, complete
 
 
+def fits_context(
+    state: dict[str, str],
+    gated: list[tuple[str, dict[str, Any]]],
+) -> bool:
+    """Whether this screen can be sent at all.
+
+    The endpoint rejects an oversized prompt instead of truncating it, so an
+    over-budget screen is a hard failure, not a slow one. Screening a *subset*
+    is not an acceptable workaround: the caller's kept-field bookkeeping is
+    built from the full candidate list, so every candidate the gate never saw
+    would be counted as unrelated and silently dropped. Refusing the whole
+    screen keeps the failure open.
+    """
+    return bool(gated) and _state_chars(state) <= _MEMORY_INJECT_DECISION_CONTEXT_CHARS
+
+
 async def run_injection_gate(
     model_id: str,
     state: dict[str, str],
     gated: list[tuple[str, dict[str, Any]]],
     *,
     threshold: float,
-    timeout: float = MEMORY_INJECT_DECISION_TIMEOUT_SECONDS,
+    timeout: float | None = None,
 ) -> InjectionGateOutcome:
-    """Run the screen end-to-end; does NOT swallow exceptions (caller wraps)."""
+    """Run the screen end-to-end; does NOT swallow exceptions (caller wraps).
+
+    ``timeout`` defaults to the org's ``memory.inject_decision_gate_timeout_seconds``
+    setting so an operator can widen the budget on slower hardware without a
+    code change.
+
+    When the assembled prompt cannot fit the model's context the outcome is
+    ``skipped``, which the caller treats as fail-open: the pre-gate candidates
+    are injected unfiltered. Returning per-candidate zeros instead would read
+    as "unrelated" and silently drop every memory, which is the opposite
+    failure mode.
+    """
+    if timeout is None:
+        try:
+            from lucent.settings import message_inject_decision_gate_timeout_seconds
+
+            timeout = message_inject_decision_gate_timeout_seconds()
+        except Exception:  # noqa: BLE001 — a settings failure must not disable the gate
+            timeout = MEMORY_INJECT_DECISION_TIMEOUT_SECONDS
+    if not fits_context(state, gated):
+        # Refuse rather than screen a truncated window: the caller's kept-field
+        # bookkeeping is built from the FULL candidate list, so screening a
+        # subset would make every dropped candidate look unrelated.
+        return InjectionGateOutcome(
+            verdict="skipped",
+            model_id=model_id,
+            threshold=threshold,
+            scores={},
+            error=(
+                "decision prompt exceeded the model context window; "
+                "candidates were injected unfiltered"
+            ),
+        )
     request = DecisionRequest(
         model_id=model_id,
         state=state,
         questions=build_gate_questions(gated),
         keep_alive=_MEMORY_INJECT_DECISION_KEEP_ALIVE,
     )
+    started = time.monotonic()
     response = await _decide(request, timeout=timeout)
+    duration_ms = int((time.monotonic() - started) * 1000)
     scores, kept_fields, complete = evaluate_gate_response(response, gated, threshold=threshold)
     if not complete:
         # No candidate answer was parseable — treat the whole screen as
@@ -307,6 +417,7 @@ async def run_injection_gate(
             error="decision response had no usable answers",
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            duration_ms=duration_ms,
         )
     return InjectionGateOutcome(
         verdict="kept" if len(kept_fields) == len(gated) else "filtered",
@@ -316,4 +427,5 @@ async def run_injection_gate(
         kept_fields=frozenset(kept_fields),
         input_tokens=response.usage.input_tokens,
         output_tokens=response.usage.output_tokens,
+        duration_ms=duration_ms,
     )

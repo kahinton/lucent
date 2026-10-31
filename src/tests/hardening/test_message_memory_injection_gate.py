@@ -296,7 +296,8 @@ async def test_gate_unexpected_error_fails_open(monkeypatch):
 async def test_gate_window_caps_questions_and_counts_overflow(monkeypatch):
     _patch_gate(monkeypatch)
     _patch_model_id(monkeypatch, "nimble")
-    recorder = _RecordingDecide({f"memory_{n}": 0.9 for n in range(1, 17)})
+    cap = gate_module.MEMORY_INJECT_DECISION_MAX_QUESTIONS
+    recorder = _RecordingDecide({f"memory_{n}": 0.9 for n in range(1, 21)})
     monkeypatch.setattr(gate_module, "_decide", recorder)
 
     bridge = FakeBridge([
@@ -310,14 +311,14 @@ async def test_gate_window_caps_questions_and_counts_overflow(monkeypatch):
     )
     assert len(recorder.requests) == 1
     request = recorder.requests[0]
-    assert len(request.questions) == 16  # MEMORY_INJECT_DECISION_MAX_QUESTIONS
-    assert list(request.questions) == [f"memory_{n}" for n in range(1, 17)]
+    assert len(request.questions) == cap
+    assert list(request.questions) == [f"memory_{n}" for n in range(1, cap + 1)]
     metadata = outcome.injectable_executions[0].metadata
-    assert metadata["decision_overflow"] == 4
+    assert metadata["decision_overflow"] == 20 - cap
     assert metadata["memory_count"] == 3  # max_memories cap still binds
     # Overflow candidates were dropped by the gate window; cap displacement
     # is not a "skip", so only the overflow adds to the skipped total.
-    assert metadata["skipped"] == 4
+    assert metadata["skipped"] == 20 - cap
 
 
 # ── gate is the relevance authority (no pre-gate recall cuts) ───────────────
@@ -712,3 +713,116 @@ async def test_gate_env_driven_flag_engages_pipeline(monkeypatch):
     assert "hit memory" in outcome.injectable_executions[0].text
     metadata = outcome.injectable_executions[0].metadata
     assert not [key for key in metadata if key.startswith("decision_")]
+
+
+# ── Payload budgeting and context fit ──────────────────────────────────────
+#
+# The gate runs inline before the model answers, and the decision endpoint is
+# quadratic in the question count while rejecting (not truncating) a prompt
+# over the model's context. These tests pin the two invariants that keep that
+# from turning into a user-visible stall or a silently emptied injection.
+
+
+def test_gate_state_fits_a_full_window_inside_the_model_context():
+    """A saturated 16-candidate screen must be sendable, not rejected."""
+    from lucent.llm.memory_injection_gate import (
+        MEMORY_INJECT_DECISION_MAX_QUESTIONS,
+        _MEMORY_INJECT_DECISION_CONTEXT_CHARS,
+        _state_chars,
+        build_gate_state,
+    )
+
+    # Worst case: every budget saturated by prose-like content.
+    candidates = [
+        (
+            _memory(
+                f"aaaaaaaa-0000-0000-0000-{index:012d}",
+                0.9,
+                "Operational reference for developing on Lucent's own codebase. " * 20,
+            ),
+            0.9,
+        )
+        for index in range(MEMORY_INJECT_DECISION_MAX_QUESTIONS)
+    ]
+    messages = [
+        {"role": "user", "content": "a question about the remote engine session " * 60},
+        {"role": "assistant", "content": "an answer about the remote engine session " * 60},
+        {"role": "user", "content": "a follow up about the remote engine session " * 60},
+    ]
+    state, gated = build_gate_state(
+        user_text="a follow up about the remote engine session " * 60,
+        messages=messages,
+        session_state={"project": {"name": "Lucent"}},
+        candidates=candidates,
+    )
+    assert len(gated) == MEMORY_INJECT_DECISION_MAX_QUESTIONS
+    assert _state_chars(state) <= _MEMORY_INJECT_DECISION_CONTEXT_CHARS
+
+
+def test_gate_questions_keep_their_instructions_short():
+    """The instruction is repeated per candidate, so length multiplies."""
+    from lucent.llm.memory_injection_gate import (
+        MEMORY_INJECT_DECISION_MAX_QUESTIONS,
+        _QUESTION_TEMPLATE,
+    )
+
+    rendered = len(_QUESTION_TEMPLATE.format(field="memory_1"))
+    # At the cap this text is emitted once per candidate. A long template is
+    # pure duplication and eats the model's context.
+    assert rendered < 200
+    assert rendered * MEMORY_INJECT_DECISION_MAX_QUESTIONS < 3200
+
+
+async def test_gate_refuses_an_oversized_prompt_instead_of_filtering(monkeypatch):
+    """Overflow must fail open: a skipped screen keeps every candidate.
+
+    Returning per-candidate zeros would read as "unrelated" and drop every
+    memory, which is the opposite of failing open.
+    """
+    from lucent.llm.memory_injection_gate import (
+        _MEMORY_INJECT_DECISION_CONTEXT_CHARS,
+        fits_context,
+        run_injection_gate,
+    )
+
+    state = {
+        "user_message": "u" * (_MEMORY_INJECT_DECISION_CONTEXT_CHARS * 2),
+        **{f"memory_{i}": "m" * 300 for i in range(1, 4)},
+    }
+    gated = [(f"memory_{i}", _memory(f"a{i}", 0.9)) for i in range(1, 4)]
+    assert fits_context(state, gated) is False
+
+    async def _must_not_call(*args, **kwargs):  # pragma: no cover - asserted
+        raise AssertionError("an oversized screen must not reach the endpoint")
+
+    monkeypatch.setattr(gate_module, "_decide", _must_not_call)
+    outcome = await run_injection_gate("nimble:latest", state, gated, threshold=0.5)
+    assert outcome.verdict == "skipped"
+    assert "context window" in (outcome.error or "")
+    assert outcome.kept_fields == frozenset()
+
+
+async def test_run_injection_gate_uses_the_configured_timeout(monkeypatch):
+    """The inline latency budget must be operator-tunable, not hard-coded."""
+    from lucent.llm.memory_injection_gate import run_injection_gate
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_decide(request, *, timeout, **_kwargs):
+        captured["timeout"] = timeout
+        return DecisionResponse(
+            model="nimble:latest",
+            answers={"memory_1": NoulAnswer(noul=0.9)},
+            usage=DecisionUsage(input_tokens=1, output_tokens=1),
+        )
+
+    monkeypatch.setattr(gate_module, "_decide", _fake_decide)
+    monkeypatch.setattr(
+        "lucent.settings.message_inject_decision_gate_timeout_seconds",
+        lambda **_kwargs: 42.0,
+    )
+    state = {"user_message": "hello", "memory_1": "Id: a1 | Content: mem"}
+    gated = [("memory_1", _memory("a1", 0.9))]
+    outcome = await run_injection_gate("nimble:latest", state, gated, threshold=0.5)
+    assert captured["timeout"] == 42.0
+    assert outcome.verdict == "kept"

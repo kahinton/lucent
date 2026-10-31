@@ -1142,6 +1142,9 @@ async def _run_message_memory_lookup_hook(
     decision_scores: dict[str, float] = {}
     decision_model_id: str | None = None
     decision_gate_failure: str | None = None
+    decision_gate_duration_ms: int = 0
+    decision_gate_input_tokens: int = 0
+    decision_gate_output_tokens: int = 0
     if decision_gate is not None:
         decision_model_id, gate_threshold = decision_gate
         try:
@@ -1165,6 +1168,9 @@ async def _run_message_memory_lookup_hook(
                 )
                 for field, memory in gated
             }
+            decision_gate_duration_ms = outcome.duration_ms
+            decision_gate_input_tokens = outcome.input_tokens
+            decision_gate_output_tokens = outcome.output_tokens
             if outcome.verdict == "skipped":
                 # Whole screen unusable: fail open; nothing was screened away.
                 decision_gate_failure = outcome.error
@@ -1235,6 +1241,12 @@ async def _run_message_memory_lookup_hook(
                 "decision_gated": decision_gated,
                 "decision_overflow": decision_overflow,
                 "decision_scores": decision_scores,
+                # The gate runs inline, before the model answers. Without this
+                # a slow screen is invisible until it crosses the timeout and
+                # turns into a silent fail-open.
+                "decision_gate_duration_ms": decision_gate_duration_ms,
+                "decision_input_tokens": decision_gate_input_tokens,
+                "decision_output_tokens": decision_gate_output_tokens,
             })
             if decision_gate_failure:
                 metadata["decision_skipped"] = decision_gate_failure
@@ -1315,6 +1327,9 @@ async def _run_message_memory_lookup_hook(
             "decision_gated": decision_gated,
             "decision_overflow": decision_overflow,
             "decision_scores": decision_scores,
+            "decision_gate_duration_ms": decision_gate_duration_ms,
+            "decision_input_tokens": decision_gate_input_tokens,
+            "decision_output_tokens": decision_gate_output_tokens,
         })
         if decision_gate_failure:
             metadata["decision_skipped"] = decision_gate_failure

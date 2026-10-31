@@ -316,6 +316,30 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         max_value=1.0,
     ),
     RuntimeSettingDefinition(
+        key="memory.inject_decision_gate_timeout_seconds",
+        env_var="LUCENT_INJECT_DECISION_GATE_TIMEOUT",
+        value_type="integer",
+        default=25,
+        title="Message injection decision timeout",
+        section="Memory lifecycle",
+        description=(
+            "How long the decision-model gate may take before the turn "
+            "proceeds uninjected."
+        ),
+        help_text=(
+            "The gate runs inline, before the model answers, so this is a "
+            "latency budget rather than a hard failure: on timeout the "
+            "pre-gate candidates are injected unfiltered. A decision model "
+            "held in memory answers in tens of milliseconds, but loading it "
+            "costs roughly 6-11s on the reference machine, and it is evicted "
+            "whenever a larger local model runs. The default leaves headroom "
+            "for that reload; raise it on slower hardware, lower it when "
+            "responsiveness matters more than filtering precision."
+        ),
+        min_value=1,
+        max_value=120,
+    ),
+    RuntimeSettingDefinition(
         key="projects.context_enabled",
         env_var="LUCENT_PROJECT_CONTEXT_ENABLED",
         value_type="boolean",
@@ -2500,6 +2524,28 @@ def message_inject_decision_gate_threshold(*, organization_id: Any | None = None
             organization_id=organization_id,
         )
     )
+
+
+def message_inject_decision_gate_timeout_seconds(
+    *, organization_id: Any | None = None
+) -> float:
+    """Latency budget for the inline decision-model screen.
+
+    This gate runs before the model answers the user, so its timeout is a
+    responsiveness budget: exceeding it falls back to injecting the pre-gate
+    candidates unfiltered. It must cover a cold model load plus inference, or
+    the first turn after the model is evicted silently loses filtering.
+    """
+    try:
+        value = int(
+            get_runtime_setting(
+                "memory.inject_decision_gate_timeout_seconds",
+                organization_id=organization_id,
+            )
+        )
+    except (TypeError, ValueError):
+        return 25.0
+    return float(max(1, min(value, 120)))
 
 
 def project_context_enabled(*, organization_id: Any | None = None) -> bool:

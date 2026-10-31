@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The memory-injection relevance gate no longer times out on the decision
+  model.** It failed roughly half of all runs (27 of 60 in production) with
+  `ReadTimeout`, silently falling back to injecting memories unfiltered.
+  - **The model was not slow — the request was too big.** The decision endpoint
+    answers each question in its own pass over the state, so cost grows with
+    both the question count and the state size. At the old budgets (4000-char
+    user text + 4000-char history + up to 16 x 500-char memory previews) a
+    saturated screen reached ~67k input tokens and ~28s, against a 15s timeout.
+    A cold model load (~6-11s, incurred whenever a local model evicts the
+    decision model) pushed that straight past the limit.
+  - **Budgets trimmed** to 1200-char user text, 1200-char history, and 280-char
+    memory previews. The gate is a coarse yes/no about topical relevance between
+    one message and one memory preview; the extra characters bought nothing but
+    latency.
+  - **Candidate window cut from 16 to 6.** At 8 candidates a warm screen already
+    cost ~15s; at 6 it costs ~11.5s and leaves room for a cold load. Production
+    turns inject 0-3 memories against a cap of 10, so the dropped candidates were
+    going to be ranked out anyway.
+  - **Oversized prompts now fail open instead of erroring.** The endpoint rejects
+    (never truncates) a prompt over the model's context, which at the old budgets
+    was reachable at every candidate count. A screen that cannot fit is now
+    skipped so the pre-gate candidates are injected unfiltered; screening a
+    truncated subset would have made the omitted candidates look unrelated and
+    dropped them.
+  - **The per-question instruction template was shortened** from 266 to 116
+    characters. It is emitted once per candidate, so at 16 candidates it was
+    ~4.2k tokens of pure duplication — more than half the model's context.
+  - **Timeout is now configurable** (`memory.inject_decision_gate_timeout_seconds`,
+    default 25s, was a hard-coded 15s) so slower hardware and larger decision
+    models can widen it without a code change.
+  - **Gate duration and token usage are recorded** in hook telemetry. Previously
+    a slow screen was invisible until it crossed the timeout and became a
+    fail-open warning with no magnitude.
+
 ### Added
 
 - **Remote engine sessions (`engine` executor).** A task pinned to a remote can
