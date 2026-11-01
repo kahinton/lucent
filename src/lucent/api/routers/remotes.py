@@ -302,13 +302,41 @@ async def remote_claim(
         from fastapi import Response
 
         return Response(status_code=204)
-    return await _task_payload_for_remote(
+
+    payload = await _task_payload_for_remote(
         task,
         remote,
         str(user.organization_id),
         pool=pool,
         request=None,
     )
+    # A claim whose payload never reached the agent must not stay claimed. The
+    # client only reports on work it actually received, so on any failure here
+    # the task would be renewed forever by the heartbeat below and the rest of
+    # its request would stay gated behind it — a zombie claim no reaper can see.
+    # Releasing returns it to the queue; the remote re-claims it next poll.
+    if payload.get("execution_plan_error"):
+        from lucent.db.requests import RequestRepository
+
+        released = await RequestRepository(pool).release_task(
+            str(task["id"]),
+            org_id=str(user.organization_id),
+            instance_id=f"remote:{remote_id}",
+        )
+        if released:
+            logger.warning(
+                "Released un-executable remote claim: task=%s remote=%s reason=%s",
+                str(task["id"])[:8],
+                remote["name"],
+                payload["execution_plan_error"][:200],
+            )
+            await remote_repo.touch_last_seen(
+                str(remote_id), str(user.organization_id)
+            )
+            from fastapi import Response
+
+            return Response(status_code=204)
+    return payload
 
 
 @remote_protocol_router.post("/remotes/{remote_id}/heartbeat")
@@ -335,6 +363,13 @@ async def remote_heartbeat(
     instance_id = f"remote:{remote_id}"
     request_repo = RequestRepository(pool)
 
+    # The client wraps its self-report as {"agent": {...}}; older/other clients
+    # may post the fields bare, so accept both shapes up front — both the lease
+    # renewal below and the capability record need it.
+    payload = body if isinstance(body, dict) else {}
+    nested = payload.get("agent")
+    reported = nested if isinstance(nested, dict) else payload
+
     # Register idempotently (upsert) so lease renewal has a row to renew.
     existing = await request_repo.get_daemon_instance(
         instance_id, org_id=str(user.organization_id)
@@ -350,19 +385,55 @@ async def remote_heartbeat(
             status="active",
         )
     else:
+        # Renew only the leases this remote reports it is still working on.
+        #
+        # Unscoped renewal was a real defect: an agent that claimed a task but
+        # never received its payload (transport timeout, controller restart)
+        # still heartbeats every 30s, so "recent heartbeat" kept reading as
+        # "work in progress" and the stale-task reaper could never recover the
+        # row. The task stayed claimed indefinitely and every later task in its
+        # request stayed gated behind it.
+        #
+        # Read from ``reported`` — the client nests its self-report under
+        # ``{"agent": {...}}``, so reading the raw body here silently yields
+        # None and falls back to renewing everything, which is exactly the bug
+        # this is meant to fix.
+        #
+        # The client sends the ids it is actively running. An older client that
+        # omits the field keeps the legacy renew-everything behaviour, so this
+        # is backward compatible — but a stalled claim still expires its lease
+        # after the normal window and is reaped.
+        active_ids = None
+        raw_active = reported.get("active_task_ids")
+        if isinstance(raw_active, list):
+            # An empty list is meaningful ("running nothing") and must NOT
+            # collapse to None, which means "renew everything I own".
+            active_ids = [str(item) for item in raw_active if item]
         await request_repo.heartbeat_instance(
             org_id=str(user.organization_id),
             instance_id=instance_id,
+            active_task_ids=active_ids,
         )
+        # A client that truthfully reports it is running nothing still holds
+        # claims nobody is executing — typically because its agent restarted
+        # mid-task. Requeue those immediately rather than waiting out the lease,
+        # which would strand every later task in the same request.
+        if active_ids is not None:
+            released = await request_repo.release_orphaned_remote_claims(
+                remote_id=str(remote_id),
+                org_id=str(user.organization_id),
+                active_task_ids=active_ids,
+            )
+            if released:
+                logger.warning(
+                    "Requeued %d orphaned remote claim(s) for %s: %s",
+                    len(released),
+                    remote["name"],
+                    ", ".join(item[:8] for item in released),
+                )
     # Persist what the remote reports about itself, so task authors can see how
     # it executes work. Without this an agent pins a task to a remote and writes
     # prose at a `shell` executor that only runs fenced command blocks.
-    #
-    # The client wraps its self-report as {"agent": {...}}; older/other clients
-    # may post the fields bare, so accept both shapes.
-    payload = body if isinstance(body, dict) else {}
-    nested = payload.get("agent")
-    reported = nested if isinstance(nested, dict) else payload
     if reported:
         await remote_repo.record_reported_capabilities(
             str(remote_id),

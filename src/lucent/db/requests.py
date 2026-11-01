@@ -47,6 +47,12 @@ from lucent.llm.decision import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_TASK_LEASE_SECONDS = int(os.environ.get("LUCENT_TASK_LEASE_SECONDS", "1800"))
+# How long a remote claim must be held before the controller may requeue it on
+# the strength of the remote saying it is not working on it. Covers the gap
+# between claiming a task and recording it as active in the client.
+DEFAULT_REMOTE_ORPHAN_GRACE_SECONDS = int(
+    os.environ.get("LUCENT_REMOTE_ORPHAN_GRACE_SECONDS", "90")
+)
 DEFAULT_INSTANCE_STALE_SECONDS = int(os.environ.get("LUCENT_INSTANCE_STALE_SECONDS", "1800"))
 
 # Activity-staleness predicate for the stale-task reaper, shared by
@@ -4279,6 +4285,73 @@ class RequestRepository:
             )
         return int(value or 0)
 
+    async def release_orphaned_remote_claims(
+        self,
+        *,
+        remote_id: str,
+        org_id: str,
+        active_task_ids: list[str],
+        grace_seconds: int = DEFAULT_REMOTE_ORPHAN_GRACE_SECONDS,
+    ) -> list[str]:
+        """Requeue claims a remote no longer reports working on.
+
+        A lease-expiry wait is the wrong recovery time for this case. When the
+        agent itself says "I am running nothing", the work it used to hold is
+        known-dead immediately: waiting out a 30-minute lease strands the whole
+        request behind a task nobody is executing.
+
+        ``grace_seconds`` is the only protection against a wrong report — a
+        client whose heartbeat happens to land in the gap between claiming a
+        task and adding it to its active set. Nothing is released until the
+        claim is at least that old, and a released task is only requeued
+        (never failed), so a mistaken release costs one restart, not the work.
+
+        Returns the ids that were released.
+        """
+        active = [UUID(str(t)) for t in active_task_ids if t]
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            rows = await conn.fetch(
+                """UPDATE tasks
+                   SET status = 'pending',
+                       claimed_by = NULL,
+                       claimed_at = NULL,
+                       last_heartbeat_at = NULL,
+                       claim_expires_at = NULL,
+                       claim_version = claim_version + 1,
+                       updated_at = NOW()
+                   WHERE organization_id = $1
+                     AND remote_target_id = $2
+                     AND status IN ('claimed', 'running')
+                     AND claimed_at IS NOT NULL
+                     AND claimed_at < NOW() - ($3::int * INTERVAL '1 second')
+                     AND NOT (id = ANY($4::uuid[]))
+                   RETURNING id, sequence_order, title""",
+                UUID(org_id),
+                UUID(remote_id),
+                int(grace_seconds),
+                active,
+            )
+        released = [str(row["id"]) for row in rows]
+        # Record each release so the activity page explains the restart rather
+        # than showing a task that silently went back in the queue.
+        for row in rows:
+            await self.add_task_event(
+                str(row["id"]),
+                "claim_orphaned",
+                (
+                    "Requeued: the remote that claimed this task no longer "
+                    "reports it as active (its agent restarted or never "
+                    f"received the payload). Recovery waited {grace_seconds}s "
+                    "for a wrong-report grace window."
+                ),
+                metadata={
+                    "remote_id": str(remote_id),
+                    "grace_seconds": int(grace_seconds),
+                },
+                org_id=org_id,
+            )
+        return released
+
     async def clear_remote_targeting(self, remote_id: str, org_id: str) -> int:
         """Unpin not-yet-claimed tasks from a remote (winding one down).
 
@@ -5139,12 +5212,67 @@ class RequestRepository:
     async def retry_task_with_feedback(
         self, task_id: str, feedback: str, org_id: str | None = None
     ) -> dict | None:
-        """Retry a failed task and persist corrective feedback on the parent request."""
+        """Retry a failed task and persist corrective feedback on the parent request.
+
+        Refuses once the request has spent its review budget. Nothing else
+        enforces ``max_reviews``: the review loop would otherwise requeue the
+        same task forever, forever resetting the request to ``in_progress`` and
+        never terminating. The request is escalated to ``review`` so a person
+        makes the call instead of the loop spinning.
+
+        Returns ``None`` when the retry is refused, which the review path
+        already treats as "could not requeue".
+        """
+        # Reserve review budget *before* touching the task. Checking after
+        # ``retry_task`` would mutate the task and only then discover the
+        # budget is gone, leaving a pending task the queue will never dispatch
+        # — the deadlock this guard exists to prevent.
+        now = datetime.now(timezone.utc)
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            if org_id:
+                reserved = await conn.fetchrow(
+                    """UPDATE requests
+                       SET review_count = review_count + 1, updated_at = $2
+                       WHERE id = (SELECT request_id FROM tasks WHERE id = $1)
+                         AND organization_id = $3
+                         AND review_count < max_reviews
+                       RETURNING id AS request_id""",
+                    UUID(task_id),
+                    now,
+                    UUID(org_id),
+                )
+            else:
+                reserved = await conn.fetchrow(
+                    """UPDATE requests
+                       SET review_count = review_count + 1, updated_at = $2
+                       WHERE id = (SELECT request_id FROM tasks WHERE id = $1)
+                         AND review_count < max_reviews
+                       RETURNING id AS request_id""",
+                    UUID(task_id),
+                    now,
+                )
+            if not reserved:
+                await self._escalate_review_budget_exhausted(
+                    task_id, org_id=org_id
+                )
+                return None
+
         task = await self.retry_task(task_id, org_id=org_id)
         if not task:
+            # The task could not be retried after budget was reserved; give the
+            # budget back so a later legitimately-failed task can use it.
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
+                await conn.execute(
+                    """UPDATE requests SET review_count = GREATEST(review_count - 1, 0)
+                       WHERE id = $1""",
+                    reserved["request_id"],
+                )
             return None
 
-        now = datetime.now(timezone.utc)
         request_id = str(task["request_id"])
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
@@ -5154,7 +5282,6 @@ class RequestRepository:
                     """UPDATE requests
                        SET status = $2,
                            review_feedback = $3,
-                           review_count = review_count + 1,
                            updated_at = $4
                        WHERE id = $1 AND organization_id = $5""",
                     UUID(request_id),
@@ -5168,7 +5295,6 @@ class RequestRepository:
                     """UPDATE requests
                        SET status = $2,
                            review_feedback = $3,
-                           review_count = review_count + 1,
                            updated_at = $4
                        WHERE id = $1""",
                     UUID(request_id),
@@ -5186,6 +5312,55 @@ class RequestRepository:
         )
         refreshed = await self.get_task(task_id, org_id=org_id)
         return refreshed
+
+    async def _escalate_review_budget_exhausted(
+        self, task_id: str, *, org_id: str | None = None
+    ) -> None:
+        """Stop a rework loop and hand the request to a person.
+
+        Called when the review budget is gone. The alternative — requeueing
+        again — leaves the request ``in_progress`` with a pending task the queue
+        will never dispatch, i.e. permanently stuck with no error to show for
+        it. ``review`` is a terminal-for-automation state a human can act on.
+        """
+        now = datetime.now(timezone.utc)
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            row = await conn.fetchrow(
+                """SELECT r.id, r.review_count, r.max_reviews
+                   FROM requests r JOIN tasks t ON t.request_id = r.id
+                   WHERE t.id = $1""",
+                UUID(task_id),
+            )
+            if not row:
+                return
+            if org_id:
+                await conn.execute(
+                    """UPDATE requests SET status = 'review', updated_at = $2
+                       WHERE id = $1 AND organization_id = $3""",
+                    row["id"],
+                    now,
+                    UUID(org_id),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE requests SET status = 'review', updated_at = $2 WHERE id = $1",
+                    row["id"],
+                    now,
+                )
+        logger.warning(
+            "Rework refused for request %s: review budget exhausted (%s of %s). "
+            "Escalated to human review instead of looping.",
+            str(row["id"])[:8],
+            row["review_count"],
+            row["max_reviews"],
+        )
+        await self.add_task_event(
+            task_id,
+            "rework_refused",
+            "Rework refused: the request exhausted its review budget. "
+            "Escalated to human review instead of looping.",
+            org_id=org_id,
+        )
 
     async def requeue_completed_task_for_rework(
         self, task_id: str, feedback: str, org_id: str | None = None

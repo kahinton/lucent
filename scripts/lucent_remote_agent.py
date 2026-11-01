@@ -48,6 +48,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -749,6 +750,16 @@ class RemoteAgent:
         self.client = client or ControllerClient(config)
         self._last_heartbeat = 0.0
         self._run_dir: str | None = None
+        #: Task ids this process is actively executing. Sent with each
+        #: heartbeat so the controller renews only leases that correspond to
+        #: real work. Without this a claim whose payload never arrived is
+        #: renewed forever and can never be reaped.
+        self._active_task_ids: set[str] = set()
+        # Guards ``_active_task_ids`` and the heartbeat clock: the heartbeat
+        # thread reads them while the main loop mutates them.
+        self._lock = threading.Lock()
+        self._stop_heartbeat = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -774,6 +785,8 @@ class RemoteAgent:
         return sorted(available)
 
     def heartbeat(self) -> dict:
+        with self._lock:
+            active = sorted(self._active_task_ids)
         info = self.client.heartbeat(
             {
                 "hostname": socket.gethostname(),
@@ -791,10 +804,60 @@ class RemoteAgent:
                 # fixed argv. Without this the controller has to guess.
                 "shell": self.config.shell,
                 "command": self.config.command,
+                # Leases the controller may renew. A claim this process never
+                # actually started (payload lost in transit) is deliberately
+                # absent, so its lease expires and the task is requeued.
+                "active_task_ids": active,
             }
         )
-        self._last_heartbeat = time.monotonic()
+        with self._lock:
+            self._last_heartbeat = time.monotonic()
         return info
+
+    def _heartbeat_loop(self) -> None:
+        """Keep leases alive independently of task execution.
+
+        ``process_task`` is synchronous and can run for an hour (an agent
+        session is unbounded work). Heartbeating only from the main loop meant
+        every lease went stale for the duration of a task, so the controller
+        treated live work as abandoned: the lease could expire outright, and the
+        activity-based reaper saw no heartbeat and requeued the task while it was
+        still running — duplicate work, two agents editing the same repo.
+
+        A dedicated thread fixes that without complicating the executor. It only
+        sends heartbeats; claim/complete/fail stay on the main loop.
+        """
+        # Honour the configured interval. A floor here would silently override an
+        # operator's (or a test's) setting and make lease timing unpredictable;
+        # only guard against a nonsensical zero/negative value.
+        interval = max(1, int(self.config.heartbeat_seconds))
+        while not self._stop_heartbeat.wait(interval):
+            try:
+                self.heartbeat()
+            except AuthError:
+                # A revoked key is terminal for the whole agent; stop the loop
+                # and let the main loop surface it.
+                self._log("heartbeat authentication failed; stopping heartbeat")
+                return
+            except Exception as exc:  # noqa: BLE001 — never kill the thread
+                # A transient controller hiccup must not end the heartbeat:
+                # stopping it would make live work look abandoned.
+                self._log(f"heartbeat failed (will retry): {exc}")
+
+    def start_heartbeat(self) -> None:
+        if self._heartbeat_thread is not None:
+            return
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, name="lucent-heartbeat", daemon=True
+        )
+        self._heartbeat_thread.start()
+
+    def stop_heartbeat(self) -> None:
+        self._stop_heartbeat.set()
+        thread = self._heartbeat_thread
+        if thread is not None:
+            thread.join(timeout=5)
+            self._heartbeat_thread = None
 
     # ── task handling ─────────────────────────────────────────────────────
 
@@ -802,7 +865,15 @@ class RemoteAgent:
         task_id = str(task.get("id") or "")
         if not task_id:
             raise ProtocolError("Claim response did not include a task id")
+        with self._lock:
+            self._active_task_ids.add(task_id)
+        try:
+            self._process_task_inner(task, task_id)
+        finally:
+            with self._lock:
+                self._active_task_ids.discard(task_id)
 
+    def _process_task_inner(self, task: dict, task_id: str) -> None:
         workdir = self._workdir(task_id)
         log = self._log
         log(f"claimed task {task_id}: {task.get('title')}")
@@ -875,6 +946,7 @@ class RemoteAgent:
             f"executor={self.config.executor}"
         )
         backoff = 1.0
+        self.start_heartbeat()
         try:
             while True:
                 try:
@@ -908,6 +980,7 @@ class RemoteAgent:
                     self._log("interrupted; shutting down")
                     return EXIT_OK
         finally:
+            self.stop_heartbeat()
             if self._run_dir:
                 shutil.rmtree(self._run_dir, ignore_errors=True)
 

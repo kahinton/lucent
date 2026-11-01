@@ -334,6 +334,39 @@ Task Reaper releases the claim within the normal stale window (default 30
 minutes of inactivity). The task returns to `pending` **with its pin intact**,
 so it is reclaimed when that remote reconnects, or you can requeue it manually.
 
+#### Leases cover work, not liveness
+
+A remote heartbeats every 30 seconds whether or not it is executing anything, so
+a heartbeat alone cannot mean "this claim is progressing". Each heartbeat
+therefore names the task ids the agent is actively running
+(`active_task_ids`), and only those leases are renewed. A claim the agent never
+received — the response timed out in transit, or the controller restarted
+mid-request — stops being renewed, expires its lease, and is requeued instead of
+holding its request open indefinitely.
+
+The controller also releases a claim it cannot serve. If composing the execution
+plan fails (feature disabled, unsupported engine, granted third-party MCP
+server), the task goes straight back to `pending` and the claimant is told
+nothing was executed. Returning the task to the queue rather than handing over a
+broken payload is what keeps one bad task from blocking every later stage of its
+request.
+
+An older client that does not send `active_task_ids` keeps the previous
+renew-everything behaviour.
+
+#### Heartbeats are independent of task execution
+
+The client sends heartbeats from a dedicated thread, not from its task loop. An
+engine session is unbounded work — minutes, sometimes tens of minutes — and while
+it ran, a single-threaded client sent no heartbeats at all. Every lease went
+stale for the duration: the claim could expire outright, and the activity-based
+reaper saw no heartbeat and requeued the task *while it was still running*, so two
+agents ended up editing the same working tree.
+
+The heartbeat thread only sends heartbeats (claim/complete/fail stay on the main
+loop), retries through transient controller errors, and stops on an auth failure,
+which is terminal for the whole agent.
+
 ## Testing
 
 ```bash

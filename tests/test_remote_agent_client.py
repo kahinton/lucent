@@ -581,3 +581,132 @@ def test_client_survives_connection_reset(monkeypatch):
     monkeypatch.setattr(client._opener, "open", fake_open)
     with pytest.raises(agent.ProtocolError):
         client.heartbeat({"executor": "shell"})
+
+
+# ── In-flight lease reporting (zombie-claim prevention) ────────────────────
+#
+# A claim whose payload never reaches this process must NOT keep being renewed.
+# The controller renews exactly the ids reported here, so an unstarted claim
+# expires its lease and is requeued instead of blocking its whole request.
+
+
+def test_heartbeat_reports_no_active_tasks_when_idle():
+    sent: list[dict] = []
+
+    class Client:
+        def heartbeat(self, metadata=None):
+            sent.append(metadata or {})
+            return {"ok": True}
+
+    remote = agent.RemoteAgent(_config(), client=Client())
+    remote.heartbeat()
+    assert sent[0]["active_task_ids"] == []
+
+
+def test_process_task_marks_the_task_active_while_it_runs(tmp_path):
+    seen: list[list[str]] = []
+    task_id = str(uuid4())
+
+    class Client(FakeClient):
+        def event(self, task, event_type, detail, metadata):
+            super().event(task, event_type, detail, metadata)
+            # Snapshot what a concurrent heartbeat would have reported.
+            seen.append(sorted(remote._active_task_ids))
+
+    client = Client()
+    remote = agent.RemoteAgent(_config(workdir=str(tmp_path)), client=client)
+    remote.process_task({"id": task_id, "title": "t", "description": "d"})
+
+    assert seen, "no events were emitted"
+    assert task_id in seen[0], "task must be reported active while executing"
+    # And released afterwards, so the lease stops being renewed on completion.
+    assert remote._active_task_ids == set()
+
+
+def test_process_task_clears_the_active_marker_on_executor_crash(tmp_path, monkeypatch):
+    """A crashed executor must not leave a lease renewing forever."""
+    task_id = str(uuid4())
+
+    def boom(config, task, workdir):
+        raise RuntimeError("executor exploded")
+
+    monkeypatch.setitem(agent.EXECUTORS, "noop", boom)
+    remote = agent.RemoteAgent(_config(workdir=str(tmp_path)), client=FakeClient())
+    remote.process_task({"id": task_id, "title": "t"})
+    assert remote._active_task_ids == set()
+
+
+# ── Heartbeats must not depend on the task finishing ───────────────────────
+#
+# `process_task` is synchronous and an engine session can run for an hour. When
+# heartbeats were only sent from the main loop, every lease went stale for the
+# duration of a task: the claim could expire outright, and the activity-based
+# reaper saw no heartbeat and requeued the task while it was still executing.
+# That is duplicate work — two agents editing the same repo.
+
+
+def test_heartbeat_continues_while_a_task_is_running(tmp_path):
+    import threading
+
+    beats: list[list[str]] = []
+    released = threading.Event()
+
+    class SlowClient(FakeClient):
+        def heartbeat(self, metadata=None):
+            beats.append(list((metadata or {}).get("active_task_ids") or []))
+            return {"ok": True}
+
+        def complete(self, task_id, result, summary=None):
+            super().complete(task_id, result, summary)
+            released.set()
+
+    client = SlowClient()
+    remote = agent.RemoteAgent(
+        _config(heartbeat_seconds=1, workdir=str(tmp_path)), client=client
+    )
+    task_id = str(uuid4())
+    remote.start_heartbeat()
+    try:
+        # Simulate a long task by holding the "running" state for a while.
+        with remote._lock:
+            remote._active_task_ids.add(task_id)
+        assert released.wait(timeout=4) is False  # nothing completed
+        remote._stop_heartbeat.wait(3.2)
+    finally:
+        remote.stop_heartbeat()
+
+    assert len(beats) >= 2, f"expected repeated heartbeats, got {beats}"
+    # Every beat during execution must name the running task, or the controller
+    # would treat live work as abandoned.
+    assert all(task_id in beat for beat in beats), beats
+
+
+def test_stop_heartbeat_is_idempotent():
+    remote = agent.RemoteAgent(_config(heartbeat_seconds=1), client=FakeClient())
+    remote.stop_heartbeat()
+    remote.start_heartbeat()
+    remote.stop_heartbeat()
+    remote.stop_heartbeat()
+    assert remote._heartbeat_thread is None
+
+
+def test_heartbeat_thread_survives_controller_errors():
+    """A transient controller failure must not permanently stop heartbeats."""
+    calls = {"n": 0}
+
+    class FlakyClient(FakeClient):
+        def heartbeat(self, metadata=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise agent.ProtocolError("controller hiccup")
+            return {"ok": True}
+
+    remote = agent.RemoteAgent(
+        _config(heartbeat_seconds=1), client=FlakyClient()
+    )
+    remote.start_heartbeat()
+    try:
+        remote._stop_heartbeat.wait(3.2)
+    finally:
+        remote.stop_heartbeat()
+    assert calls["n"] >= 2, "heartbeat stopped after a single error"

@@ -11,6 +11,7 @@ These exercise the load-bearing invariants:
 """
 
 from contextlib import asynccontextmanager
+from uuid import UUID as Uuid
 from uuid import uuid4
 
 import httpx
@@ -254,6 +255,79 @@ async def test_remote_claim_registers_instance_and_renews_lease(db_pool):
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_does_not_renew_a_claim_the_remote_is_not_running(db_pool):
+    """A claim whose payload never arrived must not be renewed forever.
+
+    The remote heartbeats every 30s whether or not it is executing anything. If
+    that heartbeat renews every claim the instance owns, the stale-task reaper
+    reads "recent heartbeat" as "work in progress" and can never recover a task
+    the agent never received — so it stays claimed indefinitely and every later
+    task in its request stays gated behind it.
+    """
+    prefix = f"test_remote_zombie_{str(uuid4())[:8]}_"
+    org, owner = await _setup(db_pool, prefix)
+    try:
+        remote = await RemoteRepository(db_pool).create(
+            org_id=str(org["id"]),
+            name=f"{prefix}remote",
+            created_by=str(owner["id"]),
+        )
+        remote = remote[0]
+        requests = RequestRepository(db_pool)
+        request = await requests.create_request(
+            org_id=str(org["id"]),
+            created_by=str(owner["id"]),
+            title=f"{prefix}req",
+            description="t",
+            source="user",
+        )
+        await requests.create_task(
+            request_id=str(request["id"]),
+            org_id=str(org["id"]),
+            title="pinned",
+            description="d",
+            agent_type="code",
+            requesting_user_id=str(owner["id"]),
+            remote_target_id=str(remote["id"]),
+        )
+        claimed = await requests.claim_remote_task(
+            remote_id=str(remote["id"]), org_id=str(org["id"])
+        )
+        assert claimed is not None
+        instance_id = f"remote:{remote['id']}"
+        await requests.register_instance(
+            org_id=str(org["id"]),
+            instance_id=instance_id,
+            roles=["remote"],
+            metadata={"kind": "remote"},
+        )
+        before = await requests.get_task(str(claimed["id"]), str(org["id"]))
+
+        # The remote reports it is running nothing. Its lease must not be pushed
+        # out, so the claim can expire and be reaped.
+        await requests.heartbeat_instance(
+            org_id=str(org["id"]),
+            instance_id=instance_id,
+            active_task_ids=[],
+        )
+        after = await requests.get_task(str(claimed["id"]), str(org["id"]))
+        assert after["claim_expires_at"] == before["claim_expires_at"], (
+            "an idle heartbeat must not extend a claim it is not executing"
+        )
+
+        # And a heartbeat that DOES name the task renews it as before.
+        await requests.heartbeat_instance(
+            org_id=str(org["id"]),
+            instance_id=instance_id,
+            active_task_ids=[str(claimed["id"])],
+        )
+        running = await requests.get_task(str(claimed["id"]), str(org["id"]))
+        assert running["claim_expires_at"] > before["claim_expires_at"]
+    finally:
+        await _cleanup(db_pool, org["id"], prefix)
+
+
+@pytest.mark.asyncio
 async def test_stale_reaper_releases_dead_remote_claim(db_pool):
     """A remote whose instance row goes stale must have its work requeued."""
     prefix = f"test_remote_reap_{str(uuid4())[:8]}_"
@@ -485,5 +559,104 @@ async def test_remote_key_cannot_transition_unclaimed_task(db_pool):
         assert all(
             e["event_type"] != "progress" for e in events["items"]
         ), "remote wrote an event to a task it never claimed"
+    finally:
+        await _cleanup(db_pool, org["id"], prefix)
+
+
+@pytest.mark.asyncio
+async def test_orphaned_claim_is_requeued_when_remote_reports_nothing_active(db_pool):
+    """A claim the agent is not running must not wait out a 30-minute lease.
+
+    Regression: an agent restarted mid-task left the task claimed with nobody
+    executing it. Lease renewal stopped (correct), but recovery then depended on
+    lease expiry, which stranded every later task in the request behind it.
+    """
+    from lucent.db.requests import DEFAULT_REMOTE_ORPHAN_GRACE_SECONDS
+
+    prefix = f"test_remote_orphan_{str(uuid4())[:8]}_"
+    org, owner = await _setup(db_pool, prefix)
+    try:
+        remote = (
+            await RemoteRepository(db_pool).create(
+                org_id=str(org["id"]),
+                name=f"{prefix}remote",
+                created_by=str(owner["id"]),
+            )
+        )[0]
+        requests = RequestRepository(db_pool)
+        request = await requests.create_request(
+            org_id=str(org["id"]),
+            created_by=str(owner["id"]),
+            title=f"{prefix}req",
+            description="t",
+            source="user",
+        )
+        await requests.create_task(
+            request_id=str(request["id"]),
+            org_id=str(org["id"]),
+            title="pinned",
+            description="d",
+            agent_type="code",
+            requesting_user_id=str(owner["id"]),
+            remote_target_id=str(remote["id"]),
+        )
+        claimed = await requests.claim_remote_task(
+            remote_id=str(remote["id"]), org_id=str(org["id"])
+        )
+        assert claimed is not None
+
+        # A fresh claim is inside the grace window: a heartbeat that does not
+        # name it must NOT release it (the client may not have recorded it yet).
+        released = await requests.release_orphaned_remote_claims(
+            remote_id=str(remote["id"]),
+            org_id=str(org["id"]),
+            active_task_ids=[],
+        )
+        assert released == []
+        still_claimed = await requests.get_task(
+            str(claimed["id"]), str(org["id"])
+        )
+        assert still_claimed["status"] == "claimed"
+
+        # Once past the grace window, a "running nothing" report requeues it.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET claimed_at = NOW() - INTERVAL '1 second' * $2 "
+                "WHERE id = $1",
+                Uuid(str(claimed["id"])),
+                DEFAULT_REMOTE_ORPHAN_GRACE_SECONDS + 30,
+            )
+        released = await requests.release_orphaned_remote_claims(
+            remote_id=str(remote["id"]),
+            org_id=str(org["id"]),
+            active_task_ids=[],
+        )
+        assert released == [str(claimed["id"])]
+        requeued = await requests.get_task(str(claimed["id"]), str(org["id"]))
+        assert requeued["status"] == "pending"
+        assert requeued["claimed_by"] is None
+        # The pin survives, so the same remote picks it back up.
+        assert str(requeued["remote_target_id"]) == str(remote["id"])
+
+        # And a task the agent DOES report keeps its claim untouched.
+        claimed2 = await requests.claim_remote_task(
+            remote_id=str(remote["id"]), org_id=str(org["id"])
+        )
+        assert claimed2 is not None
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET claimed_at = NOW() - INTERVAL '1 hour' "
+                "WHERE id = $1",
+                Uuid(str(claimed2["id"])),
+            )
+        released = await requests.release_orphaned_remote_claims(
+            remote_id=str(remote["id"]),
+            org_id=str(org["id"]),
+            active_task_ids=[str(claimed2["id"])],
+        )
+        assert released == []
+        assert (
+            await requests.get_task(str(claimed2["id"]), str(org["id"]))
+        )["status"] == "claimed"
     finally:
         await _cleanup(db_pool, org["id"], prefix)

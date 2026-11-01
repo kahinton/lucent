@@ -980,24 +980,45 @@ class TestMaxReworkExceeded:
         assert req_final["review_count"] == 3
         # At max_reviews=3, review_count == max_reviews → daemon would stop auto-retry
 
-    async def test_review_count_exceeds_max_reviews(self, repo, org_id):
-        """review_count can exceed max_reviews at DB level (daemon enforces the limit)."""
-        req = await _make_request(repo, org_id)
-        rid = str(req["id"])
+    async def test_rework_is_refused_once_the_review_budget_is_spent(
+        self, repo, org_id
+    ):
+        """The review loop must terminate, not spin forever.
 
-        for cycle in range(4):
-            task = await _make_task(
-                repo, rid, org_id, title=f"Cycle {cycle}"
-            )
-            await _fail_task_flow(repo, task, f"Error {cycle}")
-            await repo.retry_task_with_feedback(
-                str(task["id"]), f"Feedback {cycle}", org_id=org_id
-            )
+        ``review_count`` reaching ``max_reviews`` used to be recorded without a
+        decision: the loop requeued the task again, reset the request to
+        ``in_progress``, and repeated indefinitely. The request never reached a
+        terminal state and a pending rework task was never dispatched, so the
+        whole request deadlocked.
+        """
+        # The loop terminates at max_reviews: retries up to the budget succeed,
+        # everything after is refused, and the request ends in human review
+        # rather than spinning forever in_progress.
+        for total, expected_allowed in ((3, 3), (4, 3)):
+            req = await _make_request(repo, org_id)
+            rid = str(req["id"])
+            results = []
+            for cycle in range(total):
+                task = await _make_task(repo, rid, org_id, title=f"Cycle {cycle}")
+                await _fail_task_flow(repo, task, f"Error {cycle}")
+                results.append(
+                    await repo.retry_task_with_feedback(
+                        str(task["id"]), f"Feedback {cycle}", org_id=org_id
+                    )
+                )
 
-        req_final = await repo.get_request(rid, org_id)
-        # DB doesn't enforce the limit — daemon does
-        assert req_final["review_count"] == 4
-        assert req_final["max_reviews"] == 3
+            assert all(r is not None for r in results[:expected_allowed]), results
+            assert all(r is None for r in results[expected_allowed:]), results
+
+            req_final = await repo.get_request(rid, org_id)
+            assert req_final["review_count"] == expected_allowed
+            assert req_final["max_reviews"] == 3
+            if total > expected_allowed:
+                # A refused rework must not leave the request mid-flight with an
+                # undispatched task; it escalates to a person instead.
+                assert req_final["status"] == "review"
+            else:
+                assert req_final["status"] == "in_progress"
 
 
 class TestReviewAgentFailure:

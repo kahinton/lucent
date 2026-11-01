@@ -8,6 +8,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Three ways a request could get permanently stuck, all removed.**
+  - **Remote claims were renewed even when nothing was running.** The agent
+    heartbeats every 30s regardless of whether it is executing anything, and
+    that heartbeat renewed every claim the instance owned — so a claim whose
+    response never arrived (transport timeout, controller restart) stayed
+    `claimed` forever, and every later task in its request stayed gated behind
+    it. Remotes now send `active_task_ids` and only those leases renew; the
+    controller also requeues a claim the remote stops reporting as active, after
+    a short grace window. Clients that omit the field keep the old behaviour.
+  - **The client stopped heartbeating entirely while a task ran.** An engine
+    session can run for tens of minutes, and a single-threaded agent sent no
+    heartbeat for the duration — so leases could expire, and the activity reaper
+    could requeue live work, leaving two agents editing the same tree.
+    Heartbeats now come from a dedicated thread.
+  - **`max_reviews` was documented but never enforced.** The review loop
+    requeued rejected work indefinitely, resetting the request to `in_progress`
+    each time; once the budget was spent the requeued task was never dispatched
+    and the request deadlocked with no error. The budget is now reserved before
+    the task is touched, and an exhausted budget escalates the request to
+    `review` for a person instead of looping.
+
+- **The claim endpoint releases a task it cannot serve.** A claim whose execution
+  plan could not be composed (feature disabled, unsupported engine, or a granted
+  third-party MCP server) used to hand over a payload the agent could not run.
+  The task now returns to `pending` immediately.
+
+- **A remote claim could become unrecoverable, stalling its whole request.**
+  When a claim's response never reached the agent (transport timeout, or the
+  controller restarting mid-request) the task stayed `claimed` forever: the
+  agent heartbeats every 30s regardless of whether it is executing anything, and
+  that heartbeat renewed every claim the instance owned. "Recent heartbeat" then
+  read as "work in progress" to the stale-task reaper, so nothing ever released
+  it, and every later task in the request stayed gated behind its sequence.
+  - Remotes now send `active_task_ids` with each heartbeat and only those leases
+    are renewed, so an unstarted claim expires and is requeued. Clients that omit
+    the field keep the previous behaviour.
+  - The claim endpoint releases the task back to `pending` when it cannot compose
+    an execution plan (feature disabled, unsupported engine, or a granted
+    third-party MCP server), instead of handing over a payload the agent cannot
+    run.
+
 - **The memory-injection relevance gate no longer times out on the decision
   model.** It failed roughly half of all runs (27 of 60 in production) with
   `ReadTimeout`, silently falling back to injecting memories unfiltered.
