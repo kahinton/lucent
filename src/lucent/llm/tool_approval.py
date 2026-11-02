@@ -89,7 +89,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "list_sandbox_templates",
     "list_schedules",
     "list_workflows",
-    # Files (read only) and read-only network helpers.
+    # Files and projects (read only) and read-only network helpers.
+    "list_projects",
     "list_user_files",
     "read_user_file",
     "fetch_open_meteo_forecast",

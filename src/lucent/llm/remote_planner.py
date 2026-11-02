@@ -347,9 +347,13 @@ async def compose_remote_session_plan(
     backend_id = _resolve_task_backend(task, request)
     if not backend_id:
         raise RemotePlanError(
-            "A remote engine session needs an explicit backend pin so the "
-            "remote knows which engine and provider to use. Set backend_id on "
-            "the task or request."
+            "This task is pinned to a remote that only runs engine sessions, so "
+            "it needs backend_id (see list_engines) and usually an explicit "
+            "model, plus execution_config={'executor': 'engine'}. Without them "
+            "the remote has nothing it can execute: it does not run fenced "
+            "shell blocks. Re-file the task with a backend, or pin it to a "
+            "remote whose executor is 'shell' and put the commands in a fenced "
+            "code block."
         )
     from lucent.db.backends import BackendRepository
 
@@ -460,8 +464,46 @@ async def compose_remote_session_plan(
 
 
 def task_is_engine_session(task: dict[str, Any]) -> bool:
-    """Public predicate: does this task ask its remote to run an engine?"""
+    """Public predicate: does this task itself ask its remote to run an engine?"""
     return _task_wants_engine(task)
+
+
+def _remote_runs_only_engine(remote: dict[str, Any] | None) -> bool:
+    """Whether this remote reported the `engine` executor as its active one.
+
+    A remote configured with ``LUCENT_REMOTE_EXECUTOR=engine`` does not run
+    fenced shell blocks at all — its client rejects a task that carries no
+    session plan. So for such a remote, an absent ``execution_config`` is not
+    "use the default": it is a task that cannot run, and the controller must
+    compose a plan or say why.
+    """
+    if not remote:
+        return False
+    capabilities = remote.get("capabilities") or {}
+    if isinstance(capabilities, str):
+        import json
+
+        try:
+            capabilities = json.loads(capabilities) or {}
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(capabilities, dict):
+        return False
+    return str(capabilities.get("executor") or "").strip().lower() == "engine"
+
+
+def task_needs_remote_plan(
+    task: dict[str, Any], remote: dict[str, Any] | None = None
+) -> bool:
+    """Whether the controller must compose an engine session for this task.
+
+    True when the task asked for one, and also when it did not ask but its
+    remote can only run one. The second case is the important one: a pinned
+    task with no ``execution_config`` used to dispatch as plain prose to an
+    engine-only remote, which failed at the agent with an opaque exit code 2
+    and no explanation of what to fix.
+    """
+    return _task_wants_engine(task) or _remote_runs_only_engine(remote)
 
 
 __all__ = [
@@ -470,4 +512,5 @@ __all__ = [
     "compose_remote_session_plan",
     "engine_session_enabled",
     "task_is_engine_session",
+    "task_needs_remote_plan",
 ]

@@ -232,3 +232,75 @@ def test_config_rejects_engine_when_lucent_is_not_importable(monkeypatch):
     with pytest.raises(agent.ConfigError) as exc:
         agent.config_from_env(args)
     assert "'engine' executor" in str(exc.value)
+
+
+# ── An engine-only remote must never receive a plan-less task ───────────────
+#
+# A remote configured with LUCENT_REMOTE_EXECUTOR=engine does not run fenced
+# shell blocks. A pinned task with no execution_config used to dispatch as
+# plain prose, fail at the agent with a bare "exit code 2", and say nothing
+# about what was wrong. The controller now either composes a session or fails
+# the task with an actionable reason.
+
+
+def _engine_only_remote():
+    return {
+        "name": "engine-host",
+        "capabilities": {"executor": "engine", "executors": ["engine"]},
+    }
+
+
+def _shell_remote():
+    return {
+        "name": "shell-host",
+        "capabilities": {"executor": "shell", "executors": ["command", "shell"]},
+    }
+
+
+def test_plan_is_needed_for_an_engine_only_remote_even_without_execution_config():
+    from lucent.llm.remote_planner import task_needs_remote_plan
+
+    task = {"id": "t", "title": "x", "backend_id": "b", "model": "m"}
+    assert task_needs_remote_plan(task, _engine_only_remote()) is True
+
+
+def test_plain_task_on_a_shell_remote_stays_plain():
+    from lucent.llm.remote_planner import task_needs_remote_plan
+
+    task = {"id": "t", "title": "x"}
+    assert task_needs_remote_plan(task, _shell_remote()) is False
+
+
+def test_explicit_engine_executor_is_still_honoured_on_any_remote():
+    from lucent.llm.remote_planner import task_needs_remote_plan
+
+    task = {"id": "t", "execution_config": {"executor": "engine"}}
+    assert task_needs_remote_plan(task, _shell_remote()) is True
+
+
+def test_remote_without_capabilities_keeps_plain_behaviour():
+    from lucent.llm.remote_planner import task_needs_remote_plan
+
+    assert task_needs_remote_plan({"id": "t"}, None) is False
+    assert task_needs_remote_plan({"id": "t"}, {"name": "x"}) is False
+    # A capabilities blob that is still a JSON string must not crash the check.
+    assert (
+        task_needs_remote_plan(
+            {"id": "t"}, {"capabilities": '{"executor": "engine"}'}
+        )
+        is True
+    )
+
+
+def test_client_reports_what_is_missing_instead_of_a_bare_exit_code(tmp_path):
+    """The agent must name the task's actual gap, not just 'exit code 2'."""
+    result = agent.execute_engine(
+        _engine_config(),
+        {"id": "t1", "agent_type": "lucent-dev", "description": "do the thing"},
+        str(tmp_path),
+    )
+    assert result.ok is False
+    assert result.exit_code == 2
+    for expected in ("backend_id", "model", "execution_config"):
+        assert expected in result.output
+    assert "lucent-dev" in result.output

@@ -92,17 +92,29 @@ def _is_request_review_task(daemon, task: dict) -> bool:
     return title == runtime.REQUEST_REVIEW_TASK_TITLE.lower()
 
 
+# Review agents only see the memory content embedded in this prompt. Handing
+# them a truncated excerpt of a long-lived document and then requiring a
+# full-field rewrite destroys the document (proven: studio notebook
+# 0503c568 v13->v14, 7200->493 chars). Document-sized memories are therefore
+# context-only for review, never mandatory update targets.
+_REVIEW_MAX_INLINE_MEMORY_CHARS = 2000
+
+
 def _review_updatable_memories(linked_memories: list[dict]) -> list[dict]:
     """Return linked memories that a review agent may update directly.
 
     Goal milestones are transitioned by the request repository when the
     request completes. Requiring review agents to rewrite goal metadata risks
     replacing the complete milestone list with a partial update.
+
+    Document-sized memories are excluded for the same reason: a review agent
+    cannot safely reproduce content it only sees as a prompt excerpt.
     """
     return [
         memory
         for memory in linked_memories
         if memory.get("memory_type") != "goal"
+        and len(memory.get("content") or "") <= _REVIEW_MAX_INLINE_MEMORY_CHARS
     ]
 
 
@@ -347,13 +359,31 @@ Memories and review prose do not satisfy this requirement. If the research outco
             "`update_memory` on them or alter goal metadata; the request "
             "repository completes the target milestone after approval.\n"
         )
+    protected_memories = [
+        memory
+        for memory in linked_memories
+        if memory.get("memory_type") != "goal"
+        and len(memory.get("content") or "") > _REVIEW_MAX_INLINE_MEMORY_CHARS
+    ]
+    if protected_memories:
+        protected_lines = [
+            f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, "
+            f"type: {mem.get('memory_type', 'unknown')}, "
+            f"{len(mem.get('content') or '')} characters"
+            for mem in protected_memories
+        ]
+        memory_section += (
+            '\n\nLinked document memories (CONTEXT ONLY — do NOT call `update_memory` on them):\n'
+            + '\n'.join(protected_lines)
+            + '\nThese memories are too long to reproduce in this prompt, and rewriting one from an excerpt would destroy its content. Leave them untouched; record any needed change in the FEEDBACK section instead.\n'
+        )
     if updatable_memories:
         mem_lines = []
         mem_id_list = []
         for mem in updatable_memories:
             mem_id_list.append(str(mem['memory_id']))
-            mem_lines.append(f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, type: {mem.get('memory_type', 'unknown')}\n  Content: {mem.get('content', '')[:200]}\n  Status: {mem.get('status', 'unknown')}")
-        memory_section += '\n\nLinked Memories (MANDATORY UPDATE TARGETS):\n' + '\n'.join(mem_lines) + "\n\n=== MANDATORY MEMORY UPDATE STEP — DO NOT SKIP ===\nBefore you emit REQUEST_REVIEW_DECISION below, you MUST call `update_memory` on EVERY memory listed above. This is a hard precondition for emitting any decision — not a suggestion, not a best practice, not 'if relevant'. The memory update IS part of the review work. A review that skips it is incomplete and will be rejected by the daemon.\n\nRequired calls (one per linked memory):\n" + '\n'.join((f'  - update_memory(memory_id="{mid}", ...)' for mid in mem_id_list)) + '\n\nFor other memory types: update with any relevant new information from the task results, or call update_memory with a no-op note explaining why no substantive change was needed.\n\nAfter calling update_memory for each linked memory, also call `link_task_memory` to attach any NEW memories created by tasks back to this request.\n\nIn the FEEDBACK section of your decision block below, you MUST include a line of the form:\n  MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on>\nIf this line is missing or doesn\'t list every required memory ID, the daemon will treat the review as incomplete and re-queue it.\n=== END MANDATORY STEP ===\n'
+            mem_lines.append(f"- Memory ID: {mem['memory_id']}, relation: {mem['relation']}, type: {mem.get('memory_type', 'unknown')}\n  Content: {mem.get('content', '')}\n  Status: {mem.get('status', 'unknown')}")
+        memory_section += '\n\nLinked Memories (MANDATORY UPDATE TARGETS):\n' + '\n'.join(mem_lines) + "\n\n=== MANDATORY MEMORY UPDATE STEP — DO NOT SKIP ===\nBefore you emit REQUEST_REVIEW_DECISION below, you MUST call `update_memory` on EVERY memory listed above. This is a hard precondition for emitting any decision — not a suggestion, not a best practice, not 'if relevant'. The memory update IS part of the review work. A review that skips it is incomplete and will be rejected by the daemon.\n\nPRESERVE EXISTING CONTENT (REQUIRED): call `get_memory` first and compose `content` as the memory's CURRENT content plus your appended update. Never rewrite, summarize, shorten, or paraphrase the existing text — a review update must be append-only. Pass `expected_version` with the version you read so a concurrent write fails loudly instead of being silently overwritten.\n\nRequired calls (one per linked memory):\n" + '\n'.join((f'  - get_memory(memory_id="{mid}"), then update_memory(memory_id="{mid}", expected_version=<version read>, content=<current content + append>, ...)' for mid in mem_id_list)) + '\n\nFor other memory types: append any relevant new information from the task results, or call update_memory with a no-op note explaining why no substantive change was needed.\n\nAfter calling update_memory for each linked memory, also call `link_task_memory` to attach any NEW memories created by tasks back to this request.\n\nIn the FEEDBACK section of your decision block below, you MUST include a line of the form:\n  MEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on>\nIf this line is missing or doesn\'t list every required memory ID, the daemon will treat the review as incomplete and re-queue it.\n=== END MANDATORY STEP ===\n'
     review_description = f"""Perform post-completion request review.\n\nYou are validating whether the request outcomes satisfy the original request goals AND propagating those outcomes into linked memories.\n\nOriginal request title: {request_data.get('title', '')}\nOriginal request description:\n{request_data.get('description', '')}\n\n{target_section}\n\nTask outcomes:\n{chr(10).join(task_summaries)}{incomplete_note}{memory_section}{prescreen_block}\n\n=== OUTPUT ARTIFACT REVIEW ===\nEach task may include a 'recorded outputs' list. These are the user-visible deliverables shown in the Activity UI: GitHub PRs/issues, emails, docs, files, deployments, memories, or generic artifacts.\nDurable persistence is mandatory for external artifacts: if the request asked for repository documentation/files or named a target_repo, narrative markdown in the task result is insufficient. Require concrete changed file paths and a commit/URL (or an explicit BLOCKED result explaining missing write capability).\nBefore approving, verify that every deliverable mentioned in task output has a corresponding recorded output. Plain URLs in task results are auto-extracted by Lucent, but non-URL deliverables such as sent emails, created documents identified only by provider ID, or files stored in an external system may require an explicit `record_task_output` call.\nIf a deliverable is missing and you have enough task_id/title/url or external_id/provider information, call `record_task_output` before approving. If you cannot identify the missing deliverable precisely, return NEEDS_REWORK and ask the task agent to record the output.\n=== END OUTPUT ARTIFACT REVIEW ===\n\n=== SETUP/CONFIGURATION BLOCKER HANDOFFS ===\nBefore deciding APPROVED or NEEDS_REWORK, check whether task output reports a legitimate environment, setup, credential, permission, dependency, or configuration blocker that prevented useful completion. Examples include missing API keys, inaccessible services, invalid local configuration, unavailable MCP servers, sandbox provisioning failures, missing repo permissions, or dependency installation failures that the task agent could not reasonably fix.\nWhen a task was blocked by a user- or environment-actionable issue and reported what was attempted clearly, call `send_handoff` before emitting REQUEST_REVIEW_DECISION. The handoff must explain what was attempted, what blocked progress, why Lucent could not resolve it autonomously, and exactly what the user may need to configure or verify next. Include request/task references when IDs are available, set `requires_response=true` only if Lucent needs an answer before continuing, and use a stable `dedupe_key` like `review-blocker:<request-id>:<task-id-or-topic>`. A narrative-only handoff section in your final output is not enough; you must call `send_handoff` so the user sees a Handoffs item.\nApprove with a blocker handoff only when the blocker is external and the task's report is clear enough for the user to act on. Return NEEDS_REWORK when the task merely blames setup/configuration without evidence, attempted actions, or actionable remediation detail.\n=== END SETUP/CONFIGURATION BLOCKER HANDOFFS ===\n\nReturn your decision in this exact machine-readable shape (emit it ONLY after completing all mandatory memory updates above):\nREQUEST_REVIEW_DECISION: APPROVED|NEEDS_REWORK\nTASK_IDS_TO_REWORK: <comma-separated task ids, optional when approved>\nFEEDBACK: <actionable rationale and correction guidance>\nMEMORIES_UPDATED: <comma-separated memory IDs you called update_memory on; use "none" only when no Linked Memories section was provided>\nHANDOFF_SENT: <handoff URL/id if you called send_handoff, or "none">"""
     try:
         review_model, review_model_reason = await runtime._select_model_for_user(

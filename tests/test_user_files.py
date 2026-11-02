@@ -582,3 +582,183 @@ async def test_file_mcp_tools_store_edit_and_recall(
     assert recalled["content"] == "# Revised MCP file\n"
     assert len(recalled["file"]["revisions"]) == 2
     assert recalled["file"]["revisions"][0]["session_id"] == str(session["id"])
+
+
+def _register_file_mcp(name: str = "test-project-assignment") -> FastMCP:
+    mcp = FastMCP(name)
+    register_request_tools(mcp)
+    return mcp
+
+
+async def _create_project(db_pool, user, name: str):
+    from lucent.db.projects import ProjectRepository
+
+    return await ProjectRepository(db_pool).create(
+        org_id=str(user["organization_id"]),
+        user_id=str(user["id"]),
+        name=name,
+    )
+
+
+def _auth_as(user) -> None:
+    set_current_user(
+        {
+            "id": user["id"],
+            "organization_id": user["organization_id"],
+            "role": "member",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_mcp_project_assignment_assign_list_and_clear(
+    db_pool, test_user, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LUCENT_FILE_STORAGE_PATH", str(tmp_path))
+    mcp = _register_file_mcp()
+    project = await _create_project(db_pool, test_user, "Research")
+    _auth_as(test_user)
+    try:
+        created = await _call(
+            mcp,
+            "store_user_file",
+            {"filename": "notes.md", "content": "# Notes\n"},
+        )
+        projects = await _call(mcp, "list_projects")
+        assigned = await _call(
+            mcp,
+            "set_file_project",
+            {"file_id": "notes.md", "project_id": str(project["id"])},
+        )
+        filed = await _call(mcp, "list_user_files")
+        cleared = await _call(
+            mcp, "set_file_project", {"file_id": "notes.md", "project_id": ""}
+        )
+        unfiled = await _call(mcp, "list_user_files")
+    finally:
+        set_current_user(None)
+
+    assert projects["total_count"] == 1
+    assert projects["items"][0]["id"] == str(project["id"])
+    assert projects["items"][0]["name"] == "Research"
+    assert assigned["id"] == created["id"]
+    assert assigned["project_id"] == str(project["id"])
+    assert filed["items"][0]["project_id"] == str(project["id"])
+    assert cleared["project_id"] is None
+    assert unfiled["items"][0]["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_file_project_rejects_unknown_project_and_leaves_file_unfiled(
+    db_pool, test_user, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LUCENT_FILE_STORAGE_PATH", str(tmp_path))
+    mcp = _register_file_mcp("test-project-unknown")
+    _auth_as(test_user)
+    try:
+        await _call(
+            mcp, "store_user_file", {"filename": "notes.md", "content": "# Notes\n"}
+        )
+        result = await _call(
+            mcp,
+            "set_file_project",
+            {"file_id": "notes.md", "project_id": str(uuid4())},
+        )
+        listed = await _call(mcp, "list_user_files")
+    finally:
+        set_current_user(None)
+
+    assert result == {"error": "Project not found"}
+    assert listed["items"][0]["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_file_project_fails_closed_for_other_users_and_other_orgs(
+    db_pool, test_user, test_organization, clean_test_data, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LUCENT_FILE_STORAGE_PATH", str(tmp_path))
+    mcp = _register_file_mcp("test-project-scope")
+    from lucent.db import OrganizationRepository
+
+    # Same organization, different owner.
+    other_user = await UserRepository(db_pool).create(
+        external_id=f"{clean_test_data}project-other-user",
+        provider="local",
+        organization_id=test_organization["id"],
+        email=f"{clean_test_data}project-other-user@test.com",
+    )
+    other_project = await _create_project(db_pool, other_user, "Other user project")
+    foreign_file = await UserFileService(db_pool).create(
+        org_id=str(other_user["organization_id"]),
+        user_id=str(other_user["id"]),
+        created_by=str(other_user["id"]),
+        filename="foreign.md",
+        content=b"# Foreign\n",
+    )
+
+    # Different organization entirely.
+    other_org = await OrganizationRepository(db_pool).create(
+        name=f"{clean_test_data}project-other-org"
+    )
+    cross_org_user = await UserRepository(db_pool).create(
+        external_id=f"{clean_test_data}project-cross-org-user",
+        provider="local",
+        organization_id=other_org["id"],
+        email=f"{clean_test_data}project-cross-org-user@test.com",
+    )
+    cross_org_project = await _create_project(
+        db_pool, cross_org_user, "Foreign org project"
+    )
+
+    _auth_as(test_user)
+    try:
+        await _call(
+            mcp, "store_user_file", {"filename": "mine.md", "content": "# Mine\n"}
+        )
+        against_other_user = await _call(
+            mcp,
+            "set_file_project",
+            {"file_id": "mine.md", "project_id": str(other_project["id"])},
+        )
+        against_other_org = await _call(
+            mcp,
+            "set_file_project",
+            {"file_id": "mine.md", "project_id": str(cross_org_project["id"])},
+        )
+        foreign = await _call(
+            mcp,
+            "set_file_project",
+            {"file_id": str(foreign_file["id"]), "project_id": ""},
+        )
+        listed = await _call(mcp, "list_user_files")
+    finally:
+        set_current_user(None)
+
+    assert against_other_user == {"error": "Project not found"}
+    assert against_other_org == {"error": "Project not found"}
+    assert foreign == {"error": "File not found"}
+    assert listed["total_count"] == 1
+    assert listed["items"][0]["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_project_tools_fail_closed_without_user_or_org_scope():
+    mcp = _register_file_mcp("test-project-no-scope")
+    try:
+        set_current_user(None)
+        assert await _call(mcp, "list_projects") == {
+            "error": "Authentication required"
+        }
+        assert await _call(mcp, "set_file_project", {"file_id": "x"}) == {
+            "error": "Authentication required"
+        }
+
+        set_current_user({"id": uuid4(), "organization_id": None, "role": "member"})
+        assert await _call(mcp, "list_projects") == {
+            "error": "No organization context"
+        }
+        assert await _call(mcp, "set_file_project", {"file_id": "x"}) == {
+            "error": "No organization context"
+        }
+    finally:
+        set_current_user(None)

@@ -85,6 +85,27 @@ def test_review_updatable_memories_excludes_goals():
     ]
 
 
+def test_review_updatable_memories_excludes_document_sized_memories():
+    """A review agent only sees a prompt excerpt, so long documents must not
+    be mandatory update targets (regression: notebook 0503c568 v13→v14)."""
+    from daemon.review.lifecycle import _REVIEW_MAX_INLINE_MEMORY_CHARS
+
+    document = {
+        "memory_id": "document-id",
+        "memory_type": "experience",
+        "relation": "context",
+        "content": "x" * (_REVIEW_MAX_INLINE_MEMORY_CHARS + 1),
+    }
+    small = {
+        "memory_id": "small-id",
+        "memory_type": "technical",
+        "relation": "context",
+        "content": "short note",
+    }
+
+    assert _review_updatable_memories([document, small]) == [small]
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

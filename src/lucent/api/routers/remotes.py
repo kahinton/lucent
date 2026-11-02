@@ -310,31 +310,35 @@ async def remote_claim(
         pool=pool,
         request=None,
     )
-    # A claim whose payload never reached the agent must not stay claimed. The
-    # client only reports on work it actually received, so on any failure here
-    # the task would be renewed forever by the heartbeat below and the rest of
-    # its request would stay gated behind it — a zombie claim no reaper can see.
-    # Releasing returns it to the queue; the remote re-claims it next poll.
-    if payload.get("execution_plan_error"):
-        from lucent.db.requests import RequestRepository
+    # A claim the remote cannot execute must be resolved here, not handed over.
+    # Both outcomes below used to be silent: a task with no engine plan failed
+    # at the agent with a bare "exit code 2", and one whose plan could not be
+    # composed was released and immediately re-claimed, so the remote spun
+    # through claim/release forever without ever reporting anything.
+    error = payload.get("execution_plan_error")
+    if error:
+        from fastapi import Response
 
-        released = await RequestRepository(pool).release_task(
+        request_repo = RequestRepository(pool)
+        failed = await request_repo.fail_task(
             str(task["id"]),
+            error,
             org_id=str(user.organization_id),
             instance_id=f"remote:{remote_id}",
         )
-        if released:
+        if failed:
             logger.warning(
-                "Released un-executable remote claim: task=%s remote=%s reason=%s",
+                "Failed un-composable remote task: task=%s remote=%s reason=%s",
                 str(task["id"])[:8],
                 remote["name"],
-                payload["execution_plan_error"][:200],
+                error[:200],
             )
             await remote_repo.touch_last_seen(
                 str(remote_id), str(user.organization_id)
             )
-            from fastapi import Response
-
+            # Fail rather than release: releasing re-pins the task to this same
+            # remote, so the next poll would claim and fail it again, forever.
+            # A failed task stops the spin and shows the reason.
             return Response(status_code=204)
     return payload
 
@@ -479,10 +483,13 @@ async def _task_payload_for_remote(
     from lucent.llm.remote_planner import (
         RemotePlanError,
         compose_remote_session_plan,
-        task_is_engine_session,
+        task_needs_remote_plan,
     )
 
-    if not task_is_engine_session(task):
+    # Compose when the task asked for an engine session AND when its remote can
+    # run nothing else. The second case produces an explicit error instead of a
+    # plan-less payload that the agent rejects with a bare exit code 2.
+    if not task_needs_remote_plan(task, remote):
         return payload
 
     if request is None:

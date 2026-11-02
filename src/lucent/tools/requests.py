@@ -2969,6 +2969,84 @@ reading when the file reference is unknown."""
         )
 
     @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List projects owned by the current user.
+
+Use this to discover a valid project_id before assigning a durable file with
+set_file_project. Only projects for the effective user in the current
+organization are returned.
+
+Args:
+    limit: Maximum projects to return (default 100, clamped to 200)
+    offset: Pagination offset (default 0)
+
+Returns: JSON with items (each including id, name, session_count, and
+file_count), total_count, limit, offset, and has_more."""
+    )
+    async def list_projects(limit: int = 100, offset: int = 0) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.projects import ProjectRepository
+
+        result = await ProjectRepository(await _get_pool()).list_owned(
+            org_id=str(org_id),
+            user_id=str(user_id),
+            limit=max(1, min(int(limit), 200)),
+            offset=max(0, int(offset)),
+        )
+        return json.dumps(result, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Assign a durable file to a project, or clear its assignment.
+
+Args:
+    file_id: File ID returned by store_user_file or list_user_files. An exact
+        filename is also accepted when it identifies one owned active file;
+        use the ID when filenames are duplicated.
+    project_id: Project ID returned by list_projects. Pass an empty string to
+        clear the file's project assignment.
+
+Returns: Updated file metadata on success. Returns an error when the file or
+project is not found for the current user; ownership is never widened."""
+    )
+    async def set_file_project(file_id: str, project_id: str = "") -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.projects import ProjectNotFoundError, ProjectRepository
+        from lucent.storage import UserFileService
+
+        pool = await _get_pool()
+        try:
+            item = await UserFileService(pool).get_owned(
+                file_id, str(org_id), str(user_id)
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        if not item:
+            return json.dumps({"error": "File not found"})
+        try:
+            row = await ProjectRepository(pool).set_file_project(
+                str(item["id"]),
+                project_id or None,
+                org_id=str(org_id),
+                user_id=str(user_id),
+            )
+        except ProjectNotFoundError:
+            return json.dumps({"error": "Project not found"})
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+        if not row:
+            return json.dumps({"error": "File not found"})
+        return json.dumps(row, default=str)
+
+    @mcp.tool(
         annotations=CREATE_ONLY,
         description="""Send a Handoff to the user.
 

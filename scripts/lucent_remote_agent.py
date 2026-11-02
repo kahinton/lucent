@@ -643,15 +643,34 @@ def execute_engine(config: AgentConfig, task: dict, workdir: str) -> ExecutionRe
     plan_payload = task.get("execution_plan")
     plan_error = task.get("execution_plan_error")
     if not plan_payload:
+        # Name the task's actual configuration. "exit code 2" alone said
+        # nothing about what to fix, so a task authored without the fields the
+        # remote needs looked like a broken remote rather than a misfiled task.
+        config = task.get("execution_config")
+        missing = [
+            name
+            for name in ("backend_id", "model", "execution_config")
+            if not task.get(name)
+        ]
         return ExecutionResult(
             ok=False,
             output=(
                 "This task asked its remote to run an agent session, but the "
                 "controller did not send one"
                 + (f": {plan_error}" if plan_error else ".")
-                + "\n\nNo commands were executed. Either the deployment has "
-                "remote engine sessions disabled, or the task is missing the "
-                "agent/backend/model needed to compose a session."
+                + "\n\nNo commands were executed.\n"
+                f"  task agent_type : {task.get('agent_type') or '(unset)'}\n"
+                f"  execution_config: {config if config else '(unset)'}\n"
+                + (
+                    "  missing         : " + ", ".join(missing) + "\n"
+                    if missing
+                    else ""
+                )
+                + "Fix it by re-filing the task with a backend_id, a model, and "
+                "execution_config={'executor': 'engine'}. If this remote is "
+                "meant to run plain commands instead, set "
+                "LUCENT_REMOTE_EXECUTOR=shell on the host and put the commands "
+                "in a fenced code block in the description."
             ),
             exit_code=2,
             duration_seconds=time.monotonic() - started,

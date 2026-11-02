@@ -13,6 +13,7 @@ from lucent.auth import get_current_api_key_id, get_current_user
 from lucent.db import (
     AccessRepository,
     AuditRepository,
+    ContentShrinkError,
     DuplicateTechnicalMemoryError,
     MemoryRepository,
     UserRepository,
@@ -1099,6 +1100,20 @@ Returns:
 
             return json.dumps(_serialize_memory(result), indent=2)
 
+        except ContentShrinkError as e:
+            logger.warning(
+                "update_memory shrink guard: id=%s, existing=%d, new=%d",
+                memory_id,
+                e.existing_length,
+                e.new_length,
+            )
+            return _error_response(
+                f"Refusing to replace {e.existing_length} characters of content "
+                f"with {e.new_length}. Re-read the memory with get_memory, "
+                f"preserve the existing content, and append new information. "
+                f"If a destructive rewrite is genuinely intended, pass "
+                f"expected_version to confirm it."
+            )
         except VersionConflictError as e:
             logger.warning(
                 "update_memory version conflict: id=%s, expected=%s, actual=%s",
@@ -1634,7 +1649,9 @@ Returns:
                     "created after versioning was enabled."
                 )
 
-            # Apply the snapshot
+            # Apply the snapshot. Guard the restore with the version read a
+            # moment ago so a concurrent write fails loudly instead of being
+            # silently overwritten by the restore.
             result = await repo.update(
                 memory_id=uuid_id,
                 content=snapshot.get("content"),
@@ -1642,6 +1659,7 @@ Returns:
                 importance=snapshot.get("importance"),
                 metadata=snapshot.get("metadata"),
                 related_memory_ids=[UUID(uid) for uid in snapshot.get("related_memory_ids", [])],
+                expected_version=memory["version"],
                 organization_id=org_id,
                 user_id=user_id,
             )

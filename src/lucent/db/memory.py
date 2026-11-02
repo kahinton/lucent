@@ -132,6 +132,27 @@ class VersionConflictError(Exception):
         )
 
 
+# Unguarded content updates may not discard most of an existing memory.
+# A writer that never possessed the full text (e.g. a review agent rewriting
+# a 7200-char document from a 200-char excerpt) must not be able to replace
+# it silently; it has to pass expected_version to confirm the overwrite.
+_CONTENT_SHRINK_GUARD_MIN_CHARS = 500
+
+
+class ContentShrinkError(Exception):
+    """Raised when an unguarded update would discard most of a memory's content."""
+
+    def __init__(self, memory_id: UUID, existing_length: int, new_length: int):
+        self.memory_id = memory_id
+        self.existing_length = existing_length
+        self.new_length = new_length
+        super().__init__(
+            f"Refusing to replace {existing_length} characters of memory "
+            f"{memory_id} content with {new_length} characters without "
+            f"expected_version"
+        )
+
+
 class DuplicateTechnicalMemoryError(Exception):
     """Raised when a file-scoped technical memory already exists."""
 
@@ -1174,6 +1195,21 @@ class MemoryRepository:
 
         where_parts.append("deleted_at IS NULL")
 
+        # Shrink guard: an unguarded content update may not discard more than
+        # half of a substantial memory. Enforcing it in the UPDATE's WHERE
+        # clause makes the check atomic with the write, so a stale writer
+        # cannot silently drop content a concurrent writer just appended.
+        shrink_guard_applied = content is not None and expected_version is None
+        if shrink_guard_applied:
+            old_length = "char_length(coalesce(content, ''))"
+            where_parts.append(
+                f"({old_length} < ${param_idx} "
+                f"OR char_length(${param_idx + 1}) * 2 >= {old_length})"
+            )
+            params.append(_CONTENT_SHRINK_GUARD_MIN_CHARS)
+            params.append(content)
+            param_idx += 2
+
         if expected_version is not None:
             where_parts.append(f"version = ${param_idx}")
             params.append(expected_version)
@@ -1201,7 +1237,18 @@ class MemoryRepository:
             row = await conn.fetchrow(query, *params)
 
         if row is None:
-            # Distinguish between "not found" and "version mismatch"
+            # Distinguish between "not found", "version mismatch", and a
+            # rejected destructive shrink.
+            if shrink_guard_applied:
+                existing = await self.get(
+                    memory_id, organization_id=organization_id, user_id=user_id
+                )
+                if existing is not None:
+                    raise ContentShrinkError(
+                        memory_id=memory_id,
+                        existing_length=len(existing.get("content") or ""),
+                        new_length=len(content or ""),
+                    )
             if expected_version is not None:
                 existing = await self.get(
                     memory_id, organization_id=organization_id, user_id=user_id

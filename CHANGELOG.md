@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A task pinned to an engine-only remote failed with an unexplained exit 2.**
+  A remote running `LUCENT_REMOTE_EXECUTOR=engine` does not execute fenced shell
+  blocks, but a pinned task authored without `execution_config` was still sent to
+  it as plain prose. The agent rejected it and reported only "Remote executor
+  exited with code 2", which said nothing about the missing configuration.
+  - The controller now composes a session whenever the task asks for one **or**
+    its remote can only run one, so the mismatch surfaces as an actionable
+    failure at claim time instead of a mystery at the agent.
+  - The agent's message now names the task's `agent_type`, its
+    `execution_config`, and exactly which fields are missing.
+  - **A claim that cannot be composed is now failed, not released.** Releasing it
+    re-pinned it to the same remote, so the next poll claimed it again — a
+    claim/release loop that never reported anything and never stopped. Failing it
+    ends the spin with a visible reason.
+
 - **Three ways a request could get permanently stuck, all removed.**
   - **Remote claims were renewed even when nothing was running.** The agent
     heartbeats every 30s regardless of whether it is executing anything, and

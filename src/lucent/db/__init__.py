@@ -46,6 +46,7 @@ from lucent.db.identity import (
 from lucent.db.integrations import IntegrationRepository
 from lucent.db.llm_sessions import LLMSessionRepository
 from lucent.db.memory import (
+    ContentShrinkError,
     DuplicateTechnicalMemoryError,
     MemoryRepository,
     VersionConflictError,
@@ -74,6 +75,7 @@ __all__ = [
     "MemoryRepository",
     "TokenUsageRepository",
     "TokenQuotaRepository",
+    "ContentShrinkError",
     "DuplicateTechnicalMemoryError",
     "VersionConflictError",
     "DefinitionRepository",
