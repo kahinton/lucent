@@ -11,27 +11,40 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 LEARNING_EXTRACTION_PROMPT = (
-    "Run the learning extraction pipeline. "
-    "Core principle: INTEGRATE, don't accumulate. Lessons get folded into "
-    "existing memories, not stored as standalone 'Lesson:' entries. "
+    "Run the learning extraction pipeline.\n\n"
+    "Core principle: SMALL, SPECIFIC, RETRIEVABLE. Memories are surfaced into "
+    "future context by semantic similarity to the work being done. A tight memory "
+    "about one concrete system, file, or failure gets retrieved when that situation "
+    "recurs. A large memory that tries to cover everything is retrieved constantly "
+    "and is useful for none of it. Prefer several small, precisely-scoped technical "
+    "memories over one broad consolidated one — and if a memory has grown to cover "
+    "several unrelated subjects, split it.\n\n"
+    "Record durable facts only. Do NOT write about the extraction run itself: no "
+    "pass counters, no 'what I checked this run', no 'found nothing', no "
+    "verification checklists, no self-assessment of your process. That narrative is "
+    "already in the task result and session log. Memory holds the fact, not the story "
+    "of how it was found.\n\n"
     "Tool-call audit data is operational telemetry, NOT memory content. "
-    "Learning must activate behavior changes through human-reviewed channels: create "
-    "proposed agents/skills/hooks when capability is missing, and create follow-up "
-    "requests for grants, built-in changes, or source-code changes. Memory updates "
-    "are supporting evidence, not the final product.\n\n"
+    "Learning should also activate behavior changes through human-reviewed channels: "
+    "create proposed agents/skills/hooks when capability is missing, and create "
+    "follow-up requests for grants, built-in changes, or source-code changes.\n\n"
     "1. Search for memories tagged 'daemon-result' "
     "or 'rejection-lesson' or 'feedback-rejected' "
     "or 'validated' that do "
     "NOT have the 'lesson-extracted' tag. Cap at 10.\n"
-    "2. For each non-routine experience, find the existing memory or skill "
-    "that this lesson is ABOUT (the technical memory for that module/system, "
-    "or the skill for that workflow).\n"
-    "3. Update that existing memory with the new knowledge. "
-    "If no related memory exists, create ONE well-scoped technical or experience memory "
-    "that includes the lesson as part of its content. Reusable workflows belong in skills.\n"
-    "4. Tag processed source memories with 'lesson-extracted'.\n"
-    "5. Delete source experience memories that are now redundant "
-    "(their knowledge has been absorbed).\n"
+    "2. For each non-routine experience, decide where the durable knowledge belongs: "
+    "the relevant skill (for a reusable workflow), the relevant agent or tool (for a "
+    "routing or behavior rule), or a technical memory about that specific system, "
+    "file, or failure.\n"
+    "3. Update an existing memory ONLY when it is genuinely the same subject. "
+    "'Both are about the daemon' is not the same subject. If the existing memory "
+    "covers a different system, file, or failure mode, create a separate focused "
+    "memory instead. Keep each memory to what a future agent needs in order to act."
+    "\n"
+    "4. Tag processed source memories with 'lesson-extracted'. A routine source can "
+    "be tagged and produce no memory at all — that is the correct outcome.\n"
+    "5. Delete a source memory only when its content is genuinely captured elsewhere. "
+    "There is no requirement for the memory count to fall.\n"
     "6. Call analyze_tool_failure_patterns(since_days=14, min_failures=3). "
     "For repeated tool failures, classify whether the likely fix belongs in an "
     "agent definition, an existing/new skill, a hook, or the tool/server itself. "
@@ -46,10 +59,11 @@ LEARNING_EXTRACTION_PROMPT = (
     "approve/grant/update the relevant definition or source file. Do not stop at a "
     "memory note when a system change is needed, and do not grant yourself access.\n"
     "\n\nSTRICT RULES:\n"
-    "- NEVER create standalone 'Lesson:' or 'Learning Extraction Run' memories.\n"
-    "- NEVER create a new memory if an existing one covers the same scope - update it.\n"
-    "- The total memory count must go DOWN or stay the same, never up.\n"
-    "- Prefer update_memory and delete_memory. Only use create_memory for genuine gaps.\n"
+    "- NEVER write a report of the extraction run into any memory.\n"
+    "- NEVER append run counters, streaks, or 'what changed this run' to an existing memory.\n"
+    "- NEVER merge unrelated subjects to keep the memory count down. Separate focused "
+    "memories retrieve far better than one large one.\n"
+    "- NEVER create a new memory if an existing one covers the SAME specific subject - update it.\n"
     "- NEVER store raw tool audit data as memories. Use definition proposals with evidence.\n"
     "- NEVER propose a definition change from a single failure; require repeated evidence.\n"
     "- NEVER treat capability requests as documentation-only work; create a proposed "
@@ -79,7 +93,8 @@ EXPERIENCE_COMPRESSION_PROMPT = (
     "- If multiple digest candidates exist for one date, keep the highest-vitality digest as canonical "
     "(missing vitality_score = 0.5) and absorb lower-vitality fragments into it.\n"
     "- The narrative should be practical: what happened and why it matters, not raw logs.\n"
-    "- Total memory count must go DOWN.\n"
+    "- Compression reduces repetition, not information: never drop a distinct durable fact\n"
+    "  to satisfy a count target.\n"
     "- Keep digests concise - aim for 200-500 words per day, not a transcript.\n"
     "- NEVER touch memories tagged 'pinned' or 'do_not_consolidate'."
 )
@@ -334,11 +349,13 @@ Before starting work, search for relevant memories:
 - Reference skills for proven workflows
 - Build on existing knowledge rather than starting from scratch
 
-After completing work, save what you learned:
-- Not just what you did, but what approach you took and why
-- What worked vs. what didn't
-- What you'd do differently next time
-- Connections to existing knowledge
+After completing work, save the durable facts worth keeping:
+- A concrete fact about a specific system, file, or failure — small and precisely scoped
+- The rule or gotcha a future agent would need in order to act, which is not already obvious from the code
+- Prefer a few separate focused memories over one broad one; memories are retrieved by
+  semantic similarity, so precision beats coverage
+- Do not record the narrative of what you did or why you approached it that way — the task
+  result and session log already capture that
 
 --- OUTPUT ---
 Always output your findings and results as text. Do not rely solely on saving to memory — the dispatch system validates your text output.

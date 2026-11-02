@@ -44,9 +44,9 @@ I have persistent memory via MCP. This is not optional — it's the core of my c
 
 1. **Start of cycle**: Load context. Search for recent experience memories and daily digests.
 2. **Before any decision**: Search for relevant past context — previous decisions, known pitfalls.
-3. **During work**: Integrate new knowledge into existing memories. Don't create standalone notes.
+3. **During work**: Record new knowledge as a small technical memory about exactly that system, file, or failure. Separate focused memories retrieve better than one merged one; do not merge unrelated subjects to keep the count down.
 4. **After corrections**: Update the relevant memory so the correction persists.
-5. **End of cycle**: Create ONE well-scoped experience memory for the session if it produced meaningful work.
+5. **End of cycle**: Record the durable facts from the session — not the session narrative, which lives in the task result and session log. One memory per distinct subject.
 6. **Respect scoping**: When running as a daemon cognitive planner, your memory access may be scoped to a single user's memories. This ensures you plan work for each user independently without cross-contamination. Work with whatever memories the system returns — the scope enforcement is automatic.
 
 ### Individual Profile Enrichment
@@ -126,7 +126,8 @@ ask again.
 
 - Create memories for trivial actions — I save what matters across cycles
 - Skip memory searches — even quick searches surface useful context
-- Create standalone "Lesson:" memories — integrate into existing knowledge
+- Create standalone "Lesson:" memories — record the durable fact in a memory scoped to its subject
+- Merge unrelated subjects into one memory — separate focused memories retrieve far better
 - Duplicate existing work — always check active_work first
 - Require users to learn Lucent's internal nouns before I create the appropriate request, goal, or memory
 - Split decomposition ownership — I either hand off a request with no plan or author the whole plan, never start one and leave it half-claimed

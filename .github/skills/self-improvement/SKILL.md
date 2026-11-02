@@ -60,46 +60,40 @@ Bad change: Rewriting an entire skill because one step was missing.
 
 ## Step 5: Set Up Verification
 
-Create a checkpoint so future cycles can assess whether the change worked:
+State the verification plan in your **text output**. Do not create a memory for
+it.
 
-```
-create_memory(
-  type="experience",
-  content="## Improvement Verification Pending\n\n**Change**: <what was changed and where>\n**Problem**: <the pattern that triggered this>\n**Expected outcome**: <what should be different>\n**Verify after**: <N tasks or N days>\n**How to verify**: <specific check>",
-  tags=["self-improvement", "verification-pending", "daemon"],
-  importance=6
-)
-```
+Verification state is process bookkeeping: it exists only until the check
+resolves, is read once, and is never durable knowledge. Writing a memory per
+pending check means every cycle leaves behind an artifact that grows the store
+forever and helps no future retrieval. The task result already records this run.
 
-In future cycles, search for `verification-pending` and check results:
-- **Improved**: Update to `confirmed`, raise importance of the lesson
-- **Not improved**: Propose a stronger intervention or different approach
-- **Regressed**: Revert and record why
+If a check needs to be findable later, name it clearly in the run's output
+(`Verify after: <N days> — <specific check>`); the session log and task record
+are the place to look, not memory.
 
 ## Step 6: Check Pending Verifications
 
-Before finishing, check if any past improvements are due for verification:
+Before finishing, review any improvements whose verification window has elapsed
+and judge whether the expected outcome materialized. Report findings in text.
 
-```
-search_memories(tags=["verification-pending"], limit=10)
-```
-
-For each, determine whether the expected outcome materialized and update the record.
+There is no `verification-pending` memory to search for. Judge from the evidence
+you gather in Step 1 and state the result.
 
 ## Step 7: Record and Output
 
+The output is **text only**. Do **not** create a `scan-result` memory for the
+cycle.
+
+A memory recording that a scan happened — what it reviewed, what it decided, and
+whether it acted — is a log entry, not knowledge. Writing one every cycle is how
+a store fills with unreadable process narrative. The task result already keeps
+the full record.
+
+Write a memory only when the cycle produced a genuinely reusable fact about a
+specific system, file, or failure — small and scoped to that one subject.
+
 ### Outcome A: Change Made
-
-```
-create_memory(
-  type="experience",
-  content="## Self-Improvement: <title>\n\n**Pattern**: <what was wrong, with evidence count>\n**Root cause**: <why it kept happening>\n**Change**: <exact file/memory modified>\n**Verification plan**: <how and when to check>",
-  tags=["self-improvement", "agent-improvement", "scan-result", "daemon"],
-  importance=6
-)
-```
-
-Text output:
 ```
 SELF-IMPROVEMENT RESULT: change_made
 Pattern: <description> (N occurrences)
@@ -108,18 +102,12 @@ Verification: <how to confirm>
 ```
 
 ### Outcome B: No Action Needed
-
 ```
-create_memory(
-  type="experience",
-  content="## Self-Improvement Cycle: No Action Needed\n\n**Evidence reviewed**: <what was searched>\n**Finding**: <why no change needed>\n**Verifications checked**: <results of any pending checks>",
-  tags=["self-improvement", "scan-result", "daemon"],
-  importance=3
-)
+SELF-IMPROVEMENT RESULT: no_action
+Evidence reviewed: <N memories across M categories>
+Finding: <why no change needed>
 ```
 
-Text output:
-```
 SELF-IMPROVEMENT RESULT: no_action
 Evidence reviewed: <N memories across M categories>
 Finding: <why no change needed>
@@ -132,3 +120,5 @@ Finding: <why no change needed>
 - Don't over-engineer changes for edge cases because a targeted one-line fix that addresses the root cause is always better than a sweeping rewrite that introduces new failure modes.
 - Don't modify definitions during active task execution because changes to agent behavior mid-task create inconsistencies between what was planned and what executes.
 - Don't write improvement instructions that are too vague to act on because a directive like "be better at memory" changes nothing — every instruction must be specific enough to change observable behavior.
+- Don't save a memory about the cycle itself because a record of "what I scanned and what I decided" is a log entry, not knowledge; the task result already holds it, and one per cycle grows the store without ever being read again.
+- Don't write a verification-checkpoint memory because pending-check state resolves once and is never durable knowledge — state it in the run output instead.

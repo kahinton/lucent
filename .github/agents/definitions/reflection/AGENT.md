@@ -70,15 +70,29 @@ For each proposal, document: target, current behavior, problem, proposed change,
 ### 4. Set Up Verification
 
 Follow the **self-improvement** skill's Step 5 (Set Up Verification):
-- Create a `verification-pending` memory for each change
-- Define how and when to verify the improvement
-- Check any existing `verification-pending` items from prior cycles
+- Define how and when to verify the improvement, and state it in your text output
+- Do **not** create a `verification-pending` memory for it. Verification state is
+  process bookkeeping, not durable knowledge; it belongs in this run's output,
+  which the task record keeps. A memory per pending check accumulates forever and
+  is never read again after the check resolves.
+- If the change also needs a durable fact recorded, write that fact (small and
+  specific) rather than a note about the pending check.
 
 ### 5. Save Results
 
-Follow the **self-improvement** skill's Step 7 (Record and Output). Produce one of exactly two outcomes:
+Follow the **self-improvement** skill's Step 7 (Record and Output). The output is
+**text only**.
 
-**Tagging requirement**: Every scan output memory MUST include the `scan-result` tag. If the scan resulted in a concrete change, also include `agent-improvement`. These tags are tracked by the self-improvement meta-goal as measurable milestones.
+**Do not create a `scan-result` memory for the run.** A memory recording that a
+scan happened, what it reviewed, and what it decided is a log entry, not
+knowledge. It is already preserved in the task result. Writing one per cycle is
+how a "small" record grows without bound.
+
+Write a memory only when the run produced a genuinely reusable fact about a
+specific system, file, or failure — and then keep it small and scoped to that one
+subject.
+
+Produce exactly one of two outcomes in your text output:
 
 **Outcome A — Change made:**
 ```

@@ -40,12 +40,21 @@ The system enforces scoping at the database layer — you cannot accidentally ac
 Execute these steps in order when performing a maintenance pass:
 
 1. **Survey the knowledge base** — Start broad. Call `search_memories(query="<topic>", limit=50)` across the major domains you know about (architecture, bugs, preferences, projects, etc.). The goal is to see the full landscape, not just recent entries.
-2. **Connect new to old** — For each recent memory (last 24-48 hours), search for older memories on the same topic. New observations should strengthen existing long-term knowledge, not sit in isolation. A fresh bug insight should merge into the established understanding of that system area.
+2. **Connect new to old** — For each recent memory (last 24-48 hours), search for
+   older memories on the same topic. If a fresh insight is about the *same specific
+   subject*, merge it so the knowledge is in one place.
 3. **Identify stale memories** — Look for memories with outdated information (old versions, resolved goals, deprecated approaches). Check `created_at` dates and whether content still applies.
 4. **Check tag consistency** — Call `get_existing_tags(limit=100)` and look for synonyms (`bug-fix` vs `bugs`), inconsistent formats, or missing standard tags. Normalize to the conventions in [Tag Conventions](#tag-conventions).
-5. **Consolidate by topic** — Don't just deduplicate identical entries. Look for memories that are fragments of the same understanding — early notes, follow-up observations, corrections, refinements. Weave them into a single authoritative memory per topic. Follow [Consolidation Procedure](#consolidation-procedure).
+5. **Split overgrown memories** — Memories are surfaced by semantic similarity, so
+   a memory covering several unrelated subjects is retrieved for all of them and
+   useful for none. If a memory has accreted distinct systems, files, or failure
+   modes, break it into one focused memory per subject and delete the original.
+   This is the higher-value maintenance action; see
+   [Consolidation Procedure](#consolidation-procedure).
 6. **Recalibrate importance scores** — Review importance ratings against the [Importance Calibration](#importance-calibration) table. Memories that keep proving useful deserve higher importance. Memories that never get retrieved can be lowered.
-7. **Report what was changed** — Log a summary: how many memories consolidated, tags normalized, importance scores adjusted, and any issues found that need human review.
+7. **Report what was changed** — Summarize in your **text output**: how many
+   memories split, merged, normalized, or re-scored, and anything needing human
+   review. Do not write this summary into a memory.
 
 ## When to Update vs. Create
 
@@ -77,14 +86,21 @@ get_memories(memory_ids=["id1", "id2", "id3", ...])
 
 | Relationship | Action |
 |-------------|--------|
-| Same topic, same conclusion | **Consolidate** — merge into one authoritative entry |
-| Same topic, evolved understanding | **Consolidate** — the newer insight updates the older knowledge |
-| Same topic, genuinely different angles | **Keep both** — add `related_memory_ids` links |
+| Same specific subject, same conclusion | **Merge** — into one focused entry |
+| Same specific subject, evolved understanding | **Merge** — the newer insight updates the older knowledge |
+| Different systems, files, or failure modes | **Keep separate** — narrow memories retrieve better than broad ones |
+| One memory covers several unrelated subjects | **Split** — one memory per subject, then remove the original |
 | Old memory superseded by new evidence | **Update old** with new understanding, delete the fragment |
-| New memory is just a detail of existing knowledge | **Absorb** into the broader memory, delete the fragment |
+| A memory has grown into a running log or timeline | **Extract the durable facts, discard the narrative** |
+
+**Do not merge on topic alone.** "Both are about memory" or "both are about the
+daemon" is not a reason to merge. Merge only when a future retrieval of either
+should return the other.
 
 ### 4. Choose the Keeper
-Pick the memory that serves as the best foundation — usually the most comprehensive one, or the one with the broadest scope. Prefer memories with established structure over recent fragments.
+Pick the memory that is the best foundation for the *narrower* subject — usually
+the most precise one, not the most comprehensive. A broad memory that already
+covers other topics is a poor keeper: merging into it makes it broader still.
 
 ### 5. Merge with Intent
 ```
@@ -95,7 +111,10 @@ update_memory(
   expected_version=<current_version>
 )
 ```
-The merged content should read as if it was always a single well-written memory. Don't just concatenate — synthesize. New observations should be woven into the existing narrative.
+The merged content should read as if it was always a single well-written memory. Don't just concatenate — synthesize.
+
+When splitting instead, create one memory per subject, each with the context it
+needs to stand alone, then delete the original.
 
 ### 6. Delete Fragments
 ```

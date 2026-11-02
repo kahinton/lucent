@@ -2239,10 +2239,14 @@ class LucentDaemon(
                     {
                         "title": "Learning Extraction",
                         "description": (
-                            "Process recent work results and feedback into reusable lessons. "
-                            "Integrate knowledge into existing memories rather than creating standalone entries. "
-                            "Short-circuits with schedule.skipped when there are no unextracted "
-                            "recent result or feedback memories."
+                            "Process recent work results and feedback into small, focused "
+                            "technical memories, or update the relevant skill, agent, or tool. "
+                            "Prefer several precise memories over one broad one: memories are "
+                            "retrieved by semantic similarity, so a narrow memory about one "
+                            "system retrieves better than a large merged one. Record durable "
+                            "facts only — never a report of the run itself. Short-circuits "
+                            "with schedule.skipped when there are no unextracted recent "
+                            "result or feedback memories."
                         ),
                         "agent_type": "reflection",
                         "schedule_type": "interval",
