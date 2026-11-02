@@ -1799,3 +1799,51 @@ class TestCreateRequestReviewTaskGuards:
 
         assert result is None
         assert created == [], "no review task may be created over executing work"
+
+
+@pytest.mark.asyncio
+async def test_review_requeue_is_refused_once_the_budget_is_spent(repo, org_id):
+    """The review-driven rework path must honour max_reviews.
+
+    Regression: ``retry_task_with_feedback`` (the failed-task path) was guarded,
+    but ``requeue_completed_task_for_rework`` (the path the post-completion
+    review agent actually drives) incremented review_count with no check. One
+    request reached 18 review cycles against a max_reviews of 3 — each cycle
+    re-running a ~7-minute verification task.
+    """
+    req = await _make_request(repo, org_id)
+    rid = str(req["id"])
+    outcomes = []
+    for cycle in range(5):
+        task = await _make_task(repo, rid, org_id, title=f"Cycle {cycle}")
+        # The review path only reopens a COMPLETED task.
+        await _complete_task_flow(repo, task, result="done")
+        outcomes.append(
+            await repo.requeue_completed_task_for_rework(
+                str(task["id"]), f"feedback {cycle}", org_id=org_id
+            )
+        )
+
+    assert all(o is not None for o in outcomes[:3]), outcomes
+    assert all(o is None for o in outcomes[3:]), outcomes
+
+    final = await repo.get_request(rid, org_id)
+    assert final["review_count"] == 3
+    assert final["max_reviews"] == 3
+    # Escalated for a human rather than looping again.
+    assert final["status"] == "review"
+
+    # The three permitted reworks reopened their tasks; the two refused ones
+    # must not have. A refused rework that still reopened its task would leave
+    # work queued forever behind a request that is now in human review.
+    async with repo.pool.acquire() as conn:
+        pending = await conn.fetchval(
+            "SELECT count(*) FROM tasks WHERE request_id = $1 AND status = 'pending'",
+            task["request_id"],
+        )
+        completed = await conn.fetchval(
+            "SELECT count(*) FROM tasks WHERE request_id = $1 AND status = 'completed'",
+            task["request_id"],
+        )
+    assert pending == 3, "only the permitted reworks may be reopened"
+    assert completed == 2, "refused reworks must leave their task completed"

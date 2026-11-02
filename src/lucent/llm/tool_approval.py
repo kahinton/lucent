@@ -90,6 +90,8 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "list_schedules",
     "list_workflows",
     # Files and projects (read only) and read-only network helpers.
+    "get_project",
+    "list_project_memories",
     "list_projects",
     "list_user_files",
     "read_user_file",

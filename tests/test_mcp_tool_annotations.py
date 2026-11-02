@@ -30,6 +30,8 @@ def test_core_read_only_tools_are_annotated():
         "list_agent_definitions",
         "list_handoffs",
         "get_handoff",
+        "get_project",
+        "list_project_memories",
         "list_projects",
     ]:
         annotations = _tool_annotations(mcp, name)
@@ -46,11 +48,14 @@ def test_core_mutating_tools_are_annotated():
         "create_memory",
         "update_memory",
         "delete_memory",
+        "create_project",
         "create_request",
         "create_task",
         "send_handoff",
         "resolve_handoff",
         "set_file_project",
+        "set_memory_project",
+        "update_project",
     ]:
         annotations = _tool_annotations(mcp, name)
         assert annotations is not None, name

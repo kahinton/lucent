@@ -5365,8 +5365,47 @@ class RequestRepository:
     async def requeue_completed_task_for_rework(
         self, task_id: str, feedback: str, org_id: str | None = None
     ) -> dict | None:
-        """Reopen a completed task that a request review explicitly rejected."""
+        """Reopen a completed task that a request review explicitly rejected.
+
+        Refuses once the request has spent its review budget. This is the path
+        the post-completion review agent drives, and without a budget check it
+        is an unbounded loop: review rejects → task reopened → agent re-runs →
+        review rejects again. One request reached 18 cycles against a
+        ``max_reviews`` of 3 this way.
+
+        On refusal the request escalates to ``review`` for a person and nothing
+        is reopened, so the loop stops in a visible state instead of spinning.
+        """
         now = datetime.now(timezone.utc)
+        # Reserve the review budget BEFORE reopening the task, so a refused
+        # rework cannot leave a reopened task behind for the queue to run.
+        async with scoped_acquire_on(self.pool, organization_id=org_id) as conn:
+            if org_id:
+                reserved = await conn.fetchrow(
+                    """UPDATE requests
+                       SET review_count = review_count + 1, updated_at = $2
+                       WHERE id = (SELECT request_id FROM tasks WHERE id = $1)
+                         AND organization_id = $3
+                         AND review_count < max_reviews
+                       RETURNING id AS request_id""",
+                    UUID(task_id),
+                    now,
+                    UUID(org_id),
+                )
+            else:
+                reserved = await conn.fetchrow(
+                    """UPDATE requests
+                       SET review_count = review_count + 1, updated_at = $2
+                       WHERE id = (SELECT request_id FROM tasks WHERE id = $1)
+                         AND review_count < max_reviews
+                       RETURNING id AS request_id""",
+                    UUID(task_id),
+                    now,
+                )
+        if not reserved:
+            await self._escalate_review_budget_exhausted(task_id, org_id=org_id)
+            return None
+
         if org_id:
             async with scoped_acquire_on(
                 self.pool, organization_id=org_id
@@ -5398,6 +5437,14 @@ class RequestRepository:
                     now,
                 )
         if not row:
+            # Nothing was reopened, so release the reservation.
+            async with scoped_acquire_on(
+                self.pool, organization_id=org_id
+            ) as conn:
+                await conn.execute(
+                    "UPDATE requests SET review_count = GREATEST(review_count - 1, 0) WHERE id = $1",
+                    reserved["request_id"],
+                )
             return None
 
         task = dict(row)
@@ -5409,7 +5456,6 @@ class RequestRepository:
                 await conn.execute(
                     """UPDATE requests SET status = $2,
                            review_feedback = $3,
-                           review_count = review_count + 1,
                            updated_at = $4
                        WHERE id = $1 AND organization_id = $5""",
                     UUID(request_id),
@@ -5422,7 +5468,6 @@ class RequestRepository:
                 await conn.execute(
                     """UPDATE requests SET status = $2,
                            review_feedback = $3,
-                           review_count = review_count + 1,
                            updated_at = $4
                        WHERE id = $1""",
                     UUID(request_id),

@@ -97,6 +97,32 @@ def _resolve_permission_mode(
     return "acceptEdits" if approve_permissions else "default"
 
 
+#: Default cap on model turns in one session.
+#:
+#: Generous for real work — a long task uses tens of turns — but small enough
+#: that a model which answers without ever calling a tool stops in minutes
+#: rather than hours. One verification task ran ~15 turns/minute for 26 minutes
+#: (several hundred turns, zero tool calls) with no cap in place.
+DEFAULT_MAX_TURNS = int(os.environ.get("CLAUDE_MAX_TURNS", "120"))
+
+
+def _resolve_max_turns(audit_context: dict[str, Any] | None) -> int | None:
+    """Turn cap for this session: explicit override → env → default.
+
+    ``0`` (or a negative value) disables the cap for callers that genuinely
+    need an unbounded session; everything else is capped, because an uncapped
+    session has no way to stop a model that keeps replying without acting.
+    """
+    requested = (audit_context or {}).get("max_turns")
+    if requested is not None:
+        try:
+            value = int(requested)
+        except (TypeError, ValueError):
+            value = DEFAULT_MAX_TURNS
+        return value if value > 0 else None
+    return DEFAULT_MAX_TURNS or None
+
+
 def _claude_approval_callback(approval: Any) -> Any:
     """Build the SDK's ``can_use_tool`` callback around an ``EngineApproval``.
 
@@ -199,6 +225,14 @@ class ClaudeCodeEngine(LLMEngine):
             ),
             "include_partial_messages": include_partial,
         }
+        # A turn cap is the only thing that bounds a reasoning loop. A session
+        # whose model keeps replying without ever emitting a tool call will run
+        # until the wall-clock timeout, and a wall clock is a poor bound: a
+        # 1-hour timeout at ~4s/turn buys several hundred useless turns. Turns
+        # measure the actual waste, so they are capped by default.
+        max_turns = _resolve_max_turns(audit_context)
+        if max_turns:
+            kwargs["max_turns"] = max_turns
         # The SDK's can_use_tool callback is the native seam for "may this run?".
         # It is only wired when the conversation asked for approval, because a
         # callback also disables the CLI's own auto-approval shortcuts.

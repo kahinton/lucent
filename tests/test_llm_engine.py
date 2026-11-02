@@ -1612,3 +1612,62 @@ class TestValidateModel:
         monkeypatch.delenv("LUCENT_MODEL_VALIDATION", raising=False)
         result = validate_model("bad-model")
         assert "claude-sonnet-4.6" in result  # hardcoded model appears in list
+
+
+class TestClaudeCodeTurnCap:
+    """A session must be bounded in TURNS, not only wall-clock.
+
+    An engine session whose model keeps replying without ever emitting a tool
+    call runs until the timeout. One verification task produced ~15 turns/minute
+    for 26 minutes (several hundred turns, zero tool calls) because no cap
+    existed — a wall clock at ~4s/turn is a poor bound on that failure mode.
+    """
+
+    def test_default_cap_is_set_and_finite(self):
+        from lucent.llm.claude_code_engine import DEFAULT_MAX_TURNS
+
+        assert DEFAULT_MAX_TURNS > 0
+
+    def test_context_override_wins(self):
+        from lucent.llm.claude_code_engine import _resolve_max_turns
+
+        assert _resolve_max_turns({"max_turns": 7}) == 7
+
+    def test_zero_disables_the_cap(self):
+        from lucent.llm.claude_code_engine import _resolve_max_turns
+
+        assert _resolve_max_turns({"max_turns": 0}) is None
+        assert _resolve_max_turns({"max_turns": -5}) is None
+
+    def test_default_applies_without_an_override(self):
+        from lucent.llm.claude_code_engine import DEFAULT_MAX_TURNS, _resolve_max_turns
+
+        assert _resolve_max_turns(None) == DEFAULT_MAX_TURNS
+        assert _resolve_max_turns({}) == DEFAULT_MAX_TURNS
+        # A malformed override must not disable the guard.
+        assert _resolve_max_turns({"max_turns": "nonsense"}) == DEFAULT_MAX_TURNS
+
+    def test_options_carry_the_cap(self):
+        """The cap must reach ClaudeAgentOptions, not just be computed."""
+        from lucent.llm.claude_code_engine import ClaudeCodeEngine
+
+        engine = ClaudeCodeEngine()
+        if not engine or not hasattr(engine, "_build_options"):
+            pytest.skip("engine unavailable")
+        try:
+            options = engine._build_options(
+                model="claude-sonnet-4.5",
+                system_message="sys",
+                mcp_config=None,
+                reasoning_effort=None,
+                approve_permissions=True,
+                provider_session_id=None,
+                resume=False,
+                audit_context={"max_turns": 9},
+                include_partial=False,
+                native_env={},
+                approval=None,
+            )
+        except RuntimeError:
+            pytest.skip("claude-agent-sdk not installed")
+        assert options.max_turns == 9

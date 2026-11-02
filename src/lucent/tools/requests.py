@@ -3000,6 +3000,138 @@ file_count), total_count, limit, offset, and has_more."""
         return json.dumps(result, default=str)
 
     @mcp.tool(
+        annotations=READ_ONLY,
+        description="""Get one project owned by the current user, with member counts.
+
+Args:
+    project_id: Project ID returned by list_projects.
+
+Returns: JSON with the project (id, name, instructions, created_at,
+updated_at, session_count, file_count). Returns an error when the project is
+not found for the current user; ownership is never widened."""
+    )
+    async def get_project(project_id: str) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.projects import ProjectRepository
+
+        try:
+            row = await ProjectRepository(await _get_pool()).get_owned_with_counts(
+                project_id,
+                org_id=str(org_id),
+                user_id=str(user_id),
+            )
+        except ValueError:
+            return json.dumps({"error": "Project not found"})
+        if not row:
+            return json.dumps({"error": "Project not found"})
+        return json.dumps(row, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Create a project owned by the current user.
+
+Args:
+    name: Project name (required, 1-256 characters after trimming).
+    instructions: Optional standing instructions stored on the project and
+        injected as context for chats in it.
+
+Returns: JSON with the created project (id, name, instructions, timestamps).
+Use the returned id with update_project, get_project, set_memory_project,
+set_file_project, and list_project_memories."""
+    )
+    async def create_project(name: str, instructions: str | None = None) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return json.dumps({"error": "Project name is required"})
+        if len(cleaned) > 256:
+            return json.dumps(
+                {"error": "Project name must be 256 characters or fewer"}
+            )
+        from lucent.db.projects import ProjectRepository
+
+        row = await ProjectRepository(await _get_pool()).create(
+            org_id=str(org_id),
+            user_id=str(user_id),
+            name=cleaned,
+            instructions=instructions,
+        )
+        return json.dumps(row, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Update a project's name and/or standing instructions.
+
+Only the fields you pass are changed; omitted fields keep their current value.
+
+Args:
+    project_id: Project ID returned by list_projects.
+    name: New project name (1-256 characters after trimming).
+    instructions: New standing instructions. Pass an empty string to clear
+        them.
+
+Returns: JSON with the updated project. Returns an error when nothing was
+provided or the project is not found for the current user."""
+    )
+    async def update_project(
+        project_id: str,
+        name: str | None = None,
+        instructions: str | None = None,
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if name is None and instructions is None:
+            return json.dumps(
+                {"error": "Nothing to update: provide name and/or instructions"}
+            )
+        cleaned = None
+        if name is not None:
+            cleaned = name.strip()
+            if not cleaned:
+                return json.dumps({"error": "Project name cannot be empty"})
+            if len(cleaned) > 256:
+                return json.dumps(
+                    {"error": "Project name must be 256 characters or fewer"}
+                )
+        from lucent.db.projects import ProjectRepository
+
+        repo = ProjectRepository(await _get_pool())
+        try:
+            row = None
+            if cleaned is not None:
+                row = await repo.rename(
+                    project_id,
+                    org_id=str(org_id),
+                    user_id=str(user_id),
+                    name=cleaned,
+                )
+                if not row:
+                    return json.dumps({"error": "Project not found"})
+            if instructions is not None:
+                row = await repo.set_instructions(
+                    project_id,
+                    org_id=str(org_id),
+                    user_id=str(user_id),
+                    instructions=instructions.strip() or None,
+                )
+                if not row:
+                    return json.dumps({"error": "Project not found"})
+        except ValueError:
+            return json.dumps({"error": "Project not found"})
+        return json.dumps(row, default=str)
+
+    @mcp.tool(
         annotations=MUTATING,
         description="""Assign a durable file to a project, or clear its assignment.
 
@@ -3045,6 +3177,114 @@ project is not found for the current user; ownership is never widened."""
         if not row:
             return json.dumps({"error": "File not found"})
         return json.dumps(row, default=str)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description="""List the memories filed into one project.
+
+The project must belong to the current user. Only the caller's own memories
+are returned — an individual memory stays private to its owner.
+
+Args:
+    project_id: Project ID returned by list_projects.
+    limit: Maximum memories to return (default 100, clamped to 200)
+    offset: Pagination offset (default 0)
+
+Returns: JSON with items (each including id, type, content, tags, importance,
+metadata, and timestamps), total_count, limit, offset, and has_more."""
+    )
+    async def list_project_memories(
+        project_id: str, limit: int = 100, offset: int = 0
+    ) -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db.projects import ProjectNotFoundError, ProjectRepository
+
+        try:
+            result = await ProjectRepository(
+                await _get_pool()
+            ).list_memories_in_project(
+                project_id,
+                org_id=str(org_id),
+                user_id=str(user_id),
+                limit=max(1, min(int(limit), 200)),
+                offset=max(0, int(offset)),
+            )
+        except ProjectNotFoundError:
+            return json.dumps({"error": "Project not found"})
+        except ValueError:
+            return json.dumps({"error": "Project not found"})
+        return json.dumps(result, default=str)
+
+    @mcp.tool(
+        annotations=MUTATING,
+        description="""Assign one of your memories to a project, or clear its assignment.
+
+Args:
+    memory_id: The UUID of the memory to file. It must be owned by the current
+        user; memories you can only read through a shared clearance are not
+        moved.
+    project_id: Project ID returned by list_projects. Pass an empty string to
+        clear the memory's project assignment (back to unfiled).
+
+Returns: JSON with memory_id, the resulting project_id (null when cleared),
+and moved (1 on success). Returns an error when the memory or project is not
+found for the current user; ownership is never widened."""
+    )
+    async def set_memory_project(memory_id: str, project_id: str = "") -> str:
+        user_id, org_id, _, _, _ = await _get_current_user_context()
+        if not user_id:
+            return json.dumps({"error": "Authentication required"})
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        from lucent.db import MemoryRepository
+        from lucent.db.projects import ProjectRepository
+
+        try:
+            memory_uuid = UUID(memory_id)
+        except ValueError:
+            return json.dumps({"error": f"Invalid memory ID format: {memory_id}"})
+
+        pool = await _get_pool()
+        memory = await MemoryRepository(pool).get(
+            memory_uuid,
+            organization_id=str(org_id),
+            user_id=str(user_id),
+        )
+        if not memory or str(memory.get("user_id")) != str(user_id):
+            return json.dumps({"error": "Memory not found"})
+
+        projects = ProjectRepository(pool)
+        if project_id:
+            try:
+                project = await projects.get_owned(
+                    project_id,
+                    org_id=str(org_id),
+                    user_id=str(user_id),
+                )
+            except ValueError:
+                return json.dumps({"error": "Project not found"})
+            if not project:
+                return json.dumps({"error": "Project not found"})
+
+        moved = await projects.set_memories_project_bulk(
+            [str(memory_uuid)],
+            project_id or None,
+            org_id=str(org_id),
+            user_id=str(user_id),
+        )
+        if not moved:
+            return json.dumps({"error": "Memory not found"})
+        return json.dumps(
+            {
+                "memory_id": str(memory_uuid),
+                "project_id": project_id or None,
+                "moved": moved,
+            }
+        )
 
     @mcp.tool(
         annotations=CREATE_ONLY,

@@ -15,7 +15,7 @@ from lucent.api.deps import CurrentUser, get_current_user
 from lucent.api.models import safe_media_type
 from lucent.api.routers.files import UserFileCreate
 from lucent.auth import set_current_user
-from lucent.db import UserRepository
+from lucent.db import MemoryRepository, UserRepository
 from lucent.db.llm_sessions import LLMSessionRepository
 from lucent.db.requests import RequestRepository
 from lucent.llm.context import clear_llm_context, set_llm_context
@@ -744,21 +744,283 @@ async def test_set_file_project_fails_closed_for_other_users_and_other_orgs(
 @pytest.mark.asyncio
 async def test_project_tools_fail_closed_without_user_or_org_scope():
     mcp = _register_file_mcp("test-project-no-scope")
+    calls = [
+        ("list_projects", {}),
+        ("get_project", {"project_id": str(uuid4())}),
+        ("create_project", {"name": "Scoped"}),
+        ("update_project", {"project_id": str(uuid4()), "name": "Renamed"}),
+        ("list_project_memories", {"project_id": str(uuid4())}),
+        ("set_file_project", {"file_id": "x"}),
+        ("set_memory_project", {"memory_id": str(uuid4())}),
+    ]
     try:
         set_current_user(None)
-        assert await _call(mcp, "list_projects") == {
-            "error": "Authentication required"
-        }
-        assert await _call(mcp, "set_file_project", {"file_id": "x"}) == {
-            "error": "Authentication required"
-        }
+        for name, args in calls:
+            assert await _call(mcp, name, args) == {
+                "error": "Authentication required"
+            }
 
         set_current_user({"id": uuid4(), "organization_id": None, "role": "member"})
-        assert await _call(mcp, "list_projects") == {
-            "error": "No organization context"
-        }
-        assert await _call(mcp, "set_file_project", {"file_id": "x"}) == {
-            "error": "No organization context"
-        }
+        for name, args in calls:
+            assert await _call(mcp, name, args) == {
+                "error": "No organization context"
+            }
     finally:
         set_current_user(None)
+
+
+@pytest.mark.asyncio
+async def test_project_mcp_create_update_and_get_round_trip(db_pool, test_user):
+    mcp = _register_file_mcp("test-project-crud")
+    _auth_as(test_user)
+    try:
+        created = await _call(
+            mcp,
+            "create_project",
+            {"name": "  Research  ", "instructions": "Cite sources."},
+        )
+        detail = await _call(mcp, "get_project", {"project_id": created["id"]})
+        renamed = await _call(
+            mcp,
+            "update_project",
+            {"project_id": created["id"], "name": "Deep Research"},
+        )
+        instructed = await _call(
+            mcp,
+            "update_project",
+            {"project_id": created["id"], "instructions": "Be precise."},
+        )
+        listed = await _call(mcp, "list_projects")
+    finally:
+        set_current_user(None)
+
+    assert created["name"] == "Research"
+    assert created["instructions"] == "Cite sources."
+    assert detail["id"] == created["id"]
+    assert detail["session_count"] == 0
+    assert detail["file_count"] == 0
+    assert renamed["name"] == "Deep Research"
+    assert renamed["instructions"] == "Cite sources."
+    assert instructed["name"] == "Deep Research"
+    assert instructed["instructions"] == "Be precise."
+    assert listed["total_count"] == 1
+    assert listed["items"][0]["id"] == created["id"]
+
+
+@pytest.mark.asyncio
+async def test_project_tools_reject_blank_names_and_empty_updates(db_pool, test_user):
+    mcp = _register_file_mcp("test-project-blank-name")
+    _auth_as(test_user)
+    try:
+        created = await _call(mcp, "create_project", {"name": "Valid"})
+        blank_create = await _call(mcp, "create_project", {"name": "   "})
+        blank_update = await _call(
+            mcp,
+            "update_project",
+            {"project_id": created["id"], "name": "  "},
+        )
+        nothing = await _call(mcp, "update_project", {"project_id": created["id"]})
+    finally:
+        set_current_user(None)
+
+    assert blank_create == {"error": "Project name is required"}
+    assert blank_update == {"error": "Project name cannot be empty"}
+    assert nothing == {
+        "error": "Nothing to update: provide name and/or instructions"
+    }
+
+
+async def _create_memory(db_pool, user, content: str):
+    return await MemoryRepository(db_pool).create(
+        username="project-mcp-test",
+        type="experience",
+        content=content,
+        tags=["project-mcp-test"],
+        importance=4,
+        user_id=user["id"],
+        organization_id=user["organization_id"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_mcp_project_assignment_assign_list_and_clear(
+    db_pool, test_user
+):
+    mcp = _register_file_mcp("test-memory-project")
+    project = await _create_project(db_pool, test_user, "Memory project")
+    memory = await _create_memory(
+        db_pool, test_user, "# Filed experience\n\nA durable note for filing."
+    )
+    _auth_as(test_user)
+    try:
+        assigned = await _call(
+            mcp,
+            "set_memory_project",
+            {"memory_id": str(memory["id"]), "project_id": str(project["id"])},
+        )
+        listed = await _call(
+            mcp, "list_project_memories", {"project_id": str(project["id"])}
+        )
+        cleared = await _call(
+            mcp,
+            "set_memory_project",
+            {"memory_id": str(memory["id"]), "project_id": ""},
+        )
+        after = await _call(
+            mcp, "list_project_memories", {"project_id": str(project["id"])}
+        )
+    finally:
+        set_current_user(None)
+
+    assert assigned == {
+        "memory_id": str(memory["id"]),
+        "project_id": str(project["id"]),
+        "moved": 1,
+    }
+    assert listed["total_count"] == 1
+    assert listed["items"][0]["id"] == str(memory["id"])
+    assert cleared == {
+        "memory_id": str(memory["id"]),
+        "project_id": None,
+        "moved": 1,
+    }
+    assert after["total_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_set_memory_project_rejects_unknown_project_and_leaves_memory_unfiled(
+    db_pool, test_user
+):
+    mcp = _register_file_mcp("test-memory-project-unknown")
+    project = await _create_project(db_pool, test_user, "Known project")
+    memory = await _create_memory(
+        db_pool, test_user, "# Unfiled experience\n\nShould stay unfiled."
+    )
+    _auth_as(test_user)
+    try:
+        result = await _call(
+            mcp,
+            "set_memory_project",
+            {"memory_id": str(memory["id"]), "project_id": str(uuid4())},
+        )
+        listed = await _call(
+            mcp, "list_project_memories", {"project_id": str(project["id"])}
+        )
+    finally:
+        set_current_user(None)
+
+    assert result == {"error": "Project not found"}
+    assert listed["total_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_project_and_memory_tools_fail_closed_for_other_users_and_orgs(
+    db_pool, test_user, test_organization, clean_test_data
+):
+    mcp = _register_file_mcp("test-project-memory-scope")
+    from lucent.db import OrganizationRepository
+
+    # Same organization, different owner.
+    other_user = await UserRepository(db_pool).create(
+        external_id=f"{clean_test_data}project-memory-other-user",
+        provider="local",
+        organization_id=test_organization["id"],
+        email=f"{clean_test_data}project-memory-other-user@test.com",
+    )
+    other_project = await _create_project(db_pool, other_user, "Other user project")
+    other_memory = await _create_memory(
+        db_pool, other_user, "# Other user's experience\n\nPrivate note."
+    )
+
+    # Different organization entirely.
+    other_org = await OrganizationRepository(db_pool).create(
+        name=f"{clean_test_data}project-memory-other-org"
+    )
+    cross_org_user = await UserRepository(db_pool).create(
+        external_id=f"{clean_test_data}project-memory-cross-org-user",
+        provider="local",
+        organization_id=other_org["id"],
+        email=f"{clean_test_data}project-memory-cross-org-user@test.com",
+    )
+    cross_org_project = await _create_project(
+        db_pool, cross_org_user, "Foreign org project"
+    )
+
+    own_project = await _create_project(db_pool, test_user, "My project")
+    own_memory = await _create_memory(
+        db_pool, test_user, "# My experience\n\nMy own note."
+    )
+
+    _auth_as(test_user)
+    try:
+        foreign_memory = await _call(
+            mcp,
+            "set_memory_project",
+            {
+                "memory_id": str(other_memory["id"]),
+                "project_id": str(own_project["id"]),
+            },
+        )
+        against_other_user = await _call(
+            mcp,
+            "set_memory_project",
+            {
+                "memory_id": str(own_memory["id"]),
+                "project_id": str(other_project["id"]),
+            },
+        )
+        against_other_org = await _call(
+            mcp,
+            "set_memory_project",
+            {
+                "memory_id": str(own_memory["id"]),
+                "project_id": str(cross_org_project["id"]),
+            },
+        )
+        get_other_user = await _call(
+            mcp, "get_project", {"project_id": str(other_project["id"])}
+        )
+        get_other_org = await _call(
+            mcp, "get_project", {"project_id": str(cross_org_project["id"])}
+        )
+        update_other_user = await _call(
+            mcp,
+            "update_project",
+            {"project_id": str(other_project["id"]), "name": "Hijacked"},
+        )
+        list_other_user = await _call(
+            mcp,
+            "list_project_memories",
+            {"project_id": str(other_project["id"])},
+        )
+        own_listing = await _call(
+            mcp, "list_project_memories", {"project_id": str(own_project["id"])}
+        )
+        own_projects = await _call(mcp, "list_projects")
+    finally:
+        set_current_user(None)
+
+    assert foreign_memory == {"error": "Memory not found"}
+    assert against_other_user == {"error": "Project not found"}
+    assert against_other_org == {"error": "Project not found"}
+    assert get_other_user == {"error": "Project not found"}
+    assert get_other_org == {"error": "Project not found"}
+    assert update_other_user == {"error": "Project not found"}
+    assert list_other_user == {"error": "Project not found"}
+    assert own_listing["total_count"] == 0
+    assert own_projects["total_count"] == 1
+    assert own_projects["items"][0]["id"] == str(own_project["id"])
+
+
+@pytest.mark.asyncio
+async def test_set_memory_project_rejects_malformed_memory_id(db_pool, test_user):
+    mcp = _register_file_mcp("test-memory-project-bad-id")
+    _auth_as(test_user)
+    try:
+        result = await _call(
+            mcp, "set_memory_project", {"memory_id": "not-a-uuid"}
+        )
+    finally:
+        set_current_user(None)
+
+    assert result == {"error": "Invalid memory ID format: not-a-uuid"}
