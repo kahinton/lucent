@@ -497,11 +497,27 @@ async def activity_list(
         include_system=include_system,
     )
 
+    # Name the job behind each card. `source` alone renders as "Lucent" for
+    # every background request, which tells a reader nothing about which
+    # workflow produced it. Best-effort: an unresolved card falls back to the
+    # plain source badge.
+    request_origins: dict[str, dict] = {}
+    try:
+        from lucent.services.request_origin import RequestOriginService
+
+        request_origins = await RequestOriginService(pool).resolve_many(
+            [str(req["id"]) for req in requests_data],
+            org_id=org_id,
+        )
+    except Exception:
+        logger.exception("Request origins unavailable for the activity list")
+
     template_ctx = {
         "user": user,
         "requests": other_requests,
         "approval_requests": approval_requests,
         "running_requests": running_requests,
+        "request_origins": request_origins,
         "displayed_request_count": len(requests_data),
         "summary": summary,
         "filter_status": status,
@@ -651,6 +667,20 @@ async def request_detail(request: Request, request_id: str):
         raise HTTPException(404, "Request not found")
 
     await repo.mark_request_viewed(request_id, str(user.organization_id), str(user.id))
+
+    # Where this request actually came from. `source` only says "a person or
+    # the machine"; the workflow/chat/background-job it belongs to lives in
+    # schedule_runs, requests.origin_session_id and the tool audit log. Resolve
+    # that lineage into one readable origin for the page's header.
+    request_origin: dict | None = None
+    try:
+        from lucent.services.request_origin import RequestOriginService
+
+        request_origin = await RequestOriginService(pool).resolve(
+            request_id, org_id=org_id
+        )
+    except Exception:
+        logger.exception("Request origin unavailable for %s", request_id)
 
     from lucent.db.memory import MemoryRepository
     from lucent.integrations.github_repo_access_service import GitHubRepoAccessService
@@ -953,6 +983,7 @@ async def request_detail(request: Request, request_id: str):
             "available_agents": available_agents,
             "available_sandbox_templates": available_sandbox_templates,
             "goal_info": goal_info,
+            "request_origin": request_origin,
             "origin_session": origin_session,
             "origin_sessions": origin_sessions,
             "live_revision": _request_live_revision(req, reviews),

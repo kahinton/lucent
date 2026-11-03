@@ -10,6 +10,7 @@ Tests the HTML-serving endpoints:
 Uses real DB sessions + CSRF tokens through the full ASGI stack.
 """
 
+import json
 from uuid import uuid4
 
 import httpx
@@ -53,6 +54,18 @@ async def web_prefix(db_pool):
         )
         await conn.execute(
             "DELETE FROM tasks WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1)",
+            f"{prefix}%",
+        )
+        # schedule_runs references requests, so it must go before them.
+        await conn.execute(
+            "DELETE FROM schedule_runs WHERE schedule_id IN "
+            "(SELECT id FROM schedules WHERE organization_id IN "
+            "(SELECT id FROM organizations WHERE name LIKE $1))",
+            f"{prefix}%",
+        )
+        await conn.execute(
+            "DELETE FROM schedules WHERE organization_id IN "
             "(SELECT id FROM organizations WHERE name LIKE $1)",
             f"{prefix}%",
         )
@@ -599,6 +612,235 @@ class TestRequestDetail:
         resp = await client.get(f"/activity/{req['id']}")
         assert resp.status_code == 200
         assert "Web Test Task" in resp.text
+
+    async def test_detail_names_the_workflow_that_created_the_request(
+        self, client, db_pool, web_user
+    ):
+        """"Lucent" is not an answer to "which job made this?".
+
+        The page must name the workflow a background request came from, and
+        link to it, or a person has no way to trace the work back.
+        """
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="[Scheduled] Morning Briefing",
+            org_id=str(org["id"]),
+            source="schedule",
+            created_by=str(user["id"]),
+        )
+        async with db_pool.acquire() as conn:
+            schedule = await conn.fetchrow(
+                """INSERT INTO schedules (
+                       organization_id, created_by, title, description,
+                       schedule_type, cron_expression, prompt, status, enabled,
+                       trigger_type
+                   ) VALUES ($1::uuid, $2::uuid, 'Morning Briefing', '', 'cron',
+                             '0 7 * * *', 'brief me', 'active', TRUE, 'schedule')
+                   RETURNING id""",
+                org["id"],
+                user["id"],
+            )
+            await conn.execute(
+                """INSERT INTO schedule_runs (schedule_id, request_id, status, started_at)
+                   VALUES ($1::uuid, $2::uuid, 'completed', NOW())""",
+                schedule["id"],
+                req["id"],
+            )
+
+        resp = await client.get(f"/activity/{req['id']}")
+
+        assert resp.status_code == 200
+        assert 'data-request-origin="workflow"' in resp.text
+        assert "Where this came from" in resp.text
+        assert "Morning Briefing" in resp.text
+        assert f'href="/workflows/{schedule["id"]}"' in resp.text
+        # The chain ends at the request itself, so the reader can see position.
+        assert "this request" in resp.text
+        # The raw enum must never be the only thing shown.
+        assert "Asked by" in resp.text
+        assert ">Daemon<" not in resp.text
+
+    async def test_detail_does_not_render_asked_by_as_a_raw_enum(
+        self, client, db_pool, web_user
+    ):
+        """`daemon` is an internal value; the page must say Lucent."""
+        user, org, _token = web_user
+        req = await RequestRepository(db_pool).create_request(
+            title="Background detail probe",
+            org_id=str(org["id"]),
+            source="daemon",
+            created_by=str(user["id"]),
+        )
+
+        resp = await client.get(f"/activity/{req['id']}")
+
+        assert resp.status_code == 200
+        assert ">Daemon<" not in resp.text
+        assert "Lucent" in resp.text
+
+    async def test_detail_renders_the_full_work_chain_with_links(
+        self, client, db_pool, web_user
+    ):
+        """A daemon-created request must show every hop as a link.
+
+        The complaint that drove this: "Came from: created by the scheduled X
+        workflow" tells you the name but not how to get there. The chain has to
+        expose the workflow, the parent request, AND the task that created this
+        one, each clickable.
+        """
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        parent = await repo.create_request(
+            title="[Scheduled] Learning Extraction",
+            org_id=str(org["id"]),
+            source="schedule",
+            created_by=str(user["id"]),
+        )
+        parent_task = await repo.create_task(
+            request_id=str(parent["id"]),
+            title="Learning Extraction",
+            org_id=str(org["id"]),
+            agent_type="reflection",
+        )
+        child = await repo.create_request(
+            title="Fold the amendment into the proposal",
+            org_id=str(org["id"]),
+            source="daemon",
+            created_by=str(user["id"]),
+        )
+        async with db_pool.acquire() as conn:
+            schedule = await conn.fetchrow(
+                """INSERT INTO schedules (
+                       organization_id, created_by, title, description,
+                       schedule_type, cron_expression, prompt, status, enabled,
+                       trigger_type
+                   ) VALUES ($1::uuid, $2::uuid, 'Learning Extraction', '', 'cron',
+                             '0 8 * * *', 'extract', 'active', TRUE, 'schedule')
+                   RETURNING id""",
+                org["id"],
+                user["id"],
+            )
+            await conn.execute(
+                """INSERT INTO schedule_runs (schedule_id, request_id, status, started_at)
+                   VALUES ($1::uuid, $2::uuid, 'completed', NOW())""",
+                schedule["id"],
+                parent["id"],
+            )
+            await conn.execute(
+                """INSERT INTO tool_call_audit_log (
+                       organization_id, task_id, request_id, source, tool_name,
+                       status, input_preview, output_preview
+                   ) VALUES ($1::uuid, $2::uuid, $3::uuid,
+                             'daemon.memory_maintenance_fanout', 'create_request',
+                             'success', '{}'::jsonb, $4)""",
+                org["id"],
+                parent_task["id"],
+                parent["id"],
+                json.dumps({"id": str(child["id"]), "title": "probe"}),
+            )
+
+        resp = await client.get(f"/activity/{child['id']}")
+
+        assert resp.status_code == 200
+        assert "Where this came from" in resp.text
+        # Hop 1: the workflow
+        assert f'href="/workflows/{schedule["id"]}"' in resp.text
+        # Hop 2: the parent request
+        assert f'href="/activity/{parent["id"]}"' in resp.text
+        # Hop 3: the specific task, anchored inside the parent request
+        assert (
+            f'href="/activity/{parent["id"]}#task-{parent_task["id"]}"'
+            in resp.text
+        )
+        # And the chain terminates at this request.
+        assert "this request" in resp.text
+        assert "Created during memory maintenance." in resp.text
+
+    async def test_list_names_the_job_behind_a_background_request(
+        self, client, db_pool, web_user
+    ):
+        """A card must name its workflow, not just badge it "Lucent"."""
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        req = await repo.create_request(
+            title="[Scheduled] Cognitive Planning",
+            org_id=str(org["id"]),
+            source="schedule",
+            created_by=str(user["id"]),
+        )
+        async with db_pool.acquire() as conn:
+            schedule = await conn.fetchrow(
+                """INSERT INTO schedules (
+                       organization_id, created_by, title, description,
+                       schedule_type, cron_expression, prompt, status, enabled,
+                       trigger_type
+                   ) VALUES ($1::uuid, $2::uuid, 'Cognitive Planning', '', 'cron',
+                             '0 * * * *', 'plan', 'active', TRUE, 'schedule')
+                   RETURNING id""",
+                org["id"],
+                user["id"],
+            )
+            await conn.execute(
+                """INSERT INTO schedule_runs (schedule_id, request_id, status, started_at)
+                   VALUES ($1::uuid, $2::uuid, 'completed', NOW())""",
+                schedule["id"],
+                req["id"],
+            )
+
+        resp = await client.get("/activity", params={"source": "schedule"})
+
+        assert resp.status_code == 200
+        assert "Cognitive Planning" in resp.text
+        # The badge is deliberately NOT a link: the whole card is already an
+        # <a>, and nesting anchors breaks the card layout. The workflow is
+        # reached from the detail page instead.
+        assert f'href="/workflows/{schedule["id"]}"' not in resp.text
+
+    async def test_list_does_not_inline_a_long_chat_title(
+        self, client, db_pool, web_user
+    ):
+        """Chat session titles are the first user message (up to 80 chars).
+
+        Rendering one as a card badge dumped a paragraph into the badge row and
+        wrecked the card layout, so the badge must stay a compact "Chat" label
+        with the full title in the tooltip.
+        """
+        user, org, _token = web_user
+        repo = RequestRepository(db_pool)
+        long_title = (
+            "Hey friend! So a while ago we had you trying to do some development "
+            "on your own and then we started again"
+        )
+        req = await repo.create_request(
+            title="Chat-delegated list probe",
+            org_id=str(org["id"]),
+            source="user",
+            created_by=str(user["id"]),
+        )
+        async with db_pool.acquire() as conn:
+            session = await conn.fetchrow(
+                """INSERT INTO llm_sessions (
+                       organization_id, user_id, kind, title, model
+                   ) VALUES ($1::uuid, $2::uuid, 'chat', $3, 'm')
+                   RETURNING id""",
+                org["id"],
+                user["id"],
+                long_title,
+            )
+            await conn.execute(
+                "UPDATE requests SET origin_session_id = $2::uuid WHERE id = $1::uuid",
+                req["id"],
+                session["id"],
+            )
+
+        resp = await client.get("/activity")
+
+        assert resp.status_code == 200
+        assert ">Chat</span>" in resp.text
+        # The title belongs in the tooltip only — never as visible card text.
+        assert f'title="{long_title}">Chat</span>' in resp.text
+        assert f">{long_title}<" not in resp.text
 
     async def test_live_refresh_preserves_completed_task_output_state(
         self, client, db_pool, request_with_task, web_user

@@ -2,6 +2,7 @@
 {% set approval_requests = approval_requests if approval_requests is defined else [] %}
 {% set running_requests = running_requests if running_requests is defined else [] %}
 {% set requests = requests if requests is defined else [] %}
+{% set request_origins = request_origins if request_origins is defined else {} %}
 {% set displayed_request_count = displayed_request_count if displayed_request_count is defined else (approval_requests|length + running_requests|length + requests|length) %}
 {% set start_item = (page - 1) * per_page + 1 if total_count else 0 %}
 {% set end_item = [page * per_page, total_count] | min %}
@@ -32,7 +33,29 @@
 {% endmacro %}
 
 {% macro source_badge(req) %}
-{% if req.source in ('cognitive', 'daemon') %}
+{# A background request's `source` says "the machine", never which job. When
+   the resolved origin has ancestry, name the nearest ancestor instead of a
+   generic "System" — it is the thing a person actually recognises.
+   Rendered as a span, never a link: these badges live inside the card's own
+   <a>, and a nested anchor breaks the layout. #}
+{% set origin = (request_origins or {}).get(req.id|string) %}
+{# Prefer the workflow hop: it is the name a person recognises. Falling back to
+   the nearest hop would show a task titled "Learning Extraction", which reads
+   exactly like the workflow name and tells the reader nothing extra. #}
+{% set hops = origin.chain if origin and origin.chain else [] %}
+{% set hop = (hops | selectattr('kind', 'equalto', 'workflow') | list | first)
+             or (hops | selectattr('kind', 'equalto', 'chat') | list | first)
+             or (hops[-1] if hops else none) %}
+{% if hop and hop.kind == 'workflow' %}
+<span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-700" title="From the {{ hop.label }} workflow">{{ hop.label }}</span>
+{% elif hop and hop.kind == 'chat' %}
+{# Chat session titles are the first user message, up to 80 chars. Showing one
+   inline dumps a paragraph into the badge row, so keep it compact and put the
+   real title in the tooltip. #}
+<span class="px-2 py-0.5 rounded text-xs bg-indigo-50 text-indigo-700" title="{{ hop.label }}">Chat</span>
+{% elif hop %}
+<span class="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600" title="{{ hop.meta or hop.kind }}">{{ hop.label }}</span>
+{% elif req.source in ('cognitive', 'daemon') %}
 <span class="px-2 py-0.5 rounded text-xs bg-primary-50 text-primary-600 flex items-center gap-1" title="Created by Lucent">
     <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />

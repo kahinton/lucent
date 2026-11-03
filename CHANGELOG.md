@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Activity now shows the work chain that created a background request.**
+  `requests.source` only says "a person or the machine", so every
+  daemon-originated request rendered as a bare "Lucent" — no way to tell a
+  morning briefing from a memory-maintenance pass, and no way to navigate to
+  the work it came from.
+  - New `lucent.services.request_origin.RequestOriginService` joins
+    `schedule_runs`, `requests.origin_session_id`, and `tool_call_audit_log`
+    into an ordered list of **linked hops**, walked from the originating work
+    down to this request.
+  - The request page gains a **Where this came from** strip: each ancestor is a
+    labelled chip plus a link, e.g.
+    `scheduled workflow → Learning Extraction → request → [Scheduled] Learning
+    Extraction → task → Learning Extraction → this request`. Task hops link to
+    `/activity/{id}#task-{id}`, so a daemon-created request lands on the exact
+    step that produced it.
+  - Activity cards replace the generic Lucent/System badge with the workflow
+    name, or a compact `Chat` badge for conversation-originated work.
+  - `daemon` is never rendered as a raw enum; "Asked by" reads `Lucent`.
+  - Resolution is best-effort and tenant-scoped; an unresolved request keeps the
+    previous badge and shows no chain.
+
 ### Fixed
 
 - **A task pinned to an engine-only remote failed with an unexplained exit 2.**
