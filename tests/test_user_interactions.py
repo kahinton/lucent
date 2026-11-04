@@ -166,6 +166,34 @@ class _FakeHandoffChatEngine:
         return "A breathable light outfit with a thin evening layer is enough."
 
 
+async def _allow_model_access(*_args):
+    return True
+
+
+class _StreamedButNoReturnEngine:
+    """Reproduces a turn that answers and then reports failure.
+
+    The LangChain loop emits each complete model message as it goes and returns
+    the joined text only if it reaches the end. A tool-round limit, an idle
+    timeout, or an engine error after the model already spoke leaves the person
+    having watched an answer arrive with nothing to return — and, until the
+    streamed-text fallback existed, no persisted assistant message either.
+    """
+
+    name = "langchain"
+
+    async def run_session_streaming(self, **kwargs):
+        from lucent.llm.engine import SessionEvent, SessionEventType
+
+        kwargs["on_event"](
+            SessionEvent(
+                type=SessionEventType.MESSAGE,
+                content="Wear a light layer for the evening.",
+            )
+        )
+        return None
+
+
 def test_workflow_interaction_references_use_activity_request_links():
     workflow_id = str(uuid4())
     run_id = str(uuid4())
@@ -638,18 +666,23 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert "Candidate A" in detail_resp.text
     assert "Handoff self-link" not in detail_resp.text
     assert "Workflow run should not show" not in detail_resp.text
-    assert "Continue with Lucent" in detail_resp.text
-    assert "Related context" in detail_resp.text
+    # A Handoff is a Lucent-initiated conversation, so it renders the SAME
+    # surface as /chat rather than a bespoke thread view: shared transcript
+    # stylesheet, shared composer partial, shared conversation controller.
+    assert "chat-surface.css" in detail_resp.text
+    assert "id=\"messages\"" in detail_resp.text
+    assert "id=\"chat-input\"" in detail_resp.text
     assert "id=\"agent-select\"" in detail_resp.text
     assert "id=\"model-select\"" in detail_resp.text
     assert "id=\"reasoning-select\"" in detail_resp.text
-    # The Sep 2026 restyle (a584eab) aligned the handoff detail view with the
-    # main-chat styling: the small assistant orb ("lucent-orb lucent-orb-sm")
-    # and its ✦ glyph were replaced by the inline-chat conversation shell.
-    assert "data-inline-chat-loading" in detail_resp.text
+    assert "id=\"tool-approval-select\"" in detail_resp.text
+    assert "LucentChatMessageUI.createConversation" in detail_resp.text
+    assert "surface: 'embedded_chat'" in detail_resp.text
+    # Context stays reachable, but behind a disclosure so it cannot squeeze the
+    # transcript into a narrow column.
+    assert "Context (1)" in detail_resp.text
     assert "lucent-orb" not in detail_resp.text
     assert "✦" not in detail_resp.text
-    assert "Reply here, ask a follow-up question" in detail_resp.text
     assert "Question from Lucent" in detail_resp.text
     assert "live session grounded" not in detail_resp.text
     assert "Lucent can see this Inbox message" not in detail_resp.text
@@ -722,6 +755,85 @@ async def test_handoffs_web_list_detail_and_reply(web_client, db_pool, interacti
     assert unread_detail.status_code == 200
     assert "Workflow output ready" in unread_detail.text
     assert "Lucent messages needing attention" not in unread_detail.text
+
+
+@pytest.mark.asyncio
+async def test_resolved_handoff_renders_read_only_composer(web_client, db_pool, interaction_user):
+    repo = UserInteractionRepository(db_pool)
+    interaction = await repo.create_interaction(
+        org_id=interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+        created_by=interaction_user["id"],
+        title="Already handled",
+        body="Lucent finished this.",
+        interaction_type="handoff",
+    )
+    await repo.resolve_interaction(
+        interaction_id=interaction["id"],
+        org_id=str(interaction_user["organization_id"]),
+        user_id=str(interaction_user["id"]),
+    )
+
+    resp = await web_client.get(f"/handoffs/{interaction['id']}")
+    assert resp.status_code == 200
+    # The composer still renders (the transcript keeps its shape) but is inert,
+    # with the reason stated instead of a send button that silently fails.
+    assert "id=\"chat-input\"" in resp.text
+    assert "This handoff is closed" in resp.text
+    assert "Start a new chat if you need more follow-up." in resp.text
+    assert "Mark done" not in resp.text
+
+
+@pytest.mark.asyncio
+async def test_assistant_mirror_does_not_reopen_a_responded_handoff(
+    db_pool,
+    interaction_user,
+):
+    """Lucent replying inside the thread must not re-arm the question.
+
+    ``daemon`` messages normally mean "new prompt, waiting for you". A reply in
+    an ongoing conversation is the opposite, so it is mirrored with
+    ``preserve_status`` and the Handoff stays ``responded``.
+    """
+    repo = UserInteractionRepository(db_pool)
+    interaction = await repo.create_interaction(
+        org_id=interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+        created_by=interaction_user["id"],
+        title="Status shape",
+        body="Pick one.",
+        interaction_type="clarification",
+        requires_response=True,
+        status="waiting_on_user",
+    )
+    await repo.add_message(
+        interaction_id=interaction["id"],
+        org_id=str(interaction_user["organization_id"]),
+        sender_type="user",
+        sender_user_id=str(interaction_user["id"]),
+        body="Option A",
+    )
+    responded = await repo.get_interaction(
+        interaction["id"],
+        interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+    )
+    assert responded["status"] == "responded"
+
+    await repo.add_message(
+        interaction_id=interaction["id"],
+        org_id=str(interaction_user["organization_id"]),
+        sender_type="daemon",
+        body="Done — I took option A.",
+        preserve_status=True,
+    )
+    after = await repo.get_interaction(
+        interaction["id"],
+        interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+    )
+    assert after["status"] == "responded"
+    assert after["messages"][-1]["body"] == "Done — I took option A."
 
 
 @pytest.mark.asyncio
@@ -833,10 +945,156 @@ async def test_handoff_inline_chat_uses_session_and_mirrors_user_turn(
         user_id=interaction_user["id"],
     )
     assert updated["status"] == "responded"
-    assert updated["messages"][-1]["sender_type"] == "user"
-    assert updated["messages"][-1]["body"] == "Summarize that in one sentence."
-    assert updated["messages"][-1]["metadata"]["source"] == "llm_session"
-    assert updated["messages"][-1]["metadata"]["llm_session_id"] == session["id"]
+    # The thread is two-sided: the person's turn and Lucent's reply both land on
+    # the Handoff, so the record never shows Lucent answering nothing.
+    user_turns = [m for m in updated["messages"] if m["sender_type"] == "user"]
+    assistant_turns = [m for m in updated["messages"] if m["sender_type"] == "daemon"]
+    assert user_turns[-1]["body"] == "Summarize that in one sentence."
+    assert user_turns[-1]["metadata"]["source"] == "llm_session"
+    assert user_turns[-1]["metadata"]["llm_session_id"] == session["id"]
+    assert assistant_turns[-1]["body"] == (
+        "A breathable light outfit with a thin evening layer is enough."
+    )
+    assert assistant_turns[-1]["metadata"]["source"] == "llm_session"
+    assert assistant_turns[-1]["metadata"]["llm_session_id"] == session["id"]
+
+
+@pytest.mark.asyncio
+async def test_handoff_reply_survives_reload_from_the_llm_session(
+    web_client,
+    db_pool,
+    interaction_user,
+    monkeypatch,
+):
+    """A reload must show what the person just watched arrive.
+
+    The Handoff page renders the embedded LLM session, not the interaction
+    message bodies, so the transcript — including Lucent's reply — has to be in
+    that session. This guards the case where a turn streams its answer and the
+    engine still returns nothing (tool-round limit, timeout, aborted stream).
+    """
+    seen: dict = {}
+    fake_engine = _FakeHandoffChatEngine(seen)
+
+    async def allow_model_access(*_args):
+        return True
+
+    monkeypatch.setattr("lucent.llm.get_engine_for_model", lambda _model: fake_engine)
+    monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+    monkeypatch.setattr(
+        "lucent.api.routers.chat._can_user_access_model",
+        allow_model_access,
+    )
+    monkeypatch.setattr(
+        "lucent.model_registry.validate_reasoning_effort",
+        lambda _model, _effort: None,
+    )
+
+    repo = UserInteractionRepository(db_pool)
+    interaction = await repo.create_interaction(
+        org_id=interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+        created_by=interaction_user["id"],
+        title="Reload check",
+        body="Original Lucent message.",
+        interaction_type="handoff",
+    )
+    await web_client.get(f"/handoffs/{interaction['id']}")
+
+    async with db_pool.acquire() as conn:
+        session_id = await conn.fetchval(
+            """SELECT id::text FROM llm_sessions
+               WHERE metadata->>'interaction_id' = $1""",
+            str(interaction["id"]),
+        )
+
+    stream_resp = await web_client.post(
+        "/api/chat/stream-v2",
+        json={
+            "messages": [
+                {"role": "assistant", "content": "Original Lucent message."},
+                {"role": "user", "content": "What should I wear?"},
+            ],
+            "session_id": session_id,
+            "surface": "embedded_chat",
+        },
+    )
+    assert stream_resp.status_code == 200
+
+    detail = await web_client.get(f"/api/chat/sessions/{session_id}")
+    assert detail.status_code == 200
+    transcript = [
+        (m["role"], m["content"])
+        for m in detail.json()["messages"]
+        if m["role"] in {"user", "assistant"}
+    ]
+    assert ("user", "What should I wear?") in transcript
+    assert any(
+        role == "assistant" and "thin evening layer" in content
+        for role, content in transcript
+    )
+
+
+@pytest.mark.asyncio
+async def test_streamed_answer_is_persisted_when_engine_returns_nothing(
+    web_client,
+    db_pool,
+    interaction_user,
+    monkeypatch,
+):
+    """A reply the person watched arrive must survive a reload.
+
+    This is the exact failure that made answers disappear: the stream carried
+    the assistant's text, the engine returned None, and nothing was written to
+    the transcript, so reloading showed the question with no answer.
+    """
+    monkeypatch.setattr(
+        "lucent.llm.get_engine_for_model", lambda _model: _StreamedButNoReturnEngine()
+    )
+    monkeypatch.setattr("lucent.model_registry.validate_model", lambda _model: None)
+    monkeypatch.setattr(
+        "lucent.api.routers.chat._can_user_access_model", _allow_model_access
+    )
+    monkeypatch.setattr(
+        "lucent.model_registry.validate_reasoning_effort",
+        lambda _model, _effort: None,
+    )
+
+    repo = UserInteractionRepository(db_pool)
+    interaction = await repo.create_interaction(
+        org_id=interaction_user["organization_id"],
+        user_id=interaction_user["id"],
+        created_by=interaction_user["id"],
+        title="Evening plan",
+        body="What should I wear tonight?",
+        interaction_type="handoff",
+    )
+    await web_client.get(f"/handoffs/{interaction['id']}")
+
+    async with db_pool.acquire() as conn:
+        session_id = await conn.fetchval(
+            """SELECT id::text FROM llm_sessions
+               WHERE metadata->>'interaction_id' = $1""",
+            str(interaction["id"]),
+        )
+
+    resp = await web_client.post(
+        "/api/chat/stream-v2",
+        json={
+            "messages": [{"role": "user", "content": "What should I wear tonight?"}],
+            "session_id": session_id,
+            "surface": "embedded_chat",
+        },
+    )
+    assert resp.status_code == 200
+
+    detail = await web_client.get(f"/api/chat/sessions/{session_id}")
+    replies = [
+        m["content"]
+        for m in detail.json()["messages"]
+        if m["role"] == "assistant" and "light layer" in (m["content"] or "")
+    ]
+    assert replies == ["Wear a light layer for the evening."]
 
 
 @pytest.mark.asyncio

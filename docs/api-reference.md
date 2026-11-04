@@ -975,6 +975,13 @@ are `request`, `task`, `task_output`, `user_file`, `memory`, `workflow`,
 MCP tools mirror the daemon-facing workflow: `send_handoff`, `list_handoffs`,
 `get_handoff`, and `resolve_handoff`.
 
+A Handoff is also a Lucent-initiated conversation. Opening one resolves (or
+creates) the embedded `llm_session` carrying `metadata.interaction_id`, and the
+web UI renders it with the same transcript and composer as `/chat`. Both turns
+of that conversation are mirrored into the Handoff thread — user messages and
+Lucent's replies — tagged `metadata.source: "llm_session"`. A mirrored reply is a
+continuation, so it updates `updated_at` without re-arming `requires_response`.
+
 ---
 
 ## Workflows and Schedules

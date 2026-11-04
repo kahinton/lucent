@@ -271,6 +271,11 @@ PROHIBITED_TAG_MAP: dict[str, str] = {
 }
 
 TECHNICAL_MEMORY_MAX_CONTENT_CHARS = 12_000
+# Absolute ceiling on any memory's content, mirrored by the max_length on
+# CreateMemoryInput.content / UpdateMemoryInput.content. Tools check this
+# before model construction so the rejection can name the stored length and
+# the remedy instead of surfacing a bare Pydantic string_too_long error.
+MEMORY_MAX_CONTENT_CHARS = 100_000
 TECHNICAL_MEMORY_ANCHOR_FIELDS = (
     "category",
     "repo",

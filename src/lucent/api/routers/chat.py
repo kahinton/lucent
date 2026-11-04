@@ -1193,6 +1193,60 @@ async def _mirror_handoff_user_turn(
         logger.warning("Failed to mirror Handoff session user turn", exc_info=True)
 
 
+async def _mirror_handoff_assistant_turn(
+    *,
+    user: dict,
+    pool,
+    chat_session: PersistentChatSession,
+    content: str,
+    assistant_message_id: str | None = None,
+) -> None:
+    """Mirror Lucent's reply into the owning Handoff thread.
+
+    A Handoff is a Lucent-initiated conversation, so its thread has to contain
+    both sides. Only the user side used to be mirrored, which meant the Handoff
+    record (and anything reading it — the API, the daemon's follow-up, the list
+    view's "last message") showed a one-sided conversation where Lucent appeared
+    to answer nothing.
+    """
+    interaction_id = str(chat_session.session_metadata.get("interaction_id") or "").strip()
+    if not interaction_id or not chat_session.session_id:
+        return
+    if not content.strip():
+        return
+    try:
+        from lucent.db.user_interactions import UserInteractionRepository
+
+        repo = UserInteractionRepository(pool)
+        interaction = await repo.get_interaction(
+            interaction_id,
+            str(user["organization_id"]),
+            user_id=str(user["id"]),
+        )
+        # A resolved/dismissed Handoff is closed for replies by design; the chat
+        # transcript still has the answer, so skip the mirror instead of raising.
+        if not interaction or interaction.get("status") in {"resolved", "dismissed"}:
+            return
+        await repo.add_message(
+            interaction_id=interaction_id,
+            org_id=str(user["organization_id"]),
+            sender_type="daemon",
+            body=content,
+            metadata={
+                "source": "llm_session",
+                "surface": "handoff",
+                "llm_session_id": chat_session.session_id,
+                "llm_message_id": assistant_message_id,
+                "llm_turn_id": chat_session.turn_id,
+            },
+            # Continuation of the thread, not a new prompt: replying inside the
+            # Handoff chat must not flip it back to "waiting for you".
+            preserve_status=True,
+        )
+    except Exception:
+        logger.warning("Failed to mirror Handoff session assistant turn", exc_info=True)
+
+
 async def _maybe_capture_session_experience(
     *,
     user: dict,
@@ -2394,6 +2448,14 @@ async def chat_stream_v2(
     # Use an asyncio.Queue to bridge callback events → SSE stream
     event_queue: asyncio.Queue[dict | None] = asyncio.Queue()
     tool_call_inputs: dict[str, Any] = {}
+    # Assistant text observed on the event stream for THIS turn. It is the
+    # fallback transcript source: a turn can stream its whole answer and still
+    # return None (tool-round limit, timeout, an engine error after the model
+    # already spoke), and dropping the reply there meant the person watched an
+    # answer arrive and then saw it vanish on reload.
+    streamed_parts: list[str] = []
+    streamed_message_parts: list[str] = []
+    persisted_assistant_turns: set[str] = set()
 
     # Serialized FIFO persistence bridge (lucent.llm.event_persistence).
     # on_event fires synchronously inside engine callbacks (CopilotEngine and
@@ -2550,6 +2612,7 @@ async def chat_stream_v2(
                 "type": "text_delta",
                 "text": event.content or "",
             }
+            streamed_parts.append(payload["text"])
             event_queue.put_nowait(payload)
             persist_event(payload, event)
         elif event.type == SessionEventType.MESSAGE:
@@ -2557,6 +2620,12 @@ async def chat_stream_v2(
                 "type": "message",
                 "text": event.content or "",
             }
+            # Copilot and Claude Code block-stream, so deltas and complete
+            # messages both fire for one answer; LangChain emits one or the
+            # other. Keep them apart so the fallback picks one source rather
+            # than concatenating the same text twice.
+            if payload["text"]:
+                streamed_message_parts.append(payload["text"])
             event_queue.put_nowait(payload)
             persist_event(payload, event)
         elif event.type == SessionEventType.TOOL_CALL:
@@ -2625,6 +2694,66 @@ async def chat_stream_v2(
         else:
             session_state_for_engine.pop("_project_context", None)
 
+    async def _record_assistant_turn(text: str) -> None:
+        """Persist this turn's assistant message (idempotent per turn)."""
+        if not chat_session.repo or not chat_session.session_id or not text:
+            return
+        turn_id = chat_session.turn_id
+        turn_key = str(turn_id) if turn_id else ""
+        if turn_key and turn_key in persisted_assistant_turns:
+            return
+        message = await chat_session.repo.add_message(
+            chat_session.session_id,
+            role="assistant",
+            content=text,
+            org_id=str(user["organization_id"]),
+            user_id=str(user["id"]),
+            turn_id=turn_id,
+            metadata=_assistant_turn_metadata(
+                selected_model,
+                engine,
+                auto_choice,
+                tool_approval_mode=tool_approval_mode,
+            ),
+        )
+        if turn_key:
+            persisted_assistant_turns.add(turn_key)
+        if capabilities_for(engine).resume:
+            await chat_session.repo.mark_provider_initialized(
+                chat_session.session_id,
+                str(user["organization_id"]),
+                user_id=str(user["id"]),
+                provider_session_id=chat_session.provider_session_id,
+            )
+        # Keep the owning Handoff thread one conversation, not one side of it.
+        await _mirror_handoff_assistant_turn(
+            user=user,
+            pool=pool,
+            chat_session=chat_session,
+            content=text,
+            assistant_message_id=str(message["id"]) if message else None,
+        )
+
+    async def _persist_streamed_fallback() -> None:
+        """Persist streamed assistant text when the engine returned nothing.
+
+        The engine's return value is the primary transcript source, but it is
+        empty in real, non-exceptional situations: a turn that hits the tool
+        round limit, an idle/hard timeout, an engine that reports an error after
+        the model already spoke, or a browser abort. Every one of those leaves
+        the person having watched an answer arrive and then seeing it gone on
+        reload, so the observed stream is written instead. Complete ``message``
+        events win over deltas because block-streaming engines emit both.
+        """
+        try:
+            fallback = "".join(streamed_message_parts).strip() or "".join(
+                streamed_parts
+            ).strip()
+            if fallback:
+                await _record_assistant_turn(fallback)
+        except Exception:
+            logger.warning("Chat v2: could not persist streamed assistant text", exc_info=True)
+
     # Run the streaming session in a background task
     async def run_llm():
         # Registered for the whole turn so a background report turn can tell
@@ -2676,28 +2805,8 @@ async def chat_stream_v2(
                 enable_config_discovery=enable_agent_provider_discovery,
                 approval=engine_approval,
             )
-            if result and chat_session.repo and chat_session.session_id:
-                await chat_session.repo.add_message(
-                    chat_session.session_id,
-                    role="assistant",
-                    content=result,
-                    org_id=str(user["organization_id"]),
-                    user_id=str(user["id"]),
-                    turn_id=chat_session.turn_id,
-                    metadata=_assistant_turn_metadata(
-                        selected_model,
-                        engine,
-                        auto_choice,
-                        tool_approval_mode=tool_approval_mode,
-                    ),
-                )
-                if capabilities_for(engine).resume:
-                    await chat_session.repo.mark_provider_initialized(
-                        chat_session.session_id,
-                        str(user["organization_id"]),
-                        user_id=str(user["id"]),
-                        provider_session_id=chat_session.provider_session_id,
-                    )
+            if result:
+                await _record_assistant_turn(result)
             # If we got no deltas from streaming, send the full result
             if result:
                 event_queue.put_nowait({
@@ -2758,6 +2867,11 @@ async def chat_stream_v2(
 
             async def _drain_and_stop_bridge():
                 await event_persist_bridge.drain_and_stop()
+                # Last chance to keep the reply the person already watched
+                # arrive: a turn that streamed text but never returned it (tool
+                # round limit, timeout, engine error, client abort) would
+                # otherwise vanish from the transcript on the next load.
+                await _persist_streamed_fallback()
                 await _maybe_capture_session_experience(user=user, chat_session=chat_session)
 
             drain_task = asyncio.create_task(_drain_and_stop_bridge())

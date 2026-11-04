@@ -416,11 +416,19 @@ def test_chat_renders_live_progress_cards():
     # The fingerprint guard is what prevents a flicker every poll.
     assert "dataset.fingerprint" in js
 
-    # chat.html patches the transcript instead of rebuilding it.
-    assert "function syncDelegatedProgressCards" in html
-    assert "syncDelegatedProgressCards();" in html
-    resync = html.split("function requestDelegatedResync", 1)[1][:700]
-    assert "loadSession(" not in resync, (
+    # The transcript is patched in place, never rebuilt: progress cards are
+    # upserted by the shared conversation controller (so a Handoff shows the
+    # same live progress) and the resync path must not reload the transcript.
+    assert "function renderDelegatedProgress(force)" in js
+    assert "upsertDelegatedProgress(cfg.messagesEl, request)" in js
+    assert "pruneDelegatedProgress(cfg.messagesEl" in js
+    assert "function requestDelegatedResync()" in js
+    resync = js.split("function requestDelegatedResync() {", 1)[1][:400]
+    assert "renderTranscript(" not in resync, (
+        "the resync path must not reload the whole transcript; that is the jump"
+    )
+    chat_resync = html.split("function requestDelegatedResync", 1)[1][:300]
+    assert "loadSession(" not in chat_resync, (
         "the resync path must not reload the whole transcript; that is the jump"
     )
 
@@ -456,8 +464,11 @@ def test_progress_card_is_collapsible_and_matches_the_report_card_family():
     # Design tokens shared with .subagent-report-card. The window covers the
     # whole progress-card block, not just its opening rule: the tokens are used
     # in the nested rules (task rows, meta line) further down.
-    progress_block = html.split(".delegated-progress-card {", 1)[1]
-    progress_block = progress_block.split("\n    /* ", 1)[0]
+    # Progress-card styling moved with the transcript into the shared
+    # stylesheet, so a Handoff renders the same card as /chat.
+    css = Path("src/lucent/web/static/chat-surface.css").read_text()
+    progress_block = css.split(".delegated-progress-card {", 1)[1]
+    progress_block = progress_block.split("\n/* ", 1)[0]
     for token in (
         "var(--lucent-paper)",
         "var(--lucent-line)",
@@ -468,7 +479,7 @@ def test_progress_card_is_collapsible_and_matches_the_report_card_family():
         assert token in progress_block, token
 
     # Opaque header bar spanning the chat width, with no floating-card chrome.
-    shell_block = html.split(".chat-overview-shell {", 1)[1][:700]
+    shell_block = css.split(".chat-overview-shell {", 1)[1][:700]
     assert "background: #080808" in shell_block, "the bar must be solid"
     assert "left: 0" in shell_block and "right: 0" in shell_block, (
         "the bar must span the full chat width, not float as a pill"
@@ -476,7 +487,7 @@ def test_progress_card_is_collapsible_and_matches_the_report_card_family():
     assert "box-shadow: none" in shell_block, "no drop shadow under the bar"
     assert "border-radius: 0" in shell_block, "no rounding on a full-width bar"
     # The fade element under the old floating plate must be gone.
-    assert "chat-overview-shell::after" not in html
+    assert "chat-overview-shell::after" not in css
 
     # No auto-opened floating panel covering the conversation.
     assert "toggleOverviewPanel('work');\n            state.delegatedAutoOpened" not in html

@@ -711,6 +711,46 @@ class MemoryRepository:
 
         return self._row_to_dict(row)
 
+    async def get_memory_state(
+        self,
+        memory_id: UUID,
+        organization_id: UUID | str | None = None,
+        user_id: UUID | str | None = None,
+    ) -> dict[str, Any] | None:
+        """Probe a memory's existence and lifecycle without returning content.
+
+        Used to diagnose why an access-controlled read returned nothing: the
+        caller needs to know whether the id never existed, the row was
+        soft-deleted, or it exists outside the caller's scope. Returns no
+        content or metadata — only identity and lifecycle state.
+
+        Returns:
+            None when no row has this id; otherwise a dict with ``id``,
+            ``deleted_at`` and ``same_organization``.
+        """
+        query = """
+            SELECT id, organization_id, deleted_at
+            FROM memories
+            WHERE id = $1
+        """
+
+        async with scoped_acquire_on(
+            self.pool, organization_id=organization_id, user_id=user_id
+        ) as conn:
+            row = await conn.fetchrow(query, str(memory_id))
+
+        if row is None:
+            return None
+
+        return {
+            "id": row["id"],
+            "deleted_at": row["deleted_at"],
+            "same_organization": (
+                organization_id is not None
+                and str(row["organization_id"]) == str(organization_id)
+            ),
+        }
+
     async def get_accessible(
         self,
         memory_id: UUID,
@@ -3559,8 +3599,8 @@ class MemoryRepository:
 
         placeholders = ", ".join(f"${i + 1}" for i in range(len(related_ids)))
         query = f"""
-            SELECT id FROM memories
-            WHERE id IN ({placeholders}) AND deleted_at IS NULL
+            SELECT id, deleted_at FROM memories
+            WHERE id IN ({placeholders})
         """
 
         str_ids = [str(uid) for uid in related_ids]
@@ -3574,13 +3614,28 @@ class MemoryRepository:
             ) as pool_conn:
                 rows = await pool_conn.fetch(query, *str_ids)
 
-        # Convert found IDs to strings for comparison
-        found_ids = {str(row["id"]) for row in rows}
-        requested_ids = {str(uid) for uid in related_ids}
-        missing_ids = requested_ids - found_ids
+        rows_by_id = {str(row["id"]): row for row in rows}
+        unique_ids = list(dict.fromkeys(str_ids))
+        missing_ids = [uid for uid in unique_ids if uid not in rows_by_id]
+        deleted_ids = [
+            uid
+            for uid in unique_ids
+            if uid in rows_by_id and rows_by_id[uid]["deleted_at"] is not None
+        ]
 
-        if missing_ids:
-            raise ValueError(f"Related memory IDs not found or deleted: {missing_ids}")
+        if missing_ids or deleted_ids:
+            # Name every offending entry individually. Reporting only the set
+            # left callers unable to tell which member of an otherwise-valid
+            # list to remove, so the whole update was retried unchanged.
+            details = [f"{uid} (soft-deleted)" for uid in deleted_ids] + [
+                f"{uid} (not found)" for uid in missing_ids
+            ]
+            raise ValueError(
+                "related_memory_ids contains invalid entries: "
+                + ", ".join(details)
+                + ". Remove or replace these ids and retry; the rest of the "
+                "update is otherwise valid."
+            )
 
     def _row_to_search_dict(self, row: asyncpg.Record) -> dict[str, Any]:
         """Convert a search result row to a dictionary with truncation."""

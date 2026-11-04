@@ -1,0 +1,103 @@
+{# Shared conversation composer.
+
+   A Handoff is a Lucent-initiated conversation, not a different kind of object,
+   so it uses the same composer as /chat: same input, same model/agent/reasoning
+   controls, same tool-permission choice. Only the conversation-history actions
+   differ, because a Handoff is pinned to one interaction rather than being one
+   entry in the user's chat list.
+
+   ``submit_label`` names the send control for assistive tech. ``read_only``
+   renders the composer disabled with an explanation, which is what a resolved
+   or dismissed Handoff needs instead of silently failing every send.
+#}
+
+{% macro composer(placeholder='Message Lucent...', submit_label='Send message', read_only=false, read_only_note='', show_history_controls=false, show_tool_approval=true) %}
+<div class="chat-input-area border-t border-gray-200 bg-white px-6 py-4">
+    <div class="max-w-3xl mx-auto">
+        <div id="status-bar" class="hidden mb-2 px-3">
+            <div class="flex items-center gap-2 text-xs text-gray-500">
+                <div class="flex gap-1">
+                    <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
+                    <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
+                    <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
+                </div>
+                <span id="status-text">Thinking...</span>
+            </div>
+        </div>
+
+        <div id="context-usage" class="hidden mb-2 px-1">
+            <div id="context-usage-track" class="h-1.5 bg-gray-100 rounded-full overflow-hidden" title="">
+                <div id="context-usage-bar" class="h-full bg-primary-500 rounded-full transition-colors" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <form class="input-glow lucent-sweep flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 transition-all">
+            <input type="file" id="attach-input" class="hidden" multiple
+                accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,text/csv" />
+            <button type="button" id="attach-btn" class="w-8 h-8 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0" title="Attach images or documents" {% if read_only %}disabled{% endif %}>
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+                </svg>
+            </button>
+            <textarea
+                id="chat-input"
+                rows="1"
+                placeholder="{{ placeholder }}"
+                aria-label="{{ submit_label }}"
+                class="chat-input-field flex-1 resize-none border-0 bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:ring-0 focus:outline-none"
+                style="max-height: 200px;"
+                {% if read_only %}disabled{% endif %}
+            ></textarea>
+            <div class="flex items-center gap-2 shrink-0">
+                <button type="button" id="stop-btn" class="hidden w-8 h-8 rounded-lg bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-colors" title="Stop generating">
+                    <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+                </button>
+                <button type="submit" id="send-btn" class="w-8 h-8 rounded-lg bg-primary-600 hover:bg-primary-700 text-white flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed" title="{{ submit_label }}" aria-label="{{ submit_label }}" disabled>
+                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
+                    </svg>
+                </button>
+            </div>
+        </form>
+
+        <div id="attachment-previews" class="hidden flex flex-wrap gap-2 mt-2 px-1"></div>
+
+        <div class="chat-controls">
+            <select id="agent-select" class="config-select" title="Agent for this conversation" {% if read_only %}disabled{% endif %}>
+                <option value="">Lucent</option>
+            </select>
+            <select id="model-select" class="config-select" title="Model for this conversation" {% if read_only %}disabled{% endif %}>
+                <option value="">Loading...</option>
+            </select>
+            <select id="reasoning-select" class="config-select hidden" title="Reasoning effort" {% if read_only %}disabled{% endif %}>
+                <option value="">Reasoning: default</option>
+            </select>
+            {% if show_tool_approval %}
+            <select id="tool-approval-select" class="config-select" title="Whether the agent may run tools on its own" {% if read_only %}disabled{% endif %}>
+                <option value="auto">Tools: auto-run</option>
+                <option value="ask">Tools: ask first</option>
+            </select>
+            {% endif %}
+            {% if show_history_controls %}
+            <button type="button" id="session-menu-btn" class="chat-controls-button" title="Conversation history" aria-expanded="false">
+                <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>History</span>
+            </button>
+            <button type="button" id="new-conversation-btn" class="chat-controls-button" title="New conversation">
+                <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                </svg>
+                <span>New</span>
+            </button>
+            {% endif %}
+        </div>
+        {% if read_only and read_only_note %}
+        <p class="input-footer mt-1 text-center text-[11px] text-gray-400">{{ read_only_note }}</p>
+        {% else %}
+        <p class="input-footer text-[10px] text-gray-400 text-center mt-1">Shift+Enter for new line</p>
+        {% endif %}
+    </div>
+</div>
+{% endmacro %}

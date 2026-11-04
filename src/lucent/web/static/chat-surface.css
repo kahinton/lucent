@@ -1,0 +1,851 @@
+/* Shared conversation surface styles.
+
+   /chat and Handoff render the same object — a persisted LLM session with
+   assistant rows, tool chips, question cards, delegated-work cards, and a
+   composer — so they share one stylesheet instead of slowly drifting into two
+   products. Handoff loads a small amount of /chat-only chrome (session drawer,
+   overview bar, empty-state hero) as dead weight; that is cheaper than a second
+   stylesheet and a second source of truth for the transcript.
+*/
+
+.lucent-mark {
+    width: 192px;
+    height: 192px;
+    object-fit: contain;
+    filter: drop-shadow(0 7px 5px rgba(42, 50, 42, 0.2));
+    animation: mark-settle 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.assistant-response {
+    width: 100%;
+}
+/* The composer's in-motion perimeter is the shared teal→pink sweep from
+   /static/lucent-state.css, exposed as a reusable custom property so this
+   page and Activity's "running" cards cannot drift apart. The composer only
+   paints while streaming, so an idle composer never advertises motion. */
+.input-glow.is-streaming::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: var(--lucent-sweep-gradient);
+    filter: drop-shadow(0 0 5px rgba(0, 207, 193, 0.24));
+    pointer-events: none;
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: lucent-sweep 1.8s ease-in-out infinite alternate;
+}
+@keyframes mark-settle {
+    from { opacity: 0; transform: translateY(-8px) rotate(-3deg); }
+    to { opacity: 1; transform: translateY(0) rotate(0); }
+}
+
+/* Override main content to be full-height for chat */
+main { padding: 0 !important; height: 100vh; }
+main > div { max-width: none !important; height: 100%; }
+
+/* Chat shell keeps the conversation full-width; history overlays from the right. */
+.chat-shell {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+    background-color: #f5f3ef;
+    background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.022) 0, rgba(0, 0, 0, 0.022) 1px, transparent 1px, transparent 12px);
+}
+.session-drawer-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.22);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+    z-index: 20;
+}
+.session-drawer-backdrop.open {
+    opacity: 1;
+    pointer-events: auto;
+}
+.session-drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(360px, calc(100vw - 2rem));
+    background: rgba(255, 255, 255, 0.97);
+    border-left: 1px solid #d8d3cc;
+    box-shadow: -7px 0 0 rgba(0, 0, 0, 0.08), -24px 0 48px rgba(0, 0, 0, 0.18);
+    transform: translateX(100%);
+    transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    backdrop-filter: blur(14px);
+}
+.session-drawer.open {
+    transform: translateX(0);
+}
+.session-list {
+    overflow-y: auto;
+    min-height: 0;
+}
+.session-row.active {
+    background: #d8fffa;
+    color: #064a46;
+    border-color: #00cfc1;
+    box-shadow: 0 2px 0 rgba(0, 127, 120, 0.3);
+}
+.session-delete-button {
+    opacity: 0;
+}
+.session-list > div:hover .session-delete-button,
+.session-list > div:focus-within .session-delete-button {
+    opacity: 1;
+}
+/* Subtle project badge on session rows — minimal chrome, both themes */
+.session-project-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    padding: 1px 7px;
+    border-radius: 9999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 14px;
+    color: #0f766e;
+    background: rgba(0, 207, 193, 0.10);
+    border: 1px solid rgba(0, 150, 141, 0.25);
+}
+.session-project-badge svg { flex-shrink: 0; }
+.session-project-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media all {
+    .session-project-badge {
+        color: #7feee4 !important;
+        background: rgba(0, 207, 193, 0.08) !important;
+        border-color: rgba(0, 207, 193, 0.22) !important;
+    }
+}
+.chat-confirm-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(2px);
+}
+
+/* ── Composer control row ────────────────────────────────────────────
+   Matches the Activity/Workflows control-row convention: bordered controls,
+   muted text, teal focus.
+
+   Sizing is INTRINSIC, not viewport-based. The composer is capped at
+   max-w-3xl (48rem), so viewport media queries describe the wrong box: on a
+   wide monitor the controls still only have 768px. One flat flex row (no
+   growing wrapper — that would claim the full width and push the actions
+   onto their own line) shares the space between four selectors and two
+   actions, and wraps only when the space is genuinely gone. Selects shrink
+   with ellipsis rather than overflowing, which is what used to push four of
+   six controls off the right edge. */
+.chat-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+    margin-top: 0.5rem;
+    padding: 0 0.25rem;
+    /* The row is its own size container. Viewport queries are the wrong
+       signal here: the composer is capped at 48rem, so the controls have the
+       same width on a 14" laptop and a 32" monitor. `inline-size` containment
+       also means the children can no longer widen this box, which is a
+       structural guard against the original bug where long option text pushed
+       the row past the screen edge. */
+    container-type: inline-size;
+    container-name: composer-controls;
+}
+.config-select {
+    /* Share the row instead of each claiming its widest option. A native
+       select sizes to its widest option, so without a small basis the four
+       selects consume the whole 48rem composer and push the actions onto a
+       second line. With a 6.5rem basis they divide the space, the actions
+       keep their place on the right, and `min-width: 0` lets a long model
+       name shrink rather than overflow. */
+    flex: 1 1 6.5rem;
+    min-width: 0;
+    max-width: 16rem;
+    text-overflow: ellipsis;
+    padding: 0.3rem 0.45rem;
+    border: 1px solid #d8d3cc;
+    border-radius: 0.5rem;
+    background-color: #ffffff;
+    color: #6b6560;
+    font-size: 0.75rem;
+    line-height: 1.15rem;
+    cursor: pointer;
+}
+.config-select:hover { border-color: #00cfc1; }
+.config-select:focus { outline: none; border-color: #00cfc1; box-shadow: 0 0 0 2px rgba(0, 207, 193, 0.18); }
+/* Reasoning only exists for models that publish levels; a yellow accent
+   marks it as the one selector that changes the model's behavior. It needs
+   the most width because "Reasoning: default" is a long label. */
+#reasoning-select {
+    flex-grow: 1.4;
+    background-color: #fff3b5;
+    border-color: #ffd84d;
+    color: #4b3900;
+}
+#reasoning-select:hover, #reasoning-select:focus { border-color: #d8b400; }
+/* Model and agent names are the longest labels in the row, so they get a
+   larger share than the two short fixed-label selects. */
+#model-select { flex-grow: 1.6; }
+#agent-select { flex-grow: 1.2; }
+.chat-controls-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: #78736f;
+    white-space: nowrap;
+    /* Pushed to the trailing edge while there is room; wraps naturally once
+       there is not. */
+    margin-left: auto;
+    transition: background-color 120ms ease, color 120ms ease;
+}
+.chat-controls-button:hover { background-color: rgba(0, 207, 193, 0.1); color: #007f78; }
+#new-conversation-btn { margin-left: 0; }
+
+/* Phones: two selectors per row reads far better than four slivers, and the
+   actions keep their own right-aligned row. Labels drop so the actions stay
+   compact and the selectors keep their width. */
+@media (max-width: 480px) {
+    .chat-controls { gap: 0.35rem; }
+    .config-select { flex: 1 1 calc(50% - 0.5rem); max-width: none; }
+    .chat-controls-button { margin-left: 0; }
+    .chat-controls-button > span { display: none; }
+    #session-menu-btn { margin-left: auto; }
+}
+
+/* Below ~45rem of ROW width, four selectors plus two labelled actions stop
+   fitting on one line and the selects squeeze until their labels clip. Give
+   every select half the row so they form a tidy 2×2 grid instead. Container
+   queries key off the composer's real width, so this stays correct on a wide
+   monitor with a narrow window and on a phone alike. */
+@container composer-controls (max-width: 45rem) {
+    .config-select { flex: 1 1 calc(50% - 0.25rem); max-width: none; }
+    .chat-controls-button { margin-left: 0; }
+    #session-menu-btn { margin-left: auto; }
+}
+@container composer-controls (max-width: 22rem) {
+    .config-select { flex: 1 1 100%; }
+}
+
+.chat-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* Empty state: center everything vertically, input right below prompts */
+.chat-container.empty-mode .messages-area {
+    flex: 1;
+    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding-top: 3.25rem;
+    padding-bottom: 0;
+}
+.chat-input-area.drag-active .input-glow {
+    border-color: #00cfc1;
+    box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.2), 0 5px 0 #a5a29d;
+}
+.chat-container.empty-mode .chat-input-area {
+    flex: none;
+    border-top: none;
+    padding-top: 0.75rem;
+    transform: none;
+}
+.chat-container.empty-mode .messages-area #empty-state {
+    transform: none;
+}
+.chat-overview-panel {
+    width: min(30rem, calc(100vw - 2rem));
+    max-height: min(34rem, calc(100vh - 5rem));
+    overflow-y: auto;
+}
+/* Full-bleed header bar. The chrome floats over the transcript, so it is a
+   solid plate spanning the whole chat width — not a floating pill. No
+   radius, no ring, no drop shadow and no fade below: any of those made it
+   read as a detached card hovering above the text instead of the top of
+   the page. */
+.chat-overview-shell {
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 3.25rem;
+    padding: 0 1rem;
+    justify-content: flex-end;
+    border-radius: 0;
+    background: #080808;
+    border-bottom: 1px solid #1e1e1e;
+    box-shadow: none;
+}
+.chat-overview-shell [data-overview-trigger] {
+    color: var(--lucent-muted);
+}
+.chat-overview-shell [data-overview-trigger]:hover {
+    color: var(--lucent-ink);
+    background: #1e1e1e;
+}
+.chat-overview-shell [data-overview-trigger][aria-expanded="true"] {
+    background: #1c1c1c;
+    color: #f5f5f4;
+}
+.chat-overview-item summary {
+    list-style: none;
+}
+.chat-overview-item summary::-webkit-details-marker {
+    display: none;
+}
+.chat-overview-item[open] .chat-overview-chevron {
+    transform: rotate(90deg);
+}
+
+/* Delegated work pane — the live view of what this conversation handed off. */
+.delegated-list {
+    max-height: 26rem;
+    overflow-y: auto;
+}
+.delegated-request {
+    border-bottom: 1px solid var(--lucent-line);
+}
+.delegated-request:last-child {
+    border-bottom: none;
+}
+.delegated-request-summary {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    list-style: none;
+}
+.delegated-request-summary::-webkit-details-marker {
+    display: none;
+}
+.delegated-request-summary:hover {
+    background: #171717;
+}
+.delegated-request-chevron {
+    flex-shrink: 0;
+    width: 0.875rem;
+    height: 0.875rem;
+    margin-top: 0.15rem;
+    color: var(--lucent-muted);
+    transition: transform 140ms ease;
+}
+.delegated-request[open] .delegated-request-chevron {
+    transform: rotate(90deg);
+}
+.delegated-request-text {
+    min-width: 0;
+    flex: 1;
+}
+.delegated-request-title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--lucent-ink);
+}
+.delegated-request-meta {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 11px;
+    color: var(--lucent-muted);
+}
+.delegated-task-list {
+    margin: 0;
+    padding: 0 1rem 0.5rem 2rem;
+    list-style: none;
+}
+.delegated-task {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.4rem 0;
+}
+.delegated-task + .delegated-task {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+.delegated-task-dot {
+    flex-shrink: 0;
+    width: 0.4rem;
+    height: 0.4rem;
+    margin-top: 0.4rem;
+    border-radius: 999px;
+}
+.delegated-task-main {
+    min-width: 0;
+    flex: 1;
+}
+.delegated-task-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+.delegated-task-title {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.75rem;
+    color: var(--lucent-ink);
+}
+.delegated-task-status {
+    flex-shrink: 0;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--lucent-muted);
+}
+.delegated-task-excerpt {
+    margin: 0.15rem 0 0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--lucent-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.delegated-task-stop {
+    flex-shrink: 0;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--lucent-line);
+    border-radius: 0.375rem;
+    font-size: 10px;
+    color: var(--lucent-muted);
+    background: transparent;
+    cursor: pointer;
+}
+.delegated-task-stop:hover:not(:disabled) {
+    color: #fca5a5;
+    border-color: #7f1d1d;
+}
+.delegated-task-stop:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* ── Live delegated-work progress card (in transcript) ──
+   Shows where running work is *right now*, patched in place on each poll so
+   the transcript never has to be rebuilt to show progress. Deliberately the
+   same visual family as .subagent-report-card (accent stripe, chip, paper
+   surface, muted meta) so a live box and a result box read as one object
+   type rather than two unrelated widgets. Collapsible, because it sits
+   inline in the conversation and should not dominate it. */
+.delegated-progress-card {
+    position: relative;
+    max-width: 48rem;
+    margin: 0 auto;
+    border: 1px solid var(--lucent-line);
+    border-radius: 0.75rem;
+    background: var(--lucent-paper);
+    overflow: hidden;
+}
+.delegated-progress-card::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: var(--lucent-teal);
+}
+.delegated-progress[data-state="attention"] .delegated-progress-card::before {
+    background: var(--lucent-pink);
+}
+.delegated-progress-summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: 0.6rem 0.875rem 0.6rem 1rem;
+    cursor: pointer;
+    list-style: none;
+}
+.delegated-progress-summary::-webkit-details-marker { display: none; }
+.delegated-progress-chevron {
+    width: 0.75rem;
+    height: 0.75rem;
+    flex: none;
+    color: var(--lucent-muted);
+    transition: transform 0.15s ease;
+}
+.delegated-progress-card[open] .delegated-progress-chevron {
+    transform: rotate(90deg);
+}
+.delegated-progress-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+    padding: 0.125rem 0.4rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: rgba(0, 207, 193, 0.12);
+    border-color: rgba(0, 207, 193, 0.35);
+    color: var(--lucent-teal);
+}
+.delegated-progress[data-state="attention"] .delegated-progress-chip {
+    background: rgba(255, 63, 155, 0.12);
+    border-color: rgba(255, 63, 155, 0.35);
+    color: var(--lucent-pink);
+}
+.delegated-progress-spinner {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    border: 1.5px solid currentColor;
+    border-right-color: transparent;
+    animation: delegated-spin 0.8s linear infinite;
+}
+@keyframes delegated-spin {
+    to { transform: rotate(360deg); }
+}
+.delegated-progress-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--lucent-muted);
+}
+.delegated-progress-count {
+    margin-left: auto;
+    flex: none;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--lucent-muted);
+}
+.delegated-progress-detail {
+    padding: 0 0.875rem 0.7rem 1rem;
+}
+.delegated-progress-bar {
+    height: 3px;
+    border-radius: 999px;
+    background: var(--lucent-line);
+    overflow: hidden;
+}
+.delegated-progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--lucent-teal);
+    transition: width 0.4s ease;
+}
+.delegated-progress[data-state="attention"] .delegated-progress-fill {
+    background: var(--lucent-pink);
+}
+.delegated-progress-tasks {
+    margin: 0.55rem 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.delegated-progress-task {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    font-size: 0.75rem;
+    color: var(--lucent-ink);
+}
+.delegated-progress-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    flex: none;
+    background: var(--lucent-line);
+}
+.delegated-progress-dot.is-done { background: var(--lucent-teal); }
+.delegated-progress-dot.is-failed { background: var(--lucent-pink); }
+.delegated-progress-dot.is-cancelled { background: var(--lucent-muted); }
+.delegated-progress-dot.is-running {
+    background: var(--lucent-teal);
+    animation: delegated-pulse 1.4s ease-in-out infinite;
+}
+@keyframes delegated-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+.delegated-progress-task-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.delegated-progress-task-status {
+    margin-left: auto;
+    flex: none;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--lucent-muted);
+}
+.delegated-progress-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-top: 0.55rem;
+}
+.delegated-progress-meta {
+    font-size: 10px;
+    color: var(--lucent-muted);
+    font-variant-numeric: tabular-nums;
+}
+.delegated-progress-link {
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--lucent-teal);
+    text-decoration: none;
+}
+.delegated-progress-link:hover { text-decoration: underline; }
+
+.delegated-empty-row {
+    margin: 0;
+    padding: 0 1rem 0.75rem 2rem;
+    font-size: 11px;
+    color: var(--lucent-muted);
+}
+.delegated-request-link {
+    display: inline-block;
+    padding: 0 1rem 0.75rem 2rem;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--lucent-teal);
+    text-decoration: none;
+}
+.delegated-request-link:hover {
+    text-decoration: underline;
+}
+.chat-container.empty-mode .input-footer {
+    display: none;
+}
+
+/* Messages area */
+.messages-area {
+    flex: 1;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+    /* Clear the header bar: it is opaque, so text under it would be hidden
+       rather than merely cluttered. Matches the bar's 3.25rem height. */
+    padding-top: 3.25rem;
+}
+
+/* Typing indicator animation */
+@keyframes pulse-dot {
+    0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+    40% { opacity: 1; transform: scale(1); }
+}
+.typing-dot {
+    animation: pulse-dot 1.4s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* Tool call accordion animation */
+.tool-details {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+}
+.tool-details.open {
+    max-height: 500px;
+}
+
+/* Reasoning block */
+.reasoning-block {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+}
+.reasoning-block.open {
+    max-height: 2000px;
+}
+
+/* Fade-in for new messages */
+@keyframes fade-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.msg-enter {
+    animation: fade-up 0.25s ease-out;
+}
+
+/* Input area glow on focus */
+.input-glow:focus-within {
+    border-color: #00cfc1;
+    box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.14), 0 5px 0 #aaa7a1, 0 13px 28px rgba(0, 0, 0, 0.16);
+}
+
+/* Streaming cursor */
+.streaming-cursor::after {
+    content: '▊';
+    animation: blink 0.8s step-end infinite;
+    color: #ff3f9b;
+    font-weight: 200;
+}
+@keyframes blink {
+    50% { opacity: 0; }
+}
+
+/* Dark mode overrides for chat-specific elements */
+@media all {
+    .chat-shell { background-color: #080808; }
+    .chat-user-bubble { background-color: #00cfc1 !important; color: #050505 !important; }
+    .chat-assistant-bg { background-color: transparent !important; }
+    .tool-chip { background-color: #181818 !important; border-color: #3d3d3d !important; color: #b8b4b0 !important; }
+    .tool-chip:hover { background-color: #242424 !important; }
+    .tool-details-content { background-color: #121212 !important; border-color: #333333 !important; }
+    .chat-input-area { background-color: rgba(8, 8, 8, 0.96) !important; border-color: #333333 !important; }
+    .input-glow { background: #141414 !important; border-color: #3d3d3d !important; box-shadow: 0 5px 0 #000000, 0 14px 30px rgba(0, 0, 0, 0.36); }
+    .input-glow:focus-within { border-color: #00cfc1 !important; box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.14), 0 5px 0 #000000, 0 16px 34px rgba(0, 0, 0, 0.42); }
+    .chat-input-field { background-color: transparent !important; border-color: transparent !important; color: #f7f5f1 !important; }
+    .chat-input-field::placeholder { color: #77736f !important; }
+    .config-select { background-color: #181818 !important; border-color: #3d3d3d !important; color: #d5d2ce !important; }
+    .config-select:hover, .config-select:focus { border-color: #00cfc1 !important; }
+    .chat-controls-button { color: #94908c !important; }
+    .chat-controls-button:hover { background-color: rgba(0, 207, 193, 0.12) !important; color: #7feee4 !important; }
+    .empty-state-text { color: #94908c !important; }
+    .intro-summary { max-width: 42rem; white-space: pre-line; }
+    .intro-summary .intro-summary-loading { display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 9999px; background: currentColor; opacity: 0.45; animation: intro-pulse 1s ease-in-out infinite; }
+    .intro-summary .intro-summary-loading:nth-child(2) { animation-delay: 0.15s; }
+    .intro-summary .intro-summary-loading:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes intro-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.7; } }
+    .session-drawer { background: rgba(18, 18, 18, 0.98) !important; border-color: #333333 !important; }
+    .session-drawer-backdrop { background: rgba(10, 11, 8, 0.28) !important; }
+    .session-row.active { background: rgba(0, 207, 193, 0.14) !important; color: #7feee4 !important; border-color: #00a89f !important; }
+    .hook-chip { background-color: #181818 !important; border-color: #3d3d3d !important; color: #b8b4b0 !important; border-left-width: 3px !important; border-left-color: #ff3f9b !important; }
+    .hook-chip:hover { background-color: #242424 !important; }
+    .hook-inline-accent { color: #ff3f9b !important; }
+    .hook-details { background-color: #121212 !important; border-color: #333333 !important; }
+    .hook-detail-value { color: #d5d2ce !important; }
+    .hook-memory-content { color: #d5d2ce !important; }
+    .hook-context-text { color: #d5d2ce !important; }
+    .hook-decision-block { color: #f87171 !important; }
+    .hook-decision-replace_args, .hook-decision-replace_result { color: #fbbf24 !important; }
+    .hook-file-ref { background-color: rgba(255, 63, 155, 0.12) !important; border-color: rgba(255, 63, 155, 0.35) !important; color: #ff8fc4 !important; }
+    .hook-memory-tag { background-color: rgba(255, 63, 155, 0.12) !important; color: #ff8fc4 !important; }
+    .hook-memory-id { color: #ff3f9b !important; }
+    .hook-memory-score { color: rgba(255, 143, 196, 0.75) !important; }
+}
+
+#empty-state .grid button {
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.9);
+    border-color: #d8d3cc;
+    border-left-width: 3px;
+    box-shadow: 0 4px 0 #aaa7a1, 0 10px 22px rgba(0, 0, 0, 0.1);
+}
+#empty-state .grid button:nth-child(1) { border-left-color: #00cfc1 !important; }
+#empty-state .grid button:nth-child(2) { border-left-color: #ff3f9b !important; }
+#empty-state .grid button:nth-child(3) { border-left-color: #ffd84d !important; }
+#empty-state .grid button:nth-child(4) { border-left-color: #00cfc1 !important; }
+#empty-state .grid button:hover {
+    transform: translateY(-2px);
+    border-color: #00cfc1;
+    box-shadow: 0 6px 0 #008e86, 0 14px 26px rgba(0, 0, 0, 0.16);
+}
+#empty-state .grid button:active { transform: translateY(2px); box-shadow: 0 2px 0 #008e86; }
+.chat-input-area {
+    background: rgba(245, 243, 239, 0.94) !important;
+    backdrop-filter: blur(12px);
+}
+.input-glow {
+    border-radius: 0.75rem;
+    background: #ffffff;
+    border-color: #d8d3cc;
+    box-shadow: 0 5px 0 #aaa7a1, 0 14px 30px rgba(0, 0, 0, 0.12);
+}
+#send-btn {
+    border-radius: 0.45rem;
+    background: #ff3f9b !important;
+    box-shadow: 0 3px 0 #971950, 0 7px 14px rgba(255, 63, 155, 0.26);
+}
+#send-btn:hover { background: #e72f88 !important; transform: translateY(-1px); }
+#send-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #971950; }
+.chat-user-bubble {
+    border-radius: 0.7rem 0.7rem 0.2rem 0.7rem;
+    background: #00cfc1 !important;
+    color: #050505 !important;
+    border: 1px solid #007f78;
+    box-shadow: 0 4px 0 #007f78, 0 10px 22px rgba(0, 207, 193, 0.22) !important;
+}
+
+@media (max-width: 767px) {
+    main { height: 100dvh; }
+    .chat-shell { padding-top: 3.75rem; }
+    .chat-container.empty-mode .messages-area { justify-content: flex-start; overflow-y: auto; padding-top: 3.25rem; }
+    .chat-container.empty-mode .messages-area #empty-state { transform: none; padding-top: 2rem; }
+    .chat-container.empty-mode .chat-input-area { transform: none; }
+    #empty-state { padding-left: 1rem; padding-right: 1rem; }
+    #empty-state .grid { grid-template-columns: 1fr; gap: 0.65rem; }
+    #empty-state .grid button { padding: 0.7rem 0.85rem; }
+    .lucent-mark { width: 96px; height: 96px; margin-bottom: 1rem !important; }
+    .chat-input-area { padding: 0.75rem !important; }
+    .input-glow { gap: 0.35rem; padding: 0.65rem !important; }
+    .input-footer { display: none; }
+    .msg-enter { padding: 0.85rem 1rem; }
+    .chat-user-bubble { max-width: 88%; }
+    .chat-assistant-bg > div { gap: 0.6rem; }
+    .session-drawer { width: calc(100vw - 1rem); }
+}
+
+@media all {
+    #empty-state .grid button {
+        background: #181818;
+        border-color: #3d3d3d;
+        box-shadow: 0 4px 0 #000000, 0 12px 24px rgba(0, 0, 0, 0.3);
+    }
+    #empty-state .grid button:hover {
+        background: #202020;
+        border-color: #00cfc1;
+        box-shadow: 0 5px 0 #006f69, 0 15px 28px rgba(0, 0, 0, 0.34);
+    }
+    .chat-input-area {
+        background: rgba(8, 8, 8, 0.96) !important;
+        border-color: #333333 !important;
+    }
+    .input-glow {
+        background: #141414;
+        border-color: #3d3d3d;
+        box-shadow: 0 5px 0 #000000, 0 14px 30px rgba(0, 0, 0, 0.38);
+    }
+    #reasoning-select {
+        background: #2b260e !important;
+        border-color: #8a741d !important;
+        color: #ffe477 !important;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}

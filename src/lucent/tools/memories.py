@@ -31,6 +31,9 @@ from lucent.models.memory import (
     UpdateMemoryInput,
 )
 from lucent.models.validation import (
+    MEMORY_MAX_CONTENT_CHARS,
+    TECHNICAL_MEMORY_ANCHOR_FIELDS,
+    TECHNICAL_MEMORY_MAX_CONTENT_CHARS,
     normalize_tags,
     validate_memory_content_quality,
     validate_metadata,
@@ -294,10 +297,21 @@ Technical memory quality rules:
     Technical memories are injected as future working context. They must be
     concise reference material about durable system/code/domain behavior, not
     task reports, milestone deliverables, research dumps, PR summaries, or
-    changelog entries. Include technical metadata anchoring the memory to at
-    least one of: category, repo, directory, filename, language, code_snippet,
-    or version_info. Use type="experience" for task outcomes/research notes and
-    persist full deliverables to the target repo/docs plus task outputs.
+    changelog entries. Use type="experience" for task outcomes/research notes
+    and persist full deliverables to the target repo/docs plus task outputs.
+""" + f"""
+Technical anchor requirement (enforced on create and update):
+    Every technical memory must carry at least one non-empty anchor field in
+    metadata: {", ".join(TECHNICAL_MEMORY_ANCHOR_FIELDS)}.
+    update_memory applies the same rule to the resulting content and metadata,
+    including the stored metadata when you omit the metadata argument — so a
+    technical memory can never be created or changed without an anchor.
+
+Length limits (enforced on create and update):
+    Technical memories: {TECHNICAL_MEMORY_MAX_CONTENT_CHARS:,} characters.
+    Any memory type: {MEMORY_MAX_CONTENT_CHARS:,} characters absolute.
+    If your content is larger, persist the artifact externally (target
+    repo/docs or a task output) and keep a concise summary in the memory.
 
 Returns:
     JSON string with the created memory including its ID.
@@ -330,6 +344,15 @@ Returns:
             if memory_type not in CREATABLE_MEMORY_TYPES:
                 return _error_response(
                     "Invalid memory type. Must be one of: experience, technical, goal"
+                )
+
+            if len(content) > MEMORY_MAX_CONTENT_CHARS:
+                return _error_response(
+                    f"Content is {len(content):,} characters; the absolute limit "
+                    f"for any memory is {MEMORY_MAX_CONTENT_CHARS:,} characters. "
+                    "Persist the full artifact externally (in the target "
+                    "repo/docs or as a task output) and keep a concise summary "
+                    "in the memory."
                 )
 
             # Validate and normalize metadata for the memory type
@@ -503,7 +526,12 @@ Returns:
             memory_id: The UUID of the memory to retrieve.
 
         Returns:
-            JSON string with the full memory details, or an error if not found or not accessible.
+            JSON string with the full memory details, or an error that
+            distinguishes the three failure modes: the id never existed, the
+            row was soft-deleted (the error carries the deletion timestamp), or
+            the row exists but is outside your scope (another organization or
+            no read clearance). The received id is echoed exactly as received,
+            so a malformed id is visible in the error.
         """
         try:
             uuid_id = UUID(memory_id)
@@ -529,8 +557,42 @@ Returns:
                     "Authentication required: unable to determine user context for access control"
                 )
 
-            if result is None or result.get("_access_denied"):
-                return _error_response(f"Memory not found or not accessible: {memory_id}")
+            if result is None:
+                # A None result has three materially different causes. The old
+                # shared "not found or not accessible" message made them
+                # indistinguishable, so callers retried ids that had been
+                # soft-deleted seconds to hours earlier. Probe existence (never
+                # content) and say which one happened.
+                state = await memory_access.repo.get_memory_state(
+                    uuid_id, organization_id=org_id, user_id=user_id
+                )
+                if state is None:
+                    return _error_response(
+                        f"Memory not found: no memory exists with id '{memory_id}'. "
+                        "Check the id — it is echoed exactly as received — or find "
+                        "the memory with search_memories."
+                    )
+                if state.get("same_organization") and state.get("deleted_at") is not None:
+                    return _error_response(
+                        f"Memory {memory_id} was soft-deleted at "
+                        f"{state['deleted_at']} and is not retrievable. Create a "
+                        "new memory with the information you need, or ask an admin "
+                        "to recover it from a database backup."
+                    )
+                return _error_response(
+                    f"Memory {memory_id} exists but is outside your scope: it "
+                    "belongs to a different organization, or you hold no read "
+                    "clearance for it. Ask the owner to share it with you, or an "
+                    "admin to grant access."
+                )
+
+            if result.get("_access_denied"):
+                repo_name = (result.get("metadata") or {}).get("repo")
+                return _error_response(
+                    f"Memory {memory_id} exists but your access to repository "
+                    f"'{repo_name}' is denied. Request access to that repository, "
+                    "or ask the owner to share the memory another way."
+                )
 
             # Log the access
             try:
@@ -547,7 +609,10 @@ Returns:
             return json.dumps(_serialize_memory(result), indent=2)
 
         except ValueError as e:
-            return _error_response(f"Invalid memory ID format: {e}")
+            return _error_response(
+                f"Invalid memory id {memory_id!r}: not a valid UUID ({e}). Pass "
+                "the id exactly as returned by create_memory or search_memories."
+            )
         except Exception as e:
             logger.error("get_memory failed: id=%s", memory_id, exc_info=e)
             return _error_response(f"Failed to retrieve memory: {e}")
@@ -931,20 +996,44 @@ Returns:
     ) -> str:
         """Update an existing memory.
 
+        CONTENT IS REPLACED WHOLESALE. update_memory overwrites `content`; it
+        does not append. The shrink guard (ContentShrinkError) rejects an
+        unguarded replacement that materially shortens the stored content.
+        The safe form is append-first: re-read the memory with get_memory, then
+        pass the existing content plus a dated addition, e.g.
+        existing_content + "\\n\\n## 2026-11-04\\n" + new_note. Pass
+        `expected_version` only for an intentional rewrite, and only with the
+        version you just read (a stale value raises a version conflict).
+
         Args:
             memory_id: The UUID of the memory to update.
-            content: Optional new content for the memory.
+            content: Optional new content. Replaces the stored content
+                wholesale; see the note above before using it.
             tags: Optional new list of tags (replaces existing tags).
             importance: Optional new importance rating (1-10).
-            related_memory_ids: Optional new list of related memory UUIDs (replaces existing).
-            metadata: Optional new metadata for non-goal memories. Goal metadata
-                is protected; use update_goal_milestone for goal milestones.
-                Must match the memory's type schema. See create_memory for the
-                metadata schema for each memory type.
+            related_memory_ids: Optional new list of related memory UUIDs
+                (replaces existing). Every id must exist and must not be
+                soft-deleted; one invalid entry aborts the whole update, and
+                the error names that entry so you can remove or replace it
+                and retry.
+            metadata: Optional new metadata for non-goal memories. Must match
+                the memory's type schema (see create_memory). Technical
+                memories must keep at least one non-empty anchor field in
+                metadata: category, repo, directory, filename, language,
+                code_snippet, or version_info — this is enforced against the
+                resulting metadata, including the stored metadata when you
+                omit this argument. Goal metadata is protected; use
+                update_goal_milestone (passing this memory_id) for milestones.
             expected_version: Optional optimistic lock. If provided, the update only succeeds
                 if the memory's current version matches this value. Use this to prevent
-                concurrent updates from overwriting each other. Get the current version
+                concurrent updates from overwriting each other, or to confirm an
+                intentional destructive rewrite of `content`. Get the current version
                 from the memory's "version" field.
+
+        Length limits: technical memories are capped at 12,000 characters; any
+        memory's content is capped at 100,000 characters absolute. If content
+        is larger, persist the artifact externally (target repo/docs or a task
+        output) and keep a concise summary here.
 
         Returns:
             JSON string with the updated memory, or an error if not found or version conflict.
@@ -981,8 +1070,21 @@ Returns:
 
             if old_memory["type"] == "goal" and metadata is not None:
                 return _error_response(
-                    "Goal metadata cannot be updated through update_memory. Use "
-                    "update_goal_milestone to update one goal milestone."
+                    "Goal metadata cannot be updated through update_memory "
+                    f"(memory {memory_id}). Use update_goal_milestone with "
+                    f"memory_id='{memory_id}' and the milestone index and status "
+                    "to update one goal milestone."
+                )
+
+            if content is not None and len(content) > MEMORY_MAX_CONTENT_CHARS:
+                current_length = len(old_memory.get("content") or "")
+                return _error_response(
+                    f"Content is {len(content):,} characters; the absolute limit "
+                    f"for any memory is {MEMORY_MAX_CONTENT_CHARS:,} characters. "
+                    f"Memory {memory_id} currently stores {current_length:,} "
+                    "characters. Persist the full artifact externally (in the "
+                    "target repo/docs or as a task output) and keep a concise "
+                    "summary in the memory."
                 )
 
             # Validate metadata if provided
@@ -1018,12 +1120,33 @@ Returns:
                             ).message
                         )
 
-            validate_memory_content_quality(
-                old_memory["type"],
-                content if content is not None else old_memory["content"],
-                metadata=validated_metadata if metadata is not None else old_memory.get("metadata"),
-                tags=tags if tags is not None else old_memory.get("tags"),
-            )
+            try:
+                validate_memory_content_quality(
+                    old_memory["type"],
+                    content if content is not None else old_memory["content"],
+                    metadata=(
+                        validated_metadata
+                        if metadata is not None
+                        else old_memory.get("metadata")
+                    ),
+                    tags=tags if tags is not None else old_memory.get("tags"),
+                )
+            except ValueError as e:
+                if "anchors the knowledge" in str(e):
+                    # Update-specific remedy: create_memory's "use
+                    # type='experience'" advice cannot be followed here.
+                    return _error_response(
+                        f"Memory {memory_id} is a technical memory and must keep "
+                        "at least one non-empty technical anchor in metadata: "
+                        + ", ".join(
+                            f"metadata.{field}"
+                            for field in TECHNICAL_MEMORY_ANCHOR_FIELDS
+                        )
+                        + ". Call update_memory again with metadata containing "
+                        "one of these fields (for example "
+                        "metadata={'filename': 'src/lucent/db/memory.py'})."
+                    )
+                return _error_response(f"Invalid input: {str(e)}")
 
             update_input = UpdateMemoryInput(
                 content=content,

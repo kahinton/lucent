@@ -525,7 +525,16 @@ class UserInteractionRepository:
         body: str,
         sender_user_id: str | UUID | None = None,
         metadata: dict[str, Any] | None = None,
+        preserve_status: bool = False,
     ) -> dict[str, Any]:
+        """Append one message to an interaction thread.
+
+        ``preserve_status`` is for a message that continues the conversation
+        rather than starting a new turn — Lucent's reply inside the Handoff
+        chat. Without it a daemon-authored message always re-arms
+        ``requires_response``, so answering inside the thread would show the
+        Handoff as "waiting for you" again the moment Lucent replied.
+        """
         sender_type = _validate_choice(sender_type, VALID_SENDER_TYPES, "sender_type")
         body = str(body or "").strip()
         if not body:
@@ -573,19 +582,29 @@ class UserInteractionRepository:
                         now,
                     )
                 elif sender_type in {"daemon", "system"}:
-                    await conn.execute(
-                        """UPDATE user_interactions
-                           SET status = CASE
-                                   WHEN status IN ('resolved', 'dismissed') THEN status
-                                   WHEN requires_response THEN 'waiting_on_user'
-                                   ELSE 'open'
-                               END,
-                               updated_at = $3
-                           WHERE id = $1::uuid AND organization_id = $2::uuid""",
-                        str(interaction_id),
-                        str(org_id),
-                        now,
-                    )
+                    if preserve_status:
+                        await conn.execute(
+                            """UPDATE user_interactions
+                               SET updated_at = $3
+                               WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                            str(interaction_id),
+                            str(org_id),
+                            now,
+                        )
+                    else:
+                        await conn.execute(
+                            """UPDATE user_interactions
+                               SET status = CASE
+                                       WHEN status IN ('resolved', 'dismissed') THEN status
+                                       WHEN requires_response THEN 'waiting_on_user'
+                                       ELSE 'open'
+                                   END,
+                                   updated_at = $3
+                               WHERE id = $1::uuid AND organization_id = $2::uuid""",
+                            str(interaction_id),
+                            str(org_id),
+                            now,
+                        )
                 detail = await self._get_interaction_detail_locked(
                     conn,
                     str(interaction_id),

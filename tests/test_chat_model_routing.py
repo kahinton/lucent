@@ -431,16 +431,24 @@ def test_chat_mcp_config_threads_llm_session_headers():
 
 
 def test_chat_history_rehydrates_persisted_tool_events():
+    """Replay lives in the shared transcript renderer, used by /chat + Handoff.
+
+    The behaviour is the same as when it lived in the page; what changed is that
+    a Handoff now renders through the identical code path instead of its own
+    reduced one (which dropped tool calls entirely).
+    """
     template = Path("src/lucent/web/templates/chat.html").read_text()
+    ui = Path("src/lucent/web/static/chat-message-ui.js").read_text()
 
     assert "renderSessionMessages(session.messages || [], session.events || [])" in template
-    assert "function replaySessionEvents(assistantEl, events)" in template
-    assert "const turnId = event.turn_id" in template
-    assert "turnIdByMessageId.get(event.message_id)" in template
-    assert "turnEvents.length && !assistantTurns.has(msg.turn_id)" in template
-    assert "appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input)" in template
-    assert "updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output)" in template
-    assert "replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || [])" in template
+    assert "conversation.renderTranscript(messages, events);" in template
+    assert "function replaySessionEvents(assistantEl, events, interactions)" in ui
+    assert "const turnId = event.turn_id" in ui
+    assert "turnIdByMessageId.get(event.message_id)" in ui
+    assert "turnEvents.length && !assistantTurns.has(msg.turn_id)" in ui
+    assert "appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input)" in ui
+    assert "updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output)" in ui
+    assert "replaySessionEvents(row, eventsByTurn.get(msg.turn_id) || [], interactions)" in ui
 
 
 def test_chat_renders_unacknowledged_report_cards():
@@ -452,16 +460,16 @@ def test_chat_renders_unacknowledged_report_cards():
     drop such events entirely, so finished delegated work showed no
     acknowledgement until a reload by which point it sat in an unrelated row.
     """
-    template = Path("src/lucent/web/templates/chat.html").read_text()
+    ui = Path("src/lucent/web/static/chat-message-ui.js").read_text()
 
-    assert "const ORPHAN_TURN = '__delegated_report__';" in template
+    assert "const ORPHAN_TURN = '__delegated_report__';" in ui
     # Only report cards are rehomed; other turnless events keep the old skip.
-    assert "const isReport = eventTypeMatches(event, 'subagent_report');" in template
-    assert "(isReport ? ORPHAN_TURN : null)" in template
-    assert "const orphanCards = (eventsByTurn.get(ORPHAN_TURN) || [])" in template
+    assert "const isReport = eventTypeMatches(event, 'subagent_report');" in ui
+    assert "(isReport ? ORPHAN_TURN : null)" in ui
+    assert "const orphanCards = (eventsByTurn.get(ORPHAN_TURN) || [])" in ui
     # Interleaved chronologically, not dumped at the end of the thread.
-    assert "function eventTime(row)" in template
-    assert "flushOrphanCardsBefore(eventTime(msg));" in template
+    assert "function eventTime(row)" in ui
+    assert "flushOrphanCardsBefore(eventTime(msg));" in ui
 
 
 def test_chat_history_supports_soft_deleting_sessions():
@@ -902,10 +910,14 @@ async def test_chat_stream_auto_turn_metadata_reaches_message_and_sse(monkeypatc
 
 def test_chat_template_renders_auto_selection_notes():
     template = Path("src/lucent/web/templates/chat.html").read_text()
+    ui = Path("src/lucent/web/static/chat-message-ui.js").read_text()
 
+    assert "function appendAutoSelectionNote(assistantEl, info)" in ui
+    # Live provenance rides the session handshake in the shared streaming turn.
+    assert "appendAutoSelectionNote(assistantEl, payload.model_selected);" in ui
+    assert "if (autoInfo) appendAutoSelectionNote(row, autoInfo);" in ui
+    # The page only re-exports it for its own callers.
     assert "function appendAutoSelectionNote(assistantEl, info)" in template
-    assert "appendAutoSelectionNote(assistantEl, event.model_selected);" in template
-    assert "if (autoInfo) appendAutoSelectionNote(assistantEl, autoInfo);" in template
 
 
 def test_hook_event_payload_promotes_decision_gate_fields():
@@ -948,5 +960,6 @@ def test_message_ui_renders_memory_gate_confidence():
     assert "decision_scores" in js
     assert "hook-memory-score" in js
     assert "Relevance gate" in js
-    template = Path("src/lucent/web/templates/chat.html").read_text()
-    assert ".hook-memory-score" in template
+    # The hook-chip styling moved with the renderer into the shared stylesheet.
+    css = Path("src/lucent/web/static/chat-surface.css").read_text()
+    assert ".hook-memory-score" in css

@@ -88,6 +88,21 @@ class TestCreateMemory:
         assert result["importance"] == 7
         assert result["version"] == 1
 
+    async def test_create_over_absolute_cap_states_length_and_remedy(
+        self, mcp_tools, auth_user
+    ):
+        """The create-path absolute-cap rejection must carry length and remedy."""
+        result = await _call(
+            mcp_tools,
+            "create_memory",
+            {"type": "experience", "content": "x" * 100_001},
+        )
+
+        assert "error" in result
+        assert "100,001" in result["error"]
+        assert "100,000" in result["error"]
+        assert "Persist the full artifact externally" in result["error"]
+
     async def test_create_duplicate_technical_file_returns_update_instruction(
         self, mcp_tools, auth_user, clean_test_data
     ):
@@ -382,17 +397,76 @@ class TestGetMemory:
         assert result["content"] == test_memory["content"]
 
     async def test_get_nonexistent_memory(self, mcp_tools, auth_user):
-        """Test retrieving a memory that doesn't exist."""
+        """A never-created id must be reported as nonexistent, not as deleted/out-of-scope."""
+        missing_id = str(uuid4())
         result = await _call(
             mcp_tools,
             "get_memory",
             {
-                "memory_id": str(uuid4()),
+                "memory_id": missing_id,
             },
         )
 
         assert "error" in result
         assert "not found" in result["error"].lower()
+        assert missing_id in result["error"]
+        assert "no memory exists" in result["error"]
+        assert "soft-deleted" not in result["error"].lower()
+        assert "outside your scope" not in result["error"].lower()
+
+    async def test_get_soft_deleted_memory_reports_deletion(
+        self, mcp_tools, auth_user, db_pool, test_memory
+    ):
+        """A soft-deleted id must be distinguished from one that never existed."""
+        repo = MemoryRepository(db_pool)
+        assert await repo.delete(
+            test_memory["id"],
+            organization_id=auth_user["organization_id"],
+            user_id=auth_user["id"],
+        )
+
+        result = await _call(
+            mcp_tools,
+            "get_memory",
+            {"memory_id": str(test_memory["id"])},
+        )
+
+        assert "error" in result
+        assert str(test_memory["id"]) in result["error"]
+        assert "soft-deleted" in result["error"].lower()
+        assert "no memory exists" not in result["error"]
+
+    async def test_get_out_of_scope_memory_reports_scope(
+        self, mcp_tools, auth_user, db_pool, clean_test_data
+    ):
+        """A row in another owner's scope must say so, not claim it does not exist."""
+        prefix = clean_test_data
+        other_user = await UserRepository(db_pool).create(
+            external_id=f"{prefix}other-user",
+            provider="local",
+            organization_id=auth_user["organization_id"],
+            email=f"{prefix}other-user@test.com",
+            display_name=f"{prefix}Other User",
+        )
+        other_memory = await MemoryRepository(db_pool).create(
+            username=f"{prefix}other-user",
+            type="experience",
+            content=f"{prefix} memory owned by another user",
+            user_id=other_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+
+        result = await _call(
+            mcp_tools,
+            "get_memory",
+            {"memory_id": str(other_memory["id"])},
+        )
+
+        assert "error" in result
+        assert str(other_memory["id"]) in result["error"]
+        assert "outside your scope" in result["error"].lower()
+        assert "soft-deleted" not in result["error"].lower()
+        assert "no memory exists" not in result["error"]
 
     async def test_get_memory_invalid_uuid(self, mcp_tools, auth_user):
         """Test retrieving with an invalid UUID format."""
@@ -406,6 +480,7 @@ class TestGetMemory:
 
         assert "error" in result
         assert "Invalid" in result["error"]
+        assert "not-a-uuid" in result["error"]
 
     async def test_get_memory_repo_acl_blocks_when_access_denied(
         self, mcp_tools, auth_user, clean_test_data, monkeypatch
@@ -438,7 +513,9 @@ class TestGetMemory:
             },
         )
         assert "error" in result
-        assert "not found" in result["error"].lower()
+        assert "access to repository" in result["error"]
+        assert "org/private-repo" in result["error"]
+        assert created["id"] in result["error"]
 
 
 # ============================================================================
@@ -961,6 +1038,7 @@ class TestUpdateMemory:
         )
         assert "error" in generic_result
         assert "update_goal_milestone" in generic_result["error"]
+        assert str(goal["id"]) in generic_result["error"]
 
         result = await _call(
             mcp_tools,
@@ -1078,6 +1156,78 @@ class TestUpdateMemory:
         assert "error" in result
         assert "not accessible" in result["error"].lower() or "Permission denied" in result["error"]
         set_current_user(None)
+
+    async def test_update_over_absolute_cap_states_lengths_and_remedy(
+        self, mcp_tools, auth_user, test_memory
+    ):
+        """The absolute-cap rejection must carry stored length, limit, and remedy."""
+        current_length = len(test_memory["content"])
+        attempted = "x" * 100_001
+
+        result = await _call(
+            mcp_tools,
+            "update_memory",
+            {"memory_id": str(test_memory["id"]), "content": attempted},
+        )
+
+        assert "error" in result
+        assert "100,000" in result["error"]
+        assert f"{current_length:,}" in result["error"]
+        assert "Persist the full artifact externally" in result["error"]
+        assert str(test_memory["id"]) in result["error"]
+
+    async def test_update_technical_memory_without_anchor_names_remedy(
+        self, mcp_tools, auth_user, db_pool, clean_test_data
+    ):
+        """An unanchored legacy technical memory update must say how to add an anchor.
+
+        Mirrors audit row d3123c29: a tags update to technical memory 84dcfa87
+        was rejected with create-time advice ("use type='experience'") that a
+        caller cannot act on from update_memory.
+        """
+        prefix = clean_test_data
+        legacy = await MemoryRepository(db_pool).create(
+            username=f"{prefix}user",
+            type="technical",
+            content=f"{prefix} Legacy technical note without an anchor",
+            metadata={},
+            user_id=auth_user["id"],
+            organization_id=auth_user["organization_id"],
+        )
+
+        result = await _call(
+            mcp_tools,
+            "update_memory",
+            {"memory_id": str(legacy["id"]), "tags": ["legacy", "touched"]},
+        )
+
+        assert "error" in result
+        assert str(legacy["id"]) in result["error"]
+        assert "technical anchor" in result["error"].lower()
+        assert "metadata.filename" in result["error"]
+        assert "Call update_memory again with metadata" in result["error"]
+        assert "type='experience'" not in result["error"]
+
+    async def test_update_invalid_related_id_names_the_entry(
+        self, mcp_tools, auth_user, test_memory
+    ):
+        """An invalid related id must be named individually, with a remedy."""
+        bad_id = str(uuid4())
+
+        result = await _call(
+            mcp_tools,
+            "update_memory",
+            {
+                "memory_id": str(test_memory["id"]),
+                "related_memory_ids": [bad_id],
+            },
+        )
+
+        assert "error" in result
+        assert bad_id in result["error"]
+        assert "(not found)" in result["error"]
+        assert "related_memory_ids contains invalid entries" in result["error"]
+        assert "Remove or replace these ids and retry" in result["error"]
 
     async def test_admin_can_update_daemon_owned_memory(
         self, mcp_tools, db_pool, test_organization, clean_test_data
@@ -2528,3 +2678,78 @@ class TestUnshareMemory:
             },
         )
         assert "error" in result
+
+
+# ============================================================================
+# Tool-description contract (self-documenting rejections)
+# ============================================================================
+
+
+class TestToolDescriptionContract:
+    """Model-facing descriptions must state the contracts callers get wrong.
+
+    A caller only sees these descriptions, so each assertion below pins a rule
+    that a rejection otherwise has to teach the hard way. These tests render
+    the tools and need no database.
+    """
+
+    @staticmethod
+    def _descriptions():
+        mcp = FastMCP("test-descriptions")
+        register_tools(mcp)
+        return {
+            name: tool.description or ""
+            for name, tool in mcp._tool_manager._tools.items()
+        }
+
+    def test_create_memory_documents_anchors_and_limits(self):
+        description = self._descriptions()["create_memory"]
+
+        assert "Technical anchor requirement" in description
+        for field in (
+            "category",
+            "repo",
+            "directory",
+            "filename",
+            "language",
+            "code_snippet",
+            "version_info",
+        ):
+            assert field in description
+        assert "12,000 characters" in description
+        assert "100,000 characters absolute" in description
+        assert "persist the artifact externally" in description
+
+    def test_update_memory_documents_wholesale_replacement(self):
+        description = self._descriptions()["update_memory"]
+
+        assert "REPLACED WHOLESALE" in description
+        assert "ContentShrinkError" in description
+        assert "append-first" in description
+        assert "intentional rewrite" in description
+        assert "expected_version" in description
+
+    def test_update_memory_documents_anchor_enforcement(self):
+        description = self._descriptions()["update_memory"]
+
+        for field in (
+            "category",
+            "repo",
+            "directory",
+            "filename",
+            "language",
+            "code_snippet",
+            "version_info",
+        ):
+            assert field in description
+        assert "enforced against the" in description
+        assert "12,000" in description
+        assert "100,000" in description
+
+    def test_get_memory_documents_distinct_failure_modes(self):
+        description = self._descriptions()["get_memory"]
+
+        assert "the id never existed" in description
+        assert "soft-deleted" in description
+        assert "outside your scope" in description
+        assert "exactly as received" in description

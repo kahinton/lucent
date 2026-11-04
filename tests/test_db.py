@@ -1012,6 +1012,59 @@ class TestMemoryRepository:
                 organization_id=test_user["organization_id"],
             )
 
+    async def test_update_related_ids_names_each_invalid_entry(
+        self, db_pool, test_user, test_memory, clean_test_data
+    ):
+        """Deleted and nonexistent related ids must be named individually.
+
+        Audit rows 1b72bd36 and c669e46e show rejects that only printed the
+        set, leaving an otherwise-valid update blocked with no actionable
+        entry to remove.
+        """
+        prefix = clean_test_data
+        repo = MemoryRepository(db_pool)
+
+        valid_related = await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} valid related memory",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        deleted_related = await repo.create(
+            username=f"{prefix}user",
+            type="experience",
+            content=f"{prefix} related memory to delete",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        assert await repo.delete(
+            deleted_related["id"],
+            organization_id=test_user["organization_id"],
+            user_id=test_user["id"],
+        )
+        missing_id = uuid4()
+
+        with pytest.raises(ValueError) as excinfo:
+            await repo.update(
+                memory_id=test_memory["id"],
+                related_memory_ids=[
+                    valid_related["id"],
+                    deleted_related["id"],
+                    missing_id,
+                ],
+                organization_id=test_user["organization_id"],
+                user_id=test_user["id"],
+            )
+
+        message = str(excinfo.value)
+        assert str(deleted_related["id"]) in message
+        assert f"{deleted_related['id']} (soft-deleted)" in message
+        assert str(missing_id) in message
+        assert f"{missing_id} (not found)" in message
+        assert str(valid_related["id"]) not in message
+        assert "Remove or replace these ids and retry" in message
+
 
 class TestUserRepository:
     """Tests for UserRepository."""

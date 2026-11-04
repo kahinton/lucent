@@ -2,849 +2,10 @@
 {% block title %}Chat - Lucent{% endblock %}
 
 {% block extra_head %}
-<style>
-    .lucent-mark {
-        width: 192px;
-        height: 192px;
-        object-fit: contain;
-        filter: drop-shadow(0 7px 5px rgba(42, 50, 42, 0.2));
-        animation: mark-settle 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
-    }
-    .assistant-response {
-        width: 100%;
-    }
-    /* The composer's in-motion perimeter is the shared teal→pink sweep from
-       /static/lucent-state.css, exposed as a reusable custom property so this
-       page and Activity's "running" cards cannot drift apart. The composer only
-       paints while streaming, so an idle composer never advertises motion. */
-    .input-glow.is-streaming::before {
-        content: '';
-        position: absolute;
-        inset: 0;
-        border-radius: inherit;
-        padding: 2px;
-        background: var(--lucent-sweep-gradient);
-        filter: drop-shadow(0 0 5px rgba(0, 207, 193, 0.24));
-        pointer-events: none;
-        -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-        -webkit-mask-composite: xor;
-        mask-composite: exclude;
-        animation: lucent-sweep 1.8s ease-in-out infinite alternate;
-    }
-    @keyframes mark-settle {
-        from { opacity: 0; transform: translateY(-8px) rotate(-3deg); }
-        to { opacity: 1; transform: translateY(0) rotate(0); }
-    }
-
-    /* Override main content to be full-height for chat */
-    main { padding: 0 !important; height: 100vh; }
-    main > div { max-width: none !important; height: 100%; }
-    
-    /* Chat shell keeps the conversation full-width; history overlays from the right. */
-    .chat-shell {
-        height: 100%;
-        min-height: 0;
-        overflow: hidden;
-        position: relative;
-        background-color: #f5f3ef;
-        background-image: repeating-linear-gradient(90deg, rgba(0, 0, 0, 0.022) 0, rgba(0, 0, 0, 0.022) 1px, transparent 1px, transparent 12px);
-    }
-    .session-drawer-backdrop {
-        position: absolute;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.22);
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 0.22s ease;
-        z-index: 20;
-    }
-    .session-drawer-backdrop.open {
-        opacity: 1;
-        pointer-events: auto;
-    }
-    .session-drawer {
-        position: absolute;
-        top: 0;
-        right: 0;
-        bottom: 0;
-        width: min(360px, calc(100vw - 2rem));
-        background: rgba(255, 255, 255, 0.97);
-        border-left: 1px solid #d8d3cc;
-        box-shadow: -7px 0 0 rgba(0, 0, 0, 0.08), -24px 0 48px rgba(0, 0, 0, 0.18);
-        transform: translateX(100%);
-        transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
-        z-index: 30;
-        display: flex;
-        flex-direction: column;
-        min-height: 0;
-        backdrop-filter: blur(14px);
-    }
-    .session-drawer.open {
-        transform: translateX(0);
-    }
-    .session-list {
-        overflow-y: auto;
-        min-height: 0;
-    }
-    .session-row.active {
-        background: #d8fffa;
-        color: #064a46;
-        border-color: #00cfc1;
-        box-shadow: 0 2px 0 rgba(0, 127, 120, 0.3);
-    }
-    .session-delete-button {
-        opacity: 0;
-    }
-    .session-list > div:hover .session-delete-button,
-    .session-list > div:focus-within .session-delete-button {
-        opacity: 1;
-    }
-    /* Subtle project badge on session rows — minimal chrome, both themes */
-    .session-project-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        max-width: 100%;
-        padding: 1px 7px;
-        border-radius: 9999px;
-        font-size: 10px;
-        font-weight: 600;
-        letter-spacing: 0.01em;
-        line-height: 14px;
-        color: #0f766e;
-        background: rgba(0, 207, 193, 0.10);
-        border: 1px solid rgba(0, 150, 141, 0.25);
-    }
-    .session-project-badge svg { flex-shrink: 0; }
-    .session-project-badge span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    @media all {
-        .session-project-badge {
-            color: #7feee4 !important;
-            background: rgba(0, 207, 193, 0.08) !important;
-            border-color: rgba(0, 207, 193, 0.22) !important;
-        }
-    }
-    .chat-confirm-dialog::backdrop {
-        background: rgba(0, 0, 0, 0.6);
-        backdrop-filter: blur(2px);
-    }
-
-    /* ── Composer control row ────────────────────────────────────────────
-       Matches the Activity/Workflows control-row convention: bordered controls,
-       muted text, teal focus.
-
-       Sizing is INTRINSIC, not viewport-based. The composer is capped at
-       max-w-3xl (48rem), so viewport media queries describe the wrong box: on a
-       wide monitor the controls still only have 768px. One flat flex row (no
-       growing wrapper — that would claim the full width and push the actions
-       onto their own line) shares the space between four selectors and two
-       actions, and wraps only when the space is genuinely gone. Selects shrink
-       with ellipsis rather than overflowing, which is what used to push four of
-       six controls off the right edge. */
-    .chat-controls {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 0.375rem;
-        margin-top: 0.5rem;
-        padding: 0 0.25rem;
-        /* The row is its own size container. Viewport queries are the wrong
-           signal here: the composer is capped at 48rem, so the controls have the
-           same width on a 14" laptop and a 32" monitor. `inline-size` containment
-           also means the children can no longer widen this box, which is a
-           structural guard against the original bug where long option text pushed
-           the row past the screen edge. */
-        container-type: inline-size;
-        container-name: composer-controls;
-    }
-    .config-select {
-        /* Share the row instead of each claiming its widest option. A native
-           select sizes to its widest option, so without a small basis the four
-           selects consume the whole 48rem composer and push the actions onto a
-           second line. With a 6.5rem basis they divide the space, the actions
-           keep their place on the right, and `min-width: 0` lets a long model
-           name shrink rather than overflow. */
-        flex: 1 1 6.5rem;
-        min-width: 0;
-        max-width: 16rem;
-        text-overflow: ellipsis;
-        padding: 0.3rem 0.45rem;
-        border: 1px solid #d8d3cc;
-        border-radius: 0.5rem;
-        background-color: #ffffff;
-        color: #6b6560;
-        font-size: 0.75rem;
-        line-height: 1.15rem;
-        cursor: pointer;
-    }
-    .config-select:hover { border-color: #00cfc1; }
-    .config-select:focus { outline: none; border-color: #00cfc1; box-shadow: 0 0 0 2px rgba(0, 207, 193, 0.18); }
-    /* Reasoning only exists for models that publish levels; a yellow accent
-       marks it as the one selector that changes the model's behavior. It needs
-       the most width because "Reasoning: default" is a long label. */
-    #reasoning-select {
-        flex-grow: 1.4;
-        background-color: #fff3b5;
-        border-color: #ffd84d;
-        color: #4b3900;
-    }
-    #reasoning-select:hover, #reasoning-select:focus { border-color: #d8b400; }
-    /* Model and agent names are the longest labels in the row, so they get a
-       larger share than the two short fixed-label selects. */
-    #model-select { flex-grow: 1.6; }
-    #agent-select { flex-grow: 1.2; }
-    .chat-controls-button {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.3rem;
-        padding: 0.3rem 0.5rem;
-        border-radius: 0.5rem;
-        font-size: 0.75rem;
-        font-weight: 500;
-        color: #78736f;
-        white-space: nowrap;
-        /* Pushed to the trailing edge while there is room; wraps naturally once
-           there is not. */
-        margin-left: auto;
-        transition: background-color 120ms ease, color 120ms ease;
-    }
-    .chat-controls-button:hover { background-color: rgba(0, 207, 193, 0.1); color: #007f78; }
-    #new-conversation-btn { margin-left: 0; }
-
-    /* Phones: two selectors per row reads far better than four slivers, and the
-       actions keep their own right-aligned row. Labels drop so the actions stay
-       compact and the selectors keep their width. */
-    @media (max-width: 480px) {
-        .chat-controls { gap: 0.35rem; }
-        .config-select { flex: 1 1 calc(50% - 0.5rem); max-width: none; }
-        .chat-controls-button { margin-left: 0; }
-        .chat-controls-button > span { display: none; }
-        #session-menu-btn { margin-left: auto; }
-    }
-
-    /* Below ~45rem of ROW width, four selectors plus two labelled actions stop
-       fitting on one line and the selects squeeze until their labels clip. Give
-       every select half the row so they form a tidy 2×2 grid instead. Container
-       queries key off the composer's real width, so this stays correct on a wide
-       monitor with a narrow window and on a phone alike. */
-    @container composer-controls (max-width: 45rem) {
-        .config-select { flex: 1 1 calc(50% - 0.25rem); max-width: none; }
-        .chat-controls-button { margin-left: 0; }
-        #session-menu-btn { margin-left: auto; }
-    }
-    @container composer-controls (max-width: 22rem) {
-        .config-select { flex: 1 1 100%; }
-    }
-
-    .chat-container {
-        display: flex;
-        flex-direction: column;
-        flex: 1;
-        min-width: 0;
-        height: 100%;
-        overflow: hidden;
-    }
-    
-    /* Empty state: center everything vertically, input right below prompts */
-    .chat-container.empty-mode .messages-area {
-        flex: 1;
-        overflow: visible;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        padding-top: 3.25rem;
-        padding-bottom: 0;
-    }
-    .chat-input-area.drag-active .input-glow {
-        border-color: #00cfc1;
-        box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.2), 0 5px 0 #a5a29d;
-    }
-    .chat-container.empty-mode .chat-input-area {
-        flex: none;
-        border-top: none;
-        padding-top: 0.75rem;
-        transform: none;
-    }
-    .chat-container.empty-mode .messages-area #empty-state {
-        transform: none;
-    }
-    .chat-overview-panel {
-        width: min(30rem, calc(100vw - 2rem));
-        max-height: min(34rem, calc(100vh - 5rem));
-        overflow-y: auto;
-    }
-    /* Full-bleed header bar. The chrome floats over the transcript, so it is a
-       solid plate spanning the whole chat width — not a floating pill. No
-       radius, no ring, no drop shadow and no fade below: any of those made it
-       read as a detached card hovering above the text instead of the top of
-       the page. */
-    .chat-overview-shell {
-        left: 0;
-        right: 0;
-        top: 0;
-        height: 3.25rem;
-        padding: 0 1rem;
-        justify-content: flex-end;
-        border-radius: 0;
-        background: #080808;
-        border-bottom: 1px solid #1e1e1e;
-        box-shadow: none;
-    }
-    .chat-overview-shell [data-overview-trigger] {
-        color: var(--lucent-muted);
-    }
-    .chat-overview-shell [data-overview-trigger]:hover {
-        color: var(--lucent-ink);
-        background: #1e1e1e;
-    }
-    .chat-overview-shell [data-overview-trigger][aria-expanded="true"] {
-        background: #1c1c1c;
-        color: #f5f5f4;
-    }
-    .chat-overview-item summary {
-        list-style: none;
-    }
-    .chat-overview-item summary::-webkit-details-marker {
-        display: none;
-    }
-    .chat-overview-item[open] .chat-overview-chevron {
-        transform: rotate(90deg);
-    }
-
-    /* Delegated work pane — the live view of what this conversation handed off. */
-    .delegated-list {
-        max-height: 26rem;
-        overflow-y: auto;
-    }
-    .delegated-request {
-        border-bottom: 1px solid var(--lucent-line);
-    }
-    .delegated-request:last-child {
-        border-bottom: none;
-    }
-    .delegated-request-summary {
-        display: flex;
-        align-items: flex-start;
-        gap: 0.5rem;
-        padding: 0.75rem 1rem;
-        cursor: pointer;
-        list-style: none;
-    }
-    .delegated-request-summary::-webkit-details-marker {
-        display: none;
-    }
-    .delegated-request-summary:hover {
-        background: #171717;
-    }
-    .delegated-request-chevron {
-        flex-shrink: 0;
-        width: 0.875rem;
-        height: 0.875rem;
-        margin-top: 0.15rem;
-        color: var(--lucent-muted);
-        transition: transform 140ms ease;
-    }
-    .delegated-request[open] .delegated-request-chevron {
-        transform: rotate(90deg);
-    }
-    .delegated-request-text {
-        min-width: 0;
-        flex: 1;
-    }
-    .delegated-request-title {
-        display: block;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 0.8125rem;
-        font-weight: 500;
-        color: var(--lucent-ink);
-    }
-    .delegated-request-meta {
-        display: block;
-        margin-top: 0.15rem;
-        font-size: 11px;
-        color: var(--lucent-muted);
-    }
-    .delegated-task-list {
-        margin: 0;
-        padding: 0 1rem 0.5rem 2rem;
-        list-style: none;
-    }
-    .delegated-task {
-        display: flex;
-        align-items: flex-start;
-        gap: 0.5rem;
-        padding: 0.4rem 0;
-    }
-    .delegated-task + .delegated-task {
-        border-top: 1px solid rgba(255, 255, 255, 0.05);
-    }
-    .delegated-task-dot {
-        flex-shrink: 0;
-        width: 0.4rem;
-        height: 0.4rem;
-        margin-top: 0.4rem;
-        border-radius: 999px;
-    }
-    .delegated-task-main {
-        min-width: 0;
-        flex: 1;
-    }
-    .delegated-task-title-row {
-        display: flex;
-        align-items: baseline;
-        gap: 0.5rem;
-    }
-    .delegated-task-title {
-        min-width: 0;
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 0.75rem;
-        color: var(--lucent-ink);
-    }
-    .delegated-task-status {
-        flex-shrink: 0;
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: var(--lucent-muted);
-    }
-    .delegated-task-excerpt {
-        margin: 0.15rem 0 0;
-        font-size: 11px;
-        line-height: 1.45;
-        color: var(--lucent-muted);
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-    }
-    .delegated-task-stop {
-        flex-shrink: 0;
-        padding: 0.05rem 0.4rem;
-        border: 1px solid var(--lucent-line);
-        border-radius: 0.375rem;
-        font-size: 10px;
-        color: var(--lucent-muted);
-        background: transparent;
-        cursor: pointer;
-    }
-    .delegated-task-stop:hover:not(:disabled) {
-        color: #fca5a5;
-        border-color: #7f1d1d;
-    }
-    .delegated-task-stop:disabled {
-        opacity: 0.5;
-        cursor: default;
-    }
-
-    /* ── Live delegated-work progress card (in transcript) ──
-       Shows where running work is *right now*, patched in place on each poll so
-       the transcript never has to be rebuilt to show progress. Deliberately the
-       same visual family as .subagent-report-card (accent stripe, chip, paper
-       surface, muted meta) so a live box and a result box read as one object
-       type rather than two unrelated widgets. Collapsible, because it sits
-       inline in the conversation and should not dominate it. */
-    .delegated-progress-card {
-        position: relative;
-        max-width: 48rem;
-        margin: 0 auto;
-        border: 1px solid var(--lucent-line);
-        border-radius: 0.75rem;
-        background: var(--lucent-paper);
-        overflow: hidden;
-    }
-    .delegated-progress-card::before {
-        content: "";
-        position: absolute;
-        left: 0;
-        top: 0;
-        bottom: 0;
-        width: 3px;
-        background: var(--lucent-teal);
-    }
-    .delegated-progress[data-state="attention"] .delegated-progress-card::before {
-        background: var(--lucent-pink);
-    }
-    .delegated-progress-summary {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        min-width: 0;
-        padding: 0.6rem 0.875rem 0.6rem 1rem;
-        cursor: pointer;
-        list-style: none;
-    }
-    .delegated-progress-summary::-webkit-details-marker { display: none; }
-    .delegated-progress-chevron {
-        width: 0.75rem;
-        height: 0.75rem;
-        flex: none;
-        color: var(--lucent-muted);
-        transition: transform 0.15s ease;
-    }
-    .delegated-progress-card[open] .delegated-progress-chevron {
-        transform: rotate(90deg);
-    }
-    .delegated-progress-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.25rem;
-        flex-shrink: 0;
-        padding: 0.125rem 0.4rem;
-        border: 1px solid transparent;
-        border-radius: 999px;
-        font-size: 10px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        background: rgba(0, 207, 193, 0.12);
-        border-color: rgba(0, 207, 193, 0.35);
-        color: var(--lucent-teal);
-    }
-    .delegated-progress[data-state="attention"] .delegated-progress-chip {
-        background: rgba(255, 63, 155, 0.12);
-        border-color: rgba(255, 63, 155, 0.35);
-        color: var(--lucent-pink);
-    }
-    .delegated-progress-spinner {
-        width: 7px;
-        height: 7px;
-        border-radius: 999px;
-        border: 1.5px solid currentColor;
-        border-right-color: transparent;
-        animation: delegated-spin 0.8s linear infinite;
-    }
-    @keyframes delegated-spin {
-        to { transform: rotate(360deg); }
-    }
-    .delegated-progress-title {
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 11px;
-        color: var(--lucent-muted);
-    }
-    .delegated-progress-count {
-        margin-left: auto;
-        flex: none;
-        font-size: 11px;
-        font-variant-numeric: tabular-nums;
-        color: var(--lucent-muted);
-    }
-    .delegated-progress-detail {
-        padding: 0 0.875rem 0.7rem 1rem;
-    }
-    .delegated-progress-bar {
-        height: 3px;
-        border-radius: 999px;
-        background: var(--lucent-line);
-        overflow: hidden;
-    }
-    .delegated-progress-fill {
-        display: block;
-        height: 100%;
-        border-radius: 999px;
-        background: var(--lucent-teal);
-        transition: width 0.4s ease;
-    }
-    .delegated-progress[data-state="attention"] .delegated-progress-fill {
-        background: var(--lucent-pink);
-    }
-    .delegated-progress-tasks {
-        margin: 0.55rem 0 0;
-        padding: 0;
-        list-style: none;
-        display: flex;
-        flex-direction: column;
-        gap: 0.3rem;
-    }
-    .delegated-progress-task {
-        display: flex;
-        align-items: center;
-        gap: 0.45rem;
-        min-width: 0;
-        font-size: 0.75rem;
-        color: var(--lucent-ink);
-    }
-    .delegated-progress-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 999px;
-        flex: none;
-        background: var(--lucent-line);
-    }
-    .delegated-progress-dot.is-done { background: var(--lucent-teal); }
-    .delegated-progress-dot.is-failed { background: var(--lucent-pink); }
-    .delegated-progress-dot.is-cancelled { background: var(--lucent-muted); }
-    .delegated-progress-dot.is-running {
-        background: var(--lucent-teal);
-        animation: delegated-pulse 1.4s ease-in-out infinite;
-    }
-    @keyframes delegated-pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.35; }
-    }
-    .delegated-progress-task-title {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-    .delegated-progress-task-status {
-        margin-left: auto;
-        flex: none;
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: var(--lucent-muted);
-    }
-    .delegated-progress-footer {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        margin-top: 0.55rem;
-    }
-    .delegated-progress-meta {
-        font-size: 10px;
-        color: var(--lucent-muted);
-        font-variant-numeric: tabular-nums;
-    }
-    .delegated-progress-link {
-        flex-shrink: 0;
-        font-size: 11px;
-        font-weight: 500;
-        color: var(--lucent-teal);
-        text-decoration: none;
-    }
-    .delegated-progress-link:hover { text-decoration: underline; }
-
-    .delegated-empty-row {
-        margin: 0;
-        padding: 0 1rem 0.75rem 2rem;
-        font-size: 11px;
-        color: var(--lucent-muted);
-    }
-    .delegated-request-link {
-        display: inline-block;
-        padding: 0 1rem 0.75rem 2rem;
-        font-size: 11px;
-        font-weight: 500;
-        color: var(--lucent-teal);
-        text-decoration: none;
-    }
-    .delegated-request-link:hover {
-        text-decoration: underline;
-    }
-    .chat-container.empty-mode .input-footer {
-        display: none;
-    }
-    
-    /* Messages area */
-    .messages-area {
-        flex: 1;
-        overflow-y: auto;
-        scroll-behavior: smooth;
-        /* Clear the header bar: it is opaque, so text under it would be hidden
-           rather than merely cluttered. Matches the bar's 3.25rem height. */
-        padding-top: 3.25rem;
-    }
-    
-    /* Typing indicator animation */
-    @keyframes pulse-dot {
-        0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
-        40% { opacity: 1; transform: scale(1); }
-    }
-    .typing-dot {
-        animation: pulse-dot 1.4s ease-in-out infinite;
-    }
-    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
-    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
-    
-    /* Tool call accordion animation */
-    .tool-details {
-        max-height: 0;
-        overflow: hidden;
-        transition: max-height 0.3s ease-out;
-    }
-    .tool-details.open {
-        max-height: 500px;
-    }
-    
-    /* Reasoning block */
-    .reasoning-block {
-        max-height: 0;
-        overflow: hidden;
-        transition: max-height 0.3s ease-out;
-    }
-    .reasoning-block.open {
-        max-height: 2000px;
-    }
-    
-    /* Fade-in for new messages */
-    @keyframes fade-up {
-        from { opacity: 0; transform: translateY(8px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    .msg-enter {
-        animation: fade-up 0.25s ease-out;
-    }
-    
-    /* Input area glow on focus */
-    .input-glow:focus-within {
-        border-color: #00cfc1;
-        box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.14), 0 5px 0 #aaa7a1, 0 13px 28px rgba(0, 0, 0, 0.16);
-    }
-    
-    /* Streaming cursor */
-    .streaming-cursor::after {
-        content: '▊';
-        animation: blink 0.8s step-end infinite;
-        color: #ff3f9b;
-        font-weight: 200;
-    }
-    @keyframes blink {
-        50% { opacity: 0; }
-    }
-    
-    /* Dark mode overrides for chat-specific elements */
-    @media all {
-        .chat-shell { background-color: #080808; }
-        .chat-user-bubble { background-color: #00cfc1 !important; color: #050505 !important; }
-        .chat-assistant-bg { background-color: transparent !important; }
-        .tool-chip { background-color: #181818 !important; border-color: #3d3d3d !important; color: #b8b4b0 !important; }
-        .tool-chip:hover { background-color: #242424 !important; }
-        .tool-details-content { background-color: #121212 !important; border-color: #333333 !important; }
-        .chat-input-area { background-color: rgba(8, 8, 8, 0.96) !important; border-color: #333333 !important; }
-        .input-glow { background: #141414 !important; border-color: #3d3d3d !important; box-shadow: 0 5px 0 #000000, 0 14px 30px rgba(0, 0, 0, 0.36); }
-        .input-glow:focus-within { border-color: #00cfc1 !important; box-shadow: 0 0 0 3px rgba(0, 207, 193, 0.14), 0 5px 0 #000000, 0 16px 34px rgba(0, 0, 0, 0.42); }
-        .chat-input-field { background-color: transparent !important; border-color: transparent !important; color: #f7f5f1 !important; }
-        .chat-input-field::placeholder { color: #77736f !important; }
-        .config-select { background-color: #181818 !important; border-color: #3d3d3d !important; color: #d5d2ce !important; }
-        .config-select:hover, .config-select:focus { border-color: #00cfc1 !important; }
-        .chat-controls-button { color: #94908c !important; }
-        .chat-controls-button:hover { background-color: rgba(0, 207, 193, 0.12) !important; color: #7feee4 !important; }
-        .empty-state-text { color: #94908c !important; }
-        .intro-summary { max-width: 42rem; white-space: pre-line; }
-        .intro-summary .intro-summary-loading { display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 9999px; background: currentColor; opacity: 0.45; animation: intro-pulse 1s ease-in-out infinite; }
-        .intro-summary .intro-summary-loading:nth-child(2) { animation-delay: 0.15s; }
-        .intro-summary .intro-summary-loading:nth-child(3) { animation-delay: 0.3s; }
-        @keyframes intro-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.7; } }
-        .session-drawer { background: rgba(18, 18, 18, 0.98) !important; border-color: #333333 !important; }
-        .session-drawer-backdrop { background: rgba(10, 11, 8, 0.28) !important; }
-        .session-row.active { background: rgba(0, 207, 193, 0.14) !important; color: #7feee4 !important; border-color: #00a89f !important; }
-        .hook-chip { background-color: #181818 !important; border-color: #3d3d3d !important; color: #b8b4b0 !important; border-left-width: 3px !important; border-left-color: #ff3f9b !important; }
-        .hook-chip:hover { background-color: #242424 !important; }
-        .hook-inline-accent { color: #ff3f9b !important; }
-        .hook-details { background-color: #121212 !important; border-color: #333333 !important; }
-        .hook-detail-value { color: #d5d2ce !important; }
-        .hook-memory-content { color: #d5d2ce !important; }
-        .hook-context-text { color: #d5d2ce !important; }
-        .hook-decision-block { color: #f87171 !important; }
-        .hook-decision-replace_args, .hook-decision-replace_result { color: #fbbf24 !important; }
-        .hook-file-ref { background-color: rgba(255, 63, 155, 0.12) !important; border-color: rgba(255, 63, 155, 0.35) !important; color: #ff8fc4 !important; }
-        .hook-memory-tag { background-color: rgba(255, 63, 155, 0.12) !important; color: #ff8fc4 !important; }
-        .hook-memory-id { color: #ff3f9b !important; }
-        .hook-memory-score { color: rgba(255, 143, 196, 0.75) !important; }
-    }
-
-    #empty-state .grid button {
-        border-radius: 0.5rem;
-        background: rgba(255, 255, 255, 0.9);
-        border-color: #d8d3cc;
-        border-left-width: 3px;
-        box-shadow: 0 4px 0 #aaa7a1, 0 10px 22px rgba(0, 0, 0, 0.1);
-    }
-    #empty-state .grid button:nth-child(1) { border-left-color: #00cfc1 !important; }
-    #empty-state .grid button:nth-child(2) { border-left-color: #ff3f9b !important; }
-    #empty-state .grid button:nth-child(3) { border-left-color: #ffd84d !important; }
-    #empty-state .grid button:nth-child(4) { border-left-color: #00cfc1 !important; }
-    #empty-state .grid button:hover {
-        transform: translateY(-2px);
-        border-color: #00cfc1;
-        box-shadow: 0 6px 0 #008e86, 0 14px 26px rgba(0, 0, 0, 0.16);
-    }
-    #empty-state .grid button:active { transform: translateY(2px); box-shadow: 0 2px 0 #008e86; }
-    .chat-input-area {
-        background: rgba(245, 243, 239, 0.94) !important;
-        backdrop-filter: blur(12px);
-    }
-    .input-glow {
-        border-radius: 0.75rem;
-        background: #ffffff;
-        border-color: #d8d3cc;
-        box-shadow: 0 5px 0 #aaa7a1, 0 14px 30px rgba(0, 0, 0, 0.12);
-    }
-    #send-btn {
-        border-radius: 0.45rem;
-        background: #ff3f9b !important;
-        box-shadow: 0 3px 0 #971950, 0 7px 14px rgba(255, 63, 155, 0.26);
-    }
-    #send-btn:hover { background: #e72f88 !important; transform: translateY(-1px); }
-    #send-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #971950; }
-    .chat-user-bubble {
-        border-radius: 0.7rem 0.7rem 0.2rem 0.7rem;
-        background: #00cfc1 !important;
-        color: #050505 !important;
-        border: 1px solid #007f78;
-        box-shadow: 0 4px 0 #007f78, 0 10px 22px rgba(0, 207, 193, 0.22) !important;
-    }
-
-    @media (max-width: 767px) {
-        main { height: 100dvh; }
-        .chat-shell { padding-top: 3.75rem; }
-        .chat-container.empty-mode .messages-area { justify-content: flex-start; overflow-y: auto; padding-top: 3.25rem; }
-        .chat-container.empty-mode .messages-area #empty-state { transform: none; padding-top: 2rem; }
-        .chat-container.empty-mode .chat-input-area { transform: none; }
-        #empty-state { padding-left: 1rem; padding-right: 1rem; }
-        #empty-state .grid { grid-template-columns: 1fr; gap: 0.65rem; }
-        #empty-state .grid button { padding: 0.7rem 0.85rem; }
-        .lucent-mark { width: 96px; height: 96px; margin-bottom: 1rem !important; }
-        .chat-input-area { padding: 0.75rem !important; }
-        .input-glow { gap: 0.35rem; padding: 0.65rem !important; }
-        .input-footer { display: none; }
-        .msg-enter { padding: 0.85rem 1rem; }
-        .chat-user-bubble { max-width: 88%; }
-        .chat-assistant-bg > div { gap: 0.6rem; }
-        .session-drawer { width: calc(100vw - 1rem); }
-    }
-
-    @media all {
-        #empty-state .grid button {
-            background: #181818;
-            border-color: #3d3d3d;
-            box-shadow: 0 4px 0 #000000, 0 12px 24px rgba(0, 0, 0, 0.3);
-        }
-        #empty-state .grid button:hover {
-            background: #202020;
-            border-color: #00cfc1;
-            box-shadow: 0 5px 0 #006f69, 0 15px 28px rgba(0, 0, 0, 0.34);
-        }
-        .chat-input-area {
-            background: rgba(8, 8, 8, 0.96) !important;
-            border-color: #333333 !important;
-        }
-        .input-glow {
-            background: #141414;
-            border-color: #3d3d3d;
-            box-shadow: 0 5px 0 #000000, 0 14px 30px rgba(0, 0, 0, 0.38);
-        }
-        #reasoning-select {
-            background: #2b260e !important;
-            border-color: #8a741d !important;
-            color: #ffe477 !important;
-        }
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
-    }
-</style>
+{# The conversation surface — transcript, tool chips, question cards, composer
+   chrome — is shared with Handoff. Keeping it in one stylesheet is what stops
+   the two surfaces from drifting apart. #}
+<link rel="stylesheet" href="/static/chat-surface.css?v={{ static_version('chat-surface.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -979,94 +140,12 @@
         </div>
     </div>
     
-    <!-- Input area -->
-    <div class="chat-input-area border-t border-gray-200 bg-white px-6 py-4">
-        <div class="max-w-3xl mx-auto">
-            <!-- Status bar -->
-            <div id="status-bar" class="hidden mb-2 px-3">
-                <div class="flex items-center gap-2 text-xs text-gray-500">
-                    <div class="flex gap-1">
-                        <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
-                        <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
-                        <span class="typing-dot w-1.5 h-1.5 bg-primary-500 rounded-full inline-block"></span>
-                    </div>
-                    <span id="status-text">Thinking...</span>
-                </div>
-            </div>
-
-            <!-- Context usage indicator (visible: slim bar; details on hover via title) -->
-            <div id="context-usage" class="hidden mb-2 px-1">
-                <div id="context-usage-track" class="h-1.5 bg-gray-100 rounded-full overflow-hidden" title="">
-                    <div id="context-usage-bar" class="h-full bg-primary-500 rounded-full transition-colors" style="width: 0%"></div>
-                </div>
-            </div>
-
-            <form class="input-glow lucent-sweep flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 transition-all">
-                <input type="file" id="attach-input" class="hidden" multiple
-                    accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,text/csv" />
-                <button type="button" id="attach-btn" class="w-8 h-8 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed shrink-0" title="Attach images or documents">
-                    <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
-                    </svg>
-                </button>
-                <textarea
-                    id="chat-input"
-                    rows="1"
-                    placeholder="Message Lucent..."
-                    class="chat-input-field flex-1 resize-none border-0 bg-transparent text-sm text-gray-900 placeholder-gray-400 focus:ring-0 focus:outline-none"
-                    style="max-height: 200px;"
-                ></textarea>
-                <div class="flex items-center gap-2 shrink-0">
-                    <button type="button" id="stop-btn" class="hidden w-8 h-8 rounded-lg bg-red-500 hover:bg-red-600 text-white flex items-center justify-center transition-colors" title="Stop generating">
-                        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
-                    </button>
-                    <button type="submit" id="send-btn" class="w-8 h-8 rounded-lg bg-primary-600 hover:bg-primary-700 text-white flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed" disabled>
-                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
-                        </svg>
-                    </button>
-                </div>
-            </form>
-            <!-- Pending attachment previews -->
-            <div id="attachment-previews" class="hidden flex flex-wrap gap-2 mt-2 px-1"></div>
-            <!-- Controls toolbar below input.
-                 ONE flex context, no nested groups: a wrapper that grows would
-                 claim the full row and bump the actions onto a second line. Every
-                 child here shares the same line-breaking, so the row fills a
-                 single line at the composer's 48rem cap and only wraps when the
-                 space is genuinely gone. Selects shrink (with ellipsis) rather
-                 than overflowing — long agent/model names used to push four of
-                 six controls past the viewport edge. -->
-            <div class="chat-controls">
-                <select id="agent-select" class="config-select" title="Agent for this conversation">
-                    <option value="">Lucent</option>
-                </select>
-                <select id="model-select" class="config-select" title="Model for this conversation">
-                    <option value="">Loading...</option>
-                </select>
-                <select id="reasoning-select" class="config-select hidden" title="Reasoning effort">
-                    <option value="">Reasoning: default</option>
-                </select>
-                <select id="tool-approval-select" class="config-select" title="Whether the agent may run tools on its own">
-                    <option value="auto">Tools: auto-run</option>
-                    <option value="ask">Tools: ask first</option>
-                </select>
-                <button type="button" id="session-menu-btn" class="chat-controls-button" title="Conversation history" aria-expanded="false">
-                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    <span>History</span>
-                </button>
-                <button type="button" id="new-conversation-btn" class="chat-controls-button" title="New conversation">
-                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                    </svg>
-                    <span>New</span>
-                </button>
-            </div>
-            <p class="input-footer text-[10px] text-gray-400 text-center mt-1">Shift+Enter for new line</p>
-        </div>
-    </div>
+    {% import "partials/chat_composer.html" as composer_ui %}
+    {{ composer_ui.composer(
+        placeholder='Message Lucent...',
+        submit_label='Send message',
+        show_history_controls=true,
+    ) }}
 </div>
 <div id="session-drawer-backdrop" class="session-drawer-backdrop" aria-hidden="true"></div>
 <aside id="session-drawer" class="session-drawer" aria-label="Conversation history" aria-hidden="true">
@@ -1108,18 +187,49 @@
 // Chat State
 // ═══════════════════════════════════════════════════════════════════
 
-const state = {
-    messages: [],       // {role, content}
+// Conversation mechanics (attachments, model/agent controls, streaming turn,
+// interaction cards) live in chat-message-ui.js, shared with Handoff. This page
+// owns only what is specific to /chat: the session drawer, delegated-work
+// panel, and empty-state hero.
+const conversation = LucentChatMessageUI.createConversation({
+    messagesEl: document.getElementById('messages'),
     sessionId: {{ (session_id or '') | tojson }},
+    surface: 'chat',
+    ensureSession: (firstMessage) => ensureSession(firstMessage),
+    persistApprovalMode: (mode) => saveApprovalMode(mode),
+    onSessionStarted: (sessionId, payload) => {
+        state.sessionId = sessionId;
+        conversation.setSessionId(sessionId);
+        history.replaceState(null, '', `/chat/${sessionId}`);
+        loadSessions();
+        // Start tracking delegated work for this (possibly brand-new) session
+        // as soon as it exists.
+        refreshDelegatedWork();
+    },
+    onTurnComplete: () => {
+        if (state.sessionId) loadSessions();
+        refreshContextUsage();
+    },
+    onDelegatedWork: (delegated) => {
+        // The controller already patched the transcript's progress cards; copy
+        // the same snapshot into the overview panel's state so both views of
+        // the delegated work agree.
+        state.delegatedRequests = delegated.requests;
+        state.delegatedRevision = delegated.revision;
+        state.delegatedActiveCount = delegated.activeCount;
+        renderDelegatedWork();
+    },
+    afterRender: () => {
+        // A reload must show live progress without waiting for the next poll.
+        refreshDelegatedWork();
+    },
+});
+
+const state = {
+    messages: conversation.state.messages,  // {role, content}
+    sessionId: conversation.state.sessionId,
     sessions: [],
-    streaming: false,
-    abortController: null,
-    toolCalls: [],      // Current response's tool calls
-    streamedText: '',   // Current streaming text
-    msgCount: 0,
-    modelsById: {},
     contextTokens: 0,   // Context tokens sent on the latest LLM call (usage ledger)
-    pendingAttachments: [],
     activeProjectId: {{ (active_project.id if active_project else '') | tojson }},  // ?project= workspace for new chats
     projectMenuOpen: null,  // session id whose Move-to-project menu is open
     projects: [],
@@ -1129,281 +239,45 @@ const state = {
     delegatedActiveCount: 0,
     delegatedPollTimer: null,
     delegatedResyncPending: false,
-    // Human-in-the-loop: pending tool approvals / questions rendered inline.
-    // Keyed by request id so a live event and its later result land on the same
-    // card, and so a replayed history row can be matched to its outcome.
-    interactions: {},
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// Attachments (multimodal input)
-// ═══════════════════════════════════════════════════════════════════
-
-const ATTACH_LIMITS = {
-    maxCount: 8,
-    image: { bytes: 5 * 1024 * 1024, mimes: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] },
-    document: { bytes: 10 * 1024 * 1024, mimes: ['application/pdf', 'text/plain', 'text/markdown', 'text/csv'] },
-};
-
-function attachmentKindForMime(mime) {
-    return ATTACH_LIMITS.image.mimes.includes(mime) ? 'image' : 'document';
-}
-
+// ── Thin aliases so the page reads as before, backed by the shared controller ──
 function selectedModelSupportsVision() {
-    const model = state.modelsById[document.getElementById('model-select').value];
+    const select = document.getElementById('model-select');
+    const model = conversation.state.modelsById[select ? select.value : ''];
     return !!(model && model.supports_vision);
 }
-
-function updateAttachAvailability() {
-    const btn = document.getElementById('attach-btn');
-    if (!btn) return;
-    const supported = selectedModelSupportsVision();
-    btn.disabled = !supported;
-    btn.title = supported
-        ? 'Attach images or documents'
-        : 'The selected model does not support attachments';
-    if (!supported && state.pendingAttachments.length) {
-        state.pendingAttachments = [];
-        renderAttachmentPreviews();
-        updateButtons();
-    }
-}
-
-function readFileAsAttachment(file) {
-    return new Promise((resolve, reject) => {
-        const allMimes = [...ATTACH_LIMITS.image.mimes, ...ATTACH_LIMITS.document.mimes];
-        if (!allMimes.includes(file.type)) {
-            reject(new Error(`Unsupported file type: ${file.type || file.name}`));
-            return;
-        }
-        const kind = attachmentKindForMime(file.type);
-        if (file.size > ATTACH_LIMITS[kind].bytes) {
-            const mb = Math.round(ATTACH_LIMITS[kind].bytes / (1024 * 1024));
-            reject(new Error(`${file.name} exceeds the ${mb} MB limit`));
-            return;
-        }
-        const reader = new FileReader();
-        reader.onload = () => {
-            const dataUrl = String(reader.result || '');
-            const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl;
-            resolve({
-                kind,
-                mime_type: file.type,
-                name: file.name,
-                size: file.size,
-                data: base64,
-                dataUrl,
-            });
-        };
-        reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
-        reader.readAsDataURL(file);
-    });
-}
-
-async function addPendingFiles(fileList) {
-    if (!selectedModelSupportsVision()) return;
-    const files = Array.from(fileList || []);
-    for (const file of files) {
-        if (state.pendingAttachments.length >= ATTACH_LIMITS.maxCount) {
-            showStatus(`Up to ${ATTACH_LIMITS.maxCount} attachments`);
-            setTimeout(hideStatus, 1800);
-            break;
-        }
-        try {
-            const attachment = await readFileAsAttachment(file);
-            state.pendingAttachments.push(attachment);
-        } catch (err) {
-            showStatus(err.message || 'Could not attach file');
-            setTimeout(hideStatus, 2400);
-        }
-    }
-    renderAttachmentPreviews();
-    updateButtons();
-}
-
-function removePendingAttachment(index) {
-    state.pendingAttachments.splice(index, 1);
-    renderAttachmentPreviews();
-    updateButtons();
-}
-
-function renderAttachmentPreviews() {
-    const container = document.getElementById('attachment-previews');
-    if (!container) return;
-    container.innerHTML = '';
-    if (!state.pendingAttachments.length) {
-        container.classList.add('hidden');
-        return;
-    }
-    container.classList.remove('hidden');
-    state.pendingAttachments.forEach((att, index) => {
-        const chip = document.createElement('div');
-        chip.className = 'relative flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 pl-2 pr-7 py-1.5 text-xs text-gray-700 max-w-[220px]';
-        const thumb = att.kind === 'image'
-            ? `<img src="${att.dataUrl}" alt="${escapeHtml(att.name)}" class="w-8 h-8 rounded object-cover shrink-0" />`
-            : `<span class="w-8 h-8 rounded bg-gray-200 flex items-center justify-center shrink-0"><svg class="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg></span>`;
-        chip.innerHTML = `${thumb}<span class="truncate">${escapeHtml(att.name)}</span>
-            <button type="button" data-remove-attachment="${index}" class="absolute top-1 right-1 w-4 h-4 rounded-full bg-gray-300 hover:bg-gray-400 text-white flex items-center justify-center" title="Remove">
-                <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke-width="3" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>`;
-        container.appendChild(chip);
-    });
-}
-
-function pendingAttachmentsForRequest() {
-    return state.pendingAttachments.map(({ kind, mime_type, name, size, data }) => ({
-        kind, mime_type, name, size, data,
-    }));
-}
-
-function updateReasoningOptions() {
-    const modelSelect = document.getElementById('model-select');
-    const reasoningSelect = document.getElementById('reasoning-select');
-    const model = state.modelsById[modelSelect.value];
-    const efforts = (model && model.reasoning_efforts) || [];
-    reasoningSelect.innerHTML = '<option value="">Reasoning: default</option>';
-    if (!efforts.length) {
-        reasoningSelect.classList.add('hidden');
-        reasoningSelect.value = '';
-        return;
-    }
-    for (const effort of efforts) {
-        const opt = document.createElement('option');
-        opt.value = effort;
-        opt.textContent = 'Reasoning: ' + effort;
-        reasoningSelect.appendChild(opt);
-    }
-    reasoningSelect.classList.remove('hidden');
-    reasoningSelect.value = '';
-}
-
-function setSelectValueIfPresent(selectId, value) {
-    if (!value) return false;
-    const select = document.getElementById(selectId);
-    const stringValue = String(value);
-    const exists = Array.from(select.options).some(opt => opt.value === stringValue);
-    if (!exists) return false;
-    select.value = stringValue;
-    return true;
-}
-
-function addMissingModelOption(modelId) {
-    if (!modelId || state.modelsById[modelId]) return;
-    const select = document.getElementById('model-select');
-    const group = document.createElement('optgroup');
-    group.label = 'Previous session';
-    const opt = document.createElement('option');
-    opt.value = modelId;
-    opt.textContent = `${modelId} (previously used)`;
-    group.appendChild(opt);
-    select.appendChild(group);
-    state.modelsById[modelId] = { id: modelId, reasoning_efforts: [] };
-}
-
-function applySessionConfig(session) {
-    if (!session) return;
-    if (session.model) {
-        addMissingModelOption(session.model);
-        if (setSelectValueIfPresent('model-select', session.model)) {
-            updateReasoningOptions();
-        }
-    }
-    if (session.reasoning_effort) {
-        setSelectValueIfPresent('reasoning-select', session.reasoning_effort);
-    }
-    if (session.agent_definition_id) {
-        setSelectValueIfPresent('agent-select', session.agent_definition_id);
-    } else {
-        document.getElementById('agent-select').value = '';
-    }
-    const savedApproval = session.metadata && session.metadata.tool_approval_mode;
-    setSelectValueIfPresent('tool-approval-select', savedApproval || 'auto');
-    updateAttachAvailability();
-}
+function updateAttachAvailability() { conversation.updateAttachAvailability(); }
+function updateReasoningOptions() { conversation.updateReasoningOptions(); }
+function addPendingFiles(files) { return conversation.addPendingFiles(files); }
+function removePendingAttachment(index) { conversation.removePendingAttachment(index); }
+function renderAttachmentPreviews() { conversation.renderAttachmentPreviews(); }
+function applySessionConfig(session) { conversation.applySessionConfig(session); }
+function updateButtons() { conversation.updateButtons(); }
+function showStatus(text) { conversation.setStatus(text, conversation.state.streaming); }
+function hideStatus() { conversation.setStatus(''); }
+function stopStreaming() { conversation.stopStreaming(); }
 
 // ═══════════════════════════════════════════════════════════════════
 // Initialization
 // ═══════════════════════════════════════════════════════════════════
 
 (async function init() {
-    // Load models
-    try {
-        const resp = await fetch('/api/chat/models');
-        const data = await resp.json();
-        const select = document.getElementById('model-select');
-        select.innerHTML = '';
-        state.modelsById = {};
-        const byProvider = {};
-        if (data.auto_selection_enabled) {
-            state.modelsById['auto'] = { id: 'auto', name: 'Auto', reasoning_efforts: [], supports_vision: true };
-            const autoGroup = document.createElement('optgroup');
-            autoGroup.label = 'Auto';
-            const autoOpt = document.createElement('option');
-            autoOpt.value = 'auto';
-            autoOpt.textContent = 'Auto — best model per message';
-            if (!data.default) autoOpt.selected = true;
-            autoGroup.appendChild(autoOpt);
-            select.appendChild(autoGroup);
-        }
-        for (const m of data.models) {
-            state.modelsById[m.id] = m;
-            (byProvider[m.provider] = byProvider[m.provider] || []).push(m);
-        }
-        for (const [provider, models] of Object.entries(byProvider)) {
-            const group = document.createElement('optgroup');
-            group.label = provider.charAt(0).toUpperCase() + provider.slice(1);
-            for (const m of models) {
-                const opt = document.createElement('option');
-                opt.value = m.id;
-                opt.textContent = m.name;
-                if (m.id === data.default) opt.selected = true;
-                group.appendChild(opt);
-            }
-            select.appendChild(group);
-        }
-        select.addEventListener('change', updateReasoningOptions);
-        select.addEventListener('change', updateAttachAvailability);
-        updateReasoningOptions();
-        updateAttachAvailability();
-    } catch(e) {
-        document.getElementById('model-select').innerHTML = '<option value="">Unavailable</option>';
-    }
-    
-    // Load agents
-    try {
-        const resp = await fetch('/api/chat/agents');
-        const agents = await resp.json();
-        const select = document.getElementById('agent-select');
-        if (agents && agents.length > 0) {
-            for (const a of agents) {
-                const opt = document.createElement('option');
-                opt.value = a.id;
-                // Name only. An inline description made the widest option ~590px,
-                // and a native select sizes itself to its widest option — that is
-                // what forced the whole control row (and every control after it)
-                // past the viewport edge. The description is kept as the title so
-                // hovering still explains each agent.
-                opt.textContent = a.name;
-                if (a.description) opt.title = a.description;
-                select.appendChild(opt);
-            }
-        }
-    } catch(e) {
-        // Agents not available — that's fine, default is good
-    }
-    
+    await conversation.loadChatControls();
+    conversation.bind();
     await loadSessions();
     await loadProjects();
-    if (state.sessionId) {
-        await loadSession(state.sessionId);
+    if (conversation.state.sessionId) {
+        await loadSession(conversation.state.sessionId);
     }
     // Delegated work is independent of the transcript load: the panel must show
     // even before (or without) a successful session fetch.
-    refreshDelegatedWork({ resync: false });
+    refreshDelegatedWork();
 
     loadIntroSummary();
 
-    document.getElementById('chat-input').focus();
+    const input = document.getElementById('chat-input');
+    if (input) input.focus();
 })();
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1642,12 +516,13 @@ async function createSession(firstMessage) {
             project_id: state.activeProjectId || null,
             // Sent at creation too: the composer control can be used on a brand
             // new conversation, before any session exists to PATCH.
-            tool_approval_mode: currentApprovalMode(),
+            tool_approval_mode: (document.getElementById('tool-approval-select') || {}).value || 'auto',
         }),
     });
     if (!resp.ok) throw new Error('Unable to create session');
     const session = await resp.json();
     state.sessionId = session.id;
+    conversation.setSessionId(session.id);
     // The chat is now filed; the workspace URL param has done its job.
     state.activeProjectId = '';
     history.replaceState(null, '', `/chat/${session.id}`);
@@ -1666,6 +541,7 @@ async function loadSession(sessionId) {
         if (!resp.ok) throw new Error('Unable to load session');
         const session = await resp.json();
         state.sessionId = session.id;
+        conversation.setSessionId(session.id);
         history.replaceState(null, '', `/chat/${session.id}`);
         applySessionConfig(session);
         renderSessionMessages(session.messages || [], session.events || []);
@@ -1673,147 +549,36 @@ async function loadSession(sessionId) {
         refreshContextUsage();
         // Delegated work belongs to the session being opened, so it must be
         // reloaded here rather than inferred from the previous view.
-        refreshDelegatedWork({ resync: false });
+        refreshDelegatedWork();
     } catch(e) {
         console.error('Failed to load session:', e);
     }
 }
 
 function eventTypeMatches(event, ...types) {
-    return types.includes(event.event_type || event.type);
+    return LucentChatMessageUI.eventTypeMatches(event, ...types);
 }
 
 function eventTime(row) {
-    const raw = row && row.created_at;
-    if (!raw) return 0;
-    const stamp = Date.parse(raw);
-    return Number.isNaN(stamp) ? 0 : stamp;
+    return LucentChatMessageUI.eventTime(row);
 }
 
 function replaySessionEvents(assistantEl, events) {
-    if (!events.length) return;
-    const toolsEl = assistantEl.querySelector('.tools-container');
-    let reasoningEl = null;
-    let reasoningText = '';
-
-    for (const event of events) {
-        if (eventTypeMatches(event, 'tool_call', 'tool.call')) {
-            appendToolCall(toolsEl, event.tool_name || 'unknown', event.tool_input);
-        } else if (eventTypeMatches(event, 'tool_result', 'tool.result')) {
-            updateToolResult(toolsEl, event.tool_name || 'unknown', event.tool_output);
-        } else if (eventTypeMatches(event, 'hook_context')) {
-            appendHookCall(toolsEl, event);
-        } else if (eventTypeMatches(event, 'subagent_report')) {
-            appendSubagentReport(toolsEl, event);
-        } else if (eventTypeMatches(event, 'reasoning')) {
-            if (!reasoningEl) reasoningEl = createReasoningBlock(toolsEl);
-            reasoningText += event.detail || '';
-            updateReasoningBlock(reasoningEl, reasoningText);
-        } else if (eventTypeMatches(event, 'tool_approval_request')) {
-            appendInteractionRequest(toolsEl, event);
-        } else if (eventTypeMatches(event, 'tool_approval_result')) {
-            resolveInteractionCard(event);
-        } else if (eventTypeMatches(event, 'user_question')) {
-            appendInteractionRequest(toolsEl, event);
-        } else if (eventTypeMatches(event, 'user_question_result')) {
-            resolveInteractionCard(event);
-        }
-    }
-
-    if (reasoningEl) collapseReasoningBlock(reasoningEl);
-    finalizeToolCalls(toolsEl);
+    LucentChatMessageUI.replaySessionEvents(
+        assistantEl, events, conversation.state.interactions
+    );
 }
 
 function renderSessionMessages(messages, events = []) {
-    const msgs = document.getElementById('messages');
-    msgs.innerHTML = '';
-    state.messages = [];
-    // Cards from the previous transcript must not be matched by a later event
-    // carrying a recycled id; the live map is rebuilt as the rows replay.
-    state.interactions = {};
-    const visible = messages.filter(m => m.role === 'user' || m.role === 'assistant');
-    const turnIdByMessageId = new Map(
-        visible
-            .filter(m => m.id && m.turn_id)
-            .map(m => [m.id, m.turn_id])
-    );
-    const assistantTurns = new Set(
-        visible
-            .filter(m => m.role === 'assistant' && m.turn_id)
-            .map(m => m.turn_id)
-    );
-    const eventsByTurn = new Map();
-    // Background report cards are written when work settles — before, and
-    // independently of, any assistant turn that might acknowledge them. A card
-    // that could not get a reply turn (rate limit, in-flight user turn, idle
-    // session) has no turn id and used to be dropped from the transcript
-    // entirely: the work visibly finished with no acknowledgement. Unhomed
-    // report cards are collected here and rendered in their own row after the
-    // turns. Other turnless events keep the old skip behavior.
-    const ORPHAN_TURN = '__delegated_report__';
-    for (const event of events) {
-        if (event.visible === false) continue;
-        const isReport = eventTypeMatches(event, 'subagent_report');
-        const turnId = event.turn_id
-            || turnIdByMessageId.get(event.message_id)
-            || (isReport ? ORPHAN_TURN : null);
-        if (!turnId) continue;
-        const turnEvents = eventsByTurn.get(turnId) || [];
-        turnEvents.push(event);
-        eventsByTurn.set(turnId, turnEvents);
-    }
-    for (const turnEvents of eventsByTurn.values()) {
-        turnEvents.sort((left, right) => (left.sequence || 0) - (right.sequence || 0));
-    }
-    if (!visible.length) {
+    if (!(messages || []).some(m => m.role === 'user' || m.role === 'assistant')) {
         clearConversation({ keepSession: true });
         return;
     }
     document.getElementById('chat-root').classList.remove('empty-mode');
-    // Unhomed report cards are emitted in transcript order, interleaved with the
-    // turns they precede: a card written before a later turn must not be
-    // reordered to the bottom of the thread. Messages and events have separate
-    // sequence counters (they are different tables), so created_at is the only
-    // shared ordering key. Each card is flushed just before the first message
-    // that was created after it.
-    const orphanCards = (eventsByTurn.get(ORPHAN_TURN) || [])
-        .slice()
-        .sort((left, right) => eventTime(left) - eventTime(right));
-    const flushOrphanCardsBefore = (stamp) => {
-        const due = [];
-        while (orphanCards.length && eventTime(orphanCards[0]) < stamp) {
-            due.push(orphanCards.shift());
-        }
-        if (!due.length) return;
-        const assistantEl = appendAssistantMessage('');
-        replaySessionEvents(assistantEl, due);
-    };
-    for (const msg of visible) {
-        flushOrphanCardsBefore(eventTime(msg));
-        state.messages.push({ role: msg.role, content: msg.content || '' });
-        if (msg.role === 'user') {
-            const att = msg.metadata && msg.metadata.attachments;
-            appendUserMessage(msg.content || '', att);
-            const turnEvents = eventsByTurn.get(msg.turn_id) || [];
-            if (turnEvents.length && !assistantTurns.has(msg.turn_id)) {
-                const assistantEl = appendAssistantMessage('');
-                replaySessionEvents(assistantEl, turnEvents);
-            }
-        } else {
-            const assistantEl = appendAssistantMessage(msg.content || '');
-            replaySessionEvents(assistantEl, eventsByTurn.get(msg.turn_id) || []);
-            const autoInfo = msg.metadata && msg.metadata.auto_selection;
-            if (autoInfo) appendAutoSelectionNote(assistantEl, autoInfo);
-        }
-    }
-    // Cards newer than the last message still need a row of their own.
-    if (orphanCards.length) {
-        const assistantEl = appendAssistantMessage('');
-        replaySessionEvents(assistantEl, orphanCards);
-    }
+    conversation.renderTranscript(messages, events);
+    state.messages = conversation.state.messages;
     hideStatus();
     updateButtons();
-    scrollToBottom();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1826,373 +591,49 @@ function sendQuickPrompt(text) {
 }
 
 async function sendMessage(e) {
-    e.preventDefault();
-    const input = document.getElementById('chat-input');
-    const text = input.value.trim();
-    const outgoingAttachments = state.pendingAttachments.slice();
-    if ((!text && !outgoingAttachments.length) || state.streaming) return;
-
-    // File the chat up front: ?project=<id> workspaces must land new chats in
-    // the project at creation time, before any streaming begins.
-    if (!state.sessionId) {
-        try {
-            await createSession(text);
-        } catch (err) {
-            // Creation failed — continue unfiled rather than block the send.
-            console.warn('Session creation failed, continuing unfiled', err);
-        }
-    }
-    
-    // Hide empty state and switch to conversation mode
+    // The empty-state hero disappears as soon as the transcript takes over;
+    // the shared controller owns everything after that.
     const emptyState = document.getElementById('empty-state');
     if (emptyState) emptyState.style.display = 'none';
     document.getElementById('chat-root').classList.remove('empty-mode');
-    
-    // Add user message
-    const userMessage = { role: 'user', content: text };
-    if (outgoingAttachments.length) {
-        userMessage.attachments = pendingAttachmentsForRequest();
-    }
-    state.messages.push(userMessage);
-    appendUserMessage(text, outgoingAttachments);
-    input.value = '';
-    input.style.height = 'auto';
-    state.pendingAttachments = [];
-    renderAttachmentPreviews();
+    await conversation.sendTurn(e);
     updateButtons();
-    
-    // Start streaming
-    state.streaming = true;
-    state.toolCalls = [];
-    state.streamedText = '';
-    state.abortController = new AbortController();
-    updateButtons();
-    showStatus('Thinking...');
-    
-    const assistantEl = createAssistantMessage();
-    const contentEl = assistantEl.querySelector('.assistant-content');
-    const toolsEl = assistantEl.querySelector('.tools-container');
-    let reasoningEl = null;
-    let reasoningText = '';
-    
-    try {
-        const selectedModel = document.getElementById('model-select').value;
-        const selectedReasoning = document.getElementById('reasoning-select').value;
-        const selectedAgent = document.getElementById('agent-select').value;
-        
-        const resp = await fetch('/api/chat/stream-v2', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                messages: state.messages.map((m, i) =>
-                    i === state.messages.length - 1
-                        ? m
-                        : { role: m.role, content: m.content }
-                ),
-                session_id: state.sessionId,
-                surface: 'chat',
-                model: selectedModel || null,
-                reasoning_effort: selectedReasoning || null,
-                agent_id: selectedAgent || null,
-                tool_approval_mode: currentApprovalMode(),
-            }),
-            signal: state.abortController.signal,
-        });
-        
-        if (!resp.ok) {
-            const errText = await resp.text().catch(() => resp.statusText);
-            if (resp.status === 401) {
-                contentEl.innerHTML = '<div class="text-red-500 text-sm">Session expired. Please <a href="/login" class="underline">log in again</a>.</div>';
-            } else {
-                contentEl.innerHTML = `<div class="text-red-500 text-sm">Error ${resp.status}: ${escapeHtml(errText)}</div>`;
-            }
-            hideStatus();
-            state.streaming = false;
-            state.abortController = null;
-            updateButtons();
-            return;
-        }
-        
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let gotDeltas = false;
-        
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-            
-            for (const line of lines) {
-                if (!line.startsWith('data: ')) continue;
-                try {
-                    const event = JSON.parse(line.slice(6));
-                    
-                    switch (event.type) {
-                        case 'session':
-                            state.sessionId = event.session_id;
-                            history.replaceState(null, '', `/chat/${event.session_id}`);
-                            loadSessions();
-                            // Start tracking delegated work for this (possibly
-                            // brand-new) session as soon as it exists.
-                            refreshDelegatedWork({ resync: false });
-                            if (event.model_selected) {
-                                appendAutoSelectionNote(assistantEl, event.model_selected);
-                            }
-                            break;
-
-                        case 'text_delta':
-                            gotDeltas = true;
-                            state.streamedText += event.text;
-                            contentEl.innerHTML = renderMarkdown(state.streamedText);
-                            contentEl.classList.add('streaming-cursor');
-                            showStatus('Writing...');
-                            scrollToBottom();
-                            break;
-                            
-                        case 'message':
-                            if (!gotDeltas) {
-                                // Full message (no deltas were sent)
-                                state.streamedText = event.text;
-                                contentEl.innerHTML = renderMarkdown(event.text);
-                            }
-                            contentEl.classList.remove('streaming-cursor');
-                            hideStatus();
-                            scrollToBottom();
-                            break;
-                            
-                        case 'reasoning':
-                            if (!reasoningEl) {
-                                reasoningEl = createReasoningBlock(toolsEl);
-                            }
-                            reasoningText += event.text;
-                            updateReasoningBlock(reasoningEl, reasoningText);
-                            showStatus('Thinking...');
-                            scrollToBottom();
-                            break;
-                            
-                        case 'tool_call':
-                            state.toolCalls.push({ name: event.tool, input: event.input, output: null });
-                            appendToolCall(toolsEl, event.tool, event.input);
-                            // Close reasoning block when tools start
-                            if (reasoningEl) {
-                                collapseReasoningBlock(reasoningEl);
-                                reasoningEl = null;
-                                reasoningText = '';
-                            }
-                            showStatus(`Using ${event.tool.replace(/^mcp_memory-server_/, '')}...`);
-                            scrollToBottom();
-                            break;
-                            
-                        case 'tool_result':
-                            // Update the last matching tool call
-                            const lastCall = state.toolCalls.findLast(tc => tc.name === event.tool && !tc.output);
-                            if (lastCall) lastCall.output = event.output;
-                            updateToolResult(toolsEl, event.tool, event.output);
-                            showStatus('Thinking...');
-                            scrollToBottom();
-                            break;
-
-                        case 'hook_context':
-                            // Hook execution — rendered as its own inline chip
-                            // variant (distinct icon + accent, collapsed).
-                            appendHookCall(toolsEl, event);
-                            showStatus(`Running ${(event.hook || 'hook').replace(/_/g, ' ')}...`);
-                            scrollToBottom();
-                            break;
-
-                        case 'subagent_report':
-                            // A background sub-agent reported into this turn.
-                            appendSubagentReport(toolsEl, event);
-                            refreshDelegatedWork({ resync: false });
-                            scrollToBottom();
-                            break;
-
-                        case 'tool_approval_request':
-                            // The model wants to run a state-changing tool and
-                            // this conversation requires permission. The turn is
-                            // blocked inside the engine until this is answered.
-                            appendInteractionRequest(toolsEl, event);
-                            showStatus(`Waiting for you to allow ${(event.tool || 'a tool').replace(/_/g, ' ')}...`);
-                            scrollToBottom();
-                            break;
-
-                        case 'tool_approval_result':
-                            resolveInteractionCard(event);
-                            showStatus(event.decision === 'approve' ? 'Running…' : 'Thinking...');
-                            scrollToBottom();
-                            break;
-
-                        case 'user_question':
-                            appendInteractionRequest(toolsEl, event);
-                            showStatus('Waiting for your answer...');
-                            scrollToBottom();
-                            break;
-
-                        case 'user_question_result':
-                            resolveInteractionCard(event);
-                            showStatus('Thinking...');
-                            scrollToBottom();
-                            break;
-                            
-                        case 'error':
-                            contentEl.innerHTML = `<div class="flex items-center gap-2 text-red-600 text-sm"><svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/></svg><span>${escapeHtml(event.error)}</span></div>`;
-                            hideStatus();
-                            break;
-                            
-                        case 'done':
-                            contentEl.classList.remove('streaming-cursor');
-                            if (!gotDeltas && !state.streamedText) {
-                                contentEl.innerHTML = '<div class="text-gray-400 text-sm italic">No response received. The model may be unavailable — try again.</div>';
-                            }
-                            // Finalize any tool calls still showing spinners
-                            finalizeToolCalls(toolsEl);
-                            // Finalize any open reasoning block
-                            if (reasoningEl) {
-                                collapseReasoningBlock(reasoningEl);
-                                reasoningEl = null;
-                            }
-                            hideStatus();
-                            refreshContextUsage();
-                            break;
-                    }
-                } catch(e) { /* skip malformed event */ }
-            }
-        }
-    } catch(e) {
-        console.error('Chat stream error:', e);
-        if (e.name !== 'AbortError') {
-            if (contentEl) {
-                contentEl.innerHTML = '<div class="text-red-500 text-sm">Connection error: ' + escapeHtml(String(e.message || e)) + '</div>';
-            }
-        }
-        hideStatus();
-    }
-    
-    contentEl.classList.remove('streaming-cursor');
-    if (state.streamedText) {
-        state.messages.push({ role: 'assistant', content: state.streamedText });
-    }
-    if (state.sessionId) loadSessions();
-    state.streaming = false;
-    state.abortController = null;
-    updateButtons();
-    hideStatus();
-    scrollToBottom();
-    // A background report may have landed while this turn was streaming. The
-    // transcript could not be reloaded then without destroying the reply, so
-    // apply it now that the turn is finished.
-    if (state.delegatedResyncPending) {
-        state.delegatedResyncPending = false;
-        refreshDelegatedWork();
-    }
-}
-
-function stopStreaming() {
-    if (state.abortController) {
-        state.abortController.abort();
-        state.abortController = null;
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // Message Rendering
 // ═══════════════════════════════════════════════════════════════════
 
-function attachmentDataUrl(att) {
-    if (att.dataUrl) return att.dataUrl;
-    if (att.data && att.mime_type) return `data:${att.mime_type};base64,${att.data}`;
-    return '';
-}
-
-function renderMessageAttachmentsHtml(attachments) {
-    if (!attachments || !attachments.length) return '';
-    const items = attachments.map(att => {
-        const kind = att.kind || (att.mime_type && att.mime_type.startsWith('image/') ? 'image' : 'document');
-        if (kind === 'image') {
-            const url = attachmentDataUrl(att);
-            return `<a href="${url}" target="_blank" rel="noopener" class="block">
-                <img src="${url}" alt="${escapeHtml(att.name || 'image')}" class="max-h-44 max-w-[220px] rounded-lg border border-white/20 object-cover" />
-            </a>`;
-        }
-        return `<div class="flex items-center gap-2 rounded-lg bg-white/15 px-2.5 py-1.5 text-xs">
-            <svg class="w-4 h-4 shrink-0 opacity-90" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" /></svg>
-            <span class="truncate max-w-[180px]">${escapeHtml(att.name || 'document')}</span>
-        </div>`;
-    }).join('');
-    return `<div class="flex flex-wrap gap-2 justify-end mb-2">${items}</div>`;
+// Transcript rendering lives in chat-message-ui.js so /chat and Handoff render
+// one implementation. These thin adapters keep the page's own call sites — and
+// its scroll behaviour — unchanged.
+function messagesEl() {
+    return document.getElementById('messages');
 }
 
 function appendUserMessage(text, attachments) {
-    const msgs = document.getElementById('messages');
-    const div = document.createElement('div');
-    div.className = 'msg-enter px-6 py-4';
-    const attachmentsHtml = renderMessageAttachmentsHtml(attachments);
-    const textHtml = text
-        ? `<div class="chat-user-bubble max-w-[75%] bg-primary-600 text-white rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed shadow-sm">${escapeHtml(text)}</div>`
-        : '';
-    div.innerHTML = `
-        <div class="max-w-3xl mx-auto flex flex-col items-end gap-1">
-            ${attachmentsHtml}
-            ${textHtml}
-        </div>`;
-    msgs.appendChild(div);
+    const row = LucentChatMessageUI.appendUserMessage(messagesEl(), text, attachments);
     scrollToBottom();
+    return row;
 }
 
 function createAssistantMessage() {
-    const msgs = document.getElementById('messages');
-    const div = document.createElement('div');
-    div.className = 'msg-enter chat-assistant-bg px-6 py-5';
-    state.msgCount++;
-    const id = `msg-${state.msgCount}`;
-    div.id = id;
-    div.innerHTML = `
-        <div class="assistant-response max-w-3xl mx-auto">
-            <div class="min-w-0">
-                <div class="tools-container mb-3 space-y-2"></div>
-                <div class="assistant-content text-sm text-gray-800 leading-relaxed prose prose-sm prose-gray max-w-none">
-                    <div class="flex gap-1.5">
-                        <span class="typing-dot w-2 h-2 bg-gray-300 rounded-full inline-block"></span>
-                        <span class="typing-dot w-2 h-2 bg-gray-300 rounded-full inline-block"></span>
-                        <span class="typing-dot w-2 h-2 bg-gray-300 rounded-full inline-block"></span>
-                    </div>
-                </div>
-            </div>
-        </div>`;
-    msgs.appendChild(div);
+    conversation.state.msgCount++;
+    const row = LucentChatMessageUI.createAssistantMessage(messagesEl(), {
+        id: `msg-${conversation.state.msgCount}`,
+    });
     scrollToBottom();
-    return div;
+    return row;
 }
 
 function appendAssistantMessage(text) {
-    const assistantEl = createAssistantMessage();
-    const contentEl = assistantEl.querySelector('.assistant-content');
-    contentEl.classList.remove('streaming-cursor');
-    contentEl.innerHTML = renderMarkdown(text || '');
+    const row = LucentChatMessageUI.appendAssistantMessage(messagesEl(), text);
     scrollToBottom();
-    return assistantEl;
+    return row;
 }
 
 function appendAutoSelectionNote(assistantEl, info) {
-    // Quiet provenance line for "Auto" turns: what ran, and how confident
-    // the arbiter was (or why it fell back to the default chain).
-    if (!assistantEl || !info || !info.chosen) return;
-    const note = document.createElement('div');
-    note.className = 'auto-selection-note mt-2 text-xs text-gray-400';
-    let text = info.source === 'arbiter'
-        ? `Auto picked ${info.chosen}`
-        : `Auto used the default chain → ${info.chosen}`;
-    if (info.source === 'arbiter' && typeof info.confidence === 'number') {
-        text += ` (confidence ${info.confidence.toFixed(2)})`;
-    }
-    if (info.fallback_reason) text += ` — ${info.fallback_reason}`;
-    note.textContent = text;
-    const container = assistantEl.querySelector('.assistant-response > .min-w-0');
-    (container || assistantEl).appendChild(note);
+    LucentChatMessageUI.appendAutoSelectionNote(assistantEl, info);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2223,39 +664,12 @@ function appendSubagentReport(container, payload) {
 // Tool approval + clarifying questions (human-in-the-loop)
 // ═══════════════════════════════════════════════════════════════════
 
-function currentApprovalMode() {
-    return document.getElementById('tool-approval-select').value || 'auto';
-}
-
-/**
- * Render a prompt card and register it, so the outcome (live or replayed) can
- * find it again by request id.
- */
-function appendInteractionRequest(container, payload) {
-    const card = LucentChatMessageUI.appendInteractionRequest(container, payload);
-    const info = LucentChatMessageUI.interactionPayload(payload);
-    if (info.requestId) {
-        state.interactions[info.requestId] = card;
-        card.dataset.turnId = payload && payload.turn_id ? payload.turn_id : '';
-    }
-    return card;
-}
-
-/** Apply a decision/answer to its card. Safe to call for an unknown id. */
-function resolveInteractionCard(payload) {
-    const raw = LucentChatMessageUI.interactionOutcome(payload);
-    const requestId = raw.request_id || LucentChatMessageUI.interactionPayload(payload).requestId;
-    const card = requestId ? state.interactions[requestId] : null;
-    if (!card) return;
-    LucentChatMessageUI.resolveInteractionCard(card, raw || {});
-    delete state.interactions[requestId];
-}
-
 /** Persist the per-conversation tool permission so it survives reload. */
 async function saveApprovalMode(mode) {
-    if (!state.sessionId) return;
+    const sessionId = conversation.state.sessionId || state.sessionId;
+    if (!sessionId) return;
     try {
-        await fetch(`/api/chat/sessions/${encodeURIComponent(state.sessionId)}`, {
+        await fetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tool_approval_mode: mode }),
@@ -2265,140 +679,22 @@ async function saveApprovalMode(mode) {
     }
 }
 
-/**
- * Gather one answer per question block on a card.
- *
- * Returns an array parallel to the questions shown, with `{answer, choice}` per
- * entry. Free text is what the person typed; a clicked option already wrote its
- * label into the field, so the two paths agree. Unanswered questions stay empty
- * so the model can see exactly what it did not get.
- */
-function collectQuestionAnswers(card) {
-    const fields = [...card.querySelectorAll('[data-interaction-answer]')];
-    return fields.map(field => {
-        const value = field.value.trim();
-        const index = field.dataset.interactionAnswer;
-        const selected = card.querySelector(
-            `[data-interaction-question="${index}"].is-selected`
-        );
-        return {
-            answer: value,
-            choice: selected && selected.dataset.interactionChoice === value
-                ? value
-                : null,
-        };
-    });
-}
-
-/**
- * POST the answer to a waiting tool call or question.
- *
- * The card is disabled immediately: the resolve route answers 409 once the wait
- * is gone (the turn ended, or someone else answered), and a second click must
- * not look like a failure.
- */
-async function submitInteraction(card, body) {
-    const requestId = card.dataset.interactionId;
-    if (!requestId) return;
-    card.querySelectorAll('button, input').forEach(node => { node.disabled = true; });
-    const csrfCookie = document.cookie.split('; ').find(c => c.startsWith('lucent_csrf='));
-    try {
-        const resp = await fetch(`/chat/interactions/${encodeURIComponent(requestId)}/resolve`, {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {
-                'Content-Type': 'application/json',
-                ...(csrfCookie ? { 'X-CSRF-Token': csrfCookie.split('=')[1] } : {}),
-            },
-            body: JSON.stringify({ session_id: card.dataset.sessionId || state.sessionId, ...body }),
-        });
-        if (!resp.ok) {
-            // The waiting turn is gone (aborted, timed out, or the server
-            // restarted). Render that honestly instead of leaving live controls.
-            resolveInteractionCard({ request_id: requestId, ...body, expired: true });
-        }
-    } catch (error) {
-        console.warn('Could not answer interaction', error);
-        card.querySelectorAll('button, input').forEach(node => { node.disabled = false; });
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Reasoning Block Rendering
-// ═══════════════════════════════════════════════════════════════════
-
-function createReasoningBlock(container) {
-    const div = document.createElement('div');
-    div.className = 'reasoning-wrapper mb-2';
-    div.innerHTML = `
-        <button data-reasoning-toggle="true" class="flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg border border-pink-200 bg-pink-50 hover:bg-pink-100 transition-colors text-xs group">
-            <svg class="w-3.5 h-3.5 text-pink-600 animate-pulse reasoning-icon" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
-            </svg>
-            <span class="font-medium text-pink-800">Thinking</span>
-            <span class="reasoning-preview flex-1 text-pink-600 truncate ml-1"></span>
-            <svg class="w-3 h-3 text-pink-500 transition-transform reasoning-chevron" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-            </svg>
-        </button>
-        <div class="reasoning-block">
-            <div class="reasoning-content mt-1 ml-6 p-3 rounded-lg border border-pink-200 bg-pink-50 text-xs text-pink-900 leading-relaxed whitespace-pre-wrap"></div>
-        </div>`;
-    container.appendChild(div);
-    return div;
-}
-
-function updateReasoningBlock(wrapper, text) {
-    const content = wrapper.querySelector('.reasoning-content');
-    const preview = wrapper.querySelector('.reasoning-preview');
-    content.textContent = text;
-    // Show a truncated preview in the header
-    const firstLine = text.split('\n')[0] || '';
-    preview.textContent = firstLine.slice(0, 80) + (firstLine.length > 80 ? '...' : '');
-}
-
-function collapseReasoningBlock(wrapper) {
-    const block = wrapper.querySelector('.reasoning-block');
-    const icon = wrapper.querySelector('.reasoning-icon');
-    const label = wrapper.querySelector('.font-medium');
-    block.classList.remove('open');
-    icon.classList.remove('animate-pulse');
-    if (label) label.textContent = 'Thought';
-    wrapper.querySelector('.reasoning-chevron').style.transform = '';
-}
-
-function finalizeToolCalls(container) {
-    LucentChatMessageUI.finalizeToolCalls(container);
-}
-
-function toggleReasoning(btn) {
-    const wrapper = btn.closest('.reasoning-wrapper');
-    const block = wrapper.querySelector('.reasoning-block');
-    const chevron = wrapper.querySelector('.reasoning-chevron');
-    block.classList.toggle('open');
-    chevron.style.transform = block.classList.contains('open') ? 'rotate(90deg)' : '';
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // UI Helpers
 // ═══════════════════════════════════════════════════════════════════
 
 function clearConversation(options = {}) {
     state.messages = [];
-    state.toolCalls = [];
-    state.streamedText = '';
-    state.pendingAttachments = [];
-    state.interactions = {};
+    conversation.state.messages = state.messages;
+    conversation.state.pendingAttachments = [];
+    conversation.state.interactions = {};
     renderAttachmentPreviews();
     if (!options.keepSession) {
         state.sessionId = '';
+        conversation.setSessionId('');
         history.replaceState(null, '', '/chat');
     }
-    if (state.abortController) {
-        state.abortController.abort();
-        state.abortController = null;
-    }
-    state.streaming = false;
+    conversation.stopStreaming();
     updateContextUsage(0);
     
     const msgs = document.getElementById('messages');
@@ -2408,7 +704,7 @@ function clearConversation(options = {}) {
     document.getElementById('chat-root').classList.add('empty-mode');
     msgs.innerHTML = `
         <div id="empty-state" class="flex flex-col items-center px-6" data-intro-summary-target>
-            <div class="lucent-orb lucent-orb-lg mb-6"></div>
+            <img src="/static/lucent_logo_v2.svg" alt="" class="lucent-mark mb-6">
             <h2 class="text-lg font-semibold text-gray-900 mb-2">Hey — what's on your mind?</h2>
             <p class="empty-state-text text-sm text-gray-500 text-center max-w-md mb-8">
                 Pick up where we left off, start something new, or just think out loud.
@@ -2440,7 +736,6 @@ function clearConversation(options = {}) {
     state.delegatedActiveCount = 0;
     state.delegatedResyncPending = false;
     renderDelegatedWork();
-    scheduleDelegatedPoll();
     // Fresh hero after a reset — offer the summary swap-in again, exactly
     // like the initial page load.
     loadIntroSummary();
@@ -2458,28 +753,6 @@ function toggleSessionDrawer(forceOpen = null) {
     if (open) loadSessions();
 }
 
-function updateButtons() {
-    const sendBtn = document.getElementById('send-btn');
-    const stopBtn = document.getElementById('stop-btn');
-    const input = document.getElementById('chat-input');
-    const composer = input.closest('.input-glow');
-    
-    sendBtn.disabled = (!input.value.trim() && !state.pendingAttachments.length) || state.streaming;
-    sendBtn.style.display = state.streaming ? 'none' : 'flex';
-    stopBtn.style.display = state.streaming ? 'flex' : 'none';
-    stopBtn.classList.toggle('hidden', !state.streaming);
-    composer.classList.toggle('is-streaming', state.streaming);
-}
-
-function showStatus(text) {
-    document.getElementById('status-bar').classList.remove('hidden');
-    document.getElementById('status-text').textContent = text;
-}
-
-function hideStatus() {
-    document.getElementById('status-bar').classList.add('hidden');
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // Context-window usage indicator
 // ═══════════════════════════════════════════════════════════════════
@@ -2491,7 +764,7 @@ function updateContextUsage(sessionTokens) {
     const track = document.getElementById('context-usage-track');
     if (!wrapper || !bar || !track) return;
 
-    const model = state.modelsById[document.getElementById('model-select').value];
+    const model = conversation.state.modelsById[document.getElementById('model-select').value];
     const contextWindow = model && model.context_window ? model.context_window : 0;
     if (!contextWindow) {
         // Context window unknown — bar stays empty/primary; hover shows raw token count only.
@@ -2538,20 +811,6 @@ async function refreshContextUsage() {
 function scrollToBottom() {
     const msgs = document.getElementById('messages');
     msgs.scrollTop = msgs.scrollHeight;
-}
-
-function handleKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage(e);
-    }
-    setTimeout(updateButtons, 0);
-}
-
-function autoResize(el) {
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
-    updateButtons();
 }
 
 function escapeHtml(s) {
@@ -2701,29 +960,22 @@ function delegatedRequestBlock(request) {
         </details>`;
 }
 
-function renderDelegatedWork(force = false) {
+function renderDelegatedWork() {
+    // The transcript's progress cards are owned by the shared conversation
+    // controller (renderDelegatedProgress); this only paints the overview panel
+    // and its trigger, which are /chat-only chrome.
     const pane = document.querySelector('[data-overview-pane="work"]');
     const trigger = document.querySelector('[data-overview-trigger="work"]');
     if (!pane || !trigger) return;
 
     const requests = state.delegatedRequests || [];
-    // The badge answers "is anything of mine still working?", so it counts live
-    // tasks rather than open requests: a request can be cancelled while one of
-    // its tasks is still winding down, and that is exactly when the person is
-    // watching most closely.
     const activeCount = state.delegatedActiveCount || 0;
-
-    // The trigger is the whole point of the panel being discoverable: show it
-    // only when this conversation actually delegated something.
     trigger.classList.toggle('hidden', requests.length === 0);
     const countEl = trigger.querySelector('[data-delegated-count]');
     if (countEl) {
-        // Outstanding work, not history. Once everything has settled the trigger
-        // reads "delegated" with no count rather than advertising a permanent "0".
         countEl.textContent = activeCount ? String(activeCount) : '';
         countEl.classList.toggle('hidden', activeCount === 0);
     }
-
     const list = pane.querySelector('[data-delegated-list]');
     const empty = pane.querySelector('[data-delegated-empty]');
     const summary = pane.querySelector('[data-delegated-summary]');
@@ -2738,21 +990,14 @@ function renderDelegatedWork(force = false) {
     }
     if (empty) empty.classList.add('hidden');
     if (summary) {
-        const running = state.delegatedActiveCount || 0;
-        summary.textContent = running
-            ? `${running} task${running === 1 ? '' : 's'} running`
+        summary.textContent = activeCount
+            ? `${activeCount} task${activeCount === 1 ? '' : 's'} running`
             : 'Idle';
     }
-    // Rebuilding the list on every poll would reset scroll position and swallow
-    // a click that lands mid-rebuild. Only touch the DOM when the tree actually
-    // changed.
+    // Rebuilding on every poll would reset scroll and swallow a click landing
+    // mid-rebuild; only touch the DOM when the tree actually changed.
     const revision = state.delegatedRevision || '';
-    if (!force && list.dataset.renderedRevision === revision && list.children.length) {
-        return;
-    }
-    // Requests with live work open by default so progress is visible without a
-    // click. Only an explicit collapse by the user is remembered — otherwise a
-    // request that starts running after the first render would stay closed.
+    if (list.dataset.renderedRevision === revision && list.children.length) return;
     const collapsedIds = state.delegatedCollapsedRequests || (state.delegatedCollapsedRequests = new Set());
     list.innerHTML = requests.map(delegatedRequestBlock).join('');
     list.querySelectorAll('details.delegated-request').forEach(node => {
@@ -2768,77 +1013,14 @@ function renderDelegatedWork(force = false) {
     list.dataset.renderedRevision = revision;
 }
 
-async function refreshDelegatedWork(options = {}) {
-    if (!state.sessionId) {
-        state.delegatedRequests = [];
-        state.delegatedRevision = null;
-        state.delegatedActiveCount = 0;
-        renderDelegatedWork();
-        scheduleDelegatedPoll();
-        return;
-    }
-    try {
-        const resp = await fetch(`/api/chat/sessions/${encodeURIComponent(state.sessionId)}/activity`, {
-            credentials: 'same-origin',
-            cache: 'no-store',
-        });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        const previousRevision = state.delegatedRevision;
-        state.delegatedRequests = data.requests || [];
-        state.delegatedRevision = data.revision || null;
-        state.delegatedActiveCount = data.active_task_count || 0;
-        renderDelegatedWork(previousRevision === null);
-        // Patch the transcript in place instead of rebuilding it. This is what
-        // makes live progress visible without the page jumping.
-        syncDelegatedProgressCards();
-        // Nothing further to reload: the only thing the transcript renders for
-        // delegated work is the progress card above (live) and the report card
-        // (which arrives over the live-refresh channel when it is written).
-    } catch (err) {
-        /* Live updates are best-effort. */
-    } finally {
-        scheduleDelegatedPoll();
-    }
-}
-
-function scheduleDelegatedPoll() {
-    if (state.delegatedPollTimer) {
-        window.clearTimeout(state.delegatedPollTimer);
-        state.delegatedPollTimer = null;
-    }
-    if (!state.sessionId) return;
-    // Tight while work is running (users are watching), slow otherwise: an idle
-    // conversation should not poll every few seconds for nothing.
-    const delay = state.delegatedActiveCount > 0 ? 4000 : 25000;
-    state.delegatedPollTimer = window.setTimeout(() => refreshDelegatedWork(), delay);
+async function refreshDelegatedWork() {
+    // One fetch for both surfaces: the controller patches the transcript's
+    // progress cards, then this paints the overview panel from the same data.
+    await conversation.refreshDelegatedWork();
 }
 
 function requestDelegatedResync() {
-    // Progress is patched IN PLACE from the activity payload (see
-    // syncDelegatedProgressCards). Reloading the whole transcript to reflect a
-    // status change destroyed and rebuilt every message, which reset scroll
-    // position and produced the visible jump while work was running — and it
-    // ran every few seconds because a live request bumps the revision
-    // constantly. Only a *new settled outcome* needs the transcript re-read.
-    if (state.streaming) return;
-    if (!state.sessionId) return;
-    refreshDelegatedWork({ resync: false });
-}
-
-/**
- * Mirror the live delegated-work tree into the transcript.
- *
- * Runs on every activity poll. Cost is one fingerprint comparison per running
- * request, so a 4s poll while work is running cannot disturb the page.
- */
-function syncDelegatedProgressCards() {
-    const msgs = document.getElementById('messages');
-    if (!msgs) return;
-    const requests = state.delegatedRequests || [];
-    const live = requests.filter(r => DELEGATED_OPEN_REQUEST_STATUSES.has(String(r.status || '')));
-    live.forEach(request => LucentChatMessageUI.upsertDelegatedProgress(msgs, request));
-    LucentChatMessageUI.pruneDelegatedProgress(msgs, live.map(r => r.id));
+    conversation.requestDelegatedResync();
 }
 
 async function stopDelegatedTask(taskId, button) {
@@ -2867,7 +1049,7 @@ async function stopDelegatedTask(taskId, button) {
     } catch (err) {
         console.warn('Cancel request failed', err);
     } finally {
-        refreshDelegatedWork({ resync: false });
+        refreshDelegatedWork();
     }
 }
 
@@ -2890,7 +1072,7 @@ document.addEventListener('keydown', function(e) {
         }
     }
     // Escape to stop streaming
-    if (e.key === 'Escape' && state.streaming) {
+    if (e.key === 'Escape' && conversation.state.streaming) {
         stopStreaming();
     } else if (e.key === 'Escape') {
         const openOverviewTrigger = document.querySelector('[data-overview-trigger][aria-expanded="true"]');
@@ -2928,176 +1110,15 @@ document.addEventListener('click', function(e) {
         return;
     }
 
-    const toolBtn = e.target.closest('[data-tool-toggle]');
-    if (toolBtn) {
-        toggleToolDetails(toolBtn.dataset.toolToggle);
-        return;
-    }
-
-    // ── Human-in-the-loop interaction cards ──────────────────────────────
-    const interactionDecision = e.target.closest('[data-interaction-decision]');
-    if (interactionDecision) {
-        const card = interactionDecision.closest('.interaction-card');
-        const decision = interactionDecision.dataset.interactionDecision;
-        if (decision === 'approve' || decision === 'deny') {
-            // "Always allow" is an approval-scope choice, so it only applies to
-            // the approve path. Denying never persists.
-            const remember = decision === 'approve'
-                && !!card.querySelector('[data-interaction-remember]')?.checked;
-            const noteField = card.querySelector('[data-interaction-note]');
-            submitInteraction(card, {
-                decision,
-                remember,
-                note: noteField ? noteField.value.trim() : '',
-            });
-        } else if (decision === 'answer') {
-            const answers = collectQuestionAnswers(card);
-            if (!answers.some(entry => entry.answer)) {
-                // Nothing answered yet: focus the first empty field instead of
-                // sending an empty submission the model would have to interpret.
-                const empty = [...card.querySelectorAll('[data-interaction-answer]')]
-                    .find(field => !field.value.trim());
-                if (empty) empty.focus();
-                return;
-            }
-            submitInteraction(card, {
-                answer: answers.map(entry => entry.answer).filter(Boolean).join(' | '),
-                choice: null,
-                answers,
-            });
-        } else if (decision === 'skip') {
-            submitInteraction(card, { answer: '', choice: null, answers: [] });
-        }
-        return;
-    }
-
-    const interactionChoice = e.target.closest('[data-interaction-choice]');
-    if (interactionChoice) {
-        const card = interactionChoice.closest('.interaction-card');
-        const value = interactionChoice.dataset.interactionChoice || '';
-        const questionIndex = parseInt(
-            interactionChoice.dataset.interactionQuestion || '0', 10
-        );
-        // A click picks that answer for its own question. It fills the field and
-        // marks the option, then submits everything answered so far — a batched
-        // card is answered in one round trip, not one per question.
-        const answers = collectQuestionAnswers(card);
-        answers[questionIndex] = { answer: value, choice: value };
-        // Reflect the pick so an answer given by clicking is visible if the
-        // person finishes the remaining questions.
-        const field = card.querySelector(`[data-interaction-answer="${questionIndex}"]`);
-        if (field) field.value = value;
-        card.querySelectorAll(
-            `[data-interaction-question="${questionIndex}"]`
-        ).forEach(node => node.classList.toggle('is-selected', node === interactionChoice));
-
-        const total = card.querySelectorAll('[data-interaction-question-block]').length;
-        const answeredCount = answers.filter(entry => entry && entry.answer).length;
-        if (total <= 1 || answeredCount >= total) {
-            submitInteraction(card, {
-                answer: answers.map(entry => entry && entry.answer).filter(Boolean).join(' | '),
-                choice: total <= 1 ? value : null,
-                answers,
-            });
-        }
-        return;
-    }
-
-    const reasoningBtn = e.target.closest('[data-reasoning-toggle]');
-    if (reasoningBtn) {
-        toggleReasoning(reasoningBtn);
-        return;
-    }
-
-    const removeAttachBtn = e.target.closest('[data-remove-attachment]');
-    if (removeAttachBtn) {
-        removePendingAttachment(parseInt(removeAttachBtn.dataset.removeAttachment, 10));
-        return;
-    }
+    // Tool chips, reasoning toggles, attachment removal, and the
+    // human-in-the-loop cards are all wired by the shared conversation
+    // controller, so /chat and Handoff cannot drift apart on them.
 
     const overviewShell = document.querySelector('.chat-overview-shell');
     const overviewPanel = document.getElementById('chat-overview-panel');
     if (overviewShell && !overviewShell.contains(e.target) && !overviewPanel.classList.contains('hidden')) {
         const openTrigger = document.querySelector('[data-overview-trigger][aria-expanded="true"]');
         if (openTrigger) toggleOverviewPanel(openTrigger.dataset.overviewTrigger);
-    }
-});
-
-// Form submit
-document.querySelector('#chat-root form').addEventListener('submit', function(e) {
-    sendMessage(e);
-});
-
-// Textarea handlers
-const chatInput = document.getElementById('chat-input');
-chatInput.addEventListener('keydown', function(e) {
-    handleKey(e);
-});
-chatInput.addEventListener('input', function() {
-    autoResize(this);
-});
-
-// Tool permission: the control is per-conversation, so remember the choice and
-// persist it on the session as soon as one exists.
-const toolApprovalSelect = document.getElementById('tool-approval-select');
-if (toolApprovalSelect) {
-    toolApprovalSelect.addEventListener('change', function() {
-        // No session yet (a brand-new conversation): the choice is sent with the
-        // session-creation POST instead, so nothing is lost.
-        saveApprovalMode(this.value);
-    });
-}
-
-// Enter submits an inline interaction answer (Shift+Enter is unnecessary in a
-// single-line field, but leaving it unhandled would swallow the key).
-document.addEventListener('keydown', function(e) {
-    if (e.key !== 'Enter') return;
-    const field = e.target.closest('[data-interaction-answer], [data-interaction-note]');
-    if (!field) return;
-    const card = field.closest('.interaction-card');
-    if (!card) return;
-    e.preventDefault();
-    if (field.hasAttribute('data-interaction-answer')) {
-        // Enter on one question submits the whole card: batching only pays off
-        // if the person is not forced to click a button after each field.
-        const answers = collectQuestionAnswers(card);
-        if (!answers.some(entry => entry.answer)) return;
-        submitInteraction(card, {
-            answer: answers.map(entry => entry.answer).filter(Boolean).join(' | '),
-            choice: null,
-            answers,
-        });
-    } else {
-        const approve = card.querySelector('[data-interaction-decision="approve"]');
-        if (approve) approve.click();
-    }
-});
-
-// Attachment controls
-const attachBtn = document.getElementById('attach-btn');
-const attachInput = document.getElementById('attach-input');
-attachBtn.addEventListener('click', function() {
-    if (!attachBtn.disabled) attachInput.click();
-});
-attachInput.addEventListener('change', function() {
-    addPendingFiles(this.files);
-    this.value = '';
-});
-
-// Paste images directly into the composer
-chatInput.addEventListener('paste', function(e) {
-    if (!selectedModelSupportsVision()) return;
-    const items = (e.clipboardData && e.clipboardData.items) || [];
-    const files = [];
-    for (const item of items) {
-        if (item.kind === 'file') {
-            const file = item.getAsFile();
-            if (file) files.push(file);
-        }
-    }
-    if (files.length) {
-        e.preventDefault();
-        addPendingFiles(files);
     }
 });
 
@@ -3166,7 +1187,7 @@ document.getElementById('session-list').addEventListener('click', function(e) {
         return;
     }
     const row = e.target.closest('[data-session-id]');
-    if (row && !state.streaming) {
+    if (row && !conversation.state.streaming) {
         closeProjectMenu();
         loadSession(row.dataset.sessionId);
         toggleSessionDrawer(false);
