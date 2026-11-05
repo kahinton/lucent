@@ -12,7 +12,7 @@ from lucent.auth import (
 )
 from lucent.auth_providers import organization_allows_access
 from lucent.db import ApiKeyRepository, UserRepository, get_pool
-from lucent.db.api_key import API_KEY_PREFIXES
+from lucent.db.api_key import ADMIN_ORGS_SCOPE, API_KEY_PREFIXES
 from lucent.log_context import set_user_id
 from lucent.rbac import Permission, Role, has_permission
 
@@ -290,6 +290,83 @@ def _enforce_remote_agent_allowlist(request: Request, user: CurrentUser) -> None
         )
 
 
+# ── Instance control-plane (admin organization) keys ─────────────────────
+#
+# A key minted with only the ``admin-orgs`` scope lets an external control
+# plane provision tenants. Its owning user must be a hyperadmin (the routes
+# require Permission.ORG_MANAGE_INSTANCE), which would otherwise make every
+# other REST route reachable as an instance operator. This allowlist is what
+# confines the *credential* to tenant administration. The reachable surface
+# is the committed organizations router (``lucent.api.app`` mounts it at
+# ``/api/organizations``) — provision, list, read, rename, per-tenant
+# settings/setting-locks, credential reads, and model grants — and nothing
+# of the tenant data plane.
+
+#: The segment that stands for an organization id in the patterns below.
+#: It must never swallow a literal segment, because ``current`` (the
+#: tenant-scoped routes), ``instance`` (instance-wide routes), and
+#: ``provision`` are real words on this router: a negative lookahead keeps
+#: ``GET /api/organizations/current`` and friends out of the scoped key's
+#: reach even though ``[^/?]+`` would otherwise match them.
+_ORG_ID_SEGMENT = r"(?!current(?:/|$)|instance(?:/|$)|provision(?:/?$))[^/?]+"
+
+ADMIN_ORGS_ALLOWED_ROUTES: tuple[tuple[str, str], ...] = (
+    # The only create path this scope may reach. There is no bare-create
+    # pattern: a shell organization with no member is not what a control
+    # plane wants, and POST /provision is the audited, complete path.
+    ("POST", r"^/api/organizations/provision/?$"),
+    # Reconciliation reads: the paginated list and one organization's detail.
+    ("GET", r"^/api/organizations/?$"),
+    ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + "/?$"),
+    ("PATCH", "^/api/organizations/" + _ORG_ID_SEGMENT + "/?$"),
+    # Per-tenant tier controls and their reads (``features.sandboxes_enabled``
+    # and friends). Reads of settings and the lock set, writes of a single
+    # setting, and the whole lock-management family stay reachable so a tier
+    # application can pin ``features.sandboxes_enabled`` remotely.
+    ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/settings/?$"),
+    ("PUT", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/settings/.+$"),
+    ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/setting-locks/?$"),
+    ("PUT", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/setting-locks/?$"),
+    ("PUT", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/setting-locks/.+$"),
+    ("DELETE", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/setting-locks/.+$"),
+    ("POST", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/setting-locks/release/?$"),
+    # Instance-level account lookup by email (signup pre-flight, below).
+    ("GET", r"^/api/organizations/instance/users/by-email/?$"),
+    # Provider credential read — values are never returned — and the grant
+    # that makes one shared model usable by the tenant.
+    ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/credentials/?$"),
+    ("POST", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/models/.+/grant/?$"),
+    # Member creation (POST /{id}/users): the second write path a signup
+    # site needs. An invited signup must create the invitee's account in
+    # Lucent — with the password the invitee chose — exactly as the owner
+    # account is created by /provision; without this reach the invitee
+    # would keep a password the site itself stores, defeating the
+    # single-source-of-truth design. The route itself still enforces
+    # ORG_MANAGE_INSTANCE and Lucent's own role rules (`can_assign_role`),
+    # and the handler's 409 covers the identity collision.
+    ("POST", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/users/?$"),
+)
+
+
+def _enforce_admin_orgs_allowlist(request: Request, user: CurrentUser) -> None:
+    """Confine an ``admin-orgs`` key to the instance organization endpoints.
+
+    Raises:
+        HTTPException: 403 for any route outside the allowlist.
+    """
+    method = request.method.upper()
+    path = request.url.path
+
+    if not any(
+        method == allowed_method and re.match(pattern, path)
+        for allowed_method, pattern in ADMIN_ORGS_ALLOWED_ROUTES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key scope does not allow this endpoint",
+        )
+
+
 async def get_current_user(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -354,6 +431,17 @@ async def get_current_user(
                 and "remote-agent" in user.api_key_scopes
             ):
                 _enforce_remote_agent_allowlist(request, user)
+
+            # Control-plane keys are the narrowest *instance-level* scope: a
+            # key minted for tenant provisioning may reach the admin
+            # organization endpoints and nothing else, even though its owner
+            # is a hyperadmin. Checked on scope membership (not `has_scope`)
+            # so a key that also carries read/write stays confined.
+            if (
+                user.auth_method == "api_key"
+                and ADMIN_ORGS_SCOPE in user.api_key_scopes
+            ):
+                _enforce_admin_orgs_allowlist(request, user)
 
             # Remote *engine session* keys are minted per task and ship to a
             # host Lucent does not control, so they must be useless off the MCP

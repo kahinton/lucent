@@ -375,3 +375,38 @@ class TestMCPAuthMiddleware:
 
         assert inner_app._calls == []
         assert responses[0]["status"] == 401
+
+    async def test_mcp_rejects_admin_orgs_scoped_key(
+        self, inner_app, db_pool, test_user
+    ):
+        """A control-plane key must not reach the tenant data plane via MCP.
+
+        MCP has its own auth path; without this gate the key would act as its
+        hyperadmin owner inside the data plane, bypassing the REST allowlist.
+        """
+        from lucent.db import ApiKeyRepository
+        from lucent.db.api_key import ADMIN_ORGS_SCOPE
+        from lucent.server import MCPAuthMiddleware
+
+        _, plain_key = await ApiKeyRepository(db_pool).create(
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+            name="Control-plane MCP Key",
+            scopes=[ADMIN_ORGS_SCOPE],
+        )
+        responses = []
+
+        async def mock_send(message):
+            responses.append(message)
+
+        await MCPAuthMiddleware(inner_app)(
+            self._make_scope(
+                path="/mcp",
+                headers={"authorization": f"Bearer {plain_key}"},
+            ),
+            AsyncMock(),
+            mock_send,
+        )
+
+        assert inner_app._calls == []
+        assert responses[0]["status"] == 403

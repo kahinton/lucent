@@ -190,6 +190,7 @@ class MCPAuthMiddleware:
         from starlette.responses import JSONResponse
 
         from lucent.db import ApiKeyRepository, UserRepository, get_pool, init_db
+        from lucent.db.api_key import ADMIN_ORGS_SCOPE
 
         # Get authorization header from scope
         headers = dict(scope.get("headers", []))
@@ -218,6 +219,35 @@ class MCPAuthMiddleware:
                         key_info = await api_key_repo.verify(api_key)
 
                         if key_info:
+                            # A control-plane key is confined to the instance
+                            # admin organization REST endpoints. MCP is the
+                            # tenant data plane (and has its own auth path),
+                            # so refuse the key here rather than let it act
+                            # as its hyperadmin owner.
+                            if ADMIN_ORGS_SCOPE in (key_info.get("scopes") or []):
+                                logger.warning(
+                                    "MCP auth rejected: admin-orgs key cannot use MCP "
+                                    "(api_key_id=%s)",
+                                    key_info["id"],
+                                )
+                                response = JSONResponse(
+                                    status_code=403,
+                                    content={
+                                        "jsonrpc": "2.0",
+                                        "error": {
+                                            "code": -32001,
+                                            "message": (
+                                                "Forbidden: this API key is scoped "
+                                                "to the instance admin API"
+                                            ),
+                                        },
+                                        "id": None,
+                                    },
+                                    headers={"WWW-Authenticate": "Bearer"},
+                                )
+                                await response(scope, receive, send)
+                                return
+
                             # Check rate limit before proceeding
                             rate_limiter = get_rate_limiter()
                             # Pass the key's scopes so per-scope limits (e.g. the

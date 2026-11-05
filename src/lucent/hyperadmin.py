@@ -13,6 +13,8 @@ This CLI is that path. It is intentionally the smallest possible surface:
     python -m lucent.hyperadmin grant --email ops@example.com
     python -m lucent.hyperadmin revoke --email ops@example.com
     python -m lucent.hyperadmin mint-key --email ops@example.com
+    python -m lucent.hyperadmin mint-key --email ops@example.com --scope admin-orgs
+    python -m lucent.hyperadmin revoke-key --key-id <uuid>
     python -m lucent.hyperadmin status
 
 ``mint-key`` exists because the hyperadmin API is authenticated by API key:
@@ -37,8 +39,9 @@ import asyncpg
 
 from lucent.db import AdminAuditRepository, ApiKeyRepository, UserRepository
 from lucent.db import admin_audit as audit_actions
+from lucent.db.api_key import ADMIN_ORGS_SCOPE
 from lucent.db.organization import OrganizationRepository
-from lucent.db.pool import close_db, init_db
+from lucent.db.pool import close_db, init_db, preauth_guc_preamble, tenant_guc_scrub
 from lucent.logging import configure_logging, get_logger
 
 logger = get_logger("lucent.hyperadmin")
@@ -124,13 +127,14 @@ async def _audit(
     old_values: dict[str, Any] | None = None,
     new_values: dict[str, Any] | None = None,
     notes: str | None = None,
+    entity_type: str = "user",
 ) -> None:
     """Record a privilege change in the instance audit trail."""
     org_id = await _operator_org_id(pool)
     await AdminAuditRepository(pool).log(
         organization_id=org_id,
         action=action,
-        entity_type="user",
+        entity_type=entity_type,
         entity_id=entity_id,
         entity_label=entity_label,
         changed_fields=list((new_values or {}).keys()) or None,
@@ -379,8 +383,15 @@ async def cmd_mint_key(
     email: str | None,
     user_id: str | None,
     name: str,
+    scopes: list[str] | None = None,
 ) -> int:
-    """Mint an API key for a hyperadmin so it can call the instance APIs."""
+    """Mint an API key for a hyperadmin so it can call the instance APIs.
+
+    ``scopes`` defaults to the repository's ``['read', 'write']`` (full access,
+    what the ops console uses). Passing ``[ADMIN_ORGS_SCOPE]`` mints the
+    least-privilege control-plane key: the admin organization endpoints and
+    nothing else.
+    """
     try:
         user = await _resolve_user(pool, email=email, user_id=user_id)
     except LookupError as exc:
@@ -401,6 +412,7 @@ async def cmd_mint_key(
         user_id=user["id"],
         organization_id=user["organization_id"],
         name=name,
+        scopes=scopes,
     )
 
     await _audit(
@@ -408,16 +420,81 @@ async def cmd_mint_key(
         action=audit_actions.API_KEY_CREATE,
         entity_id=record["id"],
         entity_label=name,
-        new_values={"name": name, "user": str(user["id"])},
+        new_values={
+            "name": name,
+            "user": str(user["id"]),
+            "scopes": record["scopes"],
+        },
         notes="Instance-operator API key minted via the hyperadmin CLI.",
     )
+
+    if record["scopes"] == [ADMIN_ORGS_SCOPE]:
+        reach = (
+            "least-privilege — only the organization administration surface "
+            "(POST /api/organizations/provision and its read/settings reach)"
+        )
+    else:
+        reach = (
+            "full access — the tenant data plane and the instance APIs "
+            "(mint with --scope admin-orgs for a control-plane key)"
+        )
 
     sys.stdout.write(
         "\nInstance operator API key (shown once — store it now):\n"
         f"  {plaintext}\n\n"
+        f"Scopes: {', '.join(record['scopes'])}\n"
+        f"Reach:  {reach}\n\n"
         f"Use it as: Authorization: Bearer <key>\n"
-        f"against the organization APIs (team mode) or the local ops console.\n"
     )
+    return EXIT_OK
+
+
+async def cmd_revoke_key(pool: asyncpg.Pool, *, key_id: str) -> int:
+    """Revoke an API key by id, whatever user or scope it belongs to.
+
+    Machine credentials are minted headlessly, so they must also be
+    terminable headlessly — revoking through the web UI would require the
+    operator to have an interactive session.
+    """
+    try:
+        key_uuid = UUID(key_id)
+    except (TypeError, ValueError):
+        logger.error("--key-id must be a UUID")
+        return EXIT_CONFIG
+
+    # ``api_keys`` is read under the same narrow pre-auth branch as bearer
+    # verification: this lookup happens before any user/org context exists.
+    async with pool.acquire() as conn:
+        await conn.execute(preauth_guc_preamble())
+        try:
+            row = await conn.fetchrow(
+                "SELECT name, scopes, revoked_at FROM api_keys WHERE id = $1",
+                key_uuid,
+            )
+        finally:
+            await conn.execute(tenant_guc_scrub())
+
+    if row is None:
+        logger.error("No API key with id %s", key_id)
+        return EXIT_NOT_FOUND
+    if row["revoked_at"] is not None:
+        sys.stdout.write(f"API key {key_id} is already revoked.\n")
+        return EXIT_OK
+
+    await ApiKeyRepository(pool).revoke_by_id(key_uuid)
+
+    await _audit(
+        pool,
+        action=audit_actions.API_KEY_REVOKE,
+        entity_id=key_uuid,
+        entity_label=row["name"],
+        old_values={"revoked": False},
+        new_values={"revoked": True, "scopes": row["scopes"]},
+        notes="API key revoked via the hyperadmin CLI.",
+        entity_type="api_key",
+    )
+
+    sys.stdout.write(f"Revoked API key {key_id} ({row['name']}).\n")
     return EXIT_OK
 
 
@@ -472,6 +549,23 @@ def _build_parser() -> argparse.ArgumentParser:
     mint.add_argument("--email")
     mint.add_argument("--user-id")
     mint.add_argument("--name", default=DEFAULT_KEY_NAME)
+    mint.add_argument(
+        "--scope",
+        action="append",
+        dest="scopes",
+        choices=(ADMIN_ORGS_SCOPE,),
+        metavar="SCOPE",
+        help=(
+            "Restrict the key to a capability instead of granting full access. "
+            f"Supported: {ADMIN_ORGS_SCOPE} — the instance admin organization "
+            "endpoints only. Omit for a full read/write key (ops console)."
+        ),
+    )
+
+    revoke_key = sub.add_parser(
+        "revoke-key", help="Revoke an API key by id (any user or scope)."
+    )
+    revoke_key.add_argument("--key-id", required=True, help="The api_keys UUID.")
 
     return parser
 
@@ -514,8 +608,14 @@ async def _run(args: argparse.Namespace) -> int:
             )
         if args.command == "mint-key":
             return await cmd_mint_key(
-                pool, email=args.email, user_id=args.user_id, name=args.name
+                pool,
+                email=args.email,
+                user_id=args.user_id,
+                name=args.name,
+                scopes=args.scopes,
             )
+        if args.command == "revoke-key":
+            return await cmd_revoke_key(pool, key_id=args.key_id)
         logger.error("Unknown command: %s", args.command)
         return EXIT_CONFIG
     finally:

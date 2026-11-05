@@ -32,6 +32,17 @@ logger = get_logger(__name__)
 API_KEY_PREFIXES = ("hs_", "lr_")
 
 
+# Least-privilege scope for an external control plane that provisions tenants.
+# A key carrying only this scope may reach the organization administration
+# surface (``POST /api/organizations/provision``, its list/read/rename and
+# per-tenant settings, setting-locks, credential read, and model grants) and
+# nothing else — the allowlist in ``lucent.api.deps``. The MCP middleware and
+# the web login provider refuse it everywhere else. Mint one with:
+#
+#     python -m lucent.hyperadmin mint-key --email <operator> --scope admin-orgs
+ADMIN_ORGS_SCOPE = "admin-orgs"
+
+
 def _affected(status: str | None) -> int:
     """Extract the row count from an asyncpg command tag (e.g. ``DELETE 42``)."""
     if not status:

@@ -445,12 +445,6 @@ class GroupMemberResponse(BaseModel):
 # =============================================================================
 
 
-class OrganizationCreate(BaseModel):
-    """Request model for creating an organization."""
-
-    name: str = Field(..., min_length=1, max_length=255, description="Organization name")
-
-
 class OrganizationUpdate(BaseModel):
     """Request model for updating an organization."""
 
@@ -662,6 +656,28 @@ class OrganizationProvisionResponse(BaseModel):
     )
     settings_applied: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+
+
+class AccountLookupMatch(BaseModel):
+    """One account holding a given email, with its tenant context."""
+
+    user_id: UUID
+    email: str | None
+    display_name: str | None
+    role: str
+    is_active: bool
+    email_verified: bool
+    created_at: datetime
+    organization_id: UUID
+    organization_name: str
+    organization_status: str
+
+
+class AccountLookupResponse(BaseModel):
+    """Every account for the looked-up email, across tenants."""
+
+    email: str
+    accounts: list[AccountLookupMatch]
 
 
 class OrganizationAdminCreate(BaseModel):

@@ -10,11 +10,9 @@ Tests /api/organizations endpoints (team-mode only):
 - POST /api/organizations/current/transfer (transfer ownership — owner)
 """
 
-from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport
 
@@ -298,53 +296,10 @@ class TestUpdateCurrentOrganization:
 
 
 # ============================================================================
-# POST /api/organizations — create organization
+# POST /api/organizations was the bare shell-create route. It was removed:
+# the only create path is POST /provision (a complete, usable tenant), and
+# its authorization is covered by tests/test_hyperadmin_api.py.
 # ============================================================================
-
-
-class TestCreateOrganization:
-    async def test_create_org_as_hyperadmin(self, hyperadmin_client, org_prefix):
-        resp = await hyperadmin_client.post(
-            "/api/organizations",
-            json={"name": f"{org_prefix}new_org"},
-        )
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["name"] == f"{org_prefix}new_org"
-        assert "id" in data
-        assert "created_at" in data
-
-    async def test_create_org_duplicate_name(self, hyperadmin_client, org_org):
-        """Cannot create org with an existing name."""
-        resp = await hyperadmin_client.post(
-            "/api/organizations",
-            json={"name": org_org["name"]},
-        )
-        assert resp.status_code == 409
-        assert "already exists" in resp.json()["detail"]
-
-    async def test_create_org_owner_forbidden(self, owner_client, org_prefix):
-        resp = await owner_client.post(
-            "/api/organizations",
-            json={"name": f"{org_prefix}owner_org"},
-        )
-        assert resp.status_code == 403
-
-    async def test_create_org_admin_forbidden(self, admin_client, org_prefix):
-        """Admins cannot create organizations (requires owner)."""
-        resp = await admin_client.post(
-            "/api/organizations",
-            json={"name": f"{org_prefix}admin_org"},
-        )
-        assert resp.status_code == 403
-
-    async def test_create_org_member_forbidden(self, member_client, org_prefix):
-        """Members cannot create organizations (requires owner)."""
-        resp = await member_client.post(
-            "/api/organizations",
-            json={"name": f"{org_prefix}member_org"},
-        )
-        assert resp.status_code == 403
 
 
 # ============================================================================

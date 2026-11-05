@@ -12,10 +12,11 @@ Design notes worth keeping in mind when changing this file:
 
 * Every instance route requires :class:`HyperadminUser`. A tenant owner is
   intentionally *not* enough: these routes write into other tenants' rows.
-* A tenant is only usable when it has a human member. ``POST /`` alone creates a
-  headless organization; ``POST /provision`` creates the org, its first admin,
+* A tenant is only usable when it has a human member, so this router has no
+  bare create endpoint. ``POST /provision`` creates the org, its first admin,
   and their API key together, and rolls the org back if the member cannot be
-  created. Prefer ``/provision`` for any signup flow.
+  created; any signup or console flow calls it. A shell-creating ``POST`` here
+  would only offer a fast way to mint an unusable tenant.
 * Suspension is a soft stop. It blocks sessions and API keys
   (``organization_allows_access``) while retaining every row, and hyperadmins
   keep access so they can inspect and reactivate.
@@ -36,6 +37,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from lucent import settings as runtime_settings
 from lucent.api.deps import AuthenticatedUser, HyperadminUser, OwnerUser
 from lucent.api.models import (
+    AccountLookupMatch,
+    AccountLookupResponse,
     CredentialFieldSpec,
     EngineCatalogEntry,
     EngineProviderOption,
@@ -49,7 +52,6 @@ from lucent.api.models import (
     OrganizationApiKeyCreate,
     OrganizationApiKeyCreated,
     OrganizationBackendCreate,
-    OrganizationCreate,
     OrganizationCredentialUpdate,
     OrganizationInvitationCreate,
     OrganizationInvitationCreated,
@@ -89,9 +91,9 @@ from lucent.db.organization import OrganizationNameConflictError
 from lucent.db.resource_usage import ResourceUsageRepository
 from lucent.logging import get_logger
 from lucent.rbac import Permission, can_assign_role, can_manage_user
+from lucent.services import identity as identity_service
 from lucent.services import org_providers as instance_providers
 from lucent.services import org_provisioning, usage
-from lucent.services import identity as identity_service
 from lucent.services import org_settings as instance_settings
 
 logger = get_logger(__name__)
@@ -384,66 +386,18 @@ async def transfer_ownership(
 
 
 @router.post(
-    "",
-    response_model=OrganizationResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_organization(
-    data: OrganizationCreate,
-    user: HyperadminUser,
-) -> OrganizationResponse:
-    """Create an organization shell and seed its built-in definitions.
-
-    Requires hyperadmin role.
-
-    The organization this creates has **no human member**, so nobody can log
-    into it yet. Use ``POST /provision`` for anything user-facing — it creates
-    the organization, its first admin, and an API key in one step.
-    """
-    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
-
-    pool = await get_pool()
-    org_repo = OrganizationRepository(pool)
-
-    try:
-        org = await org_repo.create(name=data.name)
-    except OrganizationNameConflictError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Organization with this name already exists",
-        ) from None
-
-    # Seed the new org with built-in skills, agents, hooks, and sandbox templates.
-    try:
-        from lucent.builtin_definitions import sync_built_in_definitions_for_org
-
-        await sync_built_in_definitions_for_org(pool, str(org["id"]))
-    except Exception:
-        logger.warning(
-            "Failed to seed built-in definitions for new org %s", org["id"], exc_info=True
-        )
-
-    await _audit(
-        user,
-        action=audit_actions.ORG_PROVISION,
-        entity_type="organization",
-        entity_id=org["id"],
-        entity_label=data.name,
-        target_org_id=org["id"],
-        changed_fields=["organization"],
-        new_values={"name": data.name, "first_user": None},
-        notes="Organization shell created without a member (POST /api/organizations).",
-    )
-
-    logger.info("Organization created: id=%s, name=%s, by=%s", org["id"], data.name, user.id)
-    return _org_to_response(org)
-
-
-@router.post(
     "/provision",
     response_model=OrganizationProvisionResponse,
     status_code=status.HTTP_201_CREATED,
-    responses={409: {"model": ErrorResponse}},
+    responses={
+        409: {
+            "description": (
+                "Organization name or owner email already exists. The detail is "
+                '{"field": "<collided field>", "message": "..."} so a control plane '
+                "knows which input to change."
+            )
+        }
+    },
 )
 async def provision_organization(
     data: OrganizationProvisionRequest,
@@ -457,6 +411,12 @@ async def provision_organization(
     tenant, its first admin (with a generated password unless one is supplied),
     a default API key, seeds the built-in agent/skill definitions, and
     optionally enables a model so the tenant can chat on first login.
+
+    Errors:
+        409 — the organization name is taken, or an account already exists for
+        the first admin's identity: ``detail`` is
+        ``{"field": "name" | "owner_email" | "external_id", "message": ...}``
+        naming the input that collided.
 
     Secrets are returned **once** in this response and are never retrievable
     afterwards.
@@ -487,9 +447,20 @@ async def provision_organization(
             operator_user_id=user.id,
         )
     except org_provisioning.OrganizationNameTakenError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"field": "name", "message": str(exc)},
+        ) from None
     except org_provisioning.FirstUserConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+        # The service conflicts on the identity it was told to use: an
+        # explicit external_id, or the email when that is the identity. The
+        # field in the body has to match, so the control plane knows which
+        # input to change.
+        field = "external_id" if first and first.external_id else "owner_email"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"field": field, "message": str(exc)},
+        ) from None
     except org_provisioning.InvalidProvisioningRequestError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
@@ -804,13 +775,19 @@ async def get_organization(
     """Get an organization by ID.
 
     Hyperadmins can view any organization. Other users can only view their own.
+    Cross-organization reads are gated on the instance-operator permission —
+    never on a literal role string, which ``rbac.py`` is the contract for.
+    Members probing someone else's organization still get the same 404.
     """
-    is_instance_operator = user.role.value == "hyperadmin"
-    if organization_id != user.organization_id and not is_instance_operator:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Organization not found",
-        )
+    if organization_id != user.organization_id:
+        if not user.has_permission(Permission.ORG_MANAGE_INSTANCE):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Organization not found",
+            )
+        is_instance_operator = True
+    else:
+        is_instance_operator = user.has_permission(Permission.ORG_MANAGE_INSTANCE)
 
     pool = await get_pool()
     org_repo = OrganizationRepository(pool)
@@ -2043,6 +2020,52 @@ async def delete_organization_user(
 #   * engine BACKENDS — optional routing overrides (base URL, gateway, pinned
 #     model). A backend alone does not make a provider usable.
 # ===========================================================================
+
+
+# --- Instance account lookup -----------------------------------------------
+
+
+@router.get(
+    "/instance/users/by-email",
+    response_model=AccountLookupResponse,
+)
+async def find_accounts_by_email(
+    user: HyperadminUser,
+    email: str = Query(..., min_length=3, max_length=320),
+) -> AccountLookupResponse:
+    """Does this email already have an account, on any tenant?
+
+    Requires hyperadmin role. The external signup plane asks this before
+    provisioning: the same email may hold an account in several organizations,
+    and each one is returned with its tenant context so the control plane can
+    point the person at an existing tenant instead of silently creating a
+    duplicate identity. Matching is case-insensitive, like the login lookup,
+    and daemon service identities are excluded.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+
+    pool = await get_pool()
+    normalized = email.strip().lower()
+    matches = await UserRepository(pool).find_accounts_by_email(normalized)
+
+    return AccountLookupResponse(
+        email=normalized,
+        accounts=[
+            AccountLookupMatch(
+                user_id=match["id"],
+                email=match["email"],
+                display_name=match["display_name"],
+                role=match["role"],
+                is_active=match["is_active"],
+                email_verified=match["email_verified"],
+                created_at=match["created_at"],
+                organization_id=match["organization_id"],
+                organization_name=match["organization_name"],
+                organization_status=match["organization_status"],
+            )
+            for match in matches
+        ],
+    )
 
 
 @router.get("/instance/providers")

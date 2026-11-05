@@ -44,6 +44,30 @@ class TestParser:
         args = hyperadmin._build_parser().parse_args(["mint-key", "--email", "a@b.test"])
         assert args.name == hyperadmin.DEFAULT_KEY_NAME
 
+    def test_mint_key_least_privilege_scope(self):
+        from lucent.db.api_key import ADMIN_ORGS_SCOPE
+
+        args = hyperadmin._build_parser().parse_args(
+            ["mint-key", "--email", "a@b.test", "--scope", ADMIN_ORGS_SCOPE]
+        )
+        assert args.scopes == [ADMIN_ORGS_SCOPE]
+
+    def test_mint_key_rejects_unsupported_scope(self):
+        with pytest.raises(SystemExit):
+            hyperadmin._build_parser().parse_args(
+                ["mint-key", "--email", "a@b.test", "--scope", "read"]
+            )
+
+    def test_revoke_key_requires_key_id(self):
+        with pytest.raises(SystemExit):
+            hyperadmin._build_parser().parse_args(["revoke-key"])
+
+    def test_revoke_key_parses(self):
+        key_id = "11111111-1111-1111-1111-111111111111"
+        args = hyperadmin._build_parser().parse_args(["revoke-key", "--key-id", key_id])
+        assert args.command == "revoke-key"
+        assert args.key_id == key_id
+
 
 class TestMainGuards:
     def test_missing_database_url_exits_config(self, monkeypatch):

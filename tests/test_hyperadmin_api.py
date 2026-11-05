@@ -9,7 +9,6 @@ the authorization boundary around them.
 
 from __future__ import annotations
 
-from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -165,6 +164,33 @@ class TestProvisionEndpoint:
             },
         )
         assert resp.status_code == 409
+        # The 409 names the field that collided, so a control plane knows
+        # which input to change.
+        assert resp.json()["detail"]["field"] == "name"
+
+    async def test_provision_duplicate_owner_email_conflicts(
+        self, operator_client, ha_prefix
+    ):
+        """The identity of the first admin is instance-unique — reusing it is a
+        409 on ``owner_email``, not a second account with the same login."""
+        body = {
+            "name": f"{ha_prefix}emaildup",
+            "first_admin": {"email": f"{ha_prefix}dup@tenant.test"},
+        }
+        first = await operator_client.post("/api/organizations/provision", json=body)
+        assert first.status_code == 201, first.text
+
+        again = await operator_client.post(
+            "/api/organizations/provision",
+            json={
+                "name": f"{ha_prefix}oemaildup",
+                "first_admin": {"email": f"{ha_prefix}dup@tenant.test"},
+            },
+        )
+        assert again.status_code == 409
+        detail = again.json()["detail"]
+        assert detail["field"] == "owner_email"
+        assert detail["message"]
 
     async def test_provision_rejects_admin_role_hyperadmin(
         self, operator_client, ha_prefix
@@ -190,6 +216,56 @@ class TestProvisionEndpoint:
                 "name": f"{ha_prefix}nope",
                 "first_admin": {"email": f"{ha_prefix}nope@tenant.test"},
             },
+        )
+        assert resp.status_code == 403
+
+
+class TestAccountLookup:
+    """The signup pre-flight: does this email already hold a Lucent account?"""
+
+    async def test_lookup_returns_accounts_with_tenant_context(
+        self, operator_client, ha_tenant_member, ha_tenant, ha_prefix
+    ):
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-email",
+            params={"email": f"{ha_prefix}member@tenant.test"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["email"] == f"{ha_prefix}member@tenant.test"
+        assert len(data["accounts"]) == 1
+        account = data["accounts"][0]
+        assert account["user_id"] == str(ha_tenant_member["id"])
+        assert account["organization_id"] == str(ha_tenant["id"])
+        assert account["organization_name"] == ha_tenant["name"]
+        assert account["role"] == "owner"
+
+    async def test_lookup_matches_case_insensitively(
+        self, operator_client, ha_tenant_member, ha_prefix
+    ):
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-email",
+            params={"email": f"{ha_prefix}MEMBER@TENANT.TEST"},
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["accounts"]) == 1
+
+    async def test_lookup_of_unknown_email_is_an_empty_list(
+        self, operator_client, ha_prefix
+    ):
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-email",
+            params={"email": f"{ha_prefix}nobody@nowhere.test"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["accounts"] == []
+
+    async def test_lookup_requires_instance_operator(
+        self, tenant_owner_client, ha_tenant_member
+    ):
+        resp = await tenant_owner_client.get(
+            "/api/organizations/instance/users/by-email",
+            params={"email": ha_tenant_member["email"]},
         )
         assert resp.status_code == 403
 

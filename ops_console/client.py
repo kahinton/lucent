@@ -638,4 +638,9 @@ def _extract_detail(response: httpx.Response) -> str:
             else:
                 parts.append(str(item))
         return "; ".join(parts) or "Request validation failed"
-    return str(detail)
+    if isinstance(detail, dict):
+        # 409 conflict shape: {"field": ..., "message": ...} naming the input
+        # that collided. ``message`` is the part an operator can act on.
+        if detail.get("message"):
+            return str(detail["message"])
+        return str(detail)

@@ -736,7 +736,6 @@ def create_app() -> FastAPI:
         prefix="/api/admin/backends",
         tags=["Admin Backends"],
     )
-
     # Organization / multi-user API routers.
     #
     # These used to be mounted only when ``is_team_mode()`` was true, which made

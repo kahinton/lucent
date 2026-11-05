@@ -271,6 +271,13 @@ class ApiKeyAuthProvider(AuthProvider):
         if not key_info:
             return None
 
+        # Narrow-scope machine keys (e.g. ``admin-orgs``) are not interactive
+        # credentials. Exchanging one for a web session would bypass the REST
+        # scope allowlist and hand over the owner's full hyperadmin powers.
+        scopes = key_info.get("scopes") or []
+        if not ("read" in scopes and "write" in scopes):
+            return None
+
         user_repo = UserRepository(self.pool)
         user = await user_repo.get_by_id(key_info["user_id"])
 
