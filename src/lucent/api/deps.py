@@ -332,6 +332,12 @@ ADMIN_ORGS_ALLOWED_ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/setting-locks/release/?$"),
     # Instance-level account lookup by email (signup pre-flight, below).
     ("GET", r"^/api/organizations/instance/users/by-email/?$"),
+    # Instance-level account lookup by login. Accounts whose email is NULL
+    # log in with their display name alone and are invisible to the by-email
+    # read, so the control plane needs this sibling lookup to resolve them.
+    # Read-only, literal path (never a parametric org id), and gated on the
+    # same ORG_MANAGE_INSTANCE permission inside the handler.
+    ("GET", r"^/api/organizations/instance/users/by-login/?$"),
     # Provider credential read — values are never returned — and the grant
     # that makes one shared model usable by the tenant.
     ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/credentials/?$"),

@@ -135,8 +135,11 @@ def test_allowlist_permits_only_the_organization_surface():
         ("PUT", f"/api/organizations/{org_id}/setting-locks/features.sandboxes_enabled"),
         ("DELETE", f"/api/organizations/{org_id}/setting-locks/features.sandboxes_enabled"),
         ("POST", f"/api/organizations/{org_id}/setting-locks/release"),
-        # Account lookup by email (signup pre-flight).
+        # Account lookup by email (signup pre-flight), plus its by-login
+        # twin: accounts with a NULL email log in by display name alone and
+        # are invisible to the by-email read. Read-only, literal path.
         ("GET", "/api/organizations/instance/users/by-email"),
+        ("GET", "/api/organizations/instance/users/by-login"),
         # Credential read and model grant.
         ("GET", f"/api/organizations/{org_id}/credentials"),
         ("POST", f"/api/organizations/{org_id}/models/openai/gpt-4o-mini/grant"),
@@ -192,6 +195,14 @@ def test_allowlist_permits_only_the_organization_surface():
         ("GET", "/api/admin/models"),
         ("GET", "/api/organizations/instance/usage/resources"),
         ("GET", "/api/organizations/instance/audit"),
+        # The by-login reach is one anchored GET on a literal path: no
+        # method other than GET, no deeper path, and the bare member list
+        # still cannot become instance-wide through it.
+        ("PATCH", "/api/organizations/instance/users/by-login"),
+        ("PUT", "/api/organizations/instance/users/by-login"),
+        ("POST", "/api/organizations/instance/users/by-login"),
+        ("GET", "/api/organizations/instance/users/by-login/anything"),
+        ("GET", "/api/organizations/instance/users"),
         # Prefix smuggling: the patterns are anchored.
         ("GET", "/api/organizationsanything"),
         ("POST", "/api/organizations/provisioned"),
@@ -330,6 +341,90 @@ async def test_control_plane_key_reaches_organizations_and_nothing_else(
         "/api/organizations", headers=headers, json={"name": "nope"}
     )
     assert blocked_create.status_code in (403, 405), blocked_create.text
+
+
+@pytest.mark.asyncio
+async def test_control_plane_key_resolves_logins_by_login(
+    db_pool, control_plane_key, cred_prefix, raw_client
+):
+    """The by-login pre-flight resolves email and username-only accounts.
+
+    This is the one lookup the tenant data plane cannot replace: accounts
+    with a NULL email log in by display name alone and are invisible to
+    by-email. The same credential reaching this route must stay confined —
+    the tenant data plane, /api/auth/verify, and MCP all remain 403, MCP
+    through the server middleware that refuses an admin-orgs key outright.
+    """
+    from lucent.api.app import create_app
+    from lucent.db import OrganizationRepository, UserRepository
+    from lucent.server import MCPAuthMiddleware
+
+    _, plaintext = control_plane_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    org = await OrganizationRepository(db_pool).create(name=f"{cred_prefix}loginorg")
+
+    # A normal account: resolvable by email, case-insensitively.
+    member = await UserRepository(db_pool).create(
+        external_id=f"{cred_prefix}loginmember",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{cred_prefix}member@tenant.test",
+        display_name=f"{cred_prefix}Member",
+        role="owner",
+    )
+    email_hit = await raw_client.get(
+        "/api/organizations/instance/users/by-login",
+        headers=headers,
+        params={"login": f"{cred_prefix}MEMBER@TENANT.TEST"},
+    )
+    assert email_hit.status_code == 200, email_hit.text
+    body = email_hit.json()
+    assert body["matched_on"] == "email"
+    assert [a["user_id"] for a in body["accounts"]] == [str(member["id"])]
+
+    # The username-only account — email NULL — is the whole reason this
+    # route exists: by-email can never return it.
+    name_only = await UserRepository(db_pool).create(
+        external_id=f"{cred_prefix}namelogin",
+        provider="local",
+        organization_id=org["id"],
+        email=None,
+        display_name=f"{cred_prefix}Namesignin",
+        role="member",
+    )
+    name_hit = await raw_client.get(
+        "/api/organizations/instance/users/by-login",
+        headers=headers,
+        params={"login": f"{cred_prefix}Namesignin"},
+    )
+    assert name_hit.status_code == 200, name_hit.text
+    name_body = name_hit.json()
+    assert name_body["matched_on"] == "display_name"
+    assert [a["user_id"] for a in name_body["accounts"]] == [str(name_only["id"])]
+    assert name_body["accounts"][0]["email"] is None
+    assert name_body["accounts"][0]["organization_name"] == f"{cred_prefix}loginorg"
+
+    # The reach stays one read wide: the tenant data plane and the auth
+    # verifier remain behind the scope gate.
+    for path in (
+        f"/api/memories/{uuid4()}",  # tenant data plane
+        "/api/search",  # tenant data plane (search)
+        "/api/auth/verify",  # session verifier, not a control-plane read
+    ):
+        resp = await raw_client.get(path, headers=headers)
+        assert resp.status_code == 403, f"{path}: {resp.status_code} {resp.text}"
+        assert resp.json()["detail"] == "API key scope does not allow this endpoint"
+
+    # ...and MCP is refused by the server middleware before its own auth
+    # could ever act as the key's hyperadmin owner.
+    wrapped = ASGITransport(
+        app=MCPAuthMiddleware(create_app()), raise_app_exceptions=False
+    )
+    async with httpx.AsyncClient(transport=wrapped, base_url="http://test") as mcp_client:
+        mcp_resp = await mcp_client.get("/mcp", headers=headers)
+    assert mcp_resp.status_code == 403, mcp_resp.text
+    assert mcp_resp.json()["error"]["message"].startswith("Forbidden")
 
 
 @pytest.mark.asyncio

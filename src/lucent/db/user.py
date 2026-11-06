@@ -335,6 +335,55 @@ class UserRepository:
             for row in rows
         ]
 
+    async def find_accounts_by_display_name(
+        self, display_name: str
+    ) -> list[dict[str, Any]]:
+        """Find every non-daemon account with this display name, across tenants.
+
+        The username-only twin of :meth:`find_accounts_by_email`: accounts
+        whose email is NULL sign in with their display name alone, so an
+        instance-level lookup must be able to match on it too.
+
+        Unlike the email lookup this is inherently ambiguous — display_name
+        has no unique constraint and can repeat freely, even within one
+        organization. The caller must treat more than one row as an
+        unresolved conflict, never as an invitation to pick one; the route
+        turns that into a 409 with the candidate list.
+
+        Case-insensitive, matching the login lookup. Daemon service
+        identities are excluded, as in the email lookup.
+        """
+        normalized = (display_name or "").strip().lower()
+        if not normalized:
+            return []
+        query = """
+            SELECT u.id, u.external_id, u.provider, u.organization_id, u.email,
+                   u.display_name, u.avatar_url, u.provider_metadata, u.is_active,
+                   u.created_at, u.updated_at, u.last_login_at, u.role,
+                   u.email_verified, u.scim_external_id, u.provisioned_by,
+                   o.name AS organization_name, o.status AS organization_status
+            FROM users u
+            JOIN organizations o ON o.id = u.organization_id
+            WHERE u.role <> 'daemon'
+              AND LOWER(u.display_name) = $1
+            ORDER BY u.created_at
+        """
+
+        # users is a cross-tenant identity table; this read binds by display
+        # name and is the instance-operator surface, so it acquires without a
+        # scope, exactly as the email lookup does.
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, normalized)
+
+        return [
+            {
+                **self._row_to_dict(row),
+                "organization_name": row["organization_name"],
+                "organization_status": row["organization_status"],
+            }
+            for row in rows
+        ]
+
     async def get_by_scim_external_id(
         self, scim_external_id: str, organization_id: UUID | str
     ) -> dict[str, Any] | None:

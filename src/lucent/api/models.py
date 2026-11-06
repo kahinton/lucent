@@ -680,6 +680,32 @@ class AccountLookupResponse(BaseModel):
     accounts: list[AccountLookupMatch]
 
 
+class AccountLoginLookupMatch(BaseModel):
+    """One account the login resolved to, with its tenant context."""
+
+    user_id: UUID
+    email: str | None
+    display_name: str | None
+    role: str
+    organization_id: UUID
+    organization_name: str
+
+
+class AccountLoginLookupResponse(BaseModel):
+    """Accounts the login resolved to, and which identity field matched."""
+
+    login: str
+    matched_on: Literal["email", "display_name"] | None = Field(
+        description=(
+            "Which identity field the login resolved on: 'email' when the "
+            "login matched LOWER(email), 'display_name' when it matched "
+            "LOWER(display_name) of a username-only account, or null when "
+            "nothing matched."
+        )
+    )
+    accounts: list[AccountLoginLookupMatch]
+
+
 class OrganizationAdminCreate(BaseModel):
     """Add a member to any organization (hyperadmin)."""
 

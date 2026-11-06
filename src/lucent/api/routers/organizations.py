@@ -29,7 +29,7 @@ Design notes worth keeping in mind when changing this file:
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -37,6 +37,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from lucent import settings as runtime_settings
 from lucent.api.deps import AuthenticatedUser, HyperadminUser, OwnerUser
 from lucent.api.models import (
+    AccountLoginLookupMatch,
+    AccountLoginLookupResponse,
     AccountLookupMatch,
     AccountLookupResponse,
     CredentialFieldSpec,
@@ -2062,6 +2064,87 @@ async def find_accounts_by_email(
                 organization_id=match["organization_id"],
                 organization_name=match["organization_name"],
                 organization_status=match["organization_status"],
+            )
+            for match in matches
+        ],
+    )
+
+
+@router.get(
+    "/instance/users/by-login",
+    response_model=AccountLoginLookupResponse,
+)
+async def find_accounts_by_login(
+    user: HyperadminUser,
+    login: str = Query(..., min_length=1, max_length=320),
+) -> AccountLoginLookupResponse:
+    """Does this login — an email address or a username — hold an account?
+
+    Requires hyperadmin role. Lucent accounts may hold no email at all
+    (``users.email`` is nullable): such users sign in with their display
+    name alone, so the by-email lookup cannot see them and a control plane
+    could never resolve them. Matching mirrors the login itself —
+    ``LOWER(email) = LOWER(login) OR LOWER(display_name) = LOWER(login)`` —
+    with the email tried first and daemon service identities excluded.
+
+    The two match columns differ in what a second row means:
+
+    * Email: the same address held in several tenants is the expected
+      multi-tenant pattern by-email already reports, so every match is
+      returned under ``matched_on: "email"``.
+    * Display name: there is no unique constraint on ``display_name``, so
+      more than one row is genuine ambiguity. It is refused with 409 and
+      the candidate list rather than silently picking one.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+
+    pool = await get_pool()
+    normalized = login.strip().lower()
+
+    matches = await UserRepository(pool).find_accounts_by_email(normalized)
+    matched_on: Literal["email", "display_name"] | None = None
+    if matches:
+        matched_on = "email"
+    else:
+        display_matches = await UserRepository(pool).find_accounts_by_display_name(
+            normalized
+        )
+        if len(display_matches) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "matched_on": "display_name",
+                    "message": (
+                        f"{len(display_matches)} accounts share the display "
+                        f"name {normalized!r}; the login is ambiguous."
+                    ),
+                    "candidates": [
+                        {
+                            "user_id": str(match["id"]),
+                            "email": match["email"],
+                            "display_name": match["display_name"],
+                            "role": match["role"],
+                            "organization_id": str(match["organization_id"]),
+                            "organization_name": match["organization_name"],
+                        }
+                        for match in display_matches
+                    ],
+                },
+            )
+        matched_on = "display_name" if display_matches else None
+        matches = display_matches
+
+    return AccountLoginLookupResponse(
+        login=normalized,
+        matched_on=matched_on,
+        accounts=[
+            AccountLoginLookupMatch(
+                user_id=match["id"],
+                email=match["email"],
+                display_name=match["display_name"],
+                role=match["role"],
+                organization_id=match["organization_id"],
+                organization_name=match["organization_name"],
             )
             for match in matches
         ],

@@ -270,6 +270,164 @@ class TestAccountLookup:
         assert resp.status_code == 403
 
 
+class TestLoginLookup:
+    """Resolving a login — email or username — across tenants.
+
+    The by-email lookup cannot see a user whose email is NULL: Lucent allows
+    username-only accounts and the login matches LOWER(email) OR
+    LOWER(display_name). By-login covers both, email first; display-name
+    ambiguity is a 409, never a silent pick.
+    """
+
+    async def _create_member(
+        self, db_pool, ha_tenant, ha_prefix, *, email, display_name, role="member"
+    ):
+        from lucent.db import UserRepository
+
+        return await UserRepository(db_pool).create(
+            external_id=f"{ha_prefix}{display_name}",
+            provider="local",
+            organization_id=ha_tenant["id"],
+            email=email,
+            display_name=display_name,
+            role=role,
+        )
+
+    async def test_resolves_username_only_account(
+        self, operator_client, db_pool, ha_tenant, ha_prefix
+    ):
+        """A NULL-email account is found by its display name alone."""
+        member = await self._create_member(
+            db_pool, ha_tenant, ha_prefix,
+            email=None, display_name=f"{ha_prefix}nameonly",
+        )
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-login",
+            params={"login": f"{ha_prefix}NAMEONLY"},  # case-insensitive on purpose
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["login"] == f"{ha_prefix}nameonly"
+        assert data["matched_on"] == "display_name"
+        assert len(data["accounts"]) == 1
+        account = data["accounts"][0]
+        assert account["user_id"] == str(member["id"])
+        assert account["email"] is None
+        assert account["display_name"] == f"{ha_prefix}nameonly"
+        assert account["role"] == "member"
+        assert account["organization_id"] == str(ha_tenant["id"])
+        assert account["organization_name"] == ha_tenant["name"]
+
+    async def test_resolves_by_email_first(
+        self, operator_client, db_pool, ha_tenant, ha_tenant_member, ha_prefix
+    ):
+        """Email is the precedence field: a display-name collision loses."""
+        # A second account whose display name literally equals the first
+        # member's email address. If the lookup ever fell through to the
+        # display-name query, this account would be returned instead.
+        await self._create_member(
+            db_pool, ha_tenant, ha_prefix,
+            email=f"{ha_prefix}other@tenant.test",
+            display_name=ha_tenant_member["email"],
+        )
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-login",
+            params={"login": ha_tenant_member["email"]},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["matched_on"] == "email"
+        assert [a["user_id"] for a in data["accounts"]] == [
+            str(ha_tenant_member["id"])
+        ]
+
+    async def test_email_match_reports_every_tenant(
+        self, operator_client, db_pool, ha_tenant, ha_prefix
+    ):
+        """The same address in two tenants returns both rows — not a 409."""
+        from lucent.db import OrganizationRepository, UserRepository
+
+        second_org = await OrganizationRepository(db_pool).create(
+            name=f"{ha_prefix}second"
+        )
+        shared_email = f"{ha_prefix}shared@tenant.test"
+        first = await self._create_member(
+            db_pool, ha_tenant, ha_prefix, email=shared_email, display_name=None
+        )
+        second = await UserRepository(db_pool).create(
+            external_id=f"{ha_prefix}secondmember",
+            provider="local",
+            organization_id=second_org["id"],
+            email=shared_email,
+            display_name=None,
+        )
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-login",
+            params={"login": shared_email.upper()},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["matched_on"] == "email"
+        assert {a["user_id"] for a in data["accounts"]} == {
+            str(first["id"]),
+            str(second["id"]),
+        }
+
+    async def test_display_name_ambiguity_is_a_409(
+        self, operator_client, db_pool, ha_tenant, ha_prefix
+    ):
+        """More than one display-name row is refused with the candidates."""
+        from lucent.db import OrganizationRepository, UserRepository
+
+        second_org = await OrganizationRepository(db_pool).create(
+            name=f"{ha_prefix}third"
+        )
+        shared_name = f"{ha_prefix}twin"
+        first = await self._create_member(
+            db_pool, ha_tenant, ha_prefix,
+            email=f"{ha_prefix}twin1@tenant.test", display_name=shared_name,
+        )
+        second = await UserRepository(db_pool).create(
+            external_id=f"{ha_prefix}twin2",
+            provider="local",
+            organization_id=second_org["id"],
+            email=f"{ha_prefix}twin2@tenant.test",
+            display_name=shared_name,
+        )
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-login",
+            params={"login": shared_name},
+        )
+        assert resp.status_code == 409, resp.text
+        detail = resp.json()["detail"]
+        assert detail["matched_on"] == "display_name"
+        assert detail["message"]
+        candidate_ids = {c["user_id"] for c in detail["candidates"]}
+        assert candidate_ids == {str(first["id"]), str(second["id"])}
+        assert all(c["organization_id"] and c["role"] for c in detail["candidates"])
+
+    async def test_unknown_login_is_empty_not_an_error(
+        self, operator_client, ha_prefix
+    ):
+        resp = await operator_client.get(
+            "/api/organizations/instance/users/by-login",
+            params={"login": f"{ha_prefix}nobody"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["accounts"] == []
+        assert data["matched_on"] is None
+
+    async def test_requires_instance_operator(
+        self, tenant_owner_client, ha_tenant_member
+    ):
+        resp = await tenant_owner_client.get(
+            "/api/organizations/instance/users/by-login",
+            params={"login": ha_tenant_member["email"]},
+        )
+        assert resp.status_code == 403
+
+
 class TestListFiltering:
     async def test_system_org_is_hidden(self, operator_client):
         resp = await operator_client.get("/api/organizations", params={"limit": 100})
