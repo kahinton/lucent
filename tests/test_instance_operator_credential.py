@@ -6,8 +6,9 @@ scope, owned by a hyperadmin. These tests exercise the real auth dependency
 is the security control under test: the key must reach the organization
 administration surface — provision, list/read, per-tenant tier controls —
 and nothing else: not the tenant data plane, not the tenant-scoped
-``current`` routes, not member or delete management, even though its owner
-can do everything.
+``current`` routes, not member management (reads are open for billing
+reconciliation; creation is the committed signup path; every other member
+sub-route stays closed), even though its owner can do everything.
 """
 
 from __future__ import annotations
@@ -139,6 +140,14 @@ def test_allowlist_permits_only_the_organization_surface():
         # Credential read and model grant.
         ("GET", f"/api/organizations/{org_id}/credentials"),
         ("POST", f"/api/organizations/{org_id}/models/openai/gpt-4o-mini/grant"),
+        # Billing reads: who is in a tenant, what it consumes. GET-only.
+        ("GET", f"/api/organizations/{org_id}/users"),
+        ("GET", f"/api/organizations/{org_id}/users/"),
+        ("GET", f"/api/organizations/{org_id}/usage/resources"),
+        # Member creation stays reachable: it is the committed second write
+        # path of the signup flow (7a12c91), kept as-is here — asserted
+        # explicitly rather than removed silently.
+        ("POST", f"/api/organizations/{org_id}/users"),
     )
     for method, path in allowed:
         _enforce_admin_orgs_allowlist(_Req(method, path), user)
@@ -155,13 +164,28 @@ def test_allowlist_permits_only_the_organization_surface():
         ("GET", "/api/organizations/current/settings"),
         ("PUT", "/api/organizations/current/settings/x"),
         ("GET", "/api/organizations/current/setting-locks"),
+        # The newly opened member/usage reads must not swallow the literal
+        # segments: ``current`` and ``instance`` are never organization ids.
+        ("GET", "/api/organizations/current/users"),
+        ("GET", "/api/organizations/current/usage/resources"),
+        ("GET", "/api/organizations/instance/users"),
+        # The member reach is GET-only (creation aside): every member
+        # management sub-route stays closed.
+        ("PATCH", f"/api/organizations/{org_id}/users"),
+        ("PATCH", f"/api/organizations/{org_id}/users/{uuid4()}/role"),
+        ("POST", f"/api/organizations/{org_id}/users/{uuid4()}/reset-password"),
+        ("DELETE", f"/api/organizations/{org_id}/users/{uuid4()}"),
+        ("DELETE", f"/api/organizations/{org_id}/users/{uuid4()}/api-keys/x"),
+        # The usage read has no write side, and the member read has no
+        # deeper path.
+        ("POST", f"/api/organizations/{org_id}/usage/resources"),
+        ("PATCH", f"/api/organizations/{org_id}/usage/resources"),
+        ("GET", f"/api/organizations/{org_id}/users/{uuid4()}"),
         # Same-family operations deliberately outside the reach list.
         ("DELETE", f"/api/organizations/{org_id}"),
         ("POST", f"/api/organizations/{org_id}/suspend"),
-        ("GET", f"/api/organizations/{org_id}/users"),
         ("GET", f"/api/organizations/{org_id}/models"),
         ("PUT", f"/api/organizations/{org_id}/credentials/anthropic"),
-        ("GET", f"/api/organizations/{org_id}/usage/resources"),
         # Other instance/operator surfaces.
         ("GET", "/api/auth/verify"),
         ("GET", "/api/remotes"),
@@ -306,6 +330,96 @@ async def test_control_plane_key_reaches_organizations_and_nothing_else(
         "/api/organizations", headers=headers, json={"name": "nope"}
     )
     assert blocked_create.status_code in (403, 405), blocked_create.text
+
+
+@pytest.mark.asyncio
+async def test_control_plane_key_reads_members_and_usage_but_not_member_management(
+    db_pool, control_plane_key, cred_prefix, raw_client
+):
+    """Billing reads (`/{id}/users`, `/{id}/usage/resources`) open; writes close.
+
+    FastAPI resolves routes before dependencies, so only real method+route
+    pairs are probed here: an unconfigured pair would 405 and prove nothing.
+    Provision patches built-in definitions (proven separately, as above).
+    """
+    _, plaintext = control_plane_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+    owner_email = f"{cred_prefix}owner@tenant.test"
+
+    with patch(
+        "lucent.builtin_definitions.sync_built_in_definitions_for_org",
+        new=AsyncMock(return_value={}),
+    ):
+        provisioned = await raw_client.post(
+            "/api/organizations/provision",
+            headers=headers,
+            json={
+                "name": f"{cred_prefix}billing_reads",
+                "first_admin": {"email": owner_email, "display_name": "Billing Owner"},
+            },
+        )
+    assert provisioned.status_code == 201, provisioned.text
+    org_id = provisioned.json()["organization"]["id"]
+
+    # The member read: the operator's tenant must list its owner.
+    members = await raw_client.get(
+        f"/api/organizations/{org_id}/users", headers=headers
+    )
+    assert members.status_code == 200, members.text
+    emails = [u["email"] for u in members.json()]
+    assert owner_email in emails, emails
+
+    # The consumption read with the seats flag the billing job sets.
+    usage = await raw_client.get(
+        f"/api/organizations/{org_id}/usage/resources",
+        headers=headers,
+        params={"include_seats": True},
+    )
+    assert usage.status_code == 200, usage.text
+    assert usage.json()["organization_id"] == org_id
+
+    # The literal guard must survive the new parametric reads: a
+    # uuid-shaped segment is never ``current``.
+    current_members = await raw_client.get(
+        "/api/organizations/current/users", headers=headers
+    )
+    assert current_members.status_code == 403, current_members.text
+    assert (
+        current_members.json()["detail"] == "API key scope does not allow this endpoint"
+    )
+
+    # Member management stays closed: role change, member deletion.
+    stray = str(uuid4())
+    role_change = await raw_client.patch(
+        f"/api/organizations/{org_id}/users/{stray}/role",
+        headers=headers,
+        json={"role": "admin"},
+    )
+    assert role_change.status_code == 403, role_change.text
+    assert role_change.json()["detail"] == "API key scope does not allow this endpoint"
+
+    member_delete = await raw_client.delete(
+        f"/api/organizations/{org_id}/users/{stray}", headers=headers
+    )
+    assert member_delete.status_code == 403, member_delete.text
+    assert member_delete.json()["detail"] == "API key scope does not allow this endpoint"
+
+    # Member creation is the pre-existing committed reach of the signup
+    # flow (7a12c91): this test asserts that current behaviour explicitly
+    # rather than removing the entry silently. The task draft expected 403
+    # here; the allowlist kept the documented reach (see report).
+    invited = await raw_client.post(
+        f"/api/organizations/{org_id}/users",
+        headers=headers,
+        json={
+            "email": f"{cred_prefix}invited@tenant.test",
+            "display_name": f"{cred_prefix}Invited",
+            "external_id": f"{cred_prefix}invited",
+            "role": "member",
+        },
+    )
+    assert invited.status_code == 201, invited.text
+    assert invited.json()["temporary_password"]
 
 
 @pytest.mark.asyncio

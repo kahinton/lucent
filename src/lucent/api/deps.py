@@ -345,6 +345,15 @@ ADMIN_ORGS_ALLOWED_ROUTES: tuple[tuple[str, str], ...] = (
     # ORG_MANAGE_INSTANCE and Lucent's own role rules (`can_assign_role`),
     # and the handler's 409 covers the identity collision.
     ("POST", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/users/?$"),
+    # Member and consumption reads: a billing/control-plane reconciliation
+    # needs to see who is in a tenant and what it consumes, and no more.
+    # These are GET-only; every other member sub-route (role changes,
+    # reset-password, per-user api-keys, member deletion) stays unreachable.
+    # The negative lookahead above keeps the literal segments distinct: the
+    # parametric segment can never swallow ``current``/``instance``, so
+    # ``/current/users`` and instance-wide routes stay outside the reach.
+    ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/users/?$"),
+    ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/usage/resources/?$"),
 )
 
 
