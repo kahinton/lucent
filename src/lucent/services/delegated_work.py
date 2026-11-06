@@ -132,13 +132,23 @@ async def load_delegated_work(
 ) -> dict[str, Any]:
     """Read the delegated-work tree for a chat session (never raises)."""
     if not session_id:
-        return {"requests": [], "active_task_count": 0, "revision": "empty"}
+        return {
+            "requests": [],
+            "active_task_count": 0,
+            "revision": "empty",
+            "report_revision": "none",
+        }
     try:
         return await RequestRepository(pool).list_delegated_work_for_session(
             session_id, org_id
         )
     except Exception:  # noqa: BLE001 — context enrichment must never break a turn
-        return {"requests": [], "active_task_count": 0, "revision": "error"}
+        return {
+            "requests": [],
+            "active_task_count": 0,
+            "revision": "error",
+            "report_revision": "none",
+        }
 
 
 def build_delegated_work_digest(data: dict[str, Any]) -> str:

@@ -1807,6 +1807,7 @@
             state.abortController = null;
             updateButtons();
             refreshDelegatedWork();
+            flushPendingResync();
             if (typeof cfg.onTurnComplete === 'function') cfg.onTurnComplete();
         }
 
@@ -1996,6 +1997,7 @@
         const delegated = {
             requests: [],
             revision: null,
+            reportRevision: null,
             activeCount: 0,
             timer: null,
             resyncPending: false,
@@ -2042,14 +2044,28 @@
                 );
                 if (!resp.ok) return;
                 const data = await resp.json();
-                const previous = delegated.revision;
+                const previousRevision = delegated.revision;
+                const previousReportRevision = delegated.reportRevision;
                 delegated.requests = data.requests || [];
                 delegated.revision = data.revision || null;
+                delegated.reportRevision = data.report_revision || null;
                 delegated.activeCount = data.active_task_count || 0;
-                renderDelegatedProgress(previous === null);
+                // First successful read has no baseline to diff against, so the
+                // progress cards are (re)built from scratch and no reload fires.
+                renderDelegatedProgress(previousRevision === null);
                 if (typeof cfg.onDelegatedWork === 'function') {
                     cfg.onDelegatedWork(delegated);
                 }
+                // A new REPORT CARD is the one activity change that needs the
+                // transcript re-read: the card and Lucent's unattended reply are
+                // appended rows, not progress we can patch in place. Its own
+                // revision token is used deliberately — the work revision ticks
+                // on every task transition, and rebuilding the thread on those
+                // reset scroll position while work was running.
+                const reportChanged = previousReportRevision !== null
+                    && previousReportRevision !== undefined
+                    && previousReportRevision !== delegated.reportRevision;
+                if (reportChanged) requestDelegatedResync();
             } catch (_error) {
                 // Live updates are best-effort.
             } finally {
@@ -2058,13 +2074,32 @@
         }
 
         function requestDelegatedResync() {
-            // Reloading the transcript would reset scroll and jump the page while
-            // work is running; progress is patched in place instead.
-            if (state.streaming || !state.sessionId) return;
-            refreshDelegatedWork();
+            // Re-read the transcript so a newly written report card (and the
+            // unattended reply that accompanies it) appears without a manual
+            // reload. Deliberately gated on the report revision, not the work
+            // revision: a running request bumps the latter constantly, and
+            // rebuilding the thread every few seconds reset scroll position and
+            // made the page visibly jump. Live *progress* is patched in place by
+            // renderDelegatedProgress; only a new card needs the full re-read.
+            if (!state.sessionId) return;
+            if (state.streaming) {
+                // Never rebuild the transcript mid-stream: it would throw away
+                // the reply currently being written. Re-read once it settles.
+                delegated.resyncPending = true;
+                return;
+            }
+            delegated.resyncPending = false;
+            if (typeof cfg.reloadTranscript === 'function') cfg.reloadTranscript();
         }
 
-        if (typeof cfg.onDelegatedWork === 'function') {
+        /** Re-read the transcript after a turn ends if a report arrived mid-stream. */
+        function flushPendingResync() {
+            if (!delegated.resyncPending) return;
+            delegated.resyncPending = false;
+            if (typeof cfg.reloadTranscript === 'function') cfg.reloadTranscript();
+        }
+
+        if (typeof cfg.reloadTranscript === 'function') {
             document.addEventListener('lucent:live-refresh', () => refreshDelegatedWork());
         }
 
@@ -2074,6 +2109,7 @@
             applySessionConfig,
             bind,
             loadChatControls,
+            flushPendingResync,
             refreshDelegatedWork,
             removePendingAttachment,
             requestDelegatedResync,

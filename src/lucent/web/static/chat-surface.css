@@ -19,15 +19,31 @@
     width: 100%;
 }
 /* The composer's in-motion perimeter is the shared teal→pink sweep from
-   /static/lucent-state.css, exposed as a reusable custom property so this
-   page and Activity's "running" cards cannot drift apart. The composer only
-   paints while streaming, so an idle composer never advertises motion. */
+   /static/lucent-state.css. The composer only paints while streaming, so an
+   idle composer never advertises motion.
+
+   The gradient must be composed ON ::before, not inherited from the element.
+   `.lucent-sweep, .input-glow { --lucent-sweep-gradient: conic-gradient(...) }`
+   inherits as an ALREADY-RESOLVED string: the animation then drives
+   --lucent-sweep-spread on the pseudo-element while the gradient literal it
+   paints still says "0%", so the ring rendered as a solid teal outline that
+   never moved. Re-declaring the gradient here (unresolved, referencing the
+   spread) makes the custom property re-evaluate on every animation frame. */
 .input-glow.is-streaming::before {
     content: '';
     position: absolute;
     inset: 0;
     border-radius: inherit;
     padding: 2px;
+    --lucent-sweep-gradient: conic-gradient(
+        from 0deg,
+        #00cfc1 0%,
+        #ff3f9b var(--lucent-sweep-spread),
+        rgba(0, 207, 193, 0.22) var(--lucent-sweep-spread),
+        rgba(0, 207, 193, 0.22) calc(100% - var(--lucent-sweep-spread)),
+        #ff3f9b calc(100% - var(--lucent-sweep-spread)),
+        #00cfc1 100%
+    );
     background: var(--lucent-sweep-gradient);
     filter: drop-shadow(0 0 5px rgba(0, 207, 193, 0.24));
     pointer-events: none;

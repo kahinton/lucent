@@ -433,6 +433,52 @@ def test_chat_renders_live_progress_cards():
     )
 
 
+def test_chat_reloads_transcript_only_for_new_report_cards():
+    """New report cards must reach the page without a reload; churn must not.
+
+    Two failure modes were reported from the same place:
+      * a card (and the unattended reply beside it) never appeared until the
+        page was manually refreshed, because the activity poll only patched
+        progress cards in place and never re-read the transcript;
+      * the earlier fix re-read the transcript on ANY revision change, which a
+        running request triggers every few seconds, so the thread was rebuilt
+        mid-read and scroll jumped.
+
+    The contract that satisfies both: rebuild on the REPORT revision only.
+    """
+    from pathlib import Path
+
+    js = Path("src/lucent/web/static/chat-message-ui.js").read_text()
+
+    assert "delegated.reportRevision = data.report_revision || null;" in js
+    assert "previousReportRevision !== delegated.reportRevision" in js
+    assert "if (reportChanged) requestDelegatedResync();" in js
+    # The work revision must not drive a transcript rebuild.
+    assert "previousRevision !== delegated.revision" not in js
+
+    # A reload mid-stream would discard the reply being written.
+    resync = js.split("function requestDelegatedResync() {", 1)[1].split("\n        }", 1)[0]
+    assert "if (state.streaming) {" in resync
+    assert "delegated.resyncPending = true;" in resync
+
+
+def test_background_report_reply_lands_on_the_same_turn_as_its_card():
+    """The card and its reply share one turn id, so replay pairs them.
+
+    A reload renders whatever the transcript says. If the reply turn were
+    written without the card's turn id, the card and the answer would land in
+    different rows (or the card would be treated as turnless), and the thread
+    would read differently after a refresh than it did live.
+    """
+    from pathlib import Path
+
+    src = Path("src/lucent/services/subagent_reports.py").read_text()
+
+    assert "report_turn_id = str(uuid4())" in src
+    assert "turn_id=report_turn_id," in src
+    assert "SET message_id = $2, turn_id = $3" in src
+
+
 def test_progress_card_is_collapsible_and_matches_the_report_card_family():
     """The live box must be collapsible and visually consistent, not a floating overlay.
 
@@ -1370,6 +1416,9 @@ async def test_activity_endpoint_payload_shape(db_pool, test_user):
 
     data = await repo.list_delegated_work_for_session(str(session["id"]), org_id)
     assert data["revision"] and data["revision"] != "empty"
+    # No card written yet: the report token is the explicit "none" sentinel, not
+    # a hash, so a client can tell "no cards" from "cards, unchanged".
+    assert data["report_revision"] == "none"
     assert data["active_task_count"] == 0
     (entry,) = [r for r in data["requests"] if r["id"] == str(request["id"])]
     assert entry["task_total"] == 1
@@ -1423,9 +1472,18 @@ async def test_revision_changes_when_a_report_card_is_written(db_pool, test_user
 
     after = await repo.list_delegated_work_for_session(str(session["id"]), org_id)
 
-    assert before["revision"] != after["revision"], (
-        "a newly written report card must change the revision, or the chat "
-        "never learns that a fresher card exists"
+    # Report cards get their own token. Mixing them into the work revision
+    # forced a bad trade: a client either rebuilt the whole transcript on every
+    # task-status tick (scroll jumped while work ran) or never noticed a new
+    # card. Two tokens let the chat reload for a card and patch in place for
+    # progress.
+    assert before["report_revision"] != after["report_revision"], (
+        "a newly written report card must change the report revision, or the "
+        "chat never learns that a fresher card exists"
+    )
+    assert before["revision"] == after["revision"], (
+        "a report card must not disturb the work revision; otherwise a card "
+        "write reads as task churn and forces a needless transcript rebuild"
     )
 
 

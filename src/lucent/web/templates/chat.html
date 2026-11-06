@@ -223,6 +223,14 @@ const conversation = LucentChatMessageUI.createConversation({
         // A reload must show live progress without waiting for the next poll.
         refreshDelegatedWork();
     },
+    // Background work writes rows the live turn never streamed: report cards,
+    // the unattended reply that goes with them, a request that settled. When
+    // the activity revision changes, re-read the transcript so those appear
+    // without a manual refresh. The controller defers this while a reply is
+    // streaming so it can never discard an answer in progress.
+    reloadTranscript: () => {
+        if (state.sessionId) loadSession(state.sessionId);
+    },
 });
 
 const state = {
@@ -237,8 +245,6 @@ const state = {
     delegatedRequests: [],
     delegatedRevision: null,
     delegatedActiveCount: 0,
-    delegatedPollTimer: null,
-    delegatedResyncPending: false,
 };
 
 // ── Thin aliases so the page reads as before, backed by the shared controller ──
@@ -734,7 +740,6 @@ function clearConversation(options = {}) {
     state.delegatedRequests = [];
     state.delegatedRevision = null;
     state.delegatedActiveCount = 0;
-    state.delegatedResyncPending = false;
     renderDelegatedWork();
     // Fresh hero after a reset — offer the summary swap-in again, exactly
     // like the initial page load.

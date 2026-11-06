@@ -191,6 +191,10 @@
             // same transcript, exactly as it appears on /chat.
             conversation.refreshDelegatedWork();
         },
+        // Same rule as /chat: when work this conversation delegated settles, the
+        // report card and Lucent's reply are written server-side. Re-read the
+        // transcript so they appear here without a manual refresh.
+        reloadTranscript: () => { loadConversation(); },
         persistApprovalMode: async (mode) => {
             if (!conversation.state.sessionId) return;
             try {

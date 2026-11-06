@@ -3859,7 +3859,12 @@ class RequestRepository:
                 max_requests,
             )
             if not request_rows:
-                return {"requests": [], "active_task_count": 0, "revision": "empty"}
+                return {
+                    "requests": [],
+                    "active_task_count": 0,
+                    "revision": "empty",
+                    "report_revision": "none",
+                }
 
             request_ids = [row["id"] for row in request_rows]
             # Report cards are written *after* a request settles (the report
@@ -3948,20 +3953,32 @@ class RequestRepository:
                     f"{task['id']}:{task.get('status')}:{task.get('updated_at')}"
                 )
 
-        # Report cards fold into the revision: they are written after the
-        # request/task rows settle, so they would otherwise be invisible to a
-        # revision-diffing poller.
-        for report in report_rows:
-            revision_parts.append(
-                f"report:{report['request_id']}:{report['report_kind']}:"
-                f"{report['created_at']}"
-            )
+        # Report cards get their OWN revision, separate from the work revision.
+        #
+        # A card is written *after* the request/task rows settle, so it has to be
+        # detectable by a poller. But it is also a transcript row, unlike the
+        # in-place progress patch that request/task churn feeds: bundling the two
+        # together forced every poller to choose between missing new cards and
+        # rebuilding the whole thread every few seconds (which reset scroll and
+        # made the page jump while work ran). Two tokens let a client rebuild only
+        # when a card actually appeared.
+        report_parts = [
+            f"report:{report['request_id']}:{report['report_kind']}:"
+            f"{report['created_at']}"
+            for report in report_rows
+        ]
 
         revision = sha256("\x1f".join(revision_parts).encode()).hexdigest()[:16]
+        report_revision = (
+            sha256("\x1f".join(report_parts).encode()).hexdigest()[:16]
+            if report_parts
+            else "none"
+        )
         return {
             "requests": items,
             "active_task_count": active_task_count,
             "revision": revision,
+            "report_revision": report_revision,
         }
 
     async def list_recently_completed(

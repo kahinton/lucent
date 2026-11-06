@@ -45,6 +45,20 @@
     inset: 0;
     border-radius: inherit;
     padding: 2px;
+    /* Re-declared here on purpose. A custom property inherits as an
+     * ALREADY-RESOLVED string, so inheriting this gradient from the host would
+     * freeze --lucent-sweep-spread at whatever it was when the value was
+     * computed — the animated sweep would never paint. Declaring it on the
+     * pseudo-element that consumes it keeps the reference live per frame. */
+    --lucent-sweep-gradient: conic-gradient(
+        from 0deg,
+        #00cfc1 0%,
+        #ff3f9b var(--lucent-sweep-spread),
+        rgba(0, 207, 193, 0.22) var(--lucent-sweep-spread),
+        rgba(0, 207, 193, 0.22) calc(100% - var(--lucent-sweep-spread)),
+        #ff3f9b calc(100% - var(--lucent-sweep-spread)),
+        #00cfc1 100%
+    );
     background: var(--lucent-sweep-gradient);
     filter: drop-shadow(0 0 5px rgba(0, 207, 193, 0.24));
     pointer-events: none;

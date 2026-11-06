@@ -472,6 +472,48 @@ def test_chat_renders_unacknowledged_report_cards():
     assert "flushOrphanCardsBefore(eventTime(msg));" in ui
 
 
+def test_composer_streaming_sweep_gradient_is_not_frozen():
+    """The streaming halo must actually sweep, not paint one static colour.
+
+    A custom property inherits as an ALREADY-RESOLVED value. Declaring
+    ``--lucent-sweep-gradient: conic-gradient(... var(--lucent-sweep-spread) ...)``
+    on the host element and consuming it from ``::before`` freezes the gradient
+    at whatever spread the host had (0%), so the ring rendered as a solid teal
+    outline with zero pink while the animation still ran on a value nothing
+    painted. Measured symptom: 0 changed pixels between animation frames.
+
+    The fix is that every painter composes the gradient itself.
+    """
+    surface = Path("src/lucent/web/static/chat-surface.css").read_text()
+    state = Path("src/lucent/web/static/lucent-state.css").read_text()
+
+    def block(css: str, selector: str) -> str:
+        start = css.index(selector + " {") + len(selector) + 2
+        depth, out = 1, []
+        for char in css[start:]:
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            out.append(char)
+        return "".join(out)
+
+    for name, css, selector in (
+        ("composer", surface, ".input-glow.is-streaming::before"),
+        ("activity card", state, ".lucent-sweep--on::before"),
+    ):
+        rules = block(css, selector)
+        assert "--lucent-sweep-gradient: conic-gradient(" in rules, (
+            f"{name}: the gradient must be declared on the pseudo-element that "
+            "paints it, or the spread it references is frozen before animating"
+        )
+        assert "var(--lucent-sweep-spread)" in rules, (
+            f"{name}: the gradient must keep referencing the animated spread"
+        )
+
+
 def test_chat_history_supports_soft_deleting_sessions():
     template = Path("src/lucent/web/templates/chat.html").read_text()
 

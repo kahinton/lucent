@@ -1910,6 +1910,10 @@ async def get_chat_session_activity(request: Request, session_id: str):
     return {
         "session_id": session_id,
         "revision": data.get("revision"),
+        # Separate token for report cards specifically: those are transcript
+        # rows (a reload is required to show them), while ``revision`` also
+        # changes on every task status tick (which must NOT rebuild the thread).
+        "report_revision": data.get("report_revision"),
         "active_task_count": data.get("active_task_count") or 0,
         "requests": data.get("requests") or [],
     }
