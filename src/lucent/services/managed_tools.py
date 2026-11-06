@@ -19,6 +19,7 @@ of a second permission model that can drift.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,83 @@ class ManagedToolError(Exception):
 
 class ManagedToolBlockedError(ManagedToolError):
     """Raised when auth or policy blocks execution."""
+
+
+class ManagedToolArgumentError(ManagedToolError):
+    """Raised when ``arguments`` cannot be interpreted as a JSON object."""
+
+
+class ManagedToolDefinitionError(ManagedToolError):
+    """Raised when a stored definition is structurally unusable.
+
+    Distinct from :class:`ManagedToolBlockedError`: nothing about the caller is
+    wrong, the definition row itself cannot be read. Callers map this to a
+    server-side error with the precise field named, never an opaque crash.
+    """
+
+
+# jsonb columns read by the executor. asyncpg returns them as text unless a
+# codec is installed, and not every repository path that produces a definition
+# row decodes them — so decode at this boundary, which every runtime shares.
+_JSON_OBJECT_FIELDS = (
+    "input_schema",
+    "output_schema",
+    "runtime_config",
+    "env_vars",
+    "auth_policy",
+    "network_policy",
+    "resource_limits",
+)
+_JSON_ARRAY_FIELDS = ("requirements",)
+
+
+def _coerce_json_field(tool: dict[str, Any], field: str, expected: type) -> None:
+    value = tool.get(field)
+    if value is None or isinstance(value, expected):
+        return
+    label = "object" if expected is dict else "array"
+    tool_name = tool.get("name") or tool.get("id") or "<unknown>"
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ManagedToolDefinitionError(
+                f"Managed tool {tool_name!r} has an unreadable {field}: "
+                f"stored value is not valid JSON ({exc})"
+            ) from exc
+        if isinstance(parsed, expected):
+            tool[field] = parsed
+            return
+    raise ManagedToolDefinitionError(
+        f"Managed tool {tool_name!r} has an invalid {field}: "
+        f"expected a JSON {label}, got {type(value).__name__}"
+    )
+
+
+def _normalize_tool_definition(tool: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a definition row with its jsonb fields decoded."""
+    normalized = dict(tool)
+    for field in _JSON_OBJECT_FIELDS:
+        _coerce_json_field(normalized, field, dict)
+    for field in _JSON_ARRAY_FIELDS:
+        _coerce_json_field(normalized, field, list)
+    return normalized
+
+
+def _normalize_arguments(arguments: dict[str, Any] | str | None) -> dict[str, Any]:
+    """Accept a mapping or a JSON-object string; reject anything else clearly."""
+    if arguments is None:
+        return {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or "{}")
+        except json.JSONDecodeError as exc:
+            raise ManagedToolArgumentError(f"arguments must be a JSON object: {exc}") from exc
+    if not isinstance(arguments, dict):
+        raise ManagedToolArgumentError(
+            f"arguments must be a JSON object, got {type(arguments).__name__}"
+        )
+    return arguments
 
 
 @dataclass
@@ -106,7 +184,7 @@ class ManagedToolExecutor:
         self,
         *,
         tool: dict[str, Any],
-        arguments: dict[str, Any] | None,
+        arguments: dict[str, Any] | str | None,
         org_id: str,
         user_id: str,
         user_role: str | None = None,
@@ -160,7 +238,7 @@ class ManagedToolExecutor:
         self,
         *,
         tool: dict[str, Any],
-        arguments: dict[str, Any] | None,
+        arguments: dict[str, Any] | str | None,
         org_id: str,
         user_id: str,
         user_role: str | None = None,
@@ -169,6 +247,11 @@ class ManagedToolExecutor:
         validate_input: bool,
         validate_output: bool,
     ) -> ManagedToolExecutionResult:
+        # Definition rows arrive from several repository paths and asyncpg hands
+        # jsonb back as text unless a codec is installed; decode once here, at
+        # the boundary every runtime shares, so a raw row is a typed error
+        # naming the field instead of an AttributeError on ``.get``.
+        tool = _normalize_tool_definition(tool)
         # Which runtime kind executes this definition. Sandboxes are only
         # required for some kinds, so the feature gate has to be per-kind rather
         # than a blanket check: a deployment with sandboxes disabled can still
@@ -193,7 +276,7 @@ class ManagedToolExecutor:
             if not granted:
                 raise ManagedToolBlockedError("Managed tool is not granted to this agent")
 
-        payload = arguments or {}
+        payload = _normalize_arguments(arguments)
         if validate_input:
             self._validate_input(tool, payload)
 

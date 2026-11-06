@@ -1123,7 +1123,12 @@ async def run_managed_tool_api(tool_id: str, body: RunManagedTool, user: Authent
     )
     if not tool or tool.get("status") != "active":
         raise HTTPException(409, "Managed tool must be active before it can run")
-    from lucent.services.managed_tools import ManagedToolBlockedError, ManagedToolExecutor
+    from lucent.services.managed_tools import (
+        ManagedToolArgumentError,
+        ManagedToolBlockedError,
+        ManagedToolDefinitionError,
+        ManagedToolExecutor,
+    )
 
     executor = ManagedToolExecutor(repo)
     try:
@@ -1137,6 +1142,10 @@ async def run_managed_tool_api(tool_id: str, body: RunManagedTool, user: Authent
         )
     except ManagedToolBlockedError as exc:
         raise HTTPException(403, str(exc))
+    except ManagedToolArgumentError as exc:
+        raise HTTPException(400, str(exc))
+    except ManagedToolDefinitionError as exc:
+        raise HTTPException(500, f"Managed tool definition is unusable: {exc}")
     except Exception as exc:
         raise HTTPException(500, str(exc))
     return result.to_dict()

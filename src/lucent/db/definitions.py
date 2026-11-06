@@ -3715,7 +3715,7 @@ class DefinitionRepository:
             status=status,
             limit=limit,
             offset=offset,
-            normalize=self._normalize_definition_row,
+            normalize=self._normalize_tool_row,
         )
 
     async def get_usable_agent(self, agent_id: str) -> dict | None:
@@ -3739,7 +3739,7 @@ class DefinitionRepository:
 
     async def get_usable_managed_tool(self, tool_id: str) -> dict | None:
         return await self._usable_by_id(
-            "managed_tool_definitions", tool_id, self._normalize_definition_row
+            "managed_tool_definitions", tool_id, self._normalize_tool_row
         )
 
     async def get_usable_skill_by_name(self, name: str, org_id: str) -> dict | None:
@@ -3754,7 +3754,7 @@ class DefinitionRepository:
 
     async def get_usable_managed_tool_by_name(self, name: str, org_id: str) -> dict | None:
         return await self._usable_by_name(
-            "managed_tool_definitions", name, org_id, self._normalize_definition_row
+            "managed_tool_definitions", name, org_id, self._normalize_tool_row
         )
 
     # ── Bulk/convenience ──────────────────────────────────────────────────

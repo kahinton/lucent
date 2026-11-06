@@ -2,21 +2,26 @@
 
 import json
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from mcp.server import MCPServer as FastMCP
 
 from lucent.auth import set_current_user
-from lucent.db.definitions import DefinitionRepository
+from lucent.db.definitions import DEFINITIONS_AUTH_POLICIES, DefinitionRepository
+from lucent.db.pool import AuthorizedDatabasePool, AuthPrincipal
 from lucent.llm.context import clear_llm_context, set_llm_context
 from lucent.secrets.utils import validate_env_var_references
 from lucent.services.managed_tools import (
+    ManagedToolArgumentError,
     ManagedToolBlockedError,
+    ManagedToolDefinitionError,
     ManagedToolError,
     ManagedToolExecutionResult,
     ManagedToolExecutor,
 )
+from lucent.services.tool_runtimes.base import RuntimeExecutionResult
 from lucent.settings import clear_runtime_setting_cache, set_runtime_setting_cache
 from lucent.tools.definitions import register_definition_tools
 
@@ -377,3 +382,171 @@ async def test_run_managed_tool_uses_trusted_agent_context(mcp, repo, auth_user)
     kwargs = mocked.await_args.kwargs
     assert kwargs["agent_id"] == str(agent["id"])
     assert kwargs["enforce_agent_grant"] is True
+
+
+# ── jsonb definition rows on the clearance (usage) path ───────────────────
+#
+# Regression: the clearance-gated usage lookups normalized managed-tool rows
+# with the generic definition normalizer, so jsonb columns (`auth_policy`,
+# `input_schema`, `runtime_config`, …) stayed asyncpg text. The executor then
+# did `auth_policy.get("roles")` on a str and every managed tool — db_query,
+# docker_ops, db_snapshot — failed identically with HTTP 500 /
+# "'str' object has no attribute 'get'".
+
+
+def _raw_managed_tool_row(name: str = "db_query", **overrides) -> dict:
+    """A row shaped the way asyncpg returns it: jsonb columns as text."""
+    row = {
+        "id": str(uuid4()),
+        "name": name,
+        "description": "read-only SQL",
+        "runtime_type": "http",
+        "source_code": "",
+        "entrypoint": "handler",
+        "requirements": "[]",
+        "runtime_config": '{"url": "https://example.com/query", "method": "POST"}',
+        "input_schema": '{"type": "object", "properties": {"action": {"type": "string"}}}',
+        "output_schema": None,
+        "auth_policy": '{"mode": "agent_grant", "require_user_access": true, "roles": ["admin"]}',
+        "network_policy": '{"network_mode": "none", "allowed_hosts": []}',
+        "resource_limits": '{"memory_limit": "512m", "cpu_limit": 1.0, "disk_limit": "1g"}',
+        "env_vars": "{}",
+        "timeout_seconds": 300,
+        "status": "active",
+        "scope": "instance",
+        "organization_id": str(uuid4()),
+        "proposal_evidence": "{}",
+    }
+    row.update(overrides)
+    return row
+
+
+class _StaticConnection:
+    def __init__(self, row: dict):
+        self.row = row
+
+    async def execute(self, *_args, **_kwargs):
+        return None
+
+    async def fetchrow(self, _query, *_params):
+        return self.row
+
+    async def fetch(self, _query, *_params):
+        return [self.row]
+
+
+class _StaticPool:
+    def __init__(self, connection: _StaticConnection):
+        self.connection = connection
+
+    def acquire(self):
+        connection = self.connection
+
+        class _Context:
+            async def __aenter__(self):
+                return connection
+
+            async def __aexit__(self, *_args):
+                return False
+
+        return _Context()
+
+
+@pytest.mark.asyncio
+async def test_usable_managed_tool_by_name_decodes_jsonb_fields():
+    principal = AuthPrincipal(uuid4(), "managed-tool-tester", uuid4())
+    pool = AuthorizedDatabasePool(
+        _StaticPool(_StaticConnection(_raw_managed_tool_row())),
+        principal,
+        DEFINITIONS_AUTH_POLICIES,
+    )
+
+    tool = await DefinitionRepository(pool).get_usable_managed_tool_by_name(
+        "db_query", str(principal.organization_id)
+    )
+
+    assert tool is not None
+    assert tool["auth_policy"] == {
+        "mode": "agent_grant",
+        "require_user_access": True,
+        "roles": ["admin"],
+    }
+    assert tool["input_schema"]["properties"]["action"] == {"type": "string"}
+    assert tool["runtime_config"]["url"] == "https://example.com/query"
+    assert tool["network_policy"] == {"network_mode": "none", "allowed_hosts": []}
+    assert tool["resource_limits"]["memory_limit"] == "512m"
+    assert tool["requirements"] == []
+
+
+@pytest.mark.asyncio
+async def test_executor_enforces_roles_from_json_string_auth_policy():
+    executor = ManagedToolExecutor(AsyncMock())
+
+    with pytest.raises(ManagedToolBlockedError, match="role is not allowed"):
+        await executor.execute(
+            tool=_raw_managed_tool_row(),
+            arguments={},
+            org_id="org-1",
+            user_id="user-1",
+            user_role="member",
+            enforce_agent_grant=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_executor_reports_unusable_definition_field():
+    executor = ManagedToolExecutor(AsyncMock())
+
+    with pytest.raises(ManagedToolDefinitionError, match="auth_policy"):
+        await executor.execute(
+            tool=_raw_managed_tool_row(auth_policy="{not-json"),
+            arguments={},
+            org_id="org-1",
+            user_id="user-1",
+            user_role="admin",
+            enforce_agent_grant=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_executor_accepts_json_string_arguments(monkeypatch):
+    captured = {}
+
+    class _RecordingRuntime:
+        async def execute(self, context):
+            captured["arguments"] = context.arguments
+            return RuntimeExecutionResult(ok=True, result={"ok": True})
+
+    monkeypatch.setattr(
+        "lucent.services.managed_tools.get_runtime", lambda _kind: _RecordingRuntime()
+    )
+    repo = AsyncMock()
+    repo.create_managed_tool_run.return_value = {"id": "run-1"}
+    executor = ManagedToolExecutor(repo)
+
+    result = await executor.execute(
+        tool=_raw_managed_tool_row(),
+        arguments='{"action": "query"}',
+        org_id="org-1",
+        user_id="user-1",
+        user_role="admin",
+        enforce_agent_grant=False,
+    )
+
+    assert result.ok is True
+    assert captured["arguments"] == {"action": "query"}
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_non_object_arguments():
+    executor = ManagedToolExecutor(AsyncMock())
+
+    with pytest.raises(ManagedToolArgumentError, match="JSON object"):
+        await executor.execute(
+            tool=_raw_managed_tool_row(),
+            arguments="[1, 2]",
+            org_id="org-1",
+            user_id="user-1",
+            user_role="admin",
+            enforce_agent_grant=False,
+        )

@@ -1677,7 +1677,12 @@ Returns: JSON with ok/result/stdout/stderr/run_id metadata, or an error."""
 
         pool = await get_pool()
         from lucent.access_control import AccessControlService
-        from lucent.services.managed_tools import ManagedToolBlockedError, ManagedToolExecutor
+        from lucent.services.managed_tools import (
+            ManagedToolArgumentError,
+            ManagedToolBlockedError,
+            ManagedToolDefinitionError,
+            ManagedToolExecutor,
+        )
 
         context = dict(
             org_id=str(org_id),
@@ -1737,6 +1742,17 @@ Returns: JSON with ok/result/stdout/stderr/run_id metadata, or an error."""
             )
         except ManagedToolBlockedError as exc:
             return json.dumps({"error": str(exc), "code": 403})
+        except ManagedToolArgumentError as exc:
+            return json.dumps({"error": str(exc), "code": 400})
+        except ManagedToolDefinitionError as exc:
+            logger.error("Managed tool %s has an unusable definition", tool, exc_info=True)
+            return json.dumps(
+                {
+                    "error": str(exc),
+                    "code": 500,
+                    "error_type": "ManagedToolDefinitionError",
+                }
+            )
         except Exception as exc:
             logger.warning("Managed tool %s failed", tool, exc_info=True)
             return json.dumps({"error": str(exc), "code": 500})
