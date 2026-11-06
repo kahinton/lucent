@@ -160,10 +160,9 @@ async def create_memory(
             detail=str(e),
         )
 
-    # Always derive username from authenticated user — never trust client-supplied
-    # username to prevent display-name spoofing (anti-spoofing: V1/V2)
+    # Attribution is derived inside MemoryRepository.create from user_id —
+    # never from client-supplied text (anti-spoofing: V1/V2).
     effective_user_id = _effective_memory_user_id(user)
-    username = await _effective_memory_username(user, pool)
 
     # Detect daemon caller for auto-tagging
     is_daemon = user.is_daemon_service and not user.is_memory_scoped
@@ -176,7 +175,6 @@ async def create_memory(
         first_owner = await get_first_memory_owner(pool, user.organization_id)
         if first_owner is not None:
             effective_user_id = UUID(first_owner["id"])
-            username = first_owner["display_name"]
 
     effective_shared = data.shared
 
@@ -209,7 +207,8 @@ async def create_memory(
 
     try:
         result = await repo.create(
-            username=username,
+            # Stored attribution is derived from effective_user_id.
+            username=None,
             type=data.type,
             content=data.content,
             tags=effective_tags,
@@ -241,7 +240,7 @@ async def create_memory(
         user_id=effective_user_id,
         organization_id=user.organization_id,
         new_values={
-            "username": username,
+            "username": result["username"],
             "type": data.type,
             "content": data.content,
             "tags": data.tags,

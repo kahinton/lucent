@@ -276,9 +276,6 @@ async def memory_new_submit(
     repo = MemoryRepository(pool)
     audit_repo = AuditRepository(pool)
 
-    # Use the logged-in user's display name as username
-    username = user.display_name or "unknown"
-
     # Parse tags
     tag_list = normalize_tags([t for t in tags.split(",") if t.strip()])
 
@@ -335,7 +332,8 @@ async def memory_new_submit(
             tags=tag_list,
         )
         result = await repo.create(
-            username=username,
+            # Stored attribution is derived from user_id.
+            username=None,
             type=type,
             content=content,
             tags=tag_list if tag_list else None,
@@ -356,7 +354,7 @@ async def memory_new_submit(
         user_id=user.id,
         organization_id=user.organization_id,
         new_values={
-            "username": username,
+            "username": result["username"],
             "type": type,
             "content": content,
             "tags": tag_list,

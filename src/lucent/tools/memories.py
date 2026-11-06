@@ -389,7 +389,10 @@ Returns:
                 if attribution_user
                 else None
             )
-            effective_username = auth_username or username or "unknown"
+            # Attribution comes from the authenticated principal only. The
+            # tool's `username` argument is accepted for API compatibility but
+            # is never an identity source (see MemoryRepository.create).
+            effective_username = auth_username or "unknown"
             is_daemon = is_daemon_key_owner and not is_scoped_to_human
 
             if is_daemon:
@@ -467,7 +470,8 @@ Returns:
 
             repo = await _get_repository()
             result = await repo.create(
-                username=effective_username,
+                # Stored attribution is derived from user_id, not from text.
+                username=None,
                 type=input_data.type.value,
                 content=input_data.content,
                 tags=input_data.tags,
@@ -490,7 +494,7 @@ Returns:
                 user_id=user_id,
                 organization_id=org_id,
                 new_values={
-                    "username": input_data.username,
+                    "username": result["username"],
                     "type": input_data.type.value,
                     "content": input_data.content,
                     "tags": input_data.tags,
@@ -2022,8 +2026,6 @@ Returns:
             if user_id is None:
                 return _error_response("Authentication required")
 
-            username = _get_current_username() or "unknown"
-
             # Build tags
             memory_tags = ["daemon-task", "daemon", "pending", agent_type, priority]
             if tags:
@@ -2039,7 +2041,8 @@ Returns:
                 metadata["context"] = context
 
             result = await repo.create(
-                username=username,
+                # Stored attribution is derived from user_id, not from text.
+                username=None,
                 type="technical",
                 content=description,
                 tags=memory_tags,

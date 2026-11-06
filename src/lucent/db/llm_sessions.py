@@ -1082,9 +1082,11 @@ class LLMSessionRepository:
             )
             status = "updated"
         else:
-            username = session.get("title") or "Lucent session"
+            # Attribution is resolved from the owning user record by
+            # MemoryRepository.create; the session title is user-authored
+            # text and must never reach memories.username.
             memory = await memory_repo.create(
-                username=str(username)[:255],
+                username=None,
                 type="experience",
                 content=content,
                 tags=list(_SESSION_EXPERIENCE_TAGS),

@@ -32,7 +32,7 @@ class TestMemoryExport:
         )
 
         # Should have at least our 3 + the individual memory from test_user fixture
-        export_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        export_memories = [m for m in result if m["username"] == test_user["display_name"]]
         assert len(export_memories) >= 3
 
     @pytest.mark.asyncio
@@ -64,7 +64,7 @@ class TestMemoryExport:
             requesting_org_id=test_user["organization_id"],
         )
 
-        test_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        test_memories = [m for m in result if m["username"] == test_user["display_name"]]
         assert all(m["type"] == "technical" for m in test_memories)
         assert len(test_memories) >= 1
 
@@ -97,7 +97,7 @@ class TestMemoryExport:
             requesting_org_id=test_user["organization_id"],
         )
 
-        test_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        test_memories = [m for m in result if m["username"] == test_user["display_name"]]
         assert all("special-tag" in m["tags"] for m in test_memories)
 
     @pytest.mark.asyncio
@@ -135,7 +135,7 @@ class TestMemoryExport:
             requesting_org_id=test_user["organization_id"],
         )
 
-        test_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        test_memories = [m for m in result if m["username"] == test_user["display_name"]]
         contents = {m["content"] for m in test_memories}
 
         assert f"{prefix} Alpha memory" in contents
@@ -191,7 +191,10 @@ class TestMemoryExport:
         )
 
         test_memories = [
-            m for m in result if m["username"] == f"{prefix}user" and m["type"] == "technical"
+            m
+            for m in result
+            if m["username"] == test_user["display_name"]
+            and m["type"] == "technical"
         ]
         assert len(test_memories) >= 1
         assert test_memories[0]["metadata"]["category"] == "testing"
@@ -218,7 +221,7 @@ class TestMemoryExport:
             requesting_org_id=test_user["organization_id"],
         )
 
-        test_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        test_memories = [m for m in result if m["username"] == test_user["display_name"]]
         assert len(test_memories) == 0
 
     @pytest.mark.asyncio
@@ -253,7 +256,7 @@ class TestMemoryExport:
             requesting_org_id=test_user["organization_id"],
         )
 
-        test_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        test_memories = [m for m in result if m["username"] == test_user["display_name"]]
         assert len(test_memories) == 1
         assert test_memories[0]["importance"] == 9
 
@@ -279,7 +282,7 @@ class TestMemoryExport:
             requesting_org_id=test_user["organization_id"],
         )
 
-        test_memories = [m for m in result if m["username"] == f"{prefix}user"]
+        test_memories = [m for m in result if m["username"] == test_user["display_name"]]
         dates = [m["created_at"] for m in test_memories]
         assert dates == sorted(dates)
 
@@ -329,7 +332,7 @@ class TestMemoryImport:
             requesting_user_id=test_user["id"],
             requesting_org_id=test_user["organization_id"],
         )
-        imported_memories = [m for m in exported if m["username"] == f"{prefix}user"]
+        imported_memories = [m for m in exported if m["username"] == test_user["display_name"]]
         assert len(imported_memories) == 2
 
     @pytest.mark.asyncio
@@ -434,7 +437,7 @@ class TestMemoryImport:
             requesting_user_id=test_user["id"],
             requesting_org_id=test_user["organization_id"],
         )
-        test_memories = [m for m in exported if m["username"] == f"{prefix}user"]
+        test_memories = [m for m in exported if m["username"] == test_user["display_name"]]
         assert len(test_memories) == 1
         assert test_memories[0]["created_at"].year == 2024
         assert test_memories[0]["created_at"].month == 1
@@ -464,7 +467,7 @@ class TestMemoryImport:
             requesting_user_id=test_user["id"],
             requesting_org_id=test_user["organization_id"],
         )
-        original_memories = [m for m in exported if m["username"] == f"{prefix}user"]
+        original_memories = [m for m in exported if m["username"] == test_user["display_name"]]
         assert len(original_memories) == 3
 
         # Delete originals
@@ -502,7 +505,7 @@ class TestMemoryImport:
             requesting_user_id=test_user["id"],
             requesting_org_id=test_user["organization_id"],
         )
-        reimported = [m for m in re_exported if m["username"] == f"{prefix}user"]
+        reimported = [m for m in re_exported if m["username"] == test_user["display_name"]]
         assert len(reimported) == 3
         for orig, reimp in zip(original_memories, reimported):
             assert orig["content"] == reimp["content"]

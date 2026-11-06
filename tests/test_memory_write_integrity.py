@@ -11,6 +11,11 @@ incident (Phase 1 diagnosis, dedupe key ``notebook-0503c568-diagnosis``):
 import pytest
 
 from lucent.db import ContentShrinkError, MemoryRepository
+from lucent.db.memory import (
+    SYSTEM_MEMORY_AUTHOR,
+    _coerce_memory_username,
+    resolve_memory_username,
+)
 
 
 def _long_content(prefix: str) -> str:
@@ -142,3 +147,59 @@ class TestConcurrentUpdateCannotDropContent:
         )
 
         assert result["content"] == "deliberate replacement"
+
+
+class TestMemoryAttributionIsDerived:
+    """memories.username is attribution, never caller-supplied text."""
+
+    async def test_free_text_username_is_coerced_to_owner_identity(
+        self, db_pool, test_user, clean_test_data
+    ):
+        repo = MemoryRepository(db_pool)
+        prose = (
+            "Handoff: MCP \"Session not found\" — mechanism found, fix queued "
+            "on your MacBook"
+        )
+        memory = await repo.create(
+            username=prose,
+            type="experience",
+            content=f"{clean_test_data} attribution regression",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+
+        assert memory["username"] == test_user["display_name"]
+        assert prose not in memory["username"]
+
+        stored = await repo.get(
+            memory["id"], organization_id=test_user["organization_id"]
+        )
+        assert stored["username"] == test_user["display_name"]
+
+    async def test_omitted_username_is_derived_from_owner(
+        self, db_pool, test_user, clean_test_data
+    ):
+        repo = MemoryRepository(db_pool)
+        memory = await repo.create(
+            username=None,
+            type="experience",
+            content=f"{clean_test_data} derived attribution",
+            user_id=test_user["id"],
+            organization_id=test_user["organization_id"],
+        )
+        assert memory["username"] == test_user["display_name"]
+
+    async def test_resolver_uses_system_principal_without_owner(self, db_pool):
+        assert await resolve_memory_username(db_pool, None) == SYSTEM_MEMORY_AUTHOR
+
+    def test_registered_system_principal_is_preserved(self):
+        assert _coerce_memory_username("Lucent Daemon", "resolved-user") == (
+            "Lucent Daemon"
+        )
+        assert _coerce_memory_username("System", "resolved-user") == "System"
+
+    def test_unregistered_username_is_never_returned(self):
+        assert _coerce_memory_username("some chat prose", "resolved-user") == (
+            "resolved-user"
+        )
+        assert _coerce_memory_username(None, "resolved-user") == "resolved-user"

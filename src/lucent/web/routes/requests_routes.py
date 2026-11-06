@@ -103,7 +103,8 @@ async def _record_rejection_lesson(pool, *, user, req: dict, request_id: str, co
 
     memo_repo = MemoryRepository(pool)
     await memo_repo.create(
-        username=user.display_name or user.email or "reviewer",
+        # Stored attribution is derived from user.id.
+        username=None,
         type="experience",
         content=(
             f"Request rejected before work began: '{req.get('title', '')}'\n"

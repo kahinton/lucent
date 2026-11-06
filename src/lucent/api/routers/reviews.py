@@ -215,7 +215,8 @@ async def _create_rejection_memory(
     try:
         repo = MemoryRepository(pool)
         memory = await repo.create(
-            username=user.display_name or user.email or "system",
+            # Stored attribution is derived from user.id.
+            username=None,
             type="experience",
             content=content,
             tags=["rejection-lesson", "learning-extraction", "daemon"],

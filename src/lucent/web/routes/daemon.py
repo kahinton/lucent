@@ -96,7 +96,8 @@ async def daemon_review_action(
         if action == "reject":
             memo_repo = MemoryRepository(pool)
             await memo_repo.create(
-                username=user.display_name or user.email or "reviewer",
+                # Stored attribution is derived from user.id.
+                username=None,
                 type="experience",
                 content=(
                     f"Request rejected before work began: '{req.get('title', '')}'\n"
@@ -140,7 +141,8 @@ async def daemon_review_action(
         if action == "reject":
             memo_repo = MemoryRepository(pool)
             await memo_repo.create(
-                username=user.display_name or user.email or "reviewer",
+                # Stored attribution is derived from user.id.
+                username=None,
                 type="experience",
                 content=f"Review rejection for '{req.get('title', '')}': {comment.strip()}",
                 tags=["rejection-lesson", "learning-extraction", "daemon"],

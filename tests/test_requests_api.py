@@ -234,7 +234,7 @@ async def test_request_memories_endpoint_handles_uuid_org(db_pool):
             """INSERT INTO memories (username, type, content, user_id, organization_id)
                VALUES ($1, 'experience', $2, $3, $4)
                RETURNING id""",
-            f"{prefix}memory",
+            user["display_name"],  # attribution is derived from user_id
             f"{prefix}Linked memory",
             user["id"],
             org["id"],

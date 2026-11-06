@@ -16,6 +16,7 @@ from uuid import UUID
 import asyncpg
 from asyncpg import Pool
 
+from lucent.db.memory import resolve_memory_username
 from lucent.db.pool import scoped_acquire
 from lucent.logging import get_logger
 
@@ -127,6 +128,11 @@ class UserRepository:
         if user.get("email"):
             metadata["contact_info"]["email"] = user["email"]
 
+        # Attribution is resolved by the shared helper (display name -> email
+        # -> id). `name` above is display text for the memory body only and
+        # never reaches the username column.
+        attribution = await resolve_memory_username(self.pool, user["id"])
+
         # Create the individual memory
         query = """
             INSERT INTO memories (username, type, content, tags,
@@ -142,7 +148,7 @@ class UserRepository:
             async with self.pool.acquire() as conn:  # system-infra: intentionally scope-less, audited site
                 row = await conn.fetchrow(
                     query,
-                    name,  # username
+                    attribution,  # username (derived, never display text)
                     "individual",  # type
                     content,
                     ["team-member", "auto-generated"],  # tags
@@ -608,6 +614,10 @@ class UserRepository:
         if user.get("email"):
             content += f" Contact: {user['email']}."
 
+        # The username column is attribution, resolved from the owning user
+        # record (display name -> email -> id); `name` is body text only.
+        attribution = await resolve_memory_username(self.pool, user["id"])
+
         query = """
             UPDATE memories
             SET content = $1, metadata = $2, username = $3, updated_at = NOW()
@@ -620,7 +630,7 @@ class UserRepository:
                     query,
                     content,
                     current_metadata,
-                    name,
+                    attribution,
                     str(individual_memory["id"]),
                 )
         except Exception as e:

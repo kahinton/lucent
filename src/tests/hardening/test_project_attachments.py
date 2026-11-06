@@ -167,7 +167,12 @@ async def _seed_memory(
         return await conn.fetchval(
             """INSERT INTO memories (username, type, content, tags, importance,
                                       user_id, organization_id, project_id)
-               VALUES ('Attach User A', $2, $1, '{}', $3, $4, $5, $6) RETURNING id""",
+               VALUES (
+                   (SELECT COALESCE(NULLIF(display_name, ''),
+                                    NULLIF(email, ''), id::text)
+                      FROM users WHERE id = $4::uuid),
+                   $2, $1, '{}', $3, $4, $5, $6
+               ) RETURNING id""",
             content,
             type,
             importance,

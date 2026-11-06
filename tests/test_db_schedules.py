@@ -87,7 +87,8 @@ async def _insert_positive_candidate(
                     created_at, updated_at
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'older experience',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'older experience',
                     ARRAY[]::text[], $1::uuid, $2::uuid, $3, $3
                 )
                 """,
@@ -102,7 +103,8 @@ async def _insert_positive_candidate(
                     username, type, content, tags, organization_id, user_id
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'validated daemon result',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'validated daemon result',
                     ARRAY['daemon-result', 'validated']::text[], $1::uuid, $2::uuid
                 )
                 """,
@@ -116,7 +118,8 @@ async def _insert_positive_candidate(
                     username, type, content, tags, organization_id, user_id
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'procedure needs merge',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'procedure needs merge',
                     ARRAY['needs-merge']::text[], $1::uuid, $2::uuid
                 )
                 """,
@@ -131,7 +134,8 @@ async def _insert_positive_candidate(
                     vitality_computed_at
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'needs vitality score',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'needs vitality score',
                     ARRAY[]::text[], $1::uuid, $2::uuid, NULL
                 )
                 """,
@@ -145,7 +149,8 @@ async def _insert_positive_candidate(
                     username, type, content, tags, organization_id, user_id
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'needs shadow score',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'needs shadow score',
                     ARRAY[]::text[], $1::uuid, $2::uuid
                 )
                 """,
@@ -159,7 +164,8 @@ async def _insert_positive_candidate(
                     username, type, content, tags, metadata, organization_id, user_id
                 )
                 VALUES (
-                    'eligibility-test', 'goal', 'Active goal for planning',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'goal', 'Active goal for planning',
                     ARRAY[]::text[], '{"status": "active"}'::jsonb,
                     $1::uuid, $2::uuid
                 )
@@ -1913,7 +1919,8 @@ class TestBuiltInScheduleEligibility:
                     created_at, updated_at
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'older experience',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'older experience',
                     ARRAY[]::text[], $1::uuid, $2::uuid, $3, $3
                 )
                 """,
@@ -1933,7 +1940,8 @@ class TestBuiltInScheduleEligibility:
                     username, type, content, tags, organization_id, user_id
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'validated daemon result',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'validated daemon result',
                     ARRAY['daemon-result', 'validated']::text[], $1::uuid, $2::uuid
                 )
                 """,
@@ -2044,7 +2052,8 @@ class TestBuiltInScheduleEligibility:
                     created_at, updated_at
                 )
                 VALUES (
-                    'eligibility-test', 'experience', 'older experience to compress',
+                    (SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text)
+                     FROM users WHERE id = $2::uuid), 'experience', 'older experience to compress',
                     ARRAY[]::text[], $1::uuid, $2::uuid, $3, $3
                 )
                 """,

@@ -103,21 +103,21 @@ async def scoping_env(pool):
     # with next_milestone_index=None — exactly the rows leaked pre-fix.
     goal_a = await pool.fetchrow(
         """INSERT INTO memories (username, type, content, user_id, organization_id)
-           VALUES ('pt-user-a', 'goal', 'PT-SCOPE USER-A PRIVATE GOAL alpha',
+           VALUES ('PT User A', 'goal', 'PT-SCOPE USER-A PRIVATE GOAL alpha',
                    $1, $2) RETURNING id""",
         user_a_id,
         org_id,
     )
     goal_b = await pool.fetchrow(
         """INSERT INTO memories (username, type, content, user_id, organization_id)
-           VALUES ('pt-user-b', 'goal', 'PT-SCOPE USER-B PRIVATE GOAL beta',
+           VALUES ('PT User B', 'goal', 'PT-SCOPE USER-B PRIVATE GOAL beta',
                    $1, $2) RETURNING id""",
         user_b_id,
         org_id,
     )
     goal_owner = await pool.fetchrow(
         """INSERT INTO memories (username, type, content, user_id, organization_id)
-           VALUES ('pt-owner', 'goal', 'PT-SCOPE OWNER PRIVATE GOAL gamma',
+           VALUES ('PT Owner', 'goal', 'PT-SCOPE OWNER PRIVATE GOAL gamma',
                    $1, $2) RETURNING id""",
         user_owner_id,
         org_id,

@@ -106,6 +106,96 @@ async def get_first_memory_owner(
     }
 
 
+# ── Memory attribution ────────────────────────────────────────────────────
+#
+# `memories.username` is *attribution*, not content. It identifies the
+# principal that owns the memory (memories.user_id) and must never carry
+# caller-supplied text such as a chat session title, a first user message, or
+# a request name. The single resolution rule lives here so every writer gets
+# the same answer:
+#
+#   1. user_id set  -> the owning user's display_name, then email, then the
+#                      user id as a last resort.
+#   2. user_id unset -> the registered system principal constant.
+#
+# A writer may name a registered system principal instead of a user (daemon
+# activity that is not attributable to a person). Any other caller-supplied
+# string is coerced to the resolved identity and logged — a caller can never
+# reach the column with free text.
+
+SYSTEM_MEMORY_AUTHOR: Final[str] = "System"
+
+# Registered non-user principals. "Lucent Daemon" predates the user-backed
+# daemon identity; migration 129 reassigns legacy rows to the owning user's
+# display name, but current writers may still attribute daemon work to it.
+SYSTEM_MEMORY_PRINCIPALS: Final[frozenset[str]] = frozenset(
+    {SYSTEM_MEMORY_AUTHOR, "Lucent Daemon"}
+)
+
+_USERNAME_MAX_LENGTH = 255
+
+
+async def resolve_memory_username(
+    pool: Pool,
+    user_id: UUID | str | None,
+) -> str:
+    """Resolve the attribution name for a memory owned by ``user_id``.
+
+    This is the one place author identity is derived. It reads the ``users``
+    record — a cross-tenant identity table, so no tenant GUC binding is
+    needed — and never inspects session or message content.
+
+    Fallbacks: ``users.display_name`` -> ``users.email`` -> ``str(user_id)``;
+    with no ``user_id`` at all, the system principal constant.
+    """
+    if user_id is None:
+        return SYSTEM_MEMORY_AUTHOR
+
+    # An AuthorizedDatabasePool only rewrites its configured tables
+    # (``memories``); a ``users`` read on it fails closed with
+    # AuthorizedQueryError. ``users`` is a cross-tenant identity table with no
+    # per-tenant predicate, so read it on the raw pool exactly as
+    # UserRepository does (db/user.py: "users is a cross-tenant identity
+    # table ... reads/writes here bind by unique id/external_id").
+    raw_pool = getattr(pool, "pool", pool)
+    async with raw_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT NULLIF(display_name, '') AS display_name, "
+            "NULLIF(email, '') AS email "
+            "FROM users WHERE id = $1::uuid",
+            str(user_id),
+        )
+
+    if row is not None:
+        if row["display_name"]:
+            return str(row["display_name"])[:_USERNAME_MAX_LENGTH]
+        if row["email"]:
+            return str(row["email"])[:_USERNAME_MAX_LENGTH]
+    return str(user_id)[:_USERNAME_MAX_LENGTH]
+
+
+def _coerce_memory_username(claimed: str | None, resolved: str) -> str:
+    """Return the only value allowed into ``memories.username``.
+
+    A registered system principal is accepted as claimed. Anything else is
+    coerced to ``resolved`` (the owning user's identity). Coercion rather than
+    rejection keeps an attribution mismatch from failing a user action —
+    memory creation during review, import, or chat capture — while the column
+    still cannot hold caller text.
+    """
+    claimed = (claimed or "").strip()
+    if claimed in SYSTEM_MEMORY_PRINCIPALS:
+        return claimed[:_USERNAME_MAX_LENGTH]
+    if claimed and claimed != resolved:
+        logger.warning(
+            "memory attribution coerced: caller-supplied username %r -> %r "
+            "(username is derived from user_id, never caller text)",
+            claimed[:_USERNAME_MAX_LENGTH],
+            resolved,
+        )
+    return resolved
+
+
 @dataclass(slots=True, frozen=True)
 class MemoryShadowScoreModel:
     """Typed row model for memory_shadow_scores sidecar entries."""
@@ -406,7 +496,7 @@ class MemoryRepository:
 
     async def create(
         self,
-        username: str,
+        username: str | None,
         type: str,
         content: str,
         tags: list[str] | None = None,
@@ -421,7 +511,10 @@ class MemoryRepository:
         """Create a new memory.
 
         Args:
-            username: The username of the user creating the memory.
+            username: A *claim* only. The stored attribution is always derived
+                from ``user_id`` (display name -> email -> id) except that a
+                registered system principal may be named explicitly. Any
+                other string is coerced; see :func:`_coerce_memory_username`.
             type: The type of memory.
             content: The main content of the memory.
             tags: Optional list of tags.
@@ -442,6 +535,11 @@ class MemoryRepository:
         Returns:
             The created memory record.
         """
+        # Attribution is derived here and cannot be supplied by the caller:
+        # this is the single choke point every memory writer passes through.
+        resolved_username = await resolve_memory_username(self.pool, user_id)
+        username = _coerce_memory_username(username, resolved_username)
+
         metadata = self.normalize_metadata_for_storage(type, metadata)
         duplicate = await self.find_duplicate_technical_file_memory(
             metadata=metadata,
@@ -2704,7 +2802,9 @@ class MemoryRepository:
             memories: List of memory dicts (matching export MemoryResponse format).
             requesting_user_id: The authenticated user's ID — all imports are owned by this user.
             requesting_org_id: The authenticated user's organization ID.
-            requesting_username: Fallback username if memory dict lacks one.
+            requesting_username: Legacy fallback claim. Imported attribution is
+                always the requesting user's resolved identity; this argument
+                cannot attribute a row to anyone else.
 
         Returns:
             Dict with imported, skipped, and errors counts plus error details.
@@ -2715,6 +2815,13 @@ class MemoryRepository:
         imported = 0
         skipped = 0
         errors: list[dict[str, str]] = []
+
+        # Imports are owned by the requesting user (docstring above), so the
+        # attribution of every imported row is that user's resolved identity.
+        # Imported payloads are untrusted input and cannot carry attribution.
+        resolved_username = await resolve_memory_username(
+            self.pool, requesting_user_id
+        )
 
         async with scoped_acquire_on(
             self.pool, organization_id=requesting_org_id, user_id=requesting_user_id) as conn:
@@ -2743,7 +2850,10 @@ class MemoryRepository:
                         errors.append({"index": str(idx), "error": f"Invalid type: {mem_type}"})
                         continue
 
-                    username = mem.get("username") or requesting_username or "imported"
+                    username = _coerce_memory_username(
+                        mem.get("username") or requesting_username,
+                        resolved_username,
+                    )
                     importance = mem.get("importance", 5)
                     if not isinstance(importance, int) or importance < 1 or importance > 10:
                         importance = 5

@@ -1965,12 +1965,20 @@ class TestListPlanningTargets:
         if user_id:
             params.append(user_id)
             user_clause = ", user_id"
+        # username is attribution derived from user_id; migration 162's guard
+        # rejects free text when an owner is present.
+        username_sql = (
+            "(SELECT COALESCE(NULLIF(display_name, ''), NULLIF(email, ''), id::text) "
+            "FROM users WHERE id = $4::uuid)"
+            if user_id
+            else "'test-user'"
+        )
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""INSERT INTO memories
                        (content, type, organization_id, username,
                         metadata{user_clause})
-                   VALUES ($1, 'goal', $2::uuid, 'test-user', $3::jsonb
+                   VALUES ($1, 'goal', $2::uuid, {username_sql}, $3::jsonb
                        {', $4::uuid' if user_id else ''})
                    RETURNING id""",
                 *params,

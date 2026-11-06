@@ -1,0 +1,19 @@
+-- Down: migration 163 cannot be meaningfully reversed.
+--
+-- It is a data repair, not a schema change: rows that carried caller-supplied
+-- or case-mangled memories.username were rewritten to the owner's resolved
+-- identity (users.display_name -> users.email -> user_id::text, via
+-- memories.user_id = users.id). The pre-repair values are recorded nowhere,
+-- and restoring them would deliberately reintroduce the misattribution that
+-- migration 162's guard exists to prevent.
+--
+-- Rows whose only defect was case are now indistinguishable from rows that
+-- were always correct, so even a hypothetical "un-repair" could not be
+-- faithful. Rows with user_id IS NULL were never touched by the forward
+-- migration, so they need no reverse action either.
+--
+-- Re-running the forward migration is safe and idempotent: it only touches
+-- rows whose username is not yet the resolved identity, so a second run
+-- repairs zero rows. That is the intended recovery path if damaged rows ever
+-- reappear.
+SELECT 1;

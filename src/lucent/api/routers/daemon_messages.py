@@ -108,10 +108,9 @@ async def send_daemon_message(
     if data.in_reply_to:
         metadata["in_reply_to"] = str(data.in_reply_to)
 
-    username = user.display_name or user.email or str(user.id)
-
     result = await repo.create(
-        username=username,
+        # Stored attribution is derived from user.id.
+        username=None,
         type="experience",
         content=data.content,
         tags=tags,

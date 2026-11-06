@@ -36,7 +36,8 @@ class TestMemoryRepository:
 
         assert memory["id"] is not None
         assert isinstance(memory["id"], UUID)
-        assert memory["username"] == f"{prefix}user"
+        # Attribution is derived from the owning user, not the caller's claim.
+        assert memory["username"] == test_user["display_name"]
         assert memory["type"] == "experience"
         assert memory["content"] == "Test memory content"
         assert memory["tags"] == ["test"]
@@ -1114,6 +1115,9 @@ class TestUserRepository:
         user_memories = [m for m in result["memories"] if m["user_id"] == user["id"]]
         assert len(user_memories) >= 1
         assert user_memories[0]["type"] == "individual"
+        # Attribution is the owner's display name, never the external id.
+        assert user_memories[0]["username"] == f"{prefix}Memory User"
+        assert user_memories[0]["username"] != user["external_id"]
         assert not await memory_repo.is_org_shared(
             user_memories[0]["id"], test_organization["id"]
         )

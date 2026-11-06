@@ -215,7 +215,7 @@ class TestSearchPost:
             "/api/search",
             json={
                 "type": "technical",
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -231,7 +231,7 @@ class TestSearchPost:
             "/api/search",
             json={
                 "tags": ["python"],
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -249,7 +249,7 @@ class TestSearchPost:
             json={
                 "importance_min": 7,
                 "importance_max": 10,
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -264,13 +264,13 @@ class TestSearchPost:
         resp = await srch_client.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
         data = resp.json()
         for m in data["memories"]:
-            assert m["username"] == f"{srch_prefix}user"
+            assert m["username"] == f"{srch_prefix}User"
 
     async def test_search_pagination(self, srch_client, db_pool, srch_user, srch_prefix):
         """Search results respect offset and limit."""
@@ -279,7 +279,7 @@ class TestSearchPost:
         resp = await srch_client.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "limit": 1,
                 "offset": 0,
             },
@@ -298,7 +298,7 @@ class TestSearchPost:
         resp1 = await srch_client.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "limit": 1,
                 "offset": 0,
             },
@@ -307,7 +307,7 @@ class TestSearchPost:
         resp2 = await srch_client.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "limit": 1,
                 "offset": 1,
             },
@@ -327,7 +327,7 @@ class TestSearchPost:
         resp = await srch_client.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -374,7 +374,7 @@ class TestSearchPost:
                 "query": "Python",
                 "type": "technical",
                 "tags": ["python"],
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "importance_min": 5,
             },
         )
@@ -416,7 +416,7 @@ class TestSearchGet:
         resp = await srch_client.get(
             "/api/search",
             params={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "type": "technical",
                 "importance_min": 5,
                 "limit": 10,
@@ -434,7 +434,7 @@ class TestSearchGet:
         resp = await srch_client.get(
             "/api/search",
             params={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "offset": 0,
                 "limit": 2,
             },
@@ -452,7 +452,7 @@ class TestSearchGet:
         resp = await srch_client.get(
             "/api/search",
             params={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -467,7 +467,7 @@ class TestSearchGet:
             "/api/search",
             params={
                 "tags": ["database"],
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -484,14 +484,14 @@ class TestSearchGet:
         post_resp = await srch_client.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "type": "technical",
             },
         )
         get_resp = await srch_client.get(
             "/api/search",
             params={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
                 "type": "technical",
             },
         )
@@ -657,7 +657,7 @@ class TestSearchAccessControl:
         resp = await srch_client.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -675,7 +675,7 @@ class TestSearchAccessControl:
         resp = await srch_client_b.post(
             "/api/search",
             json={
-                "username": f"{srch_prefix}user",
+                "username": f"{srch_prefix}User",
             },
         )
         assert resp.status_code == 200
@@ -740,7 +740,7 @@ class TestSearchAccessLogging:
 
         resp = await srch_client.post(
             "/api/search",
-            json={"username": f"{srch_prefix}user"},
+            json={"username": f"{srch_prefix}User"},
         )
         assert resp.status_code == 200
         assert resp.json()["memories"]
@@ -792,7 +792,7 @@ class TestSearchAccessLogging:
         # off by default, but this keeps the test independent of it).
         resp = await srch_client.post(
             "/api/search",
-            json={"username": f"{srch_prefix}user", "include_archived": True},
+            json={"username": f"{srch_prefix}User", "include_archived": True},
         )
         assert resp.status_code == 200
         assert any(m["id"] == str(target["id"]) for m in resp.json()["memories"])

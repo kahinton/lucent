@@ -136,10 +136,9 @@ async def create_task(
     if data.context:
         metadata["context"] = data.context
 
-    username = user.display_name or user.email or str(user.id)
-
     result = await repo.create(
-        username=username,
+        # Stored attribution is derived from user.id.
+        username=None,
         type="technical",
         content=data.description,
         tags=tags,

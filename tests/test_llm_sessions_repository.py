@@ -309,6 +309,101 @@ async def test_session_experience_capture_creates_and_links_request_memory(
 
 
 @pytest.mark.asyncio
+async def test_session_experience_capture_never_uses_session_title_as_username(
+    db_pool, test_user
+):
+    """Attribution regression: a chat opener must not become memories.username.
+
+    ``add_message`` derives the session title from the first user message, so
+    before the fix that prose was passed straight into ``memories.username``.
+    The author is the owning user record; session/message content is never an
+    identity source.
+    """
+    session_repo = LLMSessionRepository(db_pool)
+    request_repo = RequestRepository(db_pool)
+
+    prose_opener = (
+        "Hey friend! So a while ago we had you trying to do some development "
+        "on your own and I wanted to check in about how that went"
+    )
+    session = await session_repo.create_session(
+        org_id=test_user["organization_id"],
+        user_id=test_user["id"],
+        kind="chat",
+    )
+    user_message = await session_repo.add_message(
+        session["id"],
+        org_id=test_user["organization_id"],
+        user_id=test_user["id"],
+        role="user",
+        content=prose_opener,
+    )
+    await session_repo.add_message(
+        session["id"],
+        org_id=test_user["organization_id"],
+        user_id=test_user["id"],
+        role="assistant",
+        content="It went well; here is the summary of the work.",
+    )
+    event = await session_repo.add_event(
+        session["id"],
+        org_id=test_user["organization_id"],
+        user_id=test_user["id"],
+        message_id=user_message["id"],
+        event_type="tool_call",
+        tool_name="create_request",
+        tool_input={"title": "Development check-in"},
+    )
+    req = await request_repo.create_request(
+        title="Development check-in",
+        org_id=str(test_user["organization_id"]),
+        created_by=str(test_user["id"]),
+        source="user",
+    )
+    await session_repo.link_request(
+        session["id"],
+        req["id"],
+        org_id=test_user["organization_id"],
+        user_id=test_user["id"],
+        message_id=user_message["id"],
+        event_id=event["id"],
+    )
+
+    # The defect's precondition: the session title really is the chat opener.
+    stored_session = await session_repo.get_session(
+        session["id"],
+        test_user["organization_id"],
+        user_id=test_user["id"],
+    )
+    assert stored_session["title"]
+    assert stored_session["title"] in prose_opener
+
+    result = await session_repo.maybe_capture_experience(
+        session["id"],
+        test_user["organization_id"],
+        user_id=test_user["id"],
+    )
+    assert result["status"] == "created"
+
+    async with db_pool.acquire() as conn:
+        stored_username = await conn.fetchval(
+            "SELECT username FROM memories WHERE id = $1",
+            result["memory_id"],
+        )
+        stored_title = await conn.fetchval(
+            "SELECT title FROM llm_sessions WHERE id = $1",
+            session["id"],
+        )
+
+    assert stored_username == test_user["display_name"]
+    # No substring of the user-authored text reached attribution.
+    assert stored_title in prose_opener
+    assert stored_title not in stored_username
+    for fragment in ("Hey friend", "development", "check in"):
+        assert fragment not in stored_username
+
+
+@pytest.mark.asyncio
 async def test_session_experience_capture_updates_existing_memory(db_pool, test_user):
     session_repo = LLMSessionRepository(db_pool)
 
