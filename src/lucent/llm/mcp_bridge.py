@@ -93,14 +93,25 @@ class MCPToolBridge:
     def _is_terminated_session_error(error: Exception) -> bool:
         """Return whether an MCP client stream was closed before a tool call.
 
-        Covers both failure surfaces of a stale Streamable HTTP session:
-        the explicit "session terminated" MCP error and the transport-level
+        Covers the three failure surfaces of a stale Streamable HTTP session:
+        the explicit "session terminated" MCP error, the transport-level
         ``MCPError: SSE stream ended without a response`` raised when the
-        server's SSE channel died underneath an in-flight request.
+        server's SSE channel died underneath an in-flight request, and the
+        ``Session not found`` JSON-RPC error the server returns at HTTP 404
+        for a session it no longer tracks.
+
+        "Session not found" is matched explicitly on purpose: the MCP client
+        inspects a 4xx response for a JSON-RPC error body *before* its own
+        ``404 -> "Session terminated"`` fallback and returns as soon as the
+        body parses. The body's message is therefore what reaches us and the
+        fallback never runs, so removing this pattern silently disables
+        reconnect for the most common stale-session case.
         """
         message = str(error).lower()
-        return "session terminated" in message or (
-            "sse stream ended without a response" in message
+        return (
+            "session terminated" in message
+            or "session not found" in message
+            or "sse stream ended without a response" in message
         )
 
     async def _ensure_session(self) -> Any:
@@ -325,7 +336,10 @@ class MCPToolBridge:
                     tool_name,
                 )
                 await self.close()
-                session = await self._ensure_session()
+                try:
+                    session = await self._ensure_session()
+                except Exception as retry_error:
+                    raise _session_lost_error(tool_name, retry_error) from retry_error
             try:
                 result = await session.call_tool(tool_name, arguments or {})
             except Exception as error:
@@ -340,8 +354,11 @@ class MCPToolBridge:
                     tool_name,
                 )
                 await self.close()
-                session = await self._ensure_session()
-                result = await session.call_tool(tool_name, arguments or {})
+                try:
+                    session = await self._ensure_session()
+                    result = await session.call_tool(tool_name, arguments or {})
+                except Exception as retry_error:
+                    raise _session_lost_error(tool_name, retry_error) from retry_error
             result_text = _call_result_to_text(result)
             await self._audit_tool_call(
                 tool_name=tool_name,
@@ -470,6 +487,20 @@ class MCPToolBridge:
             logger.debug("MCP bridge close was cancelled by transport teardown")
         except (Exception, BaseExceptionGroup):  # noqa: BLE001 — cleanup is not fatal
             logger.debug("MCP bridge cleanup failed; ignoring", exc_info=True)
+
+
+def _session_lost_error(tool_name: str, retry_error: Exception) -> RuntimeError:
+    """Build the honest failure for a call whose session recovery also failed.
+
+    The agent must be able to tell "the MCP session died" from "the query
+    itself failed". Echoing only the server's error text blurs that line —
+    a ``Session not found`` body reads like a lookup result — so name the
+    session loss explicitly and keep the underlying cause attached.
+    """
+    return RuntimeError(
+        f"MCP session was lost; reconnecting once did not recover it, so tool "
+        f"call {tool_name!r} did not succeed: {retry_error}"
+    )
 
 
 def _normalize_tool(tool: Any) -> dict[str, Any]:
