@@ -35,6 +35,7 @@ from lucent.db.pool import (
 from lucent.db.credentials import CredentialRepository
 from lucent.db.dashboard import DashboardRepository
 from lucent.db.definitions import DefinitionRepository
+from lucent.db.entitlements import EntitlementRepository
 from lucent.db.groups import GroupRepository
 from lucent.db.identity import (
     InvitationRepository,
@@ -79,6 +80,7 @@ __all__ = [
     "DuplicateTechnicalMemoryError",
     "VersionConflictError",
     "DefinitionRepository",
+    "EntitlementRepository",
     "GroupRepository",
     "InvitationRepository",
     "SsoConnectionRepository",
