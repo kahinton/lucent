@@ -1213,13 +1213,20 @@ Returns: JSON with status 'granted', or an error if either is not found."""
             return denied
 
         repo = await _get_definition_repository()
-        outcome = await repo.grant_capability(
-            agent_id=agent_id,
-            capability_type="managed_tool",
-            capability_id=tool_id,
-            org_id=str(org_id),
-            actor_user_id=str(user_id),
-        )
+        from lucent.services.entitlements import CapabilityDisabledError
+
+        try:
+            outcome = await repo.grant_capability(
+                agent_id=agent_id,
+                capability_type="managed_tool",
+                capability_id=tool_id,
+                org_id=str(org_id),
+                actor_user_id=str(user_id),
+            )
+        except CapabilityDisabledError as exc:
+            # The organization's entitlement does not cover managed tools;
+            # refuse with the capability named, not a generic 403.
+            return json.dumps({"error": str(exc), "code": 403})
         return _attach_response(
             outcome, agent_id=agent_id, id_field="tool_id", capability_id=tool_id,
         )

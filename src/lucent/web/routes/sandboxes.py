@@ -667,6 +667,20 @@ async def launch_sandbox_web(
     _require_org_membership(user)
     await _check_csrf(request, form_token=csrf_token)
     pool = await get_pool()
+    # The custom_sandboxes entitlement: launching directly from this UI
+    # bypasses task dispatch, so the dispatch gate would never refuse it.
+    # Covers built-in templates too — the entitlement governs whether the
+    # organization gets sandboxes at all.
+    from lucent.services.entitlements import (
+        CAPABILITY_SANDBOXES,
+        capability_gate_message,
+    )
+
+    gate_error = await capability_gate_message(
+        str(user.organization_id), CAPABILITY_SANDBOXES
+    )
+    if gate_error:
+        raise HTTPException(409, gate_error)
     from lucent.db.sandbox_template import (
         SandboxTemplateRepository,
         get_authorized_templates_pool,

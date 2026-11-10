@@ -751,6 +751,19 @@ async def _prepare_task_spec(
     if (sandbox_template_id or sandbox_overrides) and not ctx["sandboxes_enabled"]:
         return None, "Sandboxes are disabled for this organization by the features.sandboxes_enabled setting"
 
+    if sandbox_template_id or sandbox_overrides:
+        # Authoring-time entitlement gate, mirroring the API route: dispatch
+        # (daemon/sandbox/lifecycle._create_task_sandbox) remains the binding
+        # enforcement, this just fails fast with the capability named.
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(ctx["org_id"], CAPABILITY_SANDBOXES)
+        if gate_error:
+            return None, gate_error
+
     # --- Remote targeting (Agent Control Protocol) ----------------------
     # A remote runs the task in its own environment, so a sandbox on the same
     # task would be silently ignored. Reject the combination rather than
@@ -1592,6 +1605,18 @@ if the agent type is not approved or the sandbox template is invalid."""
                     "custom_tooling_enabled": False,
                 }
             )
+        if sandbox_template_id or sandbox_overrides:
+            # Authoring-time entitlement gate beside the setting check above.
+            from lucent.services.entitlements import (
+                CAPABILITY_SANDBOXES,
+                capability_gate_message,
+            )
+
+            gate_error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+            if gate_error:
+                return json.dumps(
+                    {"error": gate_error, "code": 409, "capability": CAPABILITY_SANDBOXES}
+                )
 
         # --- Remote targeting (Agent Control Protocol) --------------------
         # Validated here, not just in the repository, so the model gets an
@@ -2388,6 +2413,22 @@ Returns: JSON with the proposed template id and status."""
                     ),
                     "code": 409,
                 }
+            )
+
+        # Entitlement gate beside the setting check: a template proposal is
+        # the first half of the sandbox lifecycle, and the binding enforcement
+        # (dispatch, direct creation) refuses only consumption. Refusing the
+        # proposal names the capability at the moment the organization asks
+        # for custom tooling it does not have.
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+        if gate_error:
+            return json.dumps(
+                {"error": gate_error, "code": 409, "capability": CAPABILITY_SANDBOXES}
             )
 
         if network_mode not in {"none", "bridge", "allowlist"}:

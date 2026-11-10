@@ -2239,13 +2239,22 @@ async def _agent_capability_attach(
         return RedirectResponse(url=destination, status_code=303)
 
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    outcome = await repo.grant_capability(
-        agent_id=agent_id,
-        capability_type=capability_type,
-        capability_id=capability_id,
-        org_id=str(user.organization_id),
-        actor_user_id=str(user.id),
-    )
+    from lucent.services.entitlements import CapabilityDisabledError
+
+    try:
+        outcome = await repo.grant_capability(
+            agent_id=agent_id,
+            capability_type=capability_type,
+            capability_id=capability_id,
+            org_id=str(user.organization_id),
+            actor_user_id=str(user.id),
+        )
+    except CapabilityDisabledError as exc:
+        # The org's plan does not include this capability; say so explicitly
+        # in the redirect the user sees rather than as a generic Forbidden.
+        return RedirectResponse(
+            url=f"{destination}?error={quote(str(exc))}", status_code=303
+        )
     if outcome is GrantOutcome.ALREADY_ATTACHED:
         message = (
             "That capability is already attached to this agent. Approve it for "

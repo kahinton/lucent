@@ -1042,6 +1042,18 @@ async def create_schedule(
             "Sandboxes are disabled for this organization by the "
             "features.sandboxes_enabled setting",
         )
+    if sandbox_requested:
+        # Same entitlement the dispatch gate enforces, refused at authoring time.
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(
+            str(user.organization_id), CAPABILITY_SANDBOXES
+        )
+        if gate_error:
+            raise HTTPException(409, gate_error)
 
     if body.model:
         model_error = validate_model(body.model, require_tools=True)
@@ -1387,6 +1399,21 @@ async def create_workflow(
             "Sandboxes are disabled for this organization by the "
             "features.sandboxes_enabled setting",
         )
+    if any(
+        action.get("sandbox_template_id") or action.get("sandbox_config")
+        for action in actions
+    ):
+        # Same entitlement the dispatch gate enforces, refused at authoring time.
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(
+            str(user.organization_id), CAPABILITY_SANDBOXES
+        )
+        if gate_error:
+            raise HTTPException(409, gate_error)
     for action in actions:
         if action.get("action_type", "task") != "task":
             continue

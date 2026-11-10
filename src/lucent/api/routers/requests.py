@@ -596,6 +596,19 @@ async def create_task(
             "Sandboxes are disabled for this organization by the "
             "features.sandboxes_enabled setting",
         )
+    if body.sandbox_template_id or body.sandbox_config:
+        # Second authoring-time gate: the custom_sandboxes entitlement. The
+        # binding enforcement is at dispatch (daemon/sandbox/lifecycle), but
+        # refusing here gives the caller the specific error at the moment it
+        # attaches a sandbox instead of after the task has been queued.
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+        if gate_error:
+            raise HTTPException(409, gate_error)
     repo = RequestRepository(pool)
     req = await _get_visible_request(repo, str(request_id), user)
     if not req:
@@ -1120,6 +1133,16 @@ async def edit_pending_task(
             )
 
     if body.sandbox_template_id and not body.clear_sandbox_template:
+        # Attach or re-assign a template: same entitlement the dispatch gate
+        # enforces, refused here so the edit fails at authoring time.
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+        if gate_error:
+            raise HTTPException(409, gate_error)
         # Validate template exists and is approved/accessible
         try:
             from lucent.db.sandbox_template import SandboxTemplateRepository

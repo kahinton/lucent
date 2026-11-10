@@ -312,14 +312,29 @@ def _form_value(values: list[str], index: int, default: str = "") -> str:
     return values[index].strip()
 
 
-async def _validate_action_template(repo, template_id: str | None) -> str | None:
+async def _validate_action_template(
+    repo, template_id: str | None, *, org_id: str | None = None
+) -> str | None:
     """Per-action sandbox template validation (clearance probe, approved only).
 
     ``repo`` must be a SandboxTemplateRepository built on an authorized
-    templates pool — the probe is clearance-driven and default-deny.
+    templates pool — the probe is clearance-driven and default-deny. When
+    ``org_id`` is supplied, the custom_sandboxes entitlement is checked too so
+    an organization without the capability is refused here rather than at
+    dispatch only (the binding gate is
+    ``daemon/sandbox/lifecycle._create_task_sandbox``).
     """
     if not template_id:
         return None
+    if org_id:
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+        if gate_error:
+            raise HTTPException(409, gate_error)
     template = await repo.get_usable_template(template_id)
     if not template:
         raise HTTPException(
@@ -681,6 +696,17 @@ async def workflow_create_from_wizard(request: Request):
                 raise HTTPException(422, f"Invalid sandbox JSON for step {idx + 1}") from exc
             if not isinstance(sandbox_config, dict):
                 raise HTTPException(422, f"Sandbox config for step {idx + 1} must be an object")
+            # Same entitlement the dispatch gate enforces, without a template.
+            from lucent.services.entitlements import (
+                CAPABILITY_SANDBOXES,
+                capability_gate_message,
+            )
+
+            gate_error = await capability_gate_message(
+                str(user.organization_id), CAPABILITY_SANDBOXES
+            )
+            if gate_error:
+                raise HTTPException(409, gate_error)
         for key, value in (
             ("repo_url", _form_value(action_repo_urls, idx)),
             ("branch", _form_value(action_branches, idx)),
@@ -746,6 +772,7 @@ async def workflow_create_from_wizard(request: Request):
                 "reasoning_effort": _form_value(action_efforts, idx) or None,
                 "sandbox_template_id": await _validate_action_template(
                     template_probe_repo, _form_value(action_sandbox_templates, idx) or None,
+                    org_id=str(user.organization_id),
                 ),
                 "sandbox_config": sandbox_config or None,
                 "output_contract": output_contract,
@@ -1245,6 +1272,17 @@ async def schedule_edit(request: Request, schedule_id: str):
                     raise HTTPException(422, f"Invalid sandbox JSON for step {idx + 1}") from exc
                 if not isinstance(sandbox_config, dict):
                     raise HTTPException(422, f"Sandbox config for step {idx + 1} must be an object")
+                # Same entitlement the dispatch gate enforces, without a template.
+                from lucent.services.entitlements import (
+                    CAPABILITY_SANDBOXES,
+                    capability_gate_message,
+                )
+
+                gate_error = await capability_gate_message(
+                    str(user.organization_id), CAPABILITY_SANDBOXES
+                )
+                if gate_error:
+                    raise HTTPException(409, gate_error)
             for key, value in (
                 ("repo_url", _form_value(action_repo_urls, idx)),
                 ("branch", _form_value(action_branches, idx)),
@@ -1339,6 +1377,7 @@ async def schedule_edit(request: Request, schedule_id: str):
                     "sandbox_template_id": await _validate_action_template(
                         template_probe_repo,
                         _form_value(action_sandbox_templates, idx) or None,
+                        org_id=str(user.organization_id),
                     ),
                     "sandbox_config": sandbox_config or None,
                     "output_contract": output_contract,

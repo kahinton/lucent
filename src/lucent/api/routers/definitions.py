@@ -443,13 +443,20 @@ async def _attach_capability(
 ) -> dict:
     pool = await get_pool()
     repo = DefinitionRepository(pool, audit_repo=AuditRepository(pool))
-    outcome = await repo.grant_capability(
-        agent_id=agent_id,
-        capability_type=capability_type,
-        capability_id=target_id,
-        org_id=str(user.organization_id),
-        actor_user_id=str(user.id),
-    )
+    from lucent.services.entitlements import CapabilityDisabledError
+
+    try:
+        outcome = await repo.grant_capability(
+            agent_id=agent_id,
+            capability_type=capability_type,
+            capability_id=target_id,
+            org_id=str(user.organization_id),
+            actor_user_id=str(user.id),
+        )
+    except CapabilityDisabledError as exc:
+        # The org's plan does not include this capability; the message names
+        # it, and is not a generic Forbidden.
+        raise HTTPException(403, str(exc)) from exc
     from lucent.db.definitions import GrantOutcome
 
     if outcome is GrantOutcome.ALREADY_ATTACHED:

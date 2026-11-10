@@ -49,6 +49,32 @@ async def _keep_task_sandbox_alive(
         return
 
 
+async def _sandbox_entitlement_failure(org_id: str) -> dict | None:
+    """The dispatch-time sandbox entitlement refusal, or ``None`` to proceed.
+
+    Kept as its own probe so the refusal shape is testable against a real
+    database without provisioning a sandbox. Returns the same shape the
+    sandbox-disabled branch returns, with the capability named. This probe is
+    the *binding* gate: dispatch is where an organization actually gets a
+    sandbox, so it covers every authoring path (API, MCP tool, schedules,
+    web UI) that hands a task a sandbox template or config, whatever route
+    the task took to get here.
+    """
+    from lucent.services.entitlements import (
+        CAPABILITY_SANDBOXES,
+        capability_gate_message,
+    )
+
+    error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+    if error is None:
+        return None
+    return {
+        "stage": "sandbox_not_entitled",
+        "detail": error,
+        "capability": CAPABILITY_SANDBOXES,
+    }
+
+
 async def _create_task_sandbox(
     self,
     task_id: str,
@@ -77,6 +103,22 @@ async def _create_task_sandbox(
             "detail": detail,
             "setting": "features.sandboxes_enabled",
         }, False
+
+    # The custom_sandboxes entitlement — the per-organization half of the
+    # deployment-wide setting check just above. An infrastructure
+    # organization (``__lucent%``, e.g. the system org the daemon's platform
+    # work runs under) is exempt; a daemon running a tenant's task is charged
+    # to that tenant — exempting daemon callers by role would let any
+    # non-entitled organization reach sandbox execution entirely through the
+    # daemon, and the gate would never bite.
+    entitlement_failure = await _sandbox_entitlement_failure(org_id)
+    if entitlement_failure:
+        runtime.log(
+            f"Sandbox blocked for task {task_id[:8]}: "
+            f"{entitlement_failure['detail']}",
+            "WARN",
+        )
+        return None, None, entitlement_failure, False
 
     validate_env_var_references(sandbox_config.get("env_vars"))
     provider = await runtime.get_secret_provider()

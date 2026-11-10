@@ -2709,6 +2709,21 @@ class DefinitionRepository:
         spec = CAPABILITY_SPEC_BY_TYPE[normalize_capability_type(capability_type)]
         if not org_id:
             return GrantOutcome.FAILED
+        # Entitlement gate for managed tools, checked in the repository so
+        # every attach path meets it: the API router, the web UI attach
+        # handler, the MCP grant_tool_to_agent tool, and the internal
+        # grant_managed_tool wrapper. The other capability types are not
+        # entitlement-gated (nothing in the plan covers them yet). A system
+        # grant (platform bootstrap attaching its own definitions) is exempt,
+        # as is the infrastructure organization the entitlement check itself
+        # excludes by name.
+        if capability_type == "managed_tool" and not system:
+            from lucent.services.entitlements import (
+                CAPABILITY_MANAGED_TOOLS,
+                ensure_capability,
+            )
+
+            await ensure_capability(self.pool, org_id, CAPABILITY_MANAGED_TOOLS)
         allowed = await self._assert_capability_attach_allowed(
             agent_id=agent_id,
             capability_id=capability_id,

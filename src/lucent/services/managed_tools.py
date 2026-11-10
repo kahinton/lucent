@@ -32,6 +32,11 @@ from lucent.db.definitions import DefinitionRepository
 from lucent.logging import get_logger
 from lucent.sandbox.manager import get_sandbox_manager
 from lucent.secrets import SecretRegistry, resolve_env_vars
+from lucent.services.entitlements import (
+    CAPABILITY_MANAGED_TOOLS,
+    CAPABILITY_SANDBOXES,
+    capability_is_granted,
+)
 from lucent.services.tool_runtimes import (
     RuntimeExecutionContext,
     get_runtime,
@@ -70,6 +75,18 @@ class ManagedToolDefinitionError(ManagedToolError):
     wrong, the definition row itself cannot be read. Callers map this to a
     server-side error with the precise field named, never an opaque crash.
     """
+
+
+def _entitlement_message(capability: str) -> str:
+    """The refusal text naming the capability and the organization scope.
+
+    Identical to what :class:`lucent.services.entitlements.CapabilityDisabledError`
+    carries, so every envelope (MCP JSON, HTTP 403, sandbox failure detail)
+    reports the same sentence.
+    """
+    from lucent.services.entitlements import CapabilityDisabledError
+
+    return CapabilityDisabledError(capability, None).args[0]
 
 
 # jsonb columns read by the executor. asyncpg returns them as text unless a
@@ -252,6 +269,18 @@ class ManagedToolExecutor:
         # the boundary every runtime shares, so a raw row is a typed error
         # naming the field instead of an AttributeError on ``.get``.
         tool = _normalize_tool_definition(tool)
+        # Gate 1, the managed_tools entitlement: an organization without the
+        # row runs no managed tool at all. Checked here — in the code path the
+        # invocation flows through — rather than in a router dependency,
+        # because the executor is the single point every caller funnels into
+        # (API run route, MCP run_managed_tool, MCP discovery, the LLM engine).
+        # An unreachable pool denies rather than unlocking: the gate must be
+        # able to prove the entitlement (services.entitlements.capability_is_granted).
+        pool = getattr(self.repo, "pool", None)
+        if not await capability_is_granted(pool, org_id, CAPABILITY_MANAGED_TOOLS):
+            raise ManagedToolBlockedError(
+                _entitlement_message(CAPABILITY_MANAGED_TOOLS)
+            )
         # Which runtime kind executes this definition. Sandboxes are only
         # required for some kinds, so the feature gate has to be per-kind rather
         # than a blanket check: a deployment with sandboxes disabled can still
@@ -263,6 +292,14 @@ class ManagedToolExecutor:
                 "Custom tooling is disabled for this organization because "
                 "features.sandboxes_enabled is off"
             )
+        # Gate 2, additive for sandbox-backed kinds only: a python tool runs in
+        # a sandbox container, so an organization without the
+        # custom_sandboxes entitlement cannot execute it even when its
+        # managed_tools entitlement is present.
+        if requires_sandbox and not await capability_is_granted(
+            pool, org_id, CAPABILITY_SANDBOXES
+        ):
+            raise ManagedToolBlockedError(_entitlement_message(CAPABILITY_SANDBOXES))
         if tool.get("status") != "active":
             raise ManagedToolBlockedError("Managed tool is not active")
 

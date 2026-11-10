@@ -431,6 +431,28 @@ async def test_organization(db_pool, clean_test_data):
 
 
 @pytest_asyncio.fixture
+async def capable_organization(db_pool, test_organization):
+    """A test organization with both entitlement capabilities enabled.
+
+    The dispatch and managed-tool gates default-deny a missing row, which is
+    the production contract (migration 164 backfills only pre-existing orgs).
+    Tests that exercise gated actions outside an entitlement scenario use this
+    fixture; tests that study the gate itself create a bare org instead, so
+    they see the default-deny behavior directly.
+    """
+    from lucent.db import EntitlementRepository
+
+    repo = EntitlementRepository(db_pool)
+    for capability in ("custom_sandboxes", "managed_tools"):
+        await repo.set_entitlement(
+            str(test_organization["id"]), capability, True, source="override"
+        )
+    yield test_organization
+    await repo.set_entitlement(str(test_organization["id"]), "custom_sandboxes", False)
+    await repo.set_entitlement(str(test_organization["id"]), "managed_tools", False)
+
+
+@pytest_asyncio.fixture
 async def test_user(db_pool, test_organization, clean_test_data):
     """Create a test user with an organization."""
     from lucent.db import UserRepository

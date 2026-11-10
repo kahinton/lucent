@@ -1170,6 +1170,17 @@ async def edit_task(request: Request, task_id: str):
         if not any(a["name"] == agent_type for a in agents_page.get("items", [])):
             raise HTTPException(422, f"Unknown or unapproved agent_type '{agent_type}'.")
 
+    if sandbox_template_id and not clear_sandbox:
+        # Same entitlement the dispatch gate enforces, refused at authoring time.
+        from lucent.services.entitlements import (
+            CAPABILITY_SANDBOXES,
+            capability_gate_message,
+        )
+
+        gate_error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+        if gate_error:
+            raise HTTPException(409, gate_error)
+
     updated = await repo.update_pending_task(
         task_id,
         org_id,

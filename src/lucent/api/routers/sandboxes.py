@@ -26,13 +26,31 @@ _MEMORY_RE = re.compile(r"^[1-9]\d{0,4}[mgt]$")
 _IMAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,254}$")
 
 
-def _require_sandboxes_enabled(user: AuthenticatedUser) -> None:
+async def _require_sandboxes_enabled(user: AuthenticatedUser) -> None:
     if not sandboxes_enabled(organization_id=user.organization_id):
         raise HTTPException(
             409,
             "Sandboxes are disabled for this organization by the "
             "features.sandboxes_enabled setting",
         )
+    # The custom_sandboxes entitlement — the per-organization half of the
+    # deployment-wide setting above. Enforced here, at the start of every
+    # create/launch action in this router, because a direct sandbox creation
+    # bypasses task dispatch entirely; without it a free-tier organization
+    # could provision containers straight through the API even though the
+    # dispatch and authoring gates refuse anything with a template attached.
+    # This covers built-in templates too: the entitlement is about whether
+    # the organization gets sandboxes at all, not which template it uses.
+    from lucent.services.entitlements import (
+        CAPABILITY_SANDBOXES,
+        capability_gate_message,
+    )
+
+    gate_error = await capability_gate_message(
+        str(user.organization_id), CAPABILITY_SANDBOXES
+    )
+    if gate_error:
+        raise HTTPException(409, gate_error)
 
 
 # --- Request/Response Models ---
@@ -201,7 +219,7 @@ async def create_sandbox(
     user: AuthenticatedUser,
 ) -> SandboxResponse:
     """Create a new sandbox environment."""
-    _require_sandboxes_enabled(user)
+    await _require_sandboxes_enabled(user)
     provider = SecretRegistry.get()
     resolved_env_vars = await resolve_env_vars(body.env_vars, provider)
     config = SandboxConfig(
@@ -323,7 +341,7 @@ async def create_template(body: TemplateCreateRequest, user: AuthenticatedUser):
     """Create a reusable sandbox template."""
     from lucent.db.sandbox_template import SandboxTemplateRepository
 
-    _require_sandboxes_enabled(user)
+    await _require_sandboxes_enabled(user)
     if body.docker_bind_mounts and not is_admin_role(user.role.value):
         raise HTTPException(403, "Only administrators can configure Docker bind mounts")
     if body.extra_hosts and not is_admin_role(user.role.value):
@@ -496,7 +514,7 @@ async def launch_from_template(
         get_authorized_templates_pool,
     )
 
-    _require_sandboxes_enabled(user)
+    await _require_sandboxes_enabled(user)
     pool = await get_pool()
     # Usage is clearance-driven and default-deny: launching needs a grant
     # (built-in org read, ownership, group, or explicit) for this principal.

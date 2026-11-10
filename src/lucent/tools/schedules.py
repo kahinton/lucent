@@ -152,6 +152,17 @@ Returns: JSON with the created schedule including its ID and next_run_at."""
         # Usage is clearance-driven and default-deny: the schedule's sandbox
         # template must be cleared for the schedule creator.
         if sandbox_template_id:
+            # Entitlement gate beside the clearance probe: the binding
+            # enforcement stays at dispatch; this fails fast with the
+            # capability named.
+            from lucent.services.entitlements import (
+                CAPABILITY_SANDBOXES,
+                capability_gate_message,
+            )
+
+            gate_error = await capability_gate_message(org_id, CAPABILITY_SANDBOXES)
+            if gate_error:
+                return json.dumps({"error": gate_error, "code": 409})
             from lucent.db.sandbox_template import (
                 SandboxTemplateRepository,
                 get_authorized_templates_pool,
