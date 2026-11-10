@@ -351,6 +351,15 @@ ADMIN_ORGS_ALLOWED_ROUTES: tuple[tuple[str, str], ...] = (
     # ORG_MANAGE_INSTANCE and Lucent's own role rules (`can_assign_role`),
     # and the handler's 409 covers the identity collision.
     ("POST", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/users/?$"),
+    # Plan entitlements (migration 164): read the tenant's capability rows
+    # and flip one (GET list / PUT by capability, both audited, both gated
+    # on ORG_MANAGE_INSTANCE inside the handler). A marketing site showing
+    # plan contents and an ops console trialing a capability both need this.
+    # The capability segment cannot swallow a further path (``[^/?]+`` and
+    # no nested routes), and GET exposes rows only — no tenant identifiers
+    # beyond the requested organization.
+    ("GET", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/entitlements/?$"),
+    ("PUT", "^/api/organizations/" + _ORG_ID_SEGMENT + r"/entitlements/[^/?]+/?$"),
     # Member and consumption reads: a billing/control-plane reconciliation
     # needs to see who is in a tenant and what it consumes, and no more.
     # These are GET-only; every other member sub-route (role changes,

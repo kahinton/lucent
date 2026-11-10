@@ -33,6 +33,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, Field
 
 from lucent import settings as runtime_settings
 from lucent.api.deps import AuthenticatedUser, HyperadminUser, OwnerUser
@@ -84,11 +85,13 @@ from lucent.api.models import (
 )
 from lucent.db import (
     AdminAuditRepository,
+    EntitlementRepository,
     OrganizationRepository,
     UserRepository,
     get_pool,
 )
 from lucent.db import admin_audit as audit_actions
+from lucent.db.entitlements import CAPABILITIES, SOURCE_OVERRIDE
 from lucent.db.organization import OrganizationNameConflictError
 from lucent.db.resource_usage import ResourceUsageRepository
 from lucent.logging import get_logger
@@ -113,6 +116,57 @@ HIDDEN_ORGANIZATION_NAMES = ["__lucent_system__"]
 #: operator tooling (``python -m lucent.hyperadmin``), never by adding someone to
 #: a customer's organization.
 TENANT_ROLES = ("member", "admin", "owner")
+
+#: Audit action for a direct entitlement flip by an instance operator. The
+#: ``action`` column is free-form TEXT by design (migration 066) so new admin
+#: actions can be named where they happen; the constant lives here because
+#: this is the only writer.
+ORG_ENTITLEMENT_UPDATE = "org.entitlement_update"
+
+
+class OrganizationEntitlement(BaseModel):
+    """One plan-capability row, as the external control plane may read it.
+
+    Deliberately narrow: the capability and its state, where it came from,
+    the capability-shaped limits, and any note. Nothing here is a tenant
+    identifier beyond the organization the row belongs to, so the shape has
+    no handles an operator could turn into another tenant's reach.
+    """
+
+    capability: str = Field(description="Capability name, e.g. managed_tools")
+    organization_id: UUID
+    is_enabled: bool
+    source: str = Field(
+        description="How the row was reached: 'plan', 'override', or 'grandfathered'."
+    )
+    limits: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Capability-specific limits; keys are owned by the capability.",
+    )
+    note: str = ""
+
+
+class OrganizationEntitlementList(BaseModel):
+    """Every capability row one organization carries."""
+
+    organization_id: UUID
+    entitlements: list[OrganizationEntitlement]
+
+
+class OrganizationEntitlementUpdate(BaseModel):
+    """Set one capability's enabled state (with optional limits and note)."""
+
+    is_enabled: bool
+    limits: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Replaces the stored limits wholesale when supplied; omitted keeps "
+            "whatever the row already carries."
+        ),
+    )
+    note: str | None = Field(
+        default=None, description="Omitted keeps the note already on the row."
+    )
 
 
 def _org_to_response(org: dict[str, Any]) -> OrganizationResponse:
@@ -1389,6 +1443,153 @@ async def release_organization_setting_locks(
         organization_id=organization_id,
         released=result["released"],
         not_locked=result["not_locked"],
+    )
+
+
+# ===========================================================================
+# Per-organization entitlements
+#
+# Migration 164 made capability state a per-organization fact (one row per
+# (organization, capability) in ``organization_entitlements``): whether custom
+# sandboxes and managed tools are enabled for that tenant, where the state
+# came from, and what limits it carries. The external control plane — a
+# marketing site showing what a plan includes, an ops console flipping a
+# capability for a trial — needs to read those rows and flip them, the same
+# way it already drives the tier settings above. Reading is open; writing is
+# the one flip path, audited like every other operator change.
+# ===========================================================================
+
+
+@router.get(
+    "/{organization_id}/entitlements",
+    response_model=OrganizationEntitlementList,
+)
+async def list_organization_entitlements(
+    organization_id: UUID,
+    user: HyperadminUser,
+) -> OrganizationEntitlementList:
+    """Read every capability row a tenant carries.
+
+    Requires hyperadmin role. Returns the rows exactly as stored — no
+    synthesis, because a control plane reconciling plans must see the same
+    facts the gate sites enforce. A tenant with no rows lists none: that is
+    the default-deny contract, not an error.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    pool = await get_pool()
+    rows = await EntitlementRepository(pool).get_entitlements(organization_id)
+
+    return OrganizationEntitlementList(
+        organization_id=organization_id,
+        entitlements=[
+            OrganizationEntitlement(
+                capability=row["capability"],
+                organization_id=row["organization_id"],
+                is_enabled=row["is_enabled"],
+                source=row["source"],
+                limits=row["limits"],
+                note=row["note"],
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.put(
+    "/{organization_id}/entitlements/{capability}",
+    response_model=OrganizationEntitlement,
+)
+async def update_organization_entitlement(
+    organization_id: UUID,
+    capability: str,
+    data: OrganizationEntitlementUpdate,
+    user: HyperadminUser,
+) -> OrganizationEntitlement:
+    """Flip one plan capability and return the resulting row.
+
+    Requires hyperadmin role. The capability name is validated against the
+    schema's own list *before* any database call, so an unknown name is a 422
+    and no row is created — the row-level CHECK (migration 164) stays the
+    second line of defence, never the first.
+
+    The write records source ``override``, always: this surface *is* an
+    administrator flip-flopping a capability directly, and the migration's
+    source column is what keeps that provenance visible when the entitlement
+    stops working. A later plan-assignment machinery would write source
+    ``plan`` through its own path, not through this route.
+    """
+    user.require_permission(Permission.ORG_MANAGE_INSTANCE)
+    await _require_org(organization_id)
+
+    if capability not in CAPABILITIES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "message": (
+                    f"Unknown capability {capability!r}; the instance does not "
+                    "gate anything by that name."
+                ),
+                "known_capabilities": list(CAPABILITIES),
+            },
+        )
+
+    pool = await get_pool()
+    repo = EntitlementRepository(pool)
+    previous = next(
+        (
+            row
+            for row in await repo.get_entitlements(organization_id)
+            if row["capability"] == capability
+        ),
+        None,
+    )
+    row = await repo.set_entitlement(
+        organization_id,
+        capability,
+        is_enabled=data.is_enabled,
+        source=SOURCE_OVERRIDE,
+        limits=(
+            data.limits if data.limits is not None else previous["limits"]
+            if previous
+            else {}
+        ),
+        note=(data.note if data.note is not None else previous["note"] if previous else ""),
+    )
+
+    await _audit(
+        user,
+        action=ORG_ENTITLEMENT_UPDATE,
+        entity_type="entitlements",
+        entity_id=organization_id,
+        entity_label=f"{capability}={'enabled' if data.is_enabled else 'disabled'}",
+        target_org_id=organization_id,
+        changed_fields=[capability],
+        old_values=(
+            {
+                "is_enabled": previous["is_enabled"],
+                "source": previous["source"],
+                "limits": previous["limits"],
+                "note": previous["note"],
+            }
+            if previous
+            else None
+        ),
+        new_values={"is_enabled": row["is_enabled"], "source": row["source"]},
+        notes=(
+            f"Entitlement {capability} {'enabled' if data.is_enabled else 'disabled'} "
+            "by an instance operator."
+        ),
+    )
+
+    return OrganizationEntitlement(
+        capability=row["capability"],
+        organization_id=row["organization_id"],
+        is_enabled=row["is_enabled"],
+        source=row["source"],
+        limits=row["limits"],
+        note=row["note"],
     )
 
 

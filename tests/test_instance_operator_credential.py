@@ -147,6 +147,13 @@ def test_allowlist_permits_only_the_organization_surface():
         ("GET", f"/api/organizations/{org_id}/users"),
         ("GET", f"/api/organizations/{org_id}/users/"),
         ("GET", f"/api/organizations/{org_id}/usage/resources"),
+        # Plan entitlements (migration 164): read the capability rows, flip
+        # one. GET list and PUT by capability; the write is audited and
+        # gated on ORG_MANAGE_INSTANCE inside the handler like everything
+        # else on this surface.
+        ("GET", f"/api/organizations/{org_id}/entitlements"),
+        ("PUT", f"/api/organizations/{org_id}/entitlements/managed_tools"),
+        ("PUT", f"/api/organizations/{org_id}/entitlements/custom_sandboxes"),
         # Member creation stays reachable: it is the committed second write
         # path of the signup flow (7a12c91), kept as-is here — asserted
         # explicitly rather than removed silently.
@@ -184,6 +191,21 @@ def test_allowlist_permits_only_the_organization_surface():
         ("POST", f"/api/organizations/{org_id}/usage/resources"),
         ("PATCH", f"/api/organizations/{org_id}/usage/resources"),
         ("GET", f"/api/organizations/{org_id}/users/{uuid4()}"),
+        # The entitlement reach stays exactly GET-list and PUT-one: no bulk
+        # flip, no method drift, no deeper path, and the literal segments
+        # can never become entitlement targets through the parameter.
+        ("PUT", f"/api/organizations/{org_id}/entitlements"),
+        ("PATCH", f"/api/organizations/{org_id}/entitlements"),
+        ("POST", f"/api/organizations/{org_id}/entitlements"),
+        ("DELETE", f"/api/organizations/{org_id}/entitlements"),
+        ("PATCH", f"/api/organizations/{org_id}/entitlements/managed_tools"),
+        ("POST", f"/api/organizations/{org_id}/entitlements/managed_tools"),
+        ("DELETE", f"/api/organizations/{org_id}/entitlements/managed_tools"),
+        ("PUT", f"/api/organizations/{org_id}/entitlements/managed_tools/limits"),
+        ("GET", f"/api/organizations/{org_id}/entitlements/anything"),
+        ("GET", "/api/organizations/current/entitlements"),
+        ("PUT", "/api/organizations/current/entitlements/managed_tools"),
+        ("GET", "/api/organizations/instance/entitlements"),
         # Same-family operations deliberately outside the reach list.
         ("DELETE", f"/api/organizations/{org_id}"),
         ("POST", f"/api/organizations/{org_id}/suspend"),
@@ -515,6 +537,155 @@ async def test_control_plane_key_reads_members_and_usage_but_not_member_manageme
     )
     assert invited.status_code == 201, invited.text
     assert invited.json()["temporary_password"]
+
+
+@pytest.mark.asyncio
+async def test_control_plane_key_reads_and_flips_entitlements(
+    db_pool, control_plane_key, cred_prefix, raw_client
+):
+    """The control plane can read a tenant's capability rows and flip one.
+
+    Migration 164 made entitlements the per-organization fact the plan
+    system is built on; this is the read the marketing site and ops console
+    drive and the flip that marks a capability as an administrator override.
+    Provision patches built-in definitions (proven separately, as above).
+    The response shape is asserted exactly: capability + organization_id +
+    the state the caller cares about, and nothing with a handle to inside
+    the tenant.
+    """
+    _, plaintext = control_plane_key
+    headers = {"Authorization": f"Bearer {plaintext}"}
+
+    with patch(
+        "lucent.builtin_definitions.sync_built_in_definitions_for_org",
+        new=AsyncMock(return_value={}),
+    ):
+        provisioned = await raw_client.post(
+            "/api/organizations/provision",
+            headers=headers,
+            json={
+                "name": f"{cred_prefix}entitlement_tenant",
+                "first_admin": {
+                    "email": f"{cred_prefix}owner@tenant.test",
+                    "display_name": "Ent Owner",
+                },
+            },
+        )
+    assert provisioned.status_code == 201, provisioned.text
+    org_id = provisioned.json()["organization"]["id"]
+
+    # A fresh tenant has no rows at all — the default-deny contract is
+    # visible to the control plane, not hidden behind an error.
+    empty = await raw_client.get(
+        f"/api/organizations/{org_id}/entitlements", headers=headers
+    )
+    assert empty.status_code == 200, empty.text
+    assert empty.json() == {"organization_id": org_id, "entitlements": []}
+
+    # The flip: disable managed tools with limits and a note, and get the
+    # resulting row back.
+    flipped = await raw_client.put(
+        f"/api/organizations/{org_id}/entitlements/managed_tools",
+        headers=headers,
+        json={"is_enabled": False, "limits": {"tool_run_quota": 5}, "note": "trial pause"},
+    )
+    assert flipped.status_code == 200, flipped.text
+    row = flipped.json()
+    assert row == {
+        "capability": "managed_tools",
+        "organization_id": org_id,
+        "is_enabled": False,
+        # This surface IS an administrator flip, so the row says so.
+        "source": "override",
+        "limits": {"tool_run_quota": 5},
+        "note": "trial pause",
+    }
+
+    # The read now shows the row, with the same exact shape.
+    read = await raw_client.get(
+        f"/api/organizations/{org_id}/entitlements", headers=headers
+    )
+    assert read.status_code == 200, read.text
+    assert read.json() == {"organization_id": org_id, "entitlements": [row]}
+
+    # Omitted fields keep what the row already carries (limits wholesale,
+    # note untouched), and the enabled state is what was asked for.
+    reenabled = await raw_client.put(
+        f"/api/organizations/{org_id}/entitlements/managed_tools",
+        headers=headers,
+        json={"is_enabled": True},
+    )
+    assert reenabled.status_code == 200, reenabled.text
+    assert reenabled.json()["is_enabled"] is True
+    assert reenabled.json()["limits"] == {"tool_run_quota": 5}
+    assert reenabled.json()["note"] == "trial pause"
+
+    async with db_pool.acquire() as conn:
+        stored = await conn.fetchrow(
+            "SELECT is_enabled, source FROM organization_entitlements "
+            "WHERE organization_id = $1 AND capability = 'managed_tools'",
+            org_id,
+        )
+    assert stored["is_enabled"] is True and stored["source"] == "override"
+
+    # One audit row lands in the operator's own org, as on every other
+    # instance-operator change above.
+    async with db_pool.acquire() as conn:
+        audit_rows = await conn.fetchval(
+            "SELECT count(*) FROM admin_audit_log WHERE entity_type = 'entitlements' "
+            "AND entity_id = $1 AND action = 'org.entitlement_update'",
+            org_id,
+        )
+    assert audit_rows >= 1, "the flip must be audited"
+
+    # The reach stays bounded while it is open: reads of the tenant data
+    # plane and the auth verifier remain 403, and the entitlement path's
+    # write side stays PUT-one.
+    data_plane = await raw_client.get(f"/api/memories/{uuid4()}", headers=headers)
+    assert data_plane.status_code == 403, data_plane.text
+    assert data_plane.json()["detail"] == "API key scope does not allow this endpoint"
+    verifier = await raw_client.get("/api/auth/verify", headers=headers)
+    assert verifier.status_code == 403, verifier.text
+    assert verifier.json()["detail"] == "API key scope does not allow this endpoint"
+    # No bulk flip exists: there is no write route at all on the collection
+    # path, so the method is refused before auth resolves (405). A 403 from
+    # the scope gate would be equally fine if one were ever added — the
+    # bare-create probe above makes the same allowance.
+    bulk_flip = await raw_client.post(
+        f"/api/organizations/{org_id}/entitlements", headers=headers,
+        json={"is_enabled": True},
+    )
+    assert bulk_flip.status_code in (403, 405), bulk_flip.text
+
+
+@pytest.mark.asyncio
+async def test_control_plane_key_unknown_capability_is_422(
+    db_pool, control_plane_key, cred_prefix, raw_client
+):
+    """An unknown capability on PUT is 422 and creates no row.
+
+    Validation happens before any database call, so the schema CHECK never
+    becomes a 500 and a typo'd capability cannot mint a silently dead row.
+    """
+    from lucent.db import OrganizationRepository
+
+    repo = OrganizationRepository(db_pool)
+    org = await repo.create(name=f"{cred_prefix}ent_unknown")
+    headers = {"Authorization": f"Bearer {control_plane_key[1]}"}
+
+    refused = await raw_client.put(
+        f"/api/organizations/{org['id']}/entitlements/managed_tols",
+        headers=headers,
+        json={"is_enabled": True},
+    )
+    assert refused.status_code == 422, refused.text
+    assert "managed_tols" in str(refused.json()["detail"])
+
+    async with db_pool.acquire() as conn:
+        assert await conn.fetchrow(
+            "SELECT 1 FROM organization_entitlements WHERE organization_id = $1",
+            org["id"],
+        ) is None, "a rejected capability must not create a row"
 
 
 @pytest.mark.asyncio
