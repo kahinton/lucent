@@ -8,6 +8,9 @@ from daemon.api import key_verification as key_verification_module
 from daemon.daemon import AuthFailureDetectedError, LucentDaemon
 from daemon.runtime.module_proxy import RuntimeModuleProxy
 
+#: Org id used by the per-org key tests.
+ORG = "aaaaaaaa-1111-4111-8111-111111111111"
+
 
 class _FakeResponse:
     def __init__(self, status_code: int):
@@ -86,9 +89,11 @@ async def test_startup_replaces_inherited_user_scoped_key(monkeypatch):
     async def _unexpected_verify(_api_key: str) -> bool:
         raise AssertionError("Startup must not validate or adopt an inherited key")
 
-    async def _provision(instance_id: str) -> str:
+    async def _provision(instance_id: str, organization_id: str | None = None) -> str:
         provisioned_for.append(instance_id)
-        daemon_module._current_key_db_id = "daemon-key-id"
+        # Mirror the real provisioning step's recorded lifecycle state so
+        # _key_for_org treats the result as reusable.
+        daemon_module.daemon_keys._key_ids[str(organization_id)] = "daemon-key-id"
         return "hs_daemon_service_key"
 
     try:
@@ -98,11 +103,19 @@ async def test_startup_replaces_inherited_user_scoped_key(monkeypatch):
         monkeypatch.setattr(daemon_module, "_verify_api_key", _unexpected_verify)
         monkeypatch.setattr(daemon_module, "_provision_daemon_api_key", _provision)
 
+        # One key per served org. The process credential is the service org's.
+        async def _served() -> list[str]:
+            return [ORG]
+
+        monkeypatch.setattr(daemon_module, "_served_org_ids", _served)
         key = await daemon_module.ensure_valid_api_key("instance-startup")
 
         assert key == "hs_daemon_service_key"
         assert provisioned_for == ["instance-startup"]
         assert daemon_module.API_HEADERS["Authorization"] == "Bearer hs_daemon_service_key"
+        assert daemon_module.api_headers_for(ORG)["Authorization"] == (
+            "Bearer hs_daemon_service_key"
+        ), "the org must be able to use the credential minted for it"
     finally:
         daemon_module.MCP_API_KEY = previous_key
         daemon_module._current_key_db_id = previous_key_id
@@ -170,18 +183,25 @@ async def test_heartbeat_retries_after_key_recovery(monkeypatch):
     heartbeat_results = iter((None, {"status": "active"}))
     heartbeat_calls = 0
 
-    async def _verify_and_provision(_instance_id: str) -> bool:
+    async def _verify_and_provision(
+        _instance_id: str, *, organization_id: str | None = None
+    ) -> bool:
         nonlocal verify_calls
         verify_calls += 1
         return next(verify_results)
 
-    async def _update_heartbeat():
+    async def _update_heartbeat(organization_id: str | None = None):
         nonlocal heartbeat_calls
         heartbeat_calls += 1
         return next(heartbeat_results)
 
+    # Heartbeats are per served org: this process serves exactly one here.
+    async def _scheduled_orgs() -> list[str]:
+        return [ORG]
+
     monkeypatch.setattr(daemon_module, "_verify_and_provision_key", _verify_and_provision)
     monkeypatch.setattr(daemon, "_update_heartbeat", _update_heartbeat)
+    monkeypatch.setattr(daemon, "_scheduled_org_ids", _scheduled_orgs)
 
     assert await daemon._heartbeat_once() is True
     assert verify_calls == 2
@@ -194,16 +214,22 @@ async def test_heartbeat_does_not_send_without_valid_key(monkeypatch):
     daemon.instance_id = "instance-heartbeat-no-key"
     heartbeat_calls = 0
 
-    async def _verify_and_provision(_instance_id: str) -> bool:
+    async def _verify_and_provision(
+        _instance_id: str, *, organization_id: str | None = None
+    ) -> bool:
         return False
 
-    async def _update_heartbeat():
+    async def _update_heartbeat(organization_id: str | None = None):
         nonlocal heartbeat_calls
         heartbeat_calls += 1
         return {"status": "active"}
 
+    async def _scheduled_orgs() -> list[str]:
+        return [ORG]
+
     monkeypatch.setattr(daemon_module, "_verify_and_provision_key", _verify_and_provision)
     monkeypatch.setattr(daemon, "_update_heartbeat", _update_heartbeat)
+    monkeypatch.setattr(daemon, "_scheduled_org_ids", _scheduled_orgs)
 
     assert await daemon._heartbeat_once() is False
     assert heartbeat_calls == 0
@@ -605,24 +631,30 @@ async def test_definitive_rejection_reprovisions_key(monkeypatch):
     prev_exp = daemon_module._current_key_expires_at
     provisioned: list[str] = []
 
-    async def _provision(instance_id: str) -> str:
+    async def _provision(instance_id: str, organization_id: str | None = None) -> str:
         provisioned.append(instance_id)
-        daemon_module._current_key_db_id = "new-daemon-key-id"
-        daemon_module._current_key_expires_at = datetime.now(timezone.utc) + timedelta(
-            hours=24
-        )
+        daemon_module.daemon_keys._key_ids[str(organization_id)] = "new-daemon-key-id"
         return "hs_new_key"
 
     try:
         daemon_module.MCP_API_KEY = "hs_stale_key"
-        daemon_module._current_key_db_id = "daemon-key-id"
-        daemon_module._current_key_expires_at = datetime.now(timezone.utc) + timedelta(
-            hours=23
-        )
+        daemon_module._KEY_BY_ORG[ORG] = "hs_stale_key"
+        daemon_module.API_HEADERS_BY_ORG[ORG] = {"Authorization": "Bearer hs_stale_key"}
+        daemon_module.daemon_keys._key_ids[ORG] = "daemon-key-id"
         _patch_key_probe(monkeypatch, status_code=401)
         monkeypatch.setattr(daemon_module, "_provision_daemon_api_key", _provision)
 
-        assert await daemon_module._verify_and_provision_key("instance-rejected") is True
+        async def _service_org(_conn=None):
+            return (ORG, "Test Org")
+
+        monkeypatch.setattr(daemon_module, "_resolve_service_org_conn", _service_org)
+
+        assert (
+            await daemon_module._verify_and_provision_key(
+                "instance-rejected", organization_id=ORG
+            )
+            is True
+        )
         assert provisioned == ["instance-rejected"]
         assert daemon_module.MCP_API_KEY == "hs_new_key"
     finally:

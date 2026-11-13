@@ -18,6 +18,7 @@ class InstanceAPI:
         pid: int | None = None,
         roles: list[str] | None = None,
         metadata: dict | None = None,
+        organization_id: str | None = None,
     ) -> dict | None:
         from daemon.runtime.module_proxy import runtime
 
@@ -32,7 +33,7 @@ class InstanceAPI:
                         "roles": roles or [],
                         "metadata": metadata or {},
                     },
-                    headers=runtime.API_HEADERS,
+                    headers=runtime.api_headers_for(organization_id),
                 )
                 if response.status_code in (200, 201):
                     return response.json()
@@ -46,6 +47,7 @@ class InstanceAPI:
         metadata: dict | None = None,
         *,
         active_task_ids: list[str] | None = None,
+        organization_id: str | None = None,
     ) -> dict | None:
         from daemon.runtime.module_proxy import runtime
 
@@ -64,7 +66,7 @@ class InstanceAPI:
                             else {}
                         ),
                     },
-                    headers=runtime.API_HEADERS,
+                    headers=runtime.api_headers_for(organization_id),
                 )
                 if response.status_code in (200, 201):
                     return response.json()
@@ -73,7 +75,9 @@ class InstanceAPI:
         return None
 
     @staticmethod
-    async def mark_instance_stopped(instance_id: str) -> dict | None:
+    async def mark_instance_stopped(
+        instance_id: str, *, organization_id: str | None = None
+    ) -> dict | None:
         from daemon.runtime.module_proxy import runtime
 
         try:
@@ -81,7 +85,7 @@ class InstanceAPI:
                 response = await client.post(
                     f"{runtime.API_BASE}/requests/instances/stop",
                     json={"instance_id": instance_id},
-                    headers=runtime.API_HEADERS,
+                    headers=runtime.api_headers_for(organization_id),
                 )
                 if response.status_code in (200, 201):
                     return response.json()

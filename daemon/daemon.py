@@ -822,6 +822,31 @@ async def _resolve_daemon_org(conn) -> tuple[str, str] | None:
     return await organization.resolve_daemon_org(conn)
 
 
+async def _resolve_service_org(conn) -> tuple[str, str] | None:
+    """The org whose service identity this process acts under (see helper)."""
+    return await organization.resolve_service_org(conn)
+
+
+async def _org_name(conn, organization_id: str) -> str | None:
+    """Display name for one org (identity labelling, never authority)."""
+    try:
+        row = await DaemonRepository(conn).resolve_organization(organization_id)
+        return str(row["name"]) if row else None
+    except Exception:
+        return None
+
+
+async def _list_daemon_orgs(conn) -> list[tuple[str, str]]:
+    """Every real organization this daemon may serve, as (id, name).
+
+    The controller is multi-org by design: it supervises work for all of them
+    and spawns a correctly-bound worker per org. This is the roster it needs to
+    do that, and the fallback identity source when no single-tenant binding
+    applies.
+    """
+    return await organization.list_daemon_orgs(conn)
+
+
 async def _ensure_daemon_service_user(conn, org_id: str) -> dict | None:
     """Get (or self-heal) the org-scoped daemon-service user for ``org_id``.
 
@@ -843,9 +868,42 @@ PROACTIVE_KEY_ROTATION_MINUTES = 60
 DAEMON_KEY_SCOPES = ["read", "write"]
 
 # These are set dynamically after key provisioning in LucentDaemon.start()
+#
+# One credential per organization. A daemon API key is scoped to a single org,
+# and every tenant call must carry the key of the org it acts for — so a
+# multi-org controller holds a *set* of org-scoped keys and never one credential
+# that spans tenants. ``API_HEADERS``/``MCP_CONFIG`` remain the credential of
+# the process's own service org, which is exactly what a single-tenant worker
+# uses for everything.
 MCP_CONFIG: dict = {}
 API_BASE = MCP_URL.replace("/mcp", "/api")
 API_HEADERS: dict = {"Content-Type": "application/json"}
+#: org_id -> headers carrying that org's own daemon key.
+API_HEADERS_BY_ORG: dict[str, dict] = {}
+#: org_id -> MCP config for that org's own key.
+MCP_CONFIG_BY_ORG: dict[str, dict] = {}
+
+
+def api_headers_for(organization_id: str | None) -> dict:
+    """Headers for a call acting on behalf of one organization.
+
+    Falls back to the process credential only when no org-scoped key exists —
+    which for a controller means one org could reach another's data, so callers
+    that know their org must always pass it.
+    """
+    if organization_id:
+        scoped = API_HEADERS_BY_ORG.get(str(organization_id))
+        if scoped is not None:
+            return scoped
+    return API_HEADERS
+
+
+def mcp_config_for(organization_id: str | None) -> dict:
+    if organization_id:
+        scoped = MCP_CONFIG_BY_ORG.get(str(organization_id))
+        if scoped is not None:
+            return scoped
+    return MCP_CONFIG
 
 
 def _build_auth_config(api_key: str) -> tuple[dict, dict]:
@@ -857,6 +915,8 @@ def _build_auth_config(api_key: str) -> tuple[dict, dict]:
 # API Key Provisioning
 # ============================================================================
 
+#: org_id -> plaintext daemon key for that org (never shared across orgs).
+_KEY_BY_ORG: dict[str, str] = {}
 # Tracks the current key's DB id so we can revoke it on shutdown
 _current_key_db_id: str | None = None
 # Tracks the current key expiry for proactive rotation checks
@@ -873,7 +933,9 @@ def _get_key_lock() -> asyncio.Lock:
     return _key_provision_lock
 
 
-async def _provision_daemon_api_key(instance_id: str) -> str | None:
+async def _provision_daemon_api_key(
+    instance_id: str, organization_id: str | None = None
+) -> str | None:
     """Provision an instance-scoped API key with a 24-hour expiry.
 
     Uses the restricted lucent_daemon DB role which can manage api_keys and
@@ -883,12 +945,14 @@ async def _provision_daemon_api_key(instance_id: str) -> str | None:
 
     Returns the plain-text hs_ key, or None on failure.
     """
-    return await daemon_keys.provision_daemon_api_key(instance_id)
+    return await daemon_keys.provision_daemon_api_key(
+        instance_id, organization_id=organization_id or ""
+    )
 
 
 async def _revoke_current_key() -> None:
-    """Revoke the daemon's current API key (called on shutdown)."""
-    await daemon_keys.revoke_current_key()
+    """Revoke every org key this process provisioned (called on shutdown)."""
+    await daemon_keys.revoke_all_keys()
 
 
 async def _mint_scoped_api_key(
@@ -1023,15 +1087,57 @@ def _should_rotate_proactively() -> bool:
     )
 
 
-async def ensure_valid_api_key(instance_id: str = "local") -> str:
-    """Ensure the daemon has a valid instance-owned service API key.
+async def _served_org_ids() -> list[str]:
+    """Organizations this process must hold credentials for.
 
-    The daemon must not adopt a generic key from its environment: editor MCP
-    keys may be memory-scoped to a human user and would silently filter the
-    dispatch queue. Only a key this process provisioned for its daemon-service
-    principal may be reused.
+    A worker serves exactly the org the launcher pinned it to. A controller
+    serves every org with work, so it needs one credential per org — the entire
+    point of the split is that no single credential spans them.
     """
-    global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_db_id, _current_key_expires_at
+    import asyncpg
+
+    if DAEMON_WORKER and DAEMON_ORG:
+        resolved = await _resolve_daemon_org_conn()
+        return [resolved[0]] if resolved else []
+    conn = None
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        orgs = await _list_daemon_orgs(conn)
+        return [org_id for org_id, _name in orgs]
+    except Exception as error:
+        log(f"Could not enumerate organizations for key provisioning: {error}", "WARN")
+        return []
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def _resolve_daemon_org_conn():
+    import asyncpg
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        return await _resolve_daemon_org(conn)
+    except Exception as error:
+        log(f"Org resolution failed: {error}", "WARN")
+        return None
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def ensure_valid_api_key(instance_id: str = "local") -> str:
+    """Ensure this process holds a valid daemon key for every org it serves.
+
+    One key per organization, never one key across organizations. A daemon key
+    is org-scoped server-side, so holding a single credential while acting for
+    several orgs would mean every call after the first runs as the wrong tenant.
+
+    Returns the credential for the process's own service org (the single org for
+    a worker), which callers that have no org context use.
+    """
+    global MCP_API_KEY, MCP_CONFIG, API_HEADERS
 
     # One-time cleanup: remove legacy key file if it exists
     _key_file = Path(__file__).parent / ".daemon_api_key"
@@ -1042,85 +1148,190 @@ async def ensure_valid_api_key(instance_id: str = "local") -> str:
         except Exception:
             pass
 
-    # Reuse only a key provisioned and tracked by this daemon process.
-    if _current_key_db_id and MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
-        if _should_rotate_proactively():
-            remaining = _get_key_time_remaining()
-            remaining_minutes = max(0, int((remaining or timedelta()).total_seconds() // 60))
-            log(
-                "API key is near expiry "
-                f"({remaining_minutes}m remaining) — rotating proactively"
+    org_ids = await _served_org_ids()
+    if not org_ids:
+        log("WARNING: No organization to provision a daemon API key for", "WARN")
+        MCP_API_KEY = ""
+        MCP_CONFIG, API_HEADERS = _build_auth_config("")
+        return ""
+
+    primary_org = None
+    for org_id in org_ids:
+        key = await _key_for_org(instance_id, org_id)
+        if key is None:
+            continue
+        if primary_org is None:
+            primary_org = org_id
+
+    if primary_org is None:
+        log("WARNING: Could not provision a daemon service API key", "WARN")
+        MCP_API_KEY = ""
+        MCP_CONFIG, API_HEADERS = _build_auth_config("")
+        return ""
+
+    # Process-level credential = the service org's own key.
+    own = API_HEADERS_BY_ORG.get(primary_org)
+    MCP_CONFIG = MCP_CONFIG_BY_ORG.get(primary_org, {})
+    API_HEADERS = own or {"Content-Type": "application/json"}
+    MCP_API_KEY = _KEY_BY_ORG.get(primary_org, "")
+    log(
+        f"Daemon holds {len(API_HEADERS_BY_ORG)} org-scoped credential(s); "
+        f"process identity is org {primary_org[:8]}"
+    )
+    return MCP_API_KEY
+
+
+async def _key_for_org(instance_id: str, organization_id: str) -> str | None:
+    """Ensure one org has a valid, non-expired daemon key; return it.
+
+    Reuse is per org: a key provisioned for org A is never handed to org B.
+    """
+    existing = _KEY_BY_ORG.get(organization_id)
+    if existing and daemon_keys.recorded_key_id(organization_id):
+        if await _verify_api_key(existing):
+            remaining = key_verification.get_key_time_remaining(
+                daemon_keys.recorded_key_expiry(organization_id)
             )
-        else:
-            log("Daemon service API key is valid")
-            MCP_CONFIG, API_HEADERS = _build_auth_config(MCP_API_KEY)
-            return MCP_API_KEY
+            if not key_verification.should_rotate_proactively(
+                daemon_keys.recorded_key_expiry(organization_id),
+                proactive_rotation_minutes=PROACTIVE_KEY_ROTATION_MINUTES,
+            ):
+                return existing
+            log(
+                f"Daemon key for org {organization_id[:8]} is near expiry "
+                f"({max(0, int((remaining or timedelta()).total_seconds() // 60))}m) "
+                "— rotating proactively"
+            )
 
-    # Provision a new key when starting or recovering. Do not fall back to an
-    # inherited environment key, which may belong to a user-scoped MCP client.
-    _current_key_db_id = None
-    log("Provisioning daemon service API key...")
-    new_key = await _provision_daemon_api_key(instance_id)
-    if new_key:
-        MCP_API_KEY = new_key
-        MCP_CONFIG, API_HEADERS = _build_auth_config(new_key)
-        log("Daemon API key provisioned")
-        return new_key
-
-    log("WARNING: Could not provision a daemon service API key", "WARN")
-    _current_key_expires_at = None
-    MCP_API_KEY = ""
-    MCP_CONFIG, API_HEADERS = _build_auth_config("")
-    return ""
+    new_key = await _provision_daemon_api_key(instance_id, organization_id)
+    if not new_key:
+        return None
+    _KEY_BY_ORG[organization_id] = new_key
+    mcp, headers = _build_auth_config(new_key)
+    API_HEADERS_BY_ORG[organization_id] = headers
+    MCP_CONFIG_BY_ORG[organization_id] = mcp
+    log(f"Daemon API key provisioned for org {organization_id[:8]}")
+    return new_key
 
 
-async def _handle_auth_failure(instance_id: str, *, force_rotate: bool = False) -> bool:
-    """Re-provision API key after an authentication failure.
+async def _handle_auth_failure(
+    instance_id: str,
+    *,
+    force_rotate: bool = False,
+    organization_id: str | None = None,
+) -> bool:
+    """Re-provision the key of the org whose call just failed authentication.
 
-    Uses a lock to prevent concurrent provisioning from multiple async loops
-    (cognitive, scheduler, dispatcher) which would hit the unique constraint.
-    Returns True if a new key was provisioned successfully.
+    Rotation is per org. Rotating every credential because one org's key was
+    rejected would churn unrelated orgs' keys and briefly break their workers
+    too; and a failure observed on an org-scoped call says nothing about the
+    others.
     """
     global MCP_API_KEY, MCP_CONFIG, API_HEADERS, _current_key_db_id, _current_key_expires_at
 
     lock = _get_key_lock()
     async with lock:
-        # Re-check after acquiring lock — another loop may have already fixed it.
-        # A valid but inherited user key is not suitable for daemon dispatch.
+        org_id = organization_id
+        if org_id is None:
+            resolved = await _resolve_service_org_conn()
+            org_id = resolved[0] if resolved else None
+        if org_id is None:
+            log(
+                "Auth failure with no organization to rotate a key for",
+                "ERROR",
+            )
+            return False
+
+        existing = _KEY_BY_ORG.get(org_id)
         if (
             not force_rotate
-            and _current_key_db_id
-            and MCP_API_KEY
-            and await _verify_api_key(MCP_API_KEY)
+            and daemon_keys.recorded_key_id(org_id)
+            and existing
+            and await _verify_api_key(existing)
         ):
             return True
 
         if force_rotate:
-            remaining = _get_key_time_remaining()
-            remaining_minutes = max(0, int((remaining or timedelta()).total_seconds() // 60))
+            remaining = key_verification.get_key_time_remaining(
+                daemon_keys.recorded_key_expiry(org_id)
+            )
             log(
-                "API key near expiry — proactively rotating "
-                f"({remaining_minutes}m remaining)",
-                "INFO",
+                f"Daemon key for org {org_id[:8]} near expiry — proactively "
+                f"rotating ({max(0, int((remaining or timedelta()).total_seconds() // 60))}m remaining)"
             )
         else:
-            log("Auth failure detected — re-provisioning API key...", "WARN")
-        _current_key_db_id = None  # old key is dead
-        _current_key_expires_at = None
+            log(
+                f"Auth failure detected for org {org_id[:8]} — "
+                "re-provisioning that org's key...",
+                "WARN",
+            )
 
-        new_key = await _provision_daemon_api_key(instance_id)
-        if new_key:
+        _KEY_BY_ORG.pop(org_id, None)
+        API_HEADERS_BY_ORG.pop(org_id, None)
+        MCP_CONFIG_BY_ORG.pop(org_id, None)
+
+        new_key = await _provision_daemon_api_key(instance_id, org_id)
+        if not new_key:
+            log(
+                f"Failed to re-provision daemon API key for org {org_id[:8]}",
+                "ERROR",
+            )
+            return False
+
+        _KEY_BY_ORG[org_id] = new_key
+        mcp, headers = _build_auth_config(new_key)
+        API_HEADERS_BY_ORG[org_id] = headers
+        MCP_CONFIG_BY_ORG[org_id] = mcp
+        # Keep the process-level credential in step when this org IS the
+        # process's service org. Otherwise the process credential belongs to a
+        # different org and must not be overwritten with this one's key.
+        service = await _resolve_service_org_conn()
+        if service and service[0] == org_id:
             MCP_API_KEY = new_key
-            MCP_CONFIG, API_HEADERS = _build_auth_config(new_key)
-            log("Re-provisioned daemon API key after auth failure")
+            MCP_CONFIG, API_HEADERS = mcp, headers
+        _current_key_db_id = daemon_keys.recorded_key_id(org_id)
+        _current_key_expires_at = daemon_keys.recorded_key_expiry(org_id)
+        log(f"Re-provisioned daemon API key for org {org_id[:8]}")
+        return True
+
+
+async def _resolve_service_org_conn():
+    import asyncpg
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        return await _resolve_service_org(conn)
+    except Exception as error:
+        log(f"Service-org resolution failed: {error}", "WARN")
+        return None
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+async def _verify_and_provision_key(
+    instance_id: str, *, organization_id: str | None = None
+) -> bool:
+    """Validate this process's daemon key (or one org's) and rotate if needed.
+
+    ``organization_id`` narrows the check to a single tenant's credential. A
+    worker always passes its org; the controller passes the org whose call
+    failed so only that credential is rotated.
+    """
+    if organization_id is not None:
+        key = _KEY_BY_ORG.get(organization_id)
+        if key and await _verify_api_key(key):
+            if key_verification.should_rotate_proactively(
+                daemon_keys.recorded_key_expiry(organization_id),
+                proactive_rotation_minutes=PROACTIVE_KEY_ROTATION_MINUTES,
+            ):
+                return await _handle_auth_failure(
+                    instance_id, force_rotate=True, organization_id=organization_id
+                )
             return True
+        return await _handle_auth_failure(instance_id, organization_id=organization_id)
 
-        log("Failed to re-provision API key after auth failure", "ERROR")
-        return False
-
-
-async def _verify_and_provision_key(instance_id: str) -> bool:
-    """Validate daemon key and rotate when invalid or near expiry."""
     if _current_key_db_id and MCP_API_KEY and await _verify_api_key(MCP_API_KEY):
         if _should_rotate_proactively():
             return await _handle_auth_failure(instance_id, force_rotate=True)
@@ -2102,15 +2313,21 @@ class LucentDaemon(
         except Exception as secret_exc:
             log(f"Failed to initialize secret provider: {secret_exc}", "WARN")
 
-        # Ensure we have a valid API key before anything else
+        # Ensure we have a valid API key for EVERY org we serve, before
+        # anything else. One key per org: no credential spans tenants.
         await ensure_valid_api_key(self.instance_id)
-        await RequestAPI.register_instance(
-            self.instance_id,
-            hostname=platform.node(),
-            pid=os.getpid(),
-            roles=sorted(self.roles),
-            metadata={"model": _resolve_default_model(), "max_sessions": MAX_CONCURRENT_SESSIONS},
-        )
+        for org_id in await self._scheduled_org_ids():
+            await RequestAPI.register_instance(
+                self.instance_id,
+                hostname=platform.node(),
+                pid=os.getpid(),
+                roles=sorted(self.roles),
+                metadata={
+                    "model": _resolve_default_model(),
+                    "max_sessions": MAX_CONCURRENT_SESSIONS,
+                },
+                organization_id=org_id,
+            )
 
         # Start the watchdog thread — detects event loop freezes
         watchdog = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
@@ -2196,14 +2413,16 @@ class LucentDaemon(
         try:
             conn = await asyncpg.connect(DATABASE_URL)
             try:
-                bound = await _resolve_daemon_org(conn)
+                # System schedules belong to the service identity's org, which
+                # for a multi-org controller is a chosen identity rather than a
+                # tenant restriction.
+                bound = await _resolve_service_org(conn)
                 if bound:
                     await DaemonRepository(conn).set_daemon_scope(bound[0])
                 if not bound:
                     log(
-                        "Cannot seed system schedules — no organization to bind to "
-                        "(will retry once an organization is created or "
-                        "LUCENT_DAEMON_ORG is set)",
+                        "Cannot seed system schedules — no organization exists yet "
+                        "(will retry once an organization is created)",
                         "WARN",
                     )
                     return False
@@ -3478,8 +3697,16 @@ class LucentDaemon(
         log(f"Stopping daemon (instance: {self.instance_id})...")
         self.running = False
 
+        # Mark the instance stopped for each org it registered under, using that
+        # org's own credential.
         try:
-            await RequestAPI.mark_instance_stopped(self.instance_id)
+            for org_id in sorted(API_HEADERS_BY_ORG):
+                try:
+                    await RequestAPI.mark_instance_stopped(
+                        self.instance_id, organization_id=org_id
+                    )
+                except Exception:
+                    continue
         except Exception:
             pass
 

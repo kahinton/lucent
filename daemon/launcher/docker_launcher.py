@@ -144,6 +144,10 @@ class DockerLauncher(WorkerLauncher):
             client.containers.list,
             all=False,
             filters={"label": self._label_filters(org_id)},
+            # Same enumeration race as prune(): a worker that exits mid-scan
+            # must not make the whole count fail, or the controller loses the
+            # org's worker count and over-spawns on the next pass.
+            ignore_removed=True,
         )
         containers.sort(key=lambda c: str(c.attrs.get("Created", "")))
         return [
@@ -172,22 +176,54 @@ class DockerLauncher(WorkerLauncher):
         rather than optional. Called across all orgs each pass, because an org
         that no longer needs workers is exactly the one whose containers are left
         behind.
+
+        Every container is handled independently and a vanished one counts as
+        pruned. A worker can disappear between the list and the removal (another
+        controller pass, a manual ``docker rm``, an earlier partial pass), and
+        reading ``container.status`` is itself an API call — docker-py lazily
+        re-fetches ``/containers/<id>/json`` when the attribute is not already
+        cached. Leaving that read outside the per-container guard let a single
+        stale entry raise a 404 that aborted the WHOLE pass, and because the
+        listing order is stable the same dead container failed first every time:
+        prune never made progress and exited workers accumulated without bound
+        (100 containers and 29 live daemons in a 4 GB VM).
         """
+        from docker.errors import NotFound
+
         client = self._docker()
         filters = [f"{LABEL_PREFIX}.managed=true"]
         if org_id:
             filters.append(f"{LABEL_PREFIX}.org={org_id}")
         containers = await asyncio.to_thread(
-            client.containers.list, all=True, filters={"label": filters}
+            client.containers.list,
+            all=True,
+            filters={"label": filters},
+            # docker-py re-inspects EVERY container it enumerates, so a
+            # container removed between the list and the inspect raises
+            # NotFound from inside list() itself — before any per-container
+            # guard can run. Without this flag one vanished container aborted
+            # the whole pass, and since the listing order is stable the same
+            # dead entry failed first every time: prune never made progress and
+            # exited workers accumulated without bound (100 containers and 29
+            # live daemons in a 4 GB VM, which OOM-killed the web server).
+            ignore_removed=True,
         )
         removed = 0
         for container in containers:
-            if container.status == "running":
-                continue
             try:
+                # Inside the guard on purpose: this attribute read is an API
+                # call and can 404 for a container that is already gone.
+                if container.status == "running":
+                    continue
                 await asyncio.to_thread(container.remove, force=True)
                 removed += 1
+            except NotFound:
+                # Already gone — the goal state, not a failure. Count it so the
+                # caller's total reflects what this pass actually settled.
+                removed += 1
             except Exception:
+                # One unremovable container must never block the rest of the
+                # pass; it will be retried on the next reconcile.
                 continue
         return removed
 

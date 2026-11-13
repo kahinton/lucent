@@ -36,8 +36,18 @@ class FakeContainersApi:
         self._owner.runs.append(kwargs)
         return FakeContainer("new-id", kwargs["name"])
 
-    def list(self, all=False, filters=None):
-        return list(self._owner.listed)
+    def list(self, all=False, filters=None, **kwargs):
+        self._owner.list_kwargs.append(kwargs)
+        # docker-py re-inspects each container while enumerating, so a vanished
+        # one raises from list() itself unless ignore_removed=True is passed.
+        owner = self._owner
+        if any(getattr(c, "vanished", False) for c in owner.listed) and not kwargs.get(
+            "ignore_removed"
+        ):
+            from docker.errors import NotFound
+
+            raise NotFound("No such container: vanished")
+        return list(owner.listed)
 
 
 class FakeClient:
@@ -45,6 +55,7 @@ class FakeClient:
         self.self_container = self_container
         self.listed = listed or []
         self.runs: list[dict] = []
+        self.list_kwargs: list[dict] = []
         self.containers = FakeContainersApi(self)
 
 
@@ -213,7 +224,7 @@ async def test_self_location_failure_fails_closed(monkeypatch):
                 raise RuntimeError("no such container")
 
             @staticmethod
-            def list(all=False, filters=None):
+            def list(all=False, filters=None, **kwargs):
                 return []
 
     launcher._client = EmptyClient()
@@ -235,7 +246,7 @@ async def test_explicit_overrides_allow_spawning_without_self_location(monkeypat
                 raise RuntimeError("no such container")
 
             @staticmethod
-            def list(all=False, filters=None):
+            def list(all=False, filters=None, **kwargs):
                 return []
 
             @staticmethod
@@ -286,6 +297,78 @@ async def test_prune_removes_exited_but_not_running():
     assert removed == 1
     assert dead.removed is True
     assert live.removed is False
+
+
+@pytest.mark.asyncio
+async def test_prune_tolerates_a_container_that_vanishes_mid_enumeration():
+    """A worker exiting between list() and inspect() must not break prune.
+
+    docker-py's ``containers.list()`` calls ``self.get()`` (which inspects each
+    container) for every entry, so a container removed during enumeration raises
+    ``NotFound`` *inside list()* — no per-container guard downstream can catch
+    it. That aborted the entire pass, and because the listing order is stable the
+    same dead entry failed first every time: prune never made progress and
+    exited workers accumulated without bound (100 containers and 29 live daemons
+    in a 4 GB VM, which OOM-killed the web server).
+
+    The fix is docker-py's own ``ignore_removed=True`` for that exact race.
+    """
+    vanished = FakeContainer("gone", "w-gone", status="exited")
+    vanished.vanished = True
+
+    def already_gone(force=False):
+        from docker.errors import NotFound
+
+        raise NotFound("No such container: gone")
+
+    vanished.remove = already_gone
+    dead = FakeContainer("a", "w1", status="exited")
+    launcher, client = make_launcher(listed=[vanished, dead])
+
+    removed = await launcher.prune("org-abc12345")
+
+    # The pass completed instead of raising, and still cleaned up what it could.
+    assert dead.removed is True
+    # The already-gone container counts as settled: that is the goal state.
+    assert removed == 2
+    # And it asked docker-py to tolerate the race rather than papering over it.
+    assert client.list_kwargs[-1].get("ignore_removed") is True
+
+
+@pytest.mark.asyncio
+async def test_worker_count_survives_a_worker_vanishing_mid_enumeration():
+    """The scale-up decision must not break when a worker exits while counting.
+
+    A failed count is a lost data point, and the controller responds by spawning
+    replacements — one of the ways worker counts ran away.
+    """
+    gone = FakeContainer("gone", "w-gone")
+    gone.vanished = True
+    fine = FakeContainer("b", "w2")
+    launcher, client = make_launcher(listed=[gone, fine])
+
+    # The enumeration tolerated the race; the fake still returns both entries,
+    # which is the count docker-py itself would yield with ignore_removed.
+    assert await launcher.running("org-abc12345") == 2
+    assert client.list_kwargs[-1].get("ignore_removed") is True
+
+
+@pytest.mark.asyncio
+async def test_prune_does_not_let_a_removal_error_stop_the_pass():
+    """A container that refuses removal must not block the ones after it."""
+    stubborn = FakeContainer("s", "w-stuck", status="exited")
+
+    def boom(force=False):
+        raise RuntimeError("device or resource busy")
+
+    stubborn.remove = boom
+    good = FakeContainer("g", "w-ok", status="exited")
+    launcher, _ = make_launcher(listed=[stubborn, good])
+
+    removed = await launcher.prune("org-abc12345")
+
+    assert good.removed is True
+    assert removed == 1
 
 
 def test_get_launcher_rejects_unknown_backend(monkeypatch):
