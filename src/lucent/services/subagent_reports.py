@@ -39,6 +39,7 @@ from lucent.db.pool import scoped_acquire
 from lucent.db.requests import RequestRepository
 from lucent.logging import get_logger
 from lucent.services.delegated_work import (
+    is_blocked_request,
     request_status_label,
     summarize_report_event,
     task_status_label,
@@ -83,6 +84,50 @@ _MAX_REPORT_TEXT = 4000
 # a momentary engine failure) without turning a durable card into a task queue.
 REPLY_MAX_DEFERRALS = int(os.environ.get("LUCENT_SUBAGENT_REPORT_MAX_DEFERRALS", "6"))
 
+# ``pg_notify`` is fire-and-forget: a transition that lands while this process
+# is restarting, or while the LISTEN connection is re-establishing, produces no
+# callback and no retry — the outcome simply never reaches the conversation.
+# Observed live: a request escalated out of its review budget and left a chat
+# with zero report rows for it, while the row sat stranded for days. A periodic
+# sweep re-derives "which settled outcomes has this conversation never been
+# told about" from durable state, so a dropped notification costs latency
+# instead of the report.
+SWEEP_INTERVAL_SECONDS = float(
+    os.environ.get("LUCENT_SUBAGENT_REPORT_SWEEP_SECONDS", "300")
+)
+# Bound one sweep so a large backlog cannot hold the loop for minutes.
+SWEEP_BATCH_LIMIT = int(os.environ.get("LUCENT_SUBAGENT_REPORT_SWEEP_LIMIT", "50"))
+# How far back the catch-up looks. A deploy must not resurrect every historical
+# outcome into threads that moved on long ago; this window matches the
+# reply-age cutoff so a recovered report is still one the person would be
+# answered about.
+SWEEP_CATCHUP_HOURS = float(
+    os.environ.get("LUCENT_SUBAGENT_REPORT_CATCHUP_HOURS", "48")
+)
+# A request in one of these states is a settled outcome the conversation is owed.
+_REPORTABLE_REQUEST_STATUSES = (
+    "review",
+    "needs_rework",
+    "completed",
+    "failed",
+    "cancelled",
+)
+
+# Appended to the reported content (which is the *prompt*, not an appendix) when
+# the outcome is a failure, a rework, or a stall. The report turn itself stays
+# tool-free — an unattended turn must not be able to act — so this is addressed
+# to the next interactive turn, which reads the card and the delegated-work
+# digest and does have the person's own authority to fix things.
+_CORRECTION_DIRECTIVE = (
+    "This work did not land. Diagnose it before you describe it: the cause is in "
+    "the report above, not in the fact that it stopped. Then correct what you "
+    "can yourself on your next turn — reopen or retry the failed task with the "
+    "failure text as guidance, add the missing step, or re-scope the plan. Only "
+    "hand it to the person when the fix needs something you cannot reach "
+    "(a credential, a machine, a decision that is genuinely theirs), and say "
+    "plainly what that is."
+)
+
 REPORT_SYSTEM_PREAMBLE = """\
 You are Lucent, continuing a conversation in which you delegated work to the daemon.
 
@@ -106,6 +151,9 @@ Rules:
   both are reported. When the request is complete, say plainly that it is finished
   and approved — do not leave the person wondering whether a further approval step
   is still owed to them.
+- When the report names a failure, a rework, or a stall, name the CAUSE that the
+  report gives — not merely that it stopped — and say what you are doing about it.
+  Do not present a fixable failure as the person's problem to solve.
 
 --- REPORTED RESULT ---
 """
@@ -120,6 +168,43 @@ def _is_terminal_request_status(status: str | None) -> bool:
     reply that describes work as unfinished moments before it completes.
     """
     return str(status or "") in {"completed", "failed", "cancelled"}
+
+
+def _is_blocked_request(request: dict[str, Any]) -> bool:
+    """Whether a request is stuck with no automatic path forward.
+
+    The distinction matters beyond wording: an ordinary milestone rides the
+    reply interval, but a request that will never advance on its own is exactly
+    the case where the person (and the supervising agent) must be told, so it
+    bypasses every suppression that is merely a cost control.
+
+    Delegates to the digest's rule so the card and the next turn's delegated-work
+    block can never disagree about the same request.
+    """
+    return is_blocked_request(request)
+
+
+def _is_self_correctable(signal_kind: str, request: dict[str, Any]) -> bool:
+    """Whether the failure still has an automatic retry path.
+
+    A failed *task* is always retryable — ``retry_task`` accepts ``failed`` — so a
+    request stopped on one is fixable by retrying it with the failure as
+    guidance. Only a spent rework budget is a genuine dead end, and only
+    ``cancelled`` is a deliberate decision nobody should silently undo. The
+    report text must not promise a retry that will not happen, nor tell the
+    person to act on something the agent could simply retry itself.
+
+    Budget exhaustion can leave the request in either ``needs_rework`` *or*
+    ``review`` — the escalation deliberately parks it in ``review`` so a person
+    sees it. Both are dead ends once the budget is spent, so the budget check has
+    to come first rather than being reached only via ``needs_rework``.
+    """
+    if _is_blocked_request(request):
+        return False
+    status = (request or {}).get("status")
+    if signal_kind.startswith("request."):
+        status = signal_kind.split(".", 1)[1]
+    return status not in {"cancelled"}
 
 
 def _as_uuid(value: Any) -> UUID | None:
@@ -155,6 +240,7 @@ class SubagentReportService:
         # cannot retry forever.
         self._reply_deferrals: dict[str, int] = {}
         self._debounce_task: asyncio.Task | None = None
+        self._sweep_task: asyncio.Task | None = None
         self._shutdown = asyncio.Event()
 
     # -- lifecycle -----------------------------------------------------
@@ -169,19 +255,29 @@ class SubagentReportService:
             return
         self._shutdown.clear()
         self._task = asyncio.create_task(self._run(), name="subagent-reports")
+        self._sweep_task = asyncio.create_task(
+            self._run_sweep(), name="subagent-reports-sweep"
+        )
 
     async def stop(self) -> None:
         """Detach the listener and let the consumer finish."""
         self._shutdown.set()
-        if self._debounce_task and not self._debounce_task.done():
-            self._debounce_task.cancel()
+        for task in (self._debounce_task, self._sweep_task):
+            if task and not task.done():
+                task.cancel()
         if self._task and not self._task.done():
             self._task.cancel()
             try:
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
+        if self._sweep_task and not self._sweep_task.done():
+            try:
+                await self._sweep_task
+            except (asyncio.CancelledError, Exception):
+                pass
         self._task = None
+        self._sweep_task = None
         connection, self._connection = self._connection, None
         if connection and not connection.is_closed():
             try:
@@ -296,6 +392,142 @@ class SubagentReportService:
             self._debounce_task = asyncio.create_task(
                 self._flush_after_debounce(), name="subagent-reports-flush"
             )
+
+    # -- durable catch-up ----------------------------------------------
+
+    async def _run_sweep(self) -> None:
+        """Periodically re-derive reports that no notification ever delivered.
+
+        ``pg_notify`` is best-effort by design: it delivers to sessions that are
+        listening *at that moment*. A transition that lands during a process
+        restart, a deploy, or a dropped LISTEN connection produces no callback
+        and nothing retries it — the outcome is durable in `requests`/`tasks` and
+        completely invisible in the conversation that caused it. Observed live:
+        a request exhausted its rework budget and escalated, and the originating
+        chat had zero report rows for it days later.
+
+        The sweep closes that hole by asking durable state, not memory: for every
+        chat that delegated work, which requests have settled into a reportable
+        outcome and have no card representing that outcome yet. It is idempotent
+        by construction — `upsert_report_card` de-duplicates on the burst
+        identity — so a sweep that races a live notification costs one no-op
+        write, never a duplicate message.
+        """
+        # Let startup settle (migrations, pool warm-up) before the first pass.
+        try:
+            await asyncio.sleep(min(SWEEP_INTERVAL_SECONDS, 30))
+        except asyncio.CancelledError:
+            return
+        while not self._shutdown.is_set():
+            try:
+                repaired = await self._sweep_once()
+                if repaired:
+                    logger.info(
+                        "Subagent report sweep delivered %d missed outcome(s)",
+                        repaired,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Subagent report sweep failed; will retry", exc_info=True)
+            try:
+                await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                return
+
+    async def _sweep_once(self) -> int:
+        """One catch-up pass. Returns how many outcomes were reported."""
+        repaired = 0
+        async with scoped_acquire(role="system") as conn:
+            rows = await conn.fetch(
+                """SELECT r.id::text AS request_id,
+                          r.organization_id::text AS organization_id,
+                          r.status AS status,
+                          s.id::text AS session_id,
+                          s.user_id::text AS user_id,
+                          latest.raw_kind
+                     FROM requests r
+                     JOIN llm_sessions s
+                       ON s.organization_id = r.organization_id
+                      AND s.kind = 'chat'
+                      AND s.status NOT IN ('archived', 'deleted')
+                      AND (
+                          s.id = r.origin_session_id
+                          OR s.id IN (
+                              SELECT lsr.session_id
+                                FROM llm_session_requests lsr
+                               WHERE lsr.request_id = r.id
+                                 AND lsr.relation = 'created'
+                          )
+                      )
+                LEFT JOIN LATERAL (
+                    SELECT e.raw->>'report_kind' AS raw_kind
+                      FROM llm_session_events e
+                     WHERE e.session_id = s.id
+                       AND e.event_type = 'subagent_report'
+                       AND e.raw->>'request_id' = r.id::text
+                     ORDER BY e.sequence DESC
+                     LIMIT 1
+                ) latest ON TRUE
+                    WHERE r.status = ANY($1::text[])
+                      -- "Reported" means *this request status* was reported, not
+                      -- merely that some card exists: a card written for a task
+                      -- outcome does not tell the conversation where the request
+                      -- itself ended up. `IS DISTINCT FROM` covers the no-card
+                      -- case too, since `raw_kind` is then NULL.
+                      AND latest.raw_kind IS DISTINCT FROM ('request.' || r.status)
+                      -- Bound the catch-up. Matching the reply-age cutoff means
+                      -- anything the sweep recovers is still something the person
+                      -- would actually be answered about, rather than a
+                      -- months-old outcome surfaced out of nowhere. The exception
+                      -- is a blocked request: a spent rework budget never resolves
+                      -- itself, so it stays a standing obligation however old it
+                      -- is — that is precisely the state that went unreported for
+                      -- days while its thread showed nothing.
+                      AND (
+                          r.updated_at > NOW() - make_interval(hours => $3)
+                          OR (
+                              r.status IN ('review', 'needs_rework')
+                              AND r.max_reviews > 0
+                              AND r.review_count >= r.max_reviews
+                          )
+                      )
+                 ORDER BY r.updated_at DESC
+                    LIMIT $2""",
+                list(_REPORTABLE_REQUEST_STATUSES),
+                SWEEP_BATCH_LIMIT,
+                SWEEP_CATCHUP_HOURS,
+            )
+            for row in rows:
+                signal = {
+                    "session_id": row["session_id"],
+                    "request_id": row["request_id"],
+                    "task_id": None,
+                    "kind": f"request.{row['status']}",
+                    "organization_id": row["organization_id"],
+                    "user_id": row["user_id"],
+                }
+                # Suppressed reports are re-checked here forever, so the sweep
+                # must never re-notify something it already reported. The card's
+                # own de-duplication is the backstop, but skipping the work
+                # entirely keeps a quiet sweep cheap.
+                key = self._pending_key(signal)
+                if key in self._pending:
+                    continue
+                try:
+                    await self._handle_one(signal)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Sweep could not report request %s to session %s",
+                        row["request_id"],
+                        row["session_id"],
+                        exc_info=True,
+                    )
+                    continue
+                repaired += 1
+        return repaired
 
     # -- deferred replies ----------------------------------------------
 
@@ -426,6 +658,13 @@ class SubagentReportService:
             str(counts.get("failed") or 0),
             str(counts.get("running") or 0),
             str(counts.get("queued") or 0),
+            # A request can settle into a *different* quality verdict at the same
+            # status and task counts — e.g. `needs_rework` from a fixable defect
+            # versus `needs_rework` with the budget now spent. Including the
+            # budget keeps the sweep from treating that second, materially
+            # different state as a replay of the first card.
+            str(request.get("review_count") or 0),
+            str(request.get("max_reviews") or 0),
         ]
         return ":".join(parts)
 
@@ -645,7 +884,8 @@ class SubagentReportService:
                     )
                     return None
                 request_row = await conn.fetchrow(
-                    """SELECT id::text AS id, title, status, created_by::text AS created_by
+                    """SELECT id::text AS id, title, status, created_by::text AS created_by,
+                              review_count, max_reviews, review_feedback
                        FROM requests
                        WHERE id = $1::uuid AND organization_id = $2::uuid""",
                     _as_uuid(signal["request_id"]),
@@ -682,8 +922,12 @@ class SubagentReportService:
                 # know what the work actually produced. Without this the reply
                 # turn has nothing concrete to say and degrades into a status
                 # sentence. Bounded so a large request cannot flood the prompt.
+                #
+                # `status` and `id` ride along so the card can name the failure
+                # itself: an unqualified "a task failed" leaves the reply turn
+                # with nothing to diagnose, and the person with nothing to act on.
                 result_rows = await conn.fetch(
-                    """SELECT title, error,
+                    """SELECT id::text AS id, title, status, error,
                               left(COALESCE(NULLIF(result, ''), result_summary, ''), 2000) AS result_excerpt
                        FROM tasks
                        WHERE request_id = $1::uuid
@@ -691,6 +935,21 @@ class SubagentReportService:
                          AND status IN ('completed', 'failed', 'needs_review')
                        ORDER BY sequence_order, created_at
                        LIMIT 5""",
+                    _as_uuid(signal["request_id"]),
+                )
+                # The most recent review task's verdict is the only record of WHY
+                # work was sent back. Without it a rework report can say "sent back"
+                # and nothing more, so neither the person nor the supervising agent
+                # can tell a fixable defect from an exhausted budget.
+                review_row = await conn.fetchrow(
+                    """SELECT id::text AS id, status, error,
+                              left(COALESCE(result, result_summary, ''), 3000) AS review_excerpt
+                       FROM tasks
+                       WHERE request_id = $1::uuid
+                         AND (agent_type = 'request-review'
+                              OR title = 'Post-completion review')
+                       ORDER BY COALESCE(completed_at, updated_at) DESC
+                       LIMIT 1""",
                     _as_uuid(signal["request_id"]),
                 )
         except Exception:
@@ -717,6 +976,7 @@ class SubagentReportService:
             "task": dict(task_row) if task_row else None,
             "counts": dict(counts) if counts else {},
             "task_results": [dict(r) for r in result_rows],
+            "review": dict(review_row) if review_row else None,
             "repo": repo,
         }
 
@@ -758,6 +1018,17 @@ class SubagentReportService:
         headline = summarize_report_event(
             kind=headline_kind, request=request, task=task
         )
+        blocked = _is_blocked_request(request) and not kind.startswith("task.")
+        if blocked:
+            # `review` is Lucent's automatic post-completion check, which normally
+            # resolves on its own. A request sitting there with a spent rework
+            # budget is the opposite: nothing will ever move it. Reporting the
+            # generic "checking the finished work automatically" headline for that
+            # state told the reader to wait for something that was never coming.
+            headline = (
+                "Blocked: this request used its whole rework budget and needs "
+                "your decision."
+            )
         details: list[str] = []
         if kind.startswith("task."):
             status = kind.split(".", 1)[1]
@@ -784,13 +1055,53 @@ class SubagentReportService:
                 )
                 if excerpt:
                     details.append(f'"{title}": {excerpt}')
-            if headline_kind == "request.review":
+            # A failure with no stated cause is not actionable: the reply turn
+            # cannot diagnose it and the person cannot judge whether it is theirs
+            # to fix. Every failed task's error is quoted explicitly, because a
+            # failed request could otherwise show only its *successful* siblings.
+            #
+            # The error is only added when the result excerpt above did not
+            # already carry it (a failed task usually has no `result`, so the
+            # excerpt IS the error) — otherwise the same sentence appeared twice.
+            failed_tasks = [
+                r
+                for r in (context.get("task_results") or [])
+                if str(r.get("status")) == "failed"
+            ]
+            for failed in failed_tasks:
+                cause = _clip(failed.get("error"), 400)
+                if not cause or cause in "\n".join(details):
+                    continue
+                details.append(
+                    f'Cause — "{_clip(failed.get("title"), 90)}": {cause}'
+                )
+            review = context.get("review") or {}
+            if headline_kind in {"request.needs_rework", "request.failed"}:
+                feedback = _clip(
+                    (request.get("review_feedback") or "").strip()
+                    or review.get("review_excerpt"),
+                    1200,
+                )
+                if feedback:
+                    details.append(f"Review feedback: {feedback}")
+            if blocked:
+                details.append(
+                    "This request has used its entire rework budget "
+                    f"({int(request.get('review_count') or 0)} of "
+                    f"{int(request.get('max_reviews') or 0)}) and has nothing "
+                    "left that will run on its own. A person has to decide how "
+                    "to proceed; do not describe it as still working."
+                )
+            elif headline_kind == "request.review":
                 details.append(
                     "This is Lucent's automatic post-completion check; it is not "
                     "a human decision and it resolves on its own."
                 )
             elif headline_kind == "request.needs_rework":
-                details.append("Review sent the work back for another pass.")
+                details.append(
+                    "The work is going back for another pass with the feedback "
+                    "above."
+                )
             elif headline_kind == "request.completed":
                 details.append("All tasks finished and the result was approved.")
             elif headline_kind == "request.failed":
@@ -808,16 +1119,36 @@ class SubagentReportService:
             details.append(summary + ".")
 
         status = headline_kind.split(".", 1)[1] if "." in headline_kind else ""
+        attention = status in {"failed", "needs_rework"} or blocked
+        # Agent-facing guidance is NOT card body. The card body renders verbatim
+        # in the transcript, so "diagnose it before you describe it" would be
+        # shown to the person as text about them. It travels as its own field,
+        # used for the report turn's prompt and the persisted `raw`, and is
+        # stripped before the card is rendered.
+        guidance = ""
+        if attention and _is_self_correctable(headline_kind, request):
+            guidance = _CORRECTION_DIRECTIVE
+        elif attention:
+            guidance = (
+                "This one is not self-correcting: the automatic path is spent. "
+                "Say what blocked it, from the report above, and what the person "
+                "can decide or unblock — do not offer to retry it yourself."
+            )
         return {
             "kind": headline_kind,
             "severity": _severity_for(status),
             "headline": headline,
             "body": " ".join(part for part in details if part).strip(),
+            "guidance": guidance,
+            "blocked": blocked,
+            "needs_attention": attention,
             "request": {
                 "id": request.get("id"),
                 "title": request.get("title"),
                 "status": request.get("status"),
                 "status_label": request_status_label(request.get("status")),
+                "review_count": request.get("review_count"),
+                "max_reviews": request.get("max_reviews"),
             },
             "task": (
                 {
@@ -930,14 +1261,22 @@ class SubagentReportService:
         # individual task rows) still rides the interval so a long request cannot
         # produce a message per row. The card is the streaming progress view; the
         # message is the substantive report.
+        #
+        # A *blocked* request always earns one: it will never advance on its own,
+        # so deferring it behind a cost-control window is how it went silent for
+        # days while the transcript showed the previous, cheerier card.
         kind = str(signal.get("kind", ""))
         status = kind.split(".", 1)[-1]
-        milestone_outcome = kind.startswith("request.") and status in {
-            "review",
-            "completed",
-            "failed",
-            "cancelled",
-        }
+        milestone_outcome = (
+            kind.startswith("request.") and status in {
+                "review",
+                "completed",
+                "failed",
+                "cancelled",
+            }
+        ) or bool(card.get("blocked")) or (
+            kind.startswith("request.") and status == "needs_rework"
+        )
         if self._reply_too_soon(session_id) and not milestone_outcome:
             self._defer_reply(
                 session_id,
@@ -948,7 +1287,14 @@ class SubagentReportService:
                 reason=f"reply interval for {kind}",
             )
             return
-        if _stale_beyond_age_hours(session.get("last_message_at")):
+        # A conversation nobody has touched in a day still gets the card, but not
+        # a turn. A blocked request is the exception: it is the one outcome that
+        # cannot wait for the person to come back, because nothing else will
+        # move it.
+        if (
+            _stale_beyond_age_hours(session.get("last_message_at"))
+            and not card.get("blocked")
+        ):
             logger.info(
                 "Subagent report for session %s: conversation idle beyond %sh, "
                 "card only (the person sees it when they return)",
@@ -1051,8 +1397,14 @@ class SubagentReportService:
                 # card body carried the full output.
                 prompt=(
                     f"{card['headline']}\n\n"
-                    f"{card.get('body') or ''}".strip()
-                ),
+                    f"{card.get('body') or ''}"
+                    + (
+                        "\n\n--- INSTRUCTIONS FOR YOU (do not quote this section) ---\n"
+                        f"{card['guidance']}"
+                        if card.get("guidance")
+                        else ""
+                    )
+                ).strip(),
                 mcp_config={},
                 timeout=reply_timeout,
                 # No tools: an unattended turn must not be able to act.

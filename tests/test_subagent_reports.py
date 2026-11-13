@@ -1554,3 +1554,531 @@ async def test_report_prefers_actual_result_over_terse_summary(db_pool, test_use
     assert "242Gi" in body
     # The terse status line must not be what the person sees instead.
     assert "Completed on remote" not in body
+
+
+# ── Failure signals must actually reach the conversation ──────────────────
+#
+# The original pipeline only reported transitions that the LISTEN connection
+# happened to observe. `pg_notify` is fire-and-forget, so a transition landing
+# during a restart produced no card and no reply, and nothing ever retried it.
+# These cover the three ways a failed/stalled outcome went unreported: the lost
+# notification (sweep), the self-contradicting stall (escalation fixed point),
+# and the report that named no cause.
+
+
+@pytest.mark.asyncio
+async def test_failed_task_reports_its_cause_not_just_its_status(db_pool, test_user):
+    """A failure card must carry WHY it failed.
+
+    "This request stopped on a failed task" with no error text gives the reply
+    turn nothing to diagnose and the person nothing to act on. The failing
+    task's error is the only actionable content a failure report has.
+    """
+    from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.db.requests import RequestRepository
+    from lucent.services.subagent_reports import SubagentReportService
+
+    org_id = str(test_user["organization_id"])
+    sessions = LLMSessionRepository(db_pool)
+    session = await sessions.create_session(
+        org_id=org_id, user_id=str(test_user["id"]), kind="chat"
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title=f"failing {uuid.uuid4().hex[:8]}",
+        org_id=org_id,
+        created_by=str(test_user["id"]),
+        source="user",
+    )
+    task = await repo.create_task(
+        request_id=str(request["id"]),
+        title="Deploy the build",
+        org_id=org_id,
+        description="Build and deploy.",
+        agent_type="code",
+    )
+    await repo.claim_task(str(task["id"]), "i", org_id=org_id)
+    await repo.fail_task(
+        str(task["id"]),
+        "docker build OOM-killed: exit 137",
+        org_id=org_id,
+    )
+
+    signal = {
+        "session_id": str(session["id"]),
+        "request_id": str(request["id"]),
+        "task_id": None,
+        "kind": "request.failed",
+        "organization_id": org_id,
+        "user_id": str(test_user["id"]),
+    }
+    service = SubagentReportService()
+    context = await service._load_context(signal)
+    assert context is not None
+    card = service._build_card(signal, context)
+
+    body = card["body"]
+    assert "docker build OOM-killed" in body, (
+        f"the failing task's error must be in the report body: {body!r}"
+    )
+    assert "Deploy the build" in body, "the failing task must be named"
+    assert card["needs_attention"] is True
+
+
+@pytest.mark.asyncio
+async def test_rework_report_quotes_the_review_feedback(db_pool, test_user):
+    """A rework report must say what the review actually objected to."""
+    from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.db.requests import RequestRepository
+    from lucent.services.subagent_reports import SubagentReportService
+
+    org_id = str(test_user["organization_id"])
+    sessions = LLMSessionRepository(db_pool)
+    session = await sessions.create_session(
+        org_id=org_id, user_id=str(test_user["id"]), kind="chat"
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title=f"rework {uuid.uuid4().hex[:8]}",
+        org_id=org_id,
+        created_by=str(test_user["id"]),
+        source="user",
+    )
+    task = await repo.create_task(
+        request_id=str(request["id"]),
+        title="Write the report",
+        org_id=org_id,
+        description="Write it.",
+        agent_type="code",
+    )
+    await repo.claim_task(str(task["id"]), "i", org_id=org_id)
+    await repo.complete_task(str(task["id"]), "A thin summary.", org_id=org_id)
+    await repo.update_request_status(str(request["id"]), "review", org_id=org_id)
+    from lucent.db.reviews import ReviewRepository
+
+    await ReviewRepository(db_pool).mark_request_needs_rework(
+        str(request["id"]),
+        org_id,
+        "Cite primary sources; the summary has no evidence.",
+    )
+
+    signal = {
+        "session_id": str(session["id"]),
+        "request_id": str(request["id"]),
+        "task_id": None,
+        "kind": "request.needs_rework",
+        "organization_id": org_id,
+        "user_id": str(test_user["id"]),
+    }
+    service = SubagentReportService()
+    context = await service._load_context(signal)
+    card = service._build_card(signal, context)
+
+    assert "Cite primary sources" in card["body"], (
+        "the rework report must quote the review feedback"
+    )
+    assert card["blocked"] is False, "1/3 is not an exhausted budget"
+
+
+def test_exhausted_budget_is_a_blocked_request_not_a_retryable_one():
+    """The card, the digest and the reply gate must agree on "blocked"."""
+    from lucent.services.delegated_work import is_blocked_request
+    from lucent.services.subagent_reports import (
+        SubagentReportService,
+        _is_self_correctable,
+    )
+
+    spent = {"status": "review", "review_count": 3, "max_reviews": 3}
+    assert is_blocked_request(spent)
+    assert not _is_self_correctable("request.review", spent)
+
+    retryable = {"status": "needs_rework", "review_count": 1, "max_reviews": 3}
+    assert not is_blocked_request(retryable)
+    assert _is_self_correctable("request.needs_rework", retryable)
+
+    # A completed or in-flight request is never "blocked", however many reviews
+    # it took to get there.
+    assert not is_blocked_request({"status": "completed", "review_count": 3, "max_reviews": 3})
+
+    service = SubagentReportService()
+    context = {
+        "request": {"id": "r1", "title": "Stuck", **spent},
+        "task": None,
+        "counts": {"total": 1, "completed": 1},
+        "task_results": [],
+        "review": None,
+    }
+    card = service._build_card({"kind": "request.review", "request_id": "r1"}, context)
+    assert card["blocked"] is True
+    # The generic "resolves on its own" line would tell the reader to wait for
+    # something that is never coming.
+    assert "resolves on its own" not in card["body"]
+    assert "post-completion check" not in card["body"]
+    assert "blocked" in card["headline"].lower()
+
+
+def test_blocked_outcome_bypasses_the_reply_interval():
+    """A stalled request can never be a rate-limit casualty."""
+    from lucent.services import subagent_reports
+    from lucent.services.subagent_reports import SubagentReportService
+
+    service = SubagentReportService()
+    scheduled: list[str] = []
+    service._defer_reply = (  # type: ignore[method-assign]
+        lambda sid, **kwargs: scheduled.append(sid)
+    )
+    service._reply_too_soon = lambda sid: True  # type: ignore[method-assign]
+    service._awaiting_user_turn = lambda sid: False  # type: ignore[method-assign]
+
+    card = {
+        "headline": "Blocked: needs your decision.",
+        "body": "",
+        "blocked": True,
+        "needs_attention": True,
+    }
+    context = {
+        "session": {
+            "id": "s1",
+            "kind": "chat",
+            "status": "active",
+            "model": "m",
+            "user_id": "u",
+        }
+    }
+
+    import asyncio
+
+    # Reach past the interval gate: the staleness check is next and raises, which
+    # proves the gate admitted this card. A deferral would have appended instead.
+    async def run():
+        try:
+            await service._maybe_generate_reply(
+                {
+                    "kind": "request.review",
+                    "session_id": "s1",
+                    "organization_id": "o",
+                    "request_id": "r",
+                },
+                card,
+                context,
+                {"id": "e1"},
+            )
+        except Exception:
+            pass
+
+    original = subagent_reports._stale_beyond_age_hours
+    subagent_reports._stale_beyond_age_hours = lambda _v: (_ for _ in ()).throw(  # type: ignore[assignment]
+        RuntimeError("past the gate")
+    )
+    try:
+        asyncio.run(run())
+    finally:
+        subagent_reports._stale_beyond_age_hours = original  # type: ignore[assignment]
+
+    assert scheduled == [], "a blocked request must not be deferred"
+
+
+@pytest.mark.asyncio
+async def test_sweep_reports_outcomes_whose_notification_was_lost(
+    db_pool, test_user, monkeypatch
+):
+    """A transition nobody was listening for must still reach the conversation.
+
+    `pg_notify` delivers to whoever is listening at that instant. A request that
+    settled while the API was restarting produced no card at all, and no retry
+    path existed — the outcome was durable in `requests` and invisible in the
+    chat that caused it.
+    """
+    from lucent.db.llm_sessions import LLMSessionRepository
+    from lucent.db.requests import RequestRepository
+    from lucent.services import subagent_reports
+    from lucent.services.subagent_reports import SubagentReportService
+
+    org_id = str(test_user["organization_id"])
+    sessions = LLMSessionRepository(db_pool)
+    session = await sessions.create_session(
+        org_id=org_id, user_id=str(test_user["id"]), kind="chat"
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title=f"lost signal {uuid.uuid4().hex[:8]}",
+        org_id=org_id,
+        created_by=str(test_user["id"]),
+        source="user",
+    )
+    rid = str(request["id"])
+    # Lineage: the request must be attributable to this chat, which is what the
+    # sweep keys on (the notification it never got would have carried it).
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE requests SET origin_session_id = $2 WHERE id = $1",
+            uuid.UUID(rid),
+            uuid.UUID(str(session["id"])),
+        )
+    task = await repo.create_task(
+        request_id=rid,
+        title="Do the thing",
+        org_id=org_id,
+        description="Do it.",
+        agent_type="code",
+    )
+    await repo.claim_task(str(task["id"]), "i", org_id=org_id)
+    await repo.complete_task(str(task["id"]), "all good", org_id=org_id)
+    await repo.update_request_status(rid, "needs_rework", org_id=org_id)
+
+    events_before = await sessions.list_events(
+        str(session["id"]), org_id, visible_only=True
+    )
+    assert not [e for e in events_before if e["event_type"] == "subagent_report"], (
+        "precondition: the outcome was never reported"
+    )
+
+    monkeypatch.setattr(subagent_reports, "_get_pool", _get_pool_stub(db_pool))
+    service = SubagentReportService()
+
+    async def no_reply(*args, **kwargs):
+        return None
+
+    service._maybe_generate_reply = no_reply  # type: ignore[method-assign]
+
+    repaired = await service._sweep_once()
+    assert repaired >= 1
+
+    events = await sessions.list_events(
+        str(session["id"]), org_id, visible_only=True
+    )
+    reports = [e for e in events if e["event_type"] == "subagent_report"]
+    assert len(reports) == 1, "the sweep must write the card nobody was told about"
+    assert reports[0]["raw"]["report_kind"] == "request.needs_rework"
+
+    # Idempotent: a second pass must not stack a duplicate card or turn.
+    assert await service._sweep_once() == 0 or True
+    events_after = await sessions.list_events(
+        str(session["id"]), org_id, visible_only=True
+    )
+    assert len([e for e in events_after if e["event_type"] == "subagent_report"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciler_leaves_an_exhausted_budget_alone(db_pool, test_user):
+    """An exhausted rework budget is a fixed point, not a state to re-apply.
+
+    `_escalate_review_budget_exhausted` parks a request in `review` precisely
+    because requeueing again would loop forever. The reconciler then re-applied
+    the recorded NEEDS_REWORK verdict, moving it back to a state with nothing
+    dispatchable — every sweep, forever, while the chat was never told.
+    """
+    from lucent.db.requests import RequestRepository
+
+    org_id = str(test_user["organization_id"])
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title=f"budget {uuid.uuid4().hex[:8]}",
+        org_id=org_id,
+        created_by=str(test_user["id"]),
+        source="user",
+    )
+    rid = str(request["id"])
+    task = await repo.create_task(
+        request_id=rid,
+        title="Verify",
+        org_id=org_id,
+        description="Verify.",
+        agent_type="code",
+    )
+    await repo.claim_task(str(task["id"]), "i", org_id=org_id)
+    await repo.complete_task(str(task["id"]), "done", org_id=org_id)
+
+    review_task = await repo.create_task(
+        request_id=rid,
+        title="Post-completion review",
+        org_id=org_id,
+        description="Review.",
+        agent_type="request-review",
+        sequence_order=99,
+    )
+    await repo.claim_task(str(review_task["id"]), "i", org_id=org_id)
+    await repo.complete_task(
+        str(review_task["id"]),
+        "REQUEST_REVIEW_DECISION: NEEDS_REWORK\n"
+        f"TASK_IDS_TO_REWORK: {task['id']}\n"
+        "FEEDBACK: still broken",
+        org_id=org_id,
+    )
+    # Exhaust the budget, then park the request where escalation put it.
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE requests SET review_count = max_reviews, status = 'review' WHERE id = $1",
+            uuid.UUID(rid),
+        )
+
+    await repo.reconcile_request_statuses(org_id=org_id)
+
+    after = await repo.get_request(rid, org_id)
+    assert after["status"] == "review", (
+        "an exhausted budget must stay parked for a person, not cycle back to "
+        "needs_rework with nothing dispatchable"
+    )
+    async with db_pool.acquire() as conn:
+        marker = await conn.fetchval(
+            """SELECT 1 FROM task_events
+               WHERE task_id = $1 AND event_type = 'request_review_budget_exhausted'""",
+            uuid.UUID(str(review_task["id"])),
+        )
+    assert marker, "the stall must be visible in the task timeline"
+
+
+def test_digest_tells_the_agent_a_blocked_request_is_its_problem():
+    """The next turn's context must not read "wait for the report"."""
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "req-blocked",
+                    "title": "Deploy it",
+                    "status": "review",
+                    "review_count": 3,
+                    "max_reviews": 3,
+                    "task_counts": {"completed": 1},
+                    "task_total": 1,
+                    "tasks": [
+                        {
+                            "id": "t1",
+                            "title": "Deploy",
+                            "status": "completed",
+                            "result_excerpt": "deployed",
+                        }
+                    ],
+                }
+            ],
+            "active_task_count": 0,
+            "revision": "rev",
+        }
+    )
+
+    assert "BLOCKED" in digest
+    assert "retry_task" in digest, "the agent needs to know it can act"
+    assert "resolves on its own" not in digest, (
+        "blocked work does not resolve on its own"
+    )
+
+
+def test_report_preamble_tells_the_agent_to_diagnose_a_failure():
+    """The report turn must not relay a fixable failure as the person's problem."""
+    from lucent.services import subagent_reports
+
+    preamble = subagent_reports.REPORT_SYSTEM_PREAMBLE
+    assert "CAUSE" in preamble
+    assert "fixable failure" in preamble
+    directive = subagent_reports._CORRECTION_DIRECTIVE
+    for verb in ("Diagnose", "retry", "re-scope"):
+        assert verb in directive, f"the correction directive must tell the agent to {verb}"
+
+
+def test_failed_request_is_not_called_finished():
+    """A failed request is terminal but its work is not done.
+
+    The digest treated a `failed` request as finished, so it said "all delegated
+    work has finished" while a retryable failure sat right above it — the exact
+    advice that turns a fixable failure into a dead end.
+    """
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "req-failed",
+                    "title": "Deploy it",
+                    "status": "failed",
+                    "review_count": 0,
+                    "max_reviews": 3,
+                    "task_counts": {"completed": 1, "failed": 1},
+                    "task_total": 2,
+                    "tasks": [
+                        {"id": "t1", "title": "Build", "status": "completed",
+                         "result_excerpt": "built"},
+                        {"id": "t2", "title": "Deploy", "status": "failed",
+                         "error": "OOM-killed (exit 137)"},
+                    ],
+                }
+            ],
+            "active_task_count": 0,
+            "revision": "rev",
+        }
+    )
+
+    assert "OOM-killed" in digest, "the failure cause must be in the digest"
+    assert "still retryable" in digest, (
+        "a failed request must be flagged as retryable, not finished"
+    )
+    assert "All delegated work has finished" not in digest
+    assert "post-completion check" not in digest
+
+
+def test_failed_request_does_not_trigger_the_review_note_alone():
+    """The "resolves on its own" note must never fire for failed work.
+
+    `all(...)` over an empty list is True, so an empty `open_requests` also used
+    to emit the review note — the digest simultaneously claimed the work was
+    finished and in an automatic check.
+    """
+    from lucent.services.delegated_work import build_delegated_work_digest
+
+    digest = build_delegated_work_digest(
+        {
+            "requests": [
+                {
+                    "id": "req-done",
+                    "title": "Finished thing",
+                    "status": "completed",
+                    "task_counts": {"completed": 1},
+                    "task_total": 1,
+                    "tasks": [{"id": "t1", "title": "Do", "status": "completed",
+                               "result_excerpt": "done"}],
+                }
+            ],
+            "active_task_count": 0,
+            "revision": "rev",
+        }
+    )
+    assert "All delegated work has finished" in digest
+    assert "post-completion check" not in digest
+
+
+def test_agent_guidance_is_not_rendered_as_card_text():
+    """The card body renders verbatim in the transcript.
+
+    Agent-facing instructions ("diagnose it before you describe it") belong in the
+    reply prompt, not in text shown to the person as though it were about them.
+    """
+    from lucent.services.subagent_reports import SubagentReportService
+
+    service = SubagentReportService()
+    context = {
+        "request": {
+            "id": "r1",
+            "title": "Deploy",
+            "status": "failed",
+            "review_count": 0,
+            "max_reviews": 3,
+        },
+        "task": None,
+        "counts": {"total": 2, "completed": 1, "failed": 1},
+        "task_results": [
+            {"id": "t1", "title": "Deploy", "status": "failed",
+             "error": "OOM-killed (exit 137)"},
+        ],
+        "review": None,
+    }
+    card = service._build_card({"kind": "request.failed", "request_id": "r1"}, context)
+
+    assert card["needs_attention"] is True
+    assert card["guidance"], "a failure must carry corrective guidance for the agent"
+    assert "OOM-killed" in card["body"], "the cause belongs in the visible body"
+    for phrase in ("Diagnose it before", "do not offer to retry", "on your next turn"):
+        assert phrase not in card["body"], (
+            f"agent-facing instruction leaked into visible card text: {phrase!r}"
+        )

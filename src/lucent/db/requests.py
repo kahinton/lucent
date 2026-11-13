@@ -3838,6 +3838,7 @@ class RequestRepository:
             request_rows = await conn.fetch(
                 """SELECT DISTINCT r.id::text AS id, r.title, r.status,
                           r.priority, r.decomposition_mode,
+                          r.review_count, r.max_reviews,
                           r.created_at, r.updated_at
                    FROM requests r
                    WHERE r.organization_id = $1
@@ -6339,7 +6340,7 @@ AND (
             # that recorded no usable decision is therefore left for a human,
             # with a one-shot event so the stall is visible instead of silent.
             stuck_rows = await conn.fetch(
-                f"""SELECT r.id, r.organization_id
+                f"""SELECT r.id, r.organization_id, r.review_count, r.max_reviews
                       FROM requests r
                      WHERE r.status = 'review' {org_filter}
                        AND NOT EXISTS (
@@ -6402,6 +6403,42 @@ AND (
                     # reopened (which is also what that path does).
                     reopen_ids = _recorded_review_task_ids(review_task["result"])
                     rework_feedback = _recorded_review_feedback(review_task["result"])
+                    # An exhausted review budget is a fixed point, not a state to
+                    # re-apply. `_escalate_review_budget_exhausted` deliberately
+                    # parks a request in `review` precisely *because* requeueing
+                    # again would loop forever. Re-applying the recorded
+                    # NEEDS_REWORK here would undo that decision on every sweep:
+                    # observed live, a request moved review → needs_rework →
+                    # review → needs_rework every two minutes with zero tasks
+                    # ever reopened, and its conversation was never told.
+                    budget_spent = (
+                        int(row["review_count"] or 0) >= int(row["max_reviews"] or 0)
+                        and int(row["max_reviews"] or 0) > 0
+                    )
+                    if budget_spent:
+                        existing = await conn.fetchval(
+                            """SELECT 1 FROM task_events
+                                WHERE task_id = $1
+                                  AND event_type = 'request_review_budget_exhausted'""",
+                            review_task["id"],
+                        )
+                        if not existing:
+                            await self.add_task_event(
+                                str(review_task["id"]),
+                                "request_review_budget_exhausted",
+                                "Request is parked in review with its rework "
+                                "budget spent. Leaving it here for a person "
+                                "instead of re-queuing work that would loop.",
+                                {
+                                    "reconciled": True,
+                                    "reason": "review_budget_exhausted",
+                                    "review_count": int(row["review_count"] or 0),
+                                    "max_reviews": int(row["max_reviews"] or 0),
+                                },
+                                org_id=request_org_id,
+                            )
+                            fixed += 1
+                        continue
                     requeued: list[str] = []
                     for candidate_id in reopen_ids:
                         # Guard against a verdict that names the review task

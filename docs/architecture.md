@@ -770,12 +770,31 @@ results back:
   unattended turn must not be able to act — and with `resume=False`, because the
   reply is not part of the provider's session history. `chat_stream_v2` therefore
   stops resuming a provider session once such a reply exists.
+- **Catch-up sweep.** `pg_notify` is fire-and-forget: it reaches only sessions
+  listening at that instant, so a transition during a restart or a dropped
+  LISTEN connection produced no card and nothing retried it. The service runs a
+  periodic sweep that re-derives the answer from durable state — every settled
+  request a chat was told about, compared against the status it actually ended
+  in — and reports what is missing. It is bounded to a recent window so a deploy
+  cannot resurrect a historical backlog, with one deliberate exception: a
+  request whose rework budget is spent never resolves itself, so it stays a
+  standing obligation however old it is.
+- **Failure detail.** A report that named no cause was not actionable, so a
+  failure card quotes each failed task by name with its error, and a rework card
+  quotes the review feedback. A request with its budget spent is reported as
+  **blocked** rather than as another status tick: it bypasses the reply
+  rate-limit and the idle-conversation cutoff, and the digest tells the next turn
+  to act on it instead of waiting.
 - **Pull.** `build_delegated_work_digest` injects a bounded summary of the
   session's non-terminal delegated requests into the next user turn's system
   prompt, so the model never answers "I have no way to know" about work it
   started. The chat's delegated-work panel polls
   `GET /api/chat/sessions/{id}/activity`, tightly only while something is
   running.
+
+Corrective instructions are kept out of the visible card text: the card body
+renders verbatim in the transcript, so agent-facing guidance travels in a
+separate `guidance` field consumed by the reply prompt.
 
 Reports are deliberately limited to **results**, not per-step progress:
 task completion/failure/cancellation, and request review/completed/failed/

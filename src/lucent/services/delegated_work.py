@@ -66,6 +66,25 @@ def request_status_label(status: str | None) -> str:
     return _REQUEST_STATUS_LABELS.get(str(status or ""), str(status or "unknown"))
 
 
+def is_blocked_request(request: dict[str, Any]) -> bool:
+    """Whether a request has spent its rework budget and cannot advance alone.
+
+    Kept here rather than in the report service because both the transcript card
+    and the standing digest must agree on it: a digest that called blocked work
+    "sent back for rework" while the card said "blocked" is exactly the kind of
+    contradiction that makes the model tell the person to wait for nothing.
+    """
+    status = str(request.get("status") or "")
+    if status not in {"review", "needs_rework"}:
+        return False
+    try:
+        review_count = int(request.get("review_count") or 0)
+        max_reviews = int(request.get("max_reviews") or 0)
+    except (TypeError, ValueError):
+        return False
+    return max_reviews > 0 and review_count >= max_reviews
+
+
 def task_status_label(status: str | None) -> str:
     return _TASK_STATUS_LABELS.get(str(status or ""), str(status or "unknown"))
 
@@ -121,6 +140,10 @@ def _task_line(task: dict[str, Any], request_id: str | None = None) -> str:
         request_id,
     )
     line = f"    - {title} [{status}]"
+    if not detail and task.get("status") == "failed" and task.get("error"):
+        # A failed task with no result excerpt still has a *cause*. Omitting it
+        # is what left the model able to say only "it failed" with no way to act.
+        detail = _clip_result(task.get("error"), request_id)
     return f"{line}\n      {detail}" if detail else line
 
 
@@ -189,6 +212,11 @@ def build_delegated_work_digest(data: dict[str, Any]) -> str:
             bits.append(f"{done}/{total} tasks done")
         if running:
             bits.append(f"{running} running")
+        if is_blocked_request(req):
+            bits.append(
+                f"blocked — {int(req.get('review_count') or 0)}/"
+                f"{int(req.get('max_reviews') or 0)} rework budget used"
+            )
         lines.append(
             f"- \"{_clip(req.get('title'), 120)}\" — {', '.join(bits)} "
             f"(request {req.get('id')})"
@@ -204,13 +232,48 @@ def build_delegated_work_digest(data: dict[str, Any]) -> str:
             f"- …and {len(requests) - len(ordered)} older delegated request(s) "
             "not shown here."
         )
-    if len(open_requests) == 0:
+    blocked = [r for r in requests if is_blocked_request(r)]
+    if blocked:
+        # The one state where "wait for the report" is wrong advice. Saying so
+        # here matters because this digest is what the model reads on the *next*
+        # turn — the turn after a failure report, when the person is most likely
+        # to ask "so what now?".
+        lines.append("")
+        lines.append(
+            "A request above is BLOCKED: it used its entire rework budget and "
+            "nothing will run on it again by itself. Do not wait for another "
+            "report and do not describe it as still working. Read its actual "
+            "failure with get_request_details, then either fix the cause "
+            "yourself (retry_task / create_task / update_task / "
+            "update_request_status) or tell the person exactly what is "
+            "stopping it and what only they can decide."
+        )
+    failed = [
+        r
+        for r in requests
+        if str(r.get("status")) == "failed" and not is_blocked_request(r)
+    ]
+    if failed:
+        lines.append("")
+        lines.append(
+            "A request above failed on a task but is still retryable. Read the "
+            "task error (get_request_details), fix the cause if you can, then "
+            "retry_task with that as guidance — do not simply relay the failure "
+            "to the person as though it were their problem."
+        )
+    # "Finished" must exclude a failed request: its tasks are terminal, but the
+    # work is not done, and telling the model everything is finished is how a
+    # retryable failure turned into "all delegated work has finished".
+    if len(open_requests) == 0 and not failed:
         lines.append("")
         lines.append(
             "All delegated work has finished. Report results when asked; do not "
             "claim anything is still running."
         )
-    elif all(str(r.get("status")) == "review" for r in open_requests):
+    elif open_requests and all(
+        str(r.get("status")) == "review" and not is_blocked_request(r)
+        for r in open_requests
+    ):
         # `review` is the automatic post-completion quality check, not a human
         # gate. Without this note a model reads "in review"/"finishing up" as
         # work still running and tells the person it has not finished yet.

@@ -31,6 +31,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A failed or stalled request could go completely unreported to the chat that
+  created it.** Three independent holes, all of which ended in silence — the
+  conversation saw the last cheerful card and nothing after it.
+  - **Lost notifications had no recovery path.** Reports ride `pg_notify`,
+    which delivers only to sessions listening at that instant. A request that
+    settled while the API was restarting, or while the LISTEN connection was
+    re-establishing, produced no card and no reply, and nothing ever retried it.
+    `SubagentReportService` now runs a bounded catch-up sweep that asks
+    durable state instead of memory — "which settled requests has this
+    conversation never been told about?" — and writes the card itself. It is
+    idempotent (the existing card de-duplication is the backstop) and windowed to
+    48h so a deploy cannot dump a historical backlog into old threads. A
+    request parked with a spent rework budget is exempt from the window: that
+    state never resolves itself, so it stays a standing obligation.
+  - **An exhausted rework budget cycled forever instead of stopping.**
+    `_escalate_review_budget_exhausted` deliberately parks a request in `review`
+    because requeueing again would loop, and then `reconcile_request_statuses`
+    re-applied the recorded `NEEDS_REWORK` verdict — moving it back to
+    `needs_rework` with nothing dispatchable, on every sweep. Observed live: a
+    request oscillated `review → needs_rework → review` every two minutes for
+    days while its chat was told nothing. The reconciler now treats an exhausted
+    budget as a fixed point, emits one `request_review_budget_exhausted` marker
+    so the stall is visible in the task timeline, and leaves the request for a
+    person.
+  - **Reports named no cause.** A request-level failure card said only "stopped
+    on a failed task": the failing task's `error` was dropped, and the review's
+    `feedback` was never read, so neither the person nor the supervising agent
+    had anything to diagnose. Failure and rework cards now quote the failing
+    task by name with its error and the review feedback, and the
+    `--- DELEGATED WORK ---` digest carries the same detail plus the remaining
+    rework budget.
+- **A blocked request is now a distinct outcome, not another status tick.** A
+  request whose rework budget is spent reports as `Blocked: … needs your
+  decision` rather than the generic "checking the finished work automatically",
+  bypasses the reply rate-limit and the idle-conversation cutoff (nothing else
+  will ever move it), and is called out in the delegated-work digest as
+  something the agent must act on rather than wait out.
+- **Failure reports now tell the agent to fix the problem, not forward it.**
+  The report turn stays tool-free by design, so the correction is addressed to
+  the next interactive turn through the report body and the standing digest: read
+  the cause, retry or re-scope what you can, record what you changed, and only
+  hand it back when the blocker is genuinely the person's. The built-in `lucent`
+  agent definition gains a **When Delegated Work Fails** section stating the
+  same rule as standing policy.
+
 - **A task pinned to an engine-only remote failed with an unexplained exit 2.**
   A remote running `LUCENT_REMOTE_EXECUTOR=engine` does not execute fenced shell
   blocks, but a pinned task authored without `execution_config` was still sent to
