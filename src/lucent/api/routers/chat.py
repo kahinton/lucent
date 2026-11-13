@@ -2894,7 +2894,17 @@ async def chat_stream_v2(
         task = asyncio.create_task(run_llm())
         try:
             if chat_session.session_id:
-                session_event = {"type": "session", "session_id": chat_session.session_id}
+                session_event = {
+                    "type": "session",
+                    "session_id": chat_session.session_id,
+                    # The turn's user message id. A request created during this
+                    # turn is anchored to it, and the client needs it to place
+                    # the request's progress card at the turn that caused it
+                    # instead of at the end of the thread — the same anchor a
+                    # reload resolves from `requests.origin_message_id`.
+                    "user_message_id": chat_session.user_message_id,
+                    "turn_id": chat_session.turn_id,
+                }
                 if auto_choice is not None:
                     # Live provenance badge: the client appends a quiet line
                     # under this turn when the session handshake arrives.

@@ -428,7 +428,18 @@
             wrapper = document.createElement('div');
             wrapper.className = 'delegated-progress msg-enter px-6 py-2';
             wrapper.dataset.requestId = id;
-            container.appendChild(wrapper);
+            // Place the box where the request was created, not at the end of the
+            // thread. Appending made every still-open request drift to the bottom
+            // and read as brand-new activity every time the page reloaded, which
+            // is exactly the "traveling boxes" behaviour. The card stays at its
+            // anchor for its whole life; only its *contents* change as the work
+            // advances.
+            const anchor = anchorRowFor(container, request);
+            if (anchor && anchor.parentNode === container) {
+                anchor.after(wrapper);
+            } else {
+                container.appendChild(wrapper);
+            }
         }
         const collapsed = progressCollapsedIds();
         // Only rewrite when the visible facts changed — a no-op render would
@@ -527,6 +538,33 @@
         container.querySelectorAll('.delegated-progress').forEach((node) => {
             if (!live.has(String(node.dataset.requestId || ''))) node.remove();
         });
+    }
+
+    /**
+     * Move already-rendered progress cards back to their anchors.
+     *
+     * A card can be appended before the row it belongs to exists — the poll and
+     * the transcript render race on a first load, and a card for an older request
+     * is often upserted before that part of the thread has been painted. Without
+     * this pass the card would keep the end-of-thread position it was given then,
+     * which is the drift the anchor exists to prevent.
+     *
+     * Idempotent: a card already directly after its anchor is left untouched, so
+     * this cannot fight the DOM on every poll.
+     */
+    function positionDelegatedProgress(container, requests) {
+        if (!container) return;
+        for (const request of requests || []) {
+            if (!request || !request.id) continue;
+            const wrapper = container.querySelector(
+                `.delegated-progress[data-request-id="${CSS.escape(String(request.id))}"]`
+            );
+            if (!wrapper) continue;
+            const anchor = anchorRowFor(container, request);
+            if (!anchor || anchor.parentNode !== container) continue;
+            if (wrapper.previousElementSibling === anchor) continue;
+            anchor.after(wrapper);
+        }
     }
 
     /**
@@ -937,7 +975,49 @@
         return `<div class="flex flex-wrap gap-2 justify-end mb-2">${items}</div>`;
     }
 
-    function appendUserMessage(container, text, attachments) {
+    /**
+     * Record where a rendered row belongs in the conversation.
+     *
+     * Progress cards are placed against the row for the turn that created the
+     * request, so they need to be findable. Both ids are stamped: `messageId`
+     * is what the request's `origin_message_id` points at, and `turnId` lets the
+     * card settle after the whole turn rather than between the user bubble and
+     * its answer.
+     */
+    function markTranscriptRow(el, msg) {
+        if (!el || !msg) return el;
+        if (msg.id) el.dataset.messageId = String(msg.id);
+        if (msg.turn_id) el.dataset.turnId = String(msg.turn_id);
+        return el;
+    }
+
+    /**
+     * The row a request's card belongs after: the end of the turn that created it.
+     *
+     * Returns null when the anchor is not in the rendered transcript (no
+     * `origin_message_id`, or the turn predates the loaded window). Callers fall
+     * back to the end of the thread in that case, which is the old behaviour —
+     * a card is always better placed somewhere than dropped.
+     */
+    function anchorRowFor(container, request) {
+        if (!container || !request) return null;
+        const messageId = request.origin_message_id;
+        if (!messageId) return null;
+        const node = container.querySelector(
+            `[data-message-id="${CSS.escape(String(messageId))}"]`
+        );
+        if (!node) return null;
+        const turnId = node.dataset.turnId;
+        if (!turnId) return node;
+        // Place after the LAST row of the turn: the card is the outcome of the
+        // exchange, so it reads wrong wedged between the question and its answer.
+        const rows = container.querySelectorAll(
+            `[data-turn-id="${CSS.escape(turnId)}"]`
+        );
+        return rows.length ? rows[rows.length - 1] : node;
+    }
+
+    function appendUserMessage(container, text, attachments, msg) {
         const div = document.createElement('div');
         div.className = 'msg-enter px-6 py-4';
         const attachmentsHtml = renderMessageAttachmentsHtml(attachments);
@@ -950,7 +1030,7 @@
                 ${textHtml}
             </div>`;
         container.appendChild(div);
-        return div;
+        return markTranscriptRow(div, msg);
     }
 
     function createAssistantMessage(container, options) {
@@ -1172,18 +1252,20 @@
             flushOrphanCardsBefore(eventTime(msg));
             if (msg.role === 'user') {
                 const att = msg.metadata && msg.metadata.attachments;
-                rows.push(appendUserMessage(container, msg.content || '', att));
+                rows.push(appendUserMessage(container, msg.content || '', att, msg));
                 const turnEvents = eventsByTurn.get(msg.turn_id) || [];
                 // A turn that ended without an assistant message (aborted,
                 // timed out, still running) still has visible events. Render
                 // them so the thread never silently loses a tool call.
                 if (turnEvents.length && !assistantTurns.has(msg.turn_id)) {
                     const row = appendAssistantMessage(container, '');
+                    markTranscriptRow(row, msg);
                     replaySessionEvents(row, turnEvents, interactions);
                     rows.push(row);
                 }
             } else {
                 const row = appendAssistantMessage(container, msg.content || '');
+                markTranscriptRow(row, msg);
                 replaySessionEvents(row, eventsByTurn.get(msg.turn_id) || [], interactions);
                 const autoInfo = msg.metadata && msg.metadata.auto_selection;
                 if (autoInfo) appendAutoSelectionNote(row, autoInfo);
@@ -1625,7 +1707,7 @@
                 userMessage.attachments = pendingAttachmentsForRequest();
             }
             state.messages.push(userMessage);
-            appendUserMessage(cfg.messagesEl, text, outgoingAttachments);
+            const userRow = appendUserMessage(cfg.messagesEl, text, outgoingAttachments);
             scrollToBottom();
             input.value = '';
             input.style.height = 'auto';
@@ -1705,6 +1787,19 @@
                         switch (payload.type) {
                             case 'session':
                                 state.sessionId = payload.session_id;
+                                // Anchor this turn's rows to the user message the
+                                // server just persisted. A request created during
+                                // the turn points at this same id, so stamping it
+                                // lets the progress card land at the turn that
+                                // caused it — without a reload to discover the
+                                // anchor.
+                                if (payload.user_message_id) {
+                                    userRow.dataset.messageId = String(payload.user_message_id);
+                                }
+                                if (payload.turn_id) {
+                                    userRow.dataset.turnId = String(payload.turn_id);
+                                    assistantEl.dataset.turnId = String(payload.turn_id);
+                                }
                                 if (typeof cfg.onSessionStarted === 'function') {
                                     cfg.onSessionStarted(payload.session_id, payload);
                                 }
@@ -2015,6 +2110,7 @@
             }
             live.forEach(request => upsertDelegatedProgress(cfg.messagesEl, request));
             pruneDelegatedProgress(cfg.messagesEl, live.map(r => r.id));
+            positionDelegatedProgress(cfg.messagesEl, live);
         }
 
         function scheduleDelegatedPoll() {
@@ -2134,6 +2230,8 @@
         appendSubagentReport,
         upsertDelegatedProgress,
         pruneDelegatedProgress,
+        positionDelegatedProgress,
+        anchorRowFor,
         appendToolCall,
         displayToolName,
         escapeHtml,

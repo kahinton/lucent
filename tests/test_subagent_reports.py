@@ -2082,3 +2082,78 @@ def test_agent_guidance_is_not_rendered_as_card_text():
         assert phrase not in card["body"], (
             f"agent-facing instruction leaked into visible card text: {phrase!r}"
         )
+
+
+def test_progress_cards_stay_at_their_creation_anchor():
+    """An open request's box must not drift to the bottom of the thread.
+
+    The progress card used to be `appendChild`-ed to the transcript container, so
+    any request that had not settled sat at the end of the conversation no matter
+    when it was created. On reload it read as brand-new activity, detached from
+    the turn that caused it — the reported "two requests showing up at the
+    bottom" were exactly the two non-terminal requests in the session.
+
+    The card belongs after the turn that created the request, for its whole life.
+    Only its contents change as work advances.
+    """
+    from pathlib import Path
+
+    js = Path("src/lucent/web/static/chat-message-ui.js").read_text()
+
+    # The anchor is derived from the request's origin message, falling forward
+    # to the end of that turn so the card follows the answer, not the question.
+    assert "r.origin_message_id::text AS origin_message_id" in Path(
+        "src/lucent/db/requests.py"
+    ).read_text(), "the activity payload must carry the creation anchor"
+    assert "function anchorRowFor(container, request)" in js
+    assert "data-message-id" in js
+    assert "data-turn-id" in js
+
+    # Placement happens at insert time...
+    upsert = js.split("function upsertDelegatedProgress(container, request) {", 1)[1]
+    insert_block = upsert.split("const collapsed = progressCollapsedIds();", 1)[0]
+    assert "anchorRowFor(container, request)" in insert_block
+    assert "anchor.after(wrapper)" in insert_block, (
+        "the card must be inserted at its anchor, not appended to the thread"
+    )
+    # ...and is re-asserted on every poll, because a card can be created before
+    # the row it belongs to has been painted.
+    assert "function positionDelegatedProgress(container, requests)" in js
+    assert "positionDelegatedProgress(cfg.messagesEl, live)" in js
+    reposition = js.split("function positionDelegatedProgress(container, requests) {", 1)[1]
+    reposition = reposition.split("\n    }", 1)[0]
+    assert "wrapper.previousElementSibling === anchor" in reposition, (
+        "repositioning must be a no-op when the card is already correctly placed"
+    )
+
+    # Rows must carry the ids the anchor lookup depends on.
+    assert "function markTranscriptRow(el, msg)" in js
+    assert "el.dataset.messageId = String(msg.id)" in js
+    assert "el.dataset.turnId = String(msg.turn_id)" in js
+    assert "appendUserMessage(container, msg.content || '', att, msg)" in js
+
+
+def test_live_turn_stamps_the_anchor_its_requests_will_use():
+    """A request created in the current turn must anchor without a reload.
+
+    The reload path resolves the anchor from `requests.origin_message_id`, but on
+    the live turn the client has not seen that id — the server assigns it. Without
+    it the card for a request created "just now" still appends to the end until
+    the page is refreshed, which is the same drift in a narrower window.
+    """
+    from pathlib import Path
+
+    js = Path("src/lucent/web/static/chat-message-ui.js").read_text()
+    api = Path("src/lucent/api/routers/chat.py").read_text()
+
+    # The server tells the client which message and turn this is.
+    assert '"user_message_id": chat_session.user_message_id,' in api
+    assert '"turn_id": chat_session.turn_id,' in api
+
+    # The client stamps both rows it just created, before any tool call can
+    # create a request pointing at them.
+    live = js.split("const userRow = appendUserMessage(", 1)[1]
+    session_case = live.split("case 'session':", 1)[1].split("break;", 1)[0]
+    assert "userRow.dataset.messageId = String(payload.user_message_id)" in session_case
+    assert "userRow.dataset.turnId = String(payload.turn_id)" in session_case
+    assert "assistantEl.dataset.turnId = String(payload.turn_id)" in session_case

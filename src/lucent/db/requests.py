@@ -3839,6 +3839,12 @@ class RequestRepository:
                 """SELECT DISTINCT r.id::text AS id, r.title, r.status,
                           r.priority, r.decomposition_mode,
                           r.review_count, r.max_reviews,
+                          -- Where in the transcript this request was created.
+                          -- The progress card must live there for its whole life,
+                          -- not at the end of the thread: a card that moves to the
+                          -- bottom reads as new activity and detaches the box from
+                          -- the turn that caused it.
+                          r.origin_message_id::text AS origin_message_id,
                           r.created_at, r.updated_at
                    FROM requests r
                    WHERE r.organization_id = $1

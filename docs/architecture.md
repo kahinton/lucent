@@ -792,6 +792,15 @@ results back:
   `GET /api/chat/sessions/{id}/activity`, tightly only while something is
   running.
 
+A request's **live progress card** is placed after the transcript row for the
+turn that created it (`requests.origin_message_id`), and stays there for its
+whole life — only its contents change as the task tree advances. It is inserted
+at that anchor rather than appended to the thread, because an appended card made
+every still-open request drift to the bottom and read as new activity on each
+reload. The read model returns `origin_message_id` for exactly this purpose; a
+request created outside a conversation (daemon, schedule) has no anchor and falls
+back to the end of the thread.
+
 Corrective instructions are kept out of the visible card text: the card body
 renders verbatim in the transcript, so agent-facing guidance travels in a
 separate `guidance` field consumed by the reply prompt.

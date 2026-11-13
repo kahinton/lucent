@@ -31,6 +31,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A request's progress box drifted to the bottom of the conversation.**
+  The live card was appended to the transcript container, so every request that
+  had not settled sat at the end of the thread regardless of when it was created
+  — on reload it read as brand-new activity, detached from the turn that caused
+  it. A session with two unfinished requests showed exactly "two boxes at the
+  bottom".
+  - The read model now returns `requests.origin_message_id`, and the card is
+    inserted immediately after the last row of the turn that created the request.
+    It stays at that anchor for its whole life; only its contents change as the
+    task tree advances.
+  - Transcript rows carry `data-message-id` / `data-turn-id` so the anchor is
+    findable, and a repositioning pass runs on each poll — a card can be created
+    before the row it belongs to has been painted (first load, or a poll that
+    beats the transcript render). The pass is idempotent, so it cannot fight the
+    DOM.
+  - A request created outside a conversation (daemon, schedule) has no anchor and
+    still falls back to the end, where it is at least visible.
+
 - **A failed or stalled request could go completely unreported to the chat that
   created it.** Three independent holes, all of which ended in silence — the
   conversation saw the last cheerful card and nothing after it.
