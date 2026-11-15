@@ -1480,7 +1480,7 @@ class TestRemoteTargeting:
 
     @pytest.mark.asyncio
     async def test_remote_and_sandbox_are_mutually_exclusive(
-        self, mcp, auth_user, request_id, remote, agent_def
+        self, mcp, auth_user, request_id, remote, agent_def, capable_organization
     ):
         result = await _call(
             mcp,
@@ -1644,7 +1644,7 @@ class TestRemoteTargeting:
 
     @pytest.mark.asyncio
     async def test_task_plan_entry_rejects_remote_with_sandbox(
-        self, mcp, auth_user, remote, agent_def
+        self, mcp, auth_user, remote, agent_def, capable_organization
     ):
         result = await _call(
             mcp,

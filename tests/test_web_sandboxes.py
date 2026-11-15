@@ -60,10 +60,28 @@ async def web_prefix(db_pool):
         await conn.execute("DELETE FROM organizations WHERE name LIKE $1", f"{prefix}%")
 
 
+async def _entitle_org(db_pool, org_id) -> None:
+    """Grant both gated capabilities.
+
+    These tests cover the sandbox *web UI* — form handling, CSRF, redirects,
+    template approval — not which plan an organization is on. The entitlement
+    gate default-denies an org created after migration 164, which would turn
+    every launch into a 409 before the behavior under test ran.
+    """
+    from lucent.db import EntitlementRepository
+
+    entitlements = EntitlementRepository(db_pool)
+    for capability in ("custom_sandboxes", "managed_tools"):
+        await entitlements.set_entitlement(
+            str(org_id), capability, True, source="override"
+        )
+
+
 @pytest_asyncio.fixture
 async def web_user(db_pool, web_prefix):
     org_repo = OrganizationRepository(db_pool)
     org = await org_repo.create(name=f"{web_prefix}org")
+    await _entitle_org(db_pool, org["id"])
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{web_prefix}user",
@@ -83,6 +101,7 @@ async def member_user(db_pool, web_prefix):
     """Create a member-role user (no admin/owner privileges)."""
     org_repo = OrganizationRepository(db_pool)
     org = await org_repo.create(name=f"{web_prefix}member_org")
+    await _entitle_org(db_pool, org["id"])
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{web_prefix}member",

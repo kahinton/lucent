@@ -26,6 +26,36 @@ from lucent.settings import clear_runtime_setting_cache, set_runtime_setting_cac
 from lucent.tools.definitions import register_definition_tools
 
 
+@pytest.fixture(autouse=True)
+def _entitled_orgs(monkeypatch):
+    """Treat every organization as entitled to managed tools and sandboxes.
+
+    These tests cover managed-tool definition handling and the executor's
+    per-invocation checks (auth roles, runtime kind, argument validation), and
+    several drive the executor with a fake pool — which cannot answer an
+    entitlement lookup, so the gate's documented fail-closed behavior would
+    deny first and mask the gate under test. The entitlement gate itself is
+    covered by tests/test_entitlement_gates.py against real rows.
+
+    Both entry points are stubbed because they are separate call sites: the
+    executor calls ``capability_is_granted`` while ``DefinitionRepository``
+    imports ``ensure_capability`` function-locally, so patching one would
+    leave the other enforcing.
+    """
+    import lucent.services.entitlements as entitlements
+    import lucent.services.managed_tools as managed_tools
+
+    async def _granted(*_args, **_kwargs):
+        return True
+
+    async def _ensure(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(managed_tools, "capability_is_granted", _granted)
+    monkeypatch.setattr(entitlements, "capability_is_granted", _granted)
+    monkeypatch.setattr(entitlements, "ensure_capability", _ensure)
+
+
 @pytest_asyncio.fixture
 async def repo(db_pool):
     return DefinitionRepository(db_pool)

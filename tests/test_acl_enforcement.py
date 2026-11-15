@@ -76,9 +76,26 @@ async def acl_prefix(db_pool):
 
 @pytest_asyncio.fixture
 async def org_and_users(db_pool, acl_prefix):
-    """Create an org with three users: owner (member), other (member), admin."""
+    """Create an org with three users: owner (member), other (member), admin.
+
+    The org is entitled for both gated capabilities. These tests are about
+    *access control* — who may touch a resource — not about whether the
+    organization's plan includes custom sandboxes or managed tools. The
+    entitlement gates default-deny an unentitled org (the production contract
+    for orgs created after migration 164), which would make every sandbox and
+    managed-tool case here fail with 409/403 for the wrong reason.
+    ``tests/test_entitlement_gates.py`` studies the gate itself against a bare
+    org.
+    """
+    from lucent.db import EntitlementRepository
+
     org_repo = OrganizationRepository(db_pool)
     org = await org_repo.create(name=f"{acl_prefix}org")
+    entitlements = EntitlementRepository(db_pool)
+    for capability in ("custom_sandboxes", "managed_tools"):
+        await entitlements.set_entitlement(
+            str(org["id"]), capability, True, source="override"
+        )
     user_repo = UserRepository(db_pool)
 
     owner_user = await user_repo.create(

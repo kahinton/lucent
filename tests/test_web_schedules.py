@@ -95,9 +95,22 @@ async def web_prefix(db_pool):
 
 @pytest_asyncio.fixture
 async def web_user(db_pool, web_prefix):
-    """Create user + org for web tests and return (user, org, session_token)."""
+    """Create user + org for web tests and return (user, org, session_token).
+
+    The org is entitled for both gated capabilities: the wizard and edit flows
+    below accept sandbox placements, and the gate default-denies an
+    organization created after migration 164 — a 409 there would mask the
+    form behavior these tests are about.
+    """
+    from lucent.db import EntitlementRepository
+
     org_repo = OrganizationRepository(db_pool)
     org = await org_repo.create(name=f"{web_prefix}org")
+    entitlements = EntitlementRepository(db_pool)
+    for capability in ("custom_sandboxes", "managed_tools"):
+        await entitlements.set_entitlement(
+            str(org["id"]), capability, True, source="override"
+        )
     user_repo = UserRepository(db_pool)
     user = await user_repo.create(
         external_id=f"{web_prefix}user",

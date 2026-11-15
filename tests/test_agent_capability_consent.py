@@ -88,7 +88,22 @@ def consent_prefix(request):
 
 @pytest_asyncio.fixture
 async def consent_org(db_pool, consent_prefix):
-    return await OrganizationRepository(db_pool).create(name=consent_prefix)
+    """An entitled organization for capability-consent tests.
+
+    Consent is about whether a *user* has approved a capability attached to
+    their agent. The organizational entitlement is a different question with
+    its own suite (tests/test_entitlement_gates.py), and default-deny would
+    stop these tests at the gate before any consent decision is reached.
+    """
+    from lucent.db import EntitlementRepository
+
+    org = await OrganizationRepository(db_pool).create(name=consent_prefix)
+    entitlements = EntitlementRepository(db_pool)
+    for capability in ("custom_sandboxes", "managed_tools"):
+        await entitlements.set_entitlement(
+            str(org["id"]), capability, True, source="override"
+        )
+    return org
 
 
 @pytest_asyncio.fixture
