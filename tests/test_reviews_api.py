@@ -178,10 +178,19 @@ async def admin_client(rv_api_admin_user):
 
 @pytest_asyncio.fixture
 async def daemon_client(rv_api_user):
+    """A daemon-service caller for the org.
+
+    Daemon service accounts are per-org now: the identity is
+    ``daemon-service:{org_id}`` and the bare legacy ``daemon-service`` is
+    deliberately no longer recognized (see tests/test_legacy_daemon_retirement.py
+    and the ``is_daemon_service`` property). Using the bare form made this
+    fixture authenticate as an ordinary member and the review route answered
+    403.
+    """
     c, app = await _make_api_client(
         rv_api_user,
         auth_method="api_key",
-        external_id="daemon-service",
+        external_id=f"daemon-service:{rv_api_user['organization_id']}",
     )
     async with c:
         yield c
