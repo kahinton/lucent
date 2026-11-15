@@ -31,6 +31,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The usage report merged every offboarded tenant into one billable line.**
+  `resource_usage_events.organization_id` is `ON DELETE SET NULL` so the
+  ledger outlives the tenant, which means every deleted tenant has a NULL id.
+  The totals query grouped on that id alone, collapsing them all into one NULL
+  row, and the report keyed its rows by `str(organization_id)` — so even that
+  single row survived only once, under the key `"None"`.
+  - The query now adds `organization_name` to the grouping when the id is
+    NULL, and the report keys offboarded tenants by the name the schema
+    snapshots. Each deleted tenant keeps its own final period.
+  - `organization_id` is reported as null for an offboarded tenant (there is no
+    id left); `status` remains `deleted` and the name carries the identity.
+  - The single offboarded-tenant test could not see the merge; a new test
+    creates two and asserts both appear with their own usage.
 - **Dependency refresh: security advisories cleared and the toolchain moved to
   current majors.**
   `pip-audit` reported 51 advisories across 11 packages. Every fixable one is
