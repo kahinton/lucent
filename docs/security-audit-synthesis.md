@@ -86,6 +86,8 @@ The dev compose file has a prominent 12-line header: "LOCAL DEVELOPMENT ONLY —
 
 **M4 (Dependency CVEs):** Mitigated for the v0.4.0 release by refreshing security-sensitive dependency constraints in `pyproject.toml`, including `python-multipart`, `cryptography`, `requests`, `pyasn1`, and LangChain-related packages. Re-run `pip-audit` as a release gate before tagging.
 
+Re-audited 2026-11-14: `pip-audit` reported 51 advisories across 11 packages; all fixable ones are cleared by raised version floors (`mcp` 2.3.0, `PyJWT` 2.15.1, `filelock` 4.2, `pyasn1` 0.6.5, `oauthlib` 4.0.1, `urllib3` 2.8, `httpx2` 2.16, `msgpack` 1.2.3, `certifi`, `opentelemetry-api` 1.45.2, `langgraph-sdk` 0.4.14). Two transitive holds remain deliberate: `uuid-utils<1.0` (capped by `langsmith`) and `tenacity<9.2` (capped by `google-genai`).
+
 ---
 
 ## Remaining Issues for Future Work

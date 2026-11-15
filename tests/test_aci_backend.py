@@ -1010,6 +1010,51 @@ async def test_websocket_reports_oversized_frame_as_output_limit():
 
 
 @pytest.mark.asyncio
+async def test_websocket_reads_close_code_from_rcvd():
+    """websockets 17 moved the close code to ``rcvd``.
+
+    A real ``ConnectionClosed`` from the current library carries the code on
+    ``rcvd.code``; ``.code`` remains only as a deprecated alias. The output
+    limit path must therefore not depend on the alias.
+    """
+
+    class _CloseFrame:
+        code = 1009
+
+    class ConnectionClosedRcvdOnlyError(Exception):
+        """Current-library shape: the close frame is on ``rcvd``.
+
+        Deliberately does NOT expose ``.code`` on the exception, so a backend
+        that still reads the deprecated alias would treat this as a normal EOF
+        instead of an output-limit failure.
+        """
+
+        def __init__(self, message: str):
+            super().__init__(message)
+            self.rcvd = _CloseFrame()
+
+    backend = _backend()
+
+    class _TooBigWebSocket:
+        async def send(self, message):
+            pass
+
+        async def recv(self):
+            raise ConnectionClosedRcvdOnlyError("message too big")
+
+        async def close(self):
+            pass
+
+    async def fake_open(uri):
+        return _TooBigWebSocket()
+
+    backend._open_websocket = fake_open  # type: ignore[method-assign]
+
+    with pytest.raises(ExecOutputLimitError):
+        await backend._exec_via_websocket("wss://x", "pw", timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_websocket_returns_partial_output_when_connection_closes():
     websocket = _FakeWebSocket(["partial"])
     backend = _backend()

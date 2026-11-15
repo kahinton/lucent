@@ -31,6 +31,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Dependency refresh: security advisories cleared and the toolchain moved to
+  current majors.**
+  `pip-audit` reported 51 advisories across 11 packages. Every fixable one is
+  now resolved by raising the floor in `pyproject.toml` rather than pinning:
+  `mcp` 2.0.0→2.3.0 (4 CVEs), `PyJWT` 2.13→2.15.1 (15), `filelock` 3.x→4.2
+  (12), `pyasn1` 0.6.4→0.6.5 (4), `oauthlib` 3.3→4.0.1 (3), `urllib3`
+  2.7→2.8, `httpx2` 2.10→2.16, `msgpack` 1.2.3, `certifi`, `opentelemetry-api`
+  1.45.2, and `langgraph-sdk` 0.4.2→0.4.14.
+  - **Framework and runtime majors:** `fastapi` 0.141→0.163, `starlette`
+    1.6→1.10, `uvicorn` 0.52→0.54, `pydantic` 2.13→2.14, `asyncpg`
+    0.31→0.32, `websockets` 15→17.4, `cryptography` 50.0→50.0.2,
+    `signxml` 5.2→5.3.
+  - **LangChain stack:** `langchain` 1.3→1.5, `langchain-core` 1.5→1.8 and
+    the Anthropic/OpenAI/Google partners. `langsmith` 0.11→0.14.17, which
+    caps `uuid-utils<1.0`, so `uuid_utils` is deliberately held below 1.0
+    and `tenacity` below 9.2 (a `google-genai` constraint).
+  - **Coding engines:** `github-copilot-sdk` 1.0.9→1.0.34, `claude-agent-sdk`
+    0.2.165→0.2.182, `openai-codex` 0.162→0.169.
+  - **Cloud SDKs:** `kubernetes` 33→37 (the `<34` ceiling is now `<38`),
+    `azure-mgmt-containerinstance` 10→11 (its models became dict-like hybrid
+    models), `azure-identity` and `azure-storage-blob` refreshed.
+- **`pytest.MonkeyPatch` could not restore an attribute patched through the
+  daemon runtime proxy.** pytest 9.2 records the pre-patch value from
+  `target.__dict__`; `RuntimeModuleProxy` instances had their own (empty)
+  instance dict, so the proxy looked like it had no attribute at all and
+  teardown fell through to `delattr`, raising `AttributeError` and leaving
+  patched state behind for every later test in the session.
+  - The proxy is now `__slots__ = ()`, so `__dict__` resolves through
+    `__getattr__` to the live daemon module — monkeypatch records the real
+    value and restores it.
+- **ACI exec would not report an oversized output frame as an output-limit
+  failure on websockets 17.** The close code moved to
+  `ConnectionClosed.rcvd.code`; `.code` survives only as a deprecated alias.
+  Both are now read, newest shape first.
 - **A request's progress box drifted to the bottom of the conversation.**
   The live card was appended to the transcript container, so every request that
   had not settled sat at the end of the thread regardless of when it was created

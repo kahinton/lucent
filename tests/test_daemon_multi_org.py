@@ -36,10 +36,9 @@ class _Repo:
 def _reset_resolution(monkeypatch):
     """Each test starts from a cold process and an unbound daemon.
 
-    State is assigned directly rather than via ``monkeypatch.setattr``:
-    ``runtime`` is a proxy whose ``__setattr__`` writes through to the live
-    daemon module but which defines no ``__delattr__``, so monkeypatch's
-    "attribute did not exist, delete it on teardown" path raises there.
+    ``_resolved_*`` are assigned directly because they may not exist on the
+    module at all: ``monkeypatch.setattr`` cannot create-then-remove an
+    attribute here, and these two are process caches rather than configuration.
     """
     previous = {
         name: getattr(runtime, name, None)

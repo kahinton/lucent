@@ -1603,7 +1603,13 @@ class AzureContainerInstancesBackend(SandboxBackend):
                         # The websockets library closes with 1009 when a single
                         # frame exceeds max_size.  Treat that as our explicit
                         # output-limit failure rather than a normal EOF.
-                        if getattr(exc, "code", None) == 1009:
+                        # ``rcvd`` is the current home of the close code;
+                        # ``ConnectionClosed.code`` is a deprecated alias
+                        # (websockets 17) kept as a fallback.
+                        code = getattr(getattr(exc, "rcvd", None), "code", None)
+                        if code is None:
+                            code = getattr(exc, "code", None)
+                        if code == 1009:
                             raise ExecOutputLimitError(
                                 "".join(chunks), _MAX_EXEC_OUTPUT_BYTES
                             ) from exc

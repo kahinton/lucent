@@ -16,7 +16,18 @@ from types import ModuleType
 
 
 class RuntimeModuleProxy:
-    """Resolve attributes against the currently executing daemon module."""
+    """Resolve attributes against the currently executing daemon module.
+
+    ``__slots__`` is deliberately empty: with no instance dict of its own, an
+    ``__dict__`` lookup falls through ``__getattr__`` to the live module's
+    ``__dict__``. Tooling that introspects a target before mutating it — most
+    notably ``pytest.MonkeyPatch``, whose 9.2 release reads ``target.__dict__``
+    to record the pre-patch value — therefore sees the *real* daemon state and
+    restores it on teardown. Without it the proxy looked like it had no
+    attribute at all, so undo called ``delattr`` and raised.
+    """
+
+    __slots__ = ()
 
     @staticmethod
     def _entrypoint() -> ModuleType | None:
