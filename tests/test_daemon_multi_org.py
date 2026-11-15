@@ -129,3 +129,46 @@ async def test_no_orgs_at_all_resolves_to_none(monkeypatch):
 
     assert await organization.resolve_daemon_org(object()) is None
     assert await organization.resolve_service_org(object()) is None
+
+
+@pytest.mark.asyncio
+async def test_unbound_controller_is_not_logged_as_an_error(monkeypatch):
+    """A multi-org controller having no single tenant is not a failure.
+
+    ``_get_daemon_org_id`` is polled once per scheduler interval (60s by
+    default) by the request-decomposition loop. It used to log
+    ``Daemon org resolution returned none`` at ERROR every time, so a healthy
+    multi-org controller produced a permanent once-a-minute error and buried
+    real failures. ``resolve_daemon_org`` already reports the genuine
+    misconfiguration (a worker started without its pin) itself.
+    """
+    from daemon.runtime.loops import RuntimeLoopsMixin
+    from daemon.runtime.module_proxy import runtime as daemon_runtime
+
+    logged: list[tuple[str, str]] = []
+
+    def _capture(message, level="INFO"):
+        logged.append((str(message), level))
+
+    class _Conn:
+        async def close(self):
+            return None
+
+    async def _connect(*_args, **_kwargs):
+        return _Conn()
+
+    async def _no_binding(_conn):
+        return None
+
+    monkeypatch.setattr("daemon.db_scope.connect_scoped", _connect)
+    monkeypatch.setattr(daemon_runtime, "_resolve_daemon_org", _no_binding)
+    monkeypatch.setattr(daemon_runtime, "log", _capture, raising=False)
+    monkeypatch.setattr(daemon_runtime, "DATABASE_URL", "postgresql://unused", raising=False)
+
+    loops = RuntimeLoopsMixin()
+    assert loops._get_daemon_org_id
+
+    assert await loops._get_daemon_org_id() is None
+
+    errors = [m for m, level in logged if level == "ERROR"]
+    assert not errors, f"an unbound controller must not log ERROR: {errors}"

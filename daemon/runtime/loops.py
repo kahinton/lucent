@@ -335,7 +335,15 @@ class RuntimeLoopsMixin:
             self._decomposition_ready.clear()
 
     async def _get_daemon_org_id(self) -> str | None:
-        """Return the daemon's bound organization id."""
+        """Return the daemon's bound organization id.
+
+        ``None`` is a normal answer, not a failure: the always-on controller
+        supervises every organization and has no single tenant, so
+        ``resolve_daemon_org`` returns ``None`` for it by design. Callers treat
+        ``None`` as "this process is not scoped to one org" and take their
+        multi-org path. Only a genuine resolution failure is logged as an
+        error, below.
+        """
         from daemon.db_scope import connect_scoped
         from daemon.runtime.module_proxy import runtime
 
@@ -354,7 +362,16 @@ class RuntimeLoopsMixin:
         try:
             bound = await runtime._resolve_daemon_org(connection)
             if not bound:
-                runtime.log("Daemon org resolution returned none", "ERROR")
+                # Debug, not ERROR: resolve_daemon_org already logged the
+                # reason it declined to bind (multi-org controller, or a worker
+                # started without its pin, which it reports as an error). This
+                # poll runs every scheduler interval, so logging here at ERROR
+                # turned a healthy multi-org controller into a permanent
+                # once-a-minute error in the log.
+                runtime.log(
+                    "Daemon has no single-org binding; using multi-org paths",
+                    "DEBUG",
+                )
                 return None
             self._cached_daemon_org_id = bound[0]
             return bound[0]
