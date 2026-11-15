@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from lucent.auth import set_current_user
-from lucent.db.admin_audit import AdminAuditRepository
+from lucent.db.admin_audit import AdminAuditRepository, _normalize_row
 from lucent.db.audit import AuditRepository
 from lucent.db.definitions import DefinitionRepository
 from lucent.db.sandbox_template import SandboxTemplateRepository
@@ -273,14 +273,22 @@ def _admin_inserts(recorded: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _admin_row(rec: dict[str, Any]) -> dict[str, Any]:
-    """Map the admin-audit INSERT params to column names (matches repo SQL)."""
+    """Map the admin-audit INSERT params to column names (matches repo SQL).
+
+    The JSON columns are normalized through the same helper the read path uses
+    (``_normalize_row``): ``AdminAuditRepository.log`` passes Python objects
+    because the pool registers a ``jsonb`` codec, so a *correct* write leaves a
+    dict here. Rows written before that fix hold JSON strings. Normalizing
+    covers both eras instead of asserting on whichever shape the writer
+    happens to produce.
+    """
     p = rec["params"]
     keys = (
         "organization_id", "actor_user_id", "impersonator_user_id",
         "entity_type", "entity_id", "entity_label", "action",
         "changed_fields", "old_values", "new_values", "context", "notes", "outcome",
     )
-    return dict(zip(keys, p))
+    return _normalize_row(dict(zip(keys, p)))
 
 
 @pytest.fixture(autouse=True)
@@ -412,7 +420,7 @@ def test_grants_and_revocations_audited(grant_call, revoke_call, actor_owner):
     assert rows, "grant must be audited"
     audit = _admin_row(rows[0])
     assert audit["action"] == "definition.grant"
-    assert audit["context"] and json.loads(audit["context"]).get("agent_id") == AGENT_ID
+    assert audit["context"] and audit["context"].get("agent_id") == AGENT_ID
 
     pool.recorded.clear()
     assert asyncio.run(revoke_call(repo)) is True
@@ -444,8 +452,8 @@ def test_template_update_audited_with_old_values(actor_owner):
     assert audit["entity_id"] == TEMPLATE_ID
     assert audit["action"] == "sandbox_template.update"
     assert audit["actor_user_id"] == USER_ID
-    old = json.loads(audit["old_values"])
-    new = json.loads(audit["new_values"])
+    old = audit["old_values"]
+    new = audit["new_values"]
     assert old["docker_bind_mounts"], "old_values must capture the wiped mounts"
     assert new["docker_bind_mounts"] == []
 
@@ -479,8 +487,8 @@ def test_template_create_delete_status_audited(actor_owner):
     assert rows
     audit = _admin_row(rows[0])
     assert audit["action"] == "sandbox_template.status_change"
-    assert json.loads(audit["new_values"])["status"] == "rejected"
-    assert json.loads(audit["old_values"])["status"] == "approved"
+    assert audit["new_values"]["status"] == "rejected"
+    assert audit["old_values"]["status"] == "approved"
 
 
 def test_template_read_and_mark_used_not_audited(actor_owner):
@@ -518,7 +526,7 @@ def test_actor_falls_back_to_auth_context(actor_owner):
     asyncio.run(repo.update_skill(AGENT_ID, ORG_ID, content="v2"))
     audit = _admin_row(_admin_inserts(pool.recorded)[0])
     assert audit["actor_user_id"] == USER_ID
-    ctx = json.loads(audit["context"])
+    ctx = audit["context"]
     assert ctx.get("auth_source") == "request_context"
 
 
@@ -532,7 +540,7 @@ def test_actor_none_when_unauthenticated():
     assert rows, "unauthenticated mutation must still be audited"
     audit = _admin_row(rows[0])
     assert audit["actor_user_id"] is None
-    assert json.loads(audit["context"]).get("actor_source") == "system"
+    assert audit["context"].get("actor_source") == "system"
 
 
 def test_impersonator_recorded():
@@ -571,7 +579,7 @@ def test_malformed_actor_context_mutation_still_succeeds():
     assert result is not None, "audit attribution failure must never break the mutation"
     audit = _admin_row(_admin_inserts(pool.recorded)[0])
     assert audit["actor_user_id"] is None
-    assert json.loads(audit["context"]).get("actor_source") == "system"
+    assert audit["context"].get("actor_source") == "system"
 
 
 # ---------------------------------------------------------------------------
