@@ -290,15 +290,27 @@ class TestSyncForAllRealOrgs:
         # Org with a user -> should be synced.
         # System org -> must be excluded by name.
         # Userless org -> must be excluded (no user joined).
+        #
+        # The system org is a singleton: its name is unique and a real
+        # deployment — or a previous test process — may already have created
+        # it. Reuse the existing row rather than inserting a second one, and
+        # remember whether *this* test owns it so cleanup deletes only what it
+        # created.
         async with db_pool.acquire() as conn:
             real = await conn.fetchrow(
                 "INSERT INTO organizations (name) VALUES ($1) RETURNING id",
                 f"{sync_prefix}real",
             )
             system = await conn.fetchrow(
-                "INSERT INTO organizations (name) VALUES ($1) RETURNING id",
+                "SELECT id FROM organizations WHERE lower(name) = lower($1)",
                 bid.SYSTEM_ORG_NAME,
             )
+            created_system_org = system is None
+            if system is None:
+                system = await conn.fetchrow(
+                    "INSERT INTO organizations (name) VALUES ($1) RETURNING id",
+                    bid.SYSTEM_ORG_NAME,
+                )
             userless = await conn.fetchrow(
                 "INSERT INTO organizations (name) VALUES ($1) RETURNING id",
                 f"{sync_prefix}userless",
@@ -345,9 +357,10 @@ class TestSyncForAllRealOrgs:
                 await conn.execute(
                     "DELETE FROM users WHERE organization_id = $1", system_id
                 )
-                await conn.execute(
-                    "DELETE FROM organizations WHERE id = $1", system_id
-                )
+                if created_system_org:
+                    await conn.execute(
+                        "DELETE FROM organizations WHERE id = $1", system_id
+                    )
 
 
 class TestShippedBuiltins:
