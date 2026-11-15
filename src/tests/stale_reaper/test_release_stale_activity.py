@@ -29,8 +29,8 @@ from typing import Any
 
 import pytest
 
-from lucent.db.requests import RequestRepository
 from lucent.db.pool import clear_tenant_scope, set_tenant_scope
+from lucent.db.requests import RequestRepository
 
 ORG_ID = "0f9abaa4-7489-47ab-8d6c-7c5be8d69d51"
 
@@ -124,13 +124,49 @@ class _RecordingPool:
 
 
 class _ReleasedRowConn(_RecordingConn):
-    """Connection variant whose release statement returns one released row."""
+    """Connection variant whose release statement returns one released row.
+
+    ``release_stale_tasks`` issues two different UPDATEs against ``tasks``:
+    ``finalize_stale_cancels`` first (RETURNING ``id, request_id``) and then
+    the release pass (RETURNING ``id, previous_claimed_by``). Matching on
+    ``UPDATE TASKS T`` alone answered both with the release row shape, so the
+    finalize loop read ``row["request_id"]`` off a row that never had one.
+
+    Here the finalize pass matches nothing — the ordinary case, where no task
+    has a pending cancel — and only the release pass returns a row. Finalize's
+    own row shape is covered separately by
+    ``test_finalize_stale_cancels_reads_request_id_from_its_row``.
+    """
 
     async def fetch(self, query: str, *params: Any) -> list[dict]:
         self._record("fetch", query, *params)
-        if "UPDATE TASKS T" in _norm(query):
+        normalized = _norm(query)
+        if (
+            "UPDATE TASKS T" in normalized
+            and "RETURNING T.ID, S.CLAIMED_BY AS PREVIOUS_CLAIMED_BY" in normalized
+        ):
             return [{"id": str(uuid.uuid4()), "previous_claimed_by": "daemon-1"}]
         return []
+
+
+class _FinalizedCancelConn(_RecordingConn):
+    """Connection whose finalize pass returns one finalized cancel."""
+
+    finalized_id = str(uuid.uuid4())
+    finalized_request_id = str(uuid.uuid4())
+
+    async def fetch(self, query: str, *params: Any) -> list[dict]:
+        self._record("fetch", query, *params)
+        normalized = _norm(query)
+        if "RETURNING T.ID, T.REQUEST_ID" in normalized:
+            return [
+                {"id": self.finalized_id, "request_id": self.finalized_request_id}
+            ]
+        return []
+
+
+class _FinalizedCancelPool(_RecordingPool):
+    conn_cls = _FinalizedCancelConn
 
 
 class _ReleasedRowPool(_RecordingPool):
@@ -206,3 +242,35 @@ def test_reaper_event_recorded_after_release():
     ]
     assert len(event_inserts) == 1, "each released task gets one 'reaper' event"
     assert event_inserts[0]["params"][1] == "reaper"
+
+
+def test_finalize_stale_cancels_reads_request_id_from_its_row():
+    """The finalize pass hands its row's request_id to request completion.
+
+    ``finalize_stale_cancels`` selects ``RETURNING t.id, t.request_id`` and
+    then passes that request id to ``_check_request_completion``. A fake pool
+    that answered this statement with the *release* row shape
+    (``previous_claimed_by``, no ``request_id``) raised KeyError here, which
+    is how a fixture-fidelity bug surfaced as a production-looking failure.
+    """
+    pool = _FinalizedCancelPool()
+    repo = RequestRepository(pool)
+    completed: list[str] = []
+
+    async def _record_completion(request_id: str, **_kwargs: Any) -> None:
+        completed.append(request_id)
+
+    repo._check_request_completion = _record_completion  # type: ignore[method-assign]
+
+    count = asyncio.run(
+        repo.finalize_stale_cancels(org_id=ORG_ID, instance_stale_seconds=1800)
+    )
+
+    assert count == 1
+    assert completed == [_FinalizedCancelConn.finalized_request_id]
+    events = [
+        r for r in pool.recorded if "INSERT INTO TASK_EVENTS" in r["query"]
+    ]
+    assert len(events) == 1
+    # add_task_event receives the task id as a UUID object, not a string.
+    assert str(events[0]["params"][0]) == _FinalizedCancelConn.finalized_id
