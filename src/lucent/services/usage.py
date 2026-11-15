@@ -190,7 +190,19 @@ async def usage_report(
                 }
             )
 
-    by_org = {str(row["organization_id"]): row for row in resource_rows}
+    # Live tenants are keyed by id; offboarded ones have a NULL id (the ledger's
+    # FK is ON DELETE SET NULL) and are keyed by the snapshotted name instead,
+    # which the totals query groups them by. Keying everything on
+    # `str(organization_id)` would put every offboarded tenant under the single
+    # key "None" and silently drop all but one of them.
+    by_org: dict[str, dict[str, Any]] = {}
+    offboarded: list[dict[str, Any]] = []
+    for row in resource_rows:
+        if row.get("organization_id") is None:
+            offboarded.append(row)
+        else:
+            by_org[str(row["organization_id"])] = row
+
     known = {t["organization_id"] and str(t["organization_id"]) for t in tenants}
 
     for tenant in tenants:
@@ -208,6 +220,19 @@ async def usage_report(
                 )
             }
 
+    def _resources(usage: dict[str, Any]) -> dict[str, Any]:
+        return {
+            field: usage[field]
+            for field in (
+                "intervals",
+                "duration_seconds",
+                "cpu_seconds",
+                "cpu_hours",
+                "memory_mb_seconds",
+                "tool_invocations",
+            )
+        }
+
     # Tenants with usage but no live organization row (offboarded, or scoped out
     # of the seat listing) still need to appear: their period is metered.
     for key, usage in by_org.items():
@@ -219,17 +244,20 @@ async def usage_report(
                 "organization_name": usage.get("organization_name"),
                 "status": "deleted",
                 "seats": None,
-                "resources": {
-                    field: usage[field]
-                    for field in (
-                        "intervals",
-                        "duration_seconds",
-                        "cpu_seconds",
-                        "cpu_hours",
-                        "memory_mb_seconds",
-                        "tool_invocations",
-                    )
-                },
+                "resources": _resources(usage),
+            }
+        )
+
+    for usage in offboarded:
+        tenants.append(
+            {
+                # The tenant is gone, so there is no id left to report; the name
+                # is the identity the ledger kept.
+                "organization_id": None,
+                "organization_name": usage.get("organization_name"),
+                "status": "deleted",
+                "seats": None,
+                "resources": _resources(usage),
             }
         )
 

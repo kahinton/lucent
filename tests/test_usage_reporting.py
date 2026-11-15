@@ -641,6 +641,40 @@ async def test_report_includes_offboarded_tenants_with_usage(
 
 
 @pytest.mark.asyncio
+async def test_report_keeps_separate_offboarded_tenants_apart(operator_client, db_pool):
+    """Two deleted tenants must not merge into one billable line.
+
+    ``resource_usage_events.organization_id`` is ``ON DELETE SET NULL`` so the
+    ledger outlives the tenant — which means every offboarded tenant has a NULL
+    id. Grouping the totals on that id alone collapsed all of them into a single
+    NULL row, so a second offboarded tenant's period disappeared into the
+    first's (or was dropped entirely when the report keyed by ``str(id)``).
+    """
+    org_repo = OrganizationRepository(db_pool)
+    created = []
+    for suffix in ("gone_a", "gone_b"):
+        org = await org_repo.create(name=f"{usage_prefix}{suffix}")
+        await ResourceUsageRepository(db_pool).record_interval(
+            organization_id=org["id"],
+            **_interval(org_name=org["name"], hours=1, cpu=1.0, memory_mb=1024),
+        )
+        created.append(org)
+    for org in created:
+        await org_repo.delete(org["id"])
+
+    resp = await operator_client.get("/api/organizations/instance/usage/resources")
+    assert resp.status_code == 200, resp.text
+    by_name = {t["organization_name"]: t for t in resp.json()["tenants"]}
+
+    for org in created:
+        tenant = by_name.get(org["name"])
+        assert tenant is not None, f"{org['name']} is missing from the report"
+        assert tenant["status"] == "deleted"
+        assert tenant["resources"]["intervals"] == 1
+        assert tenant["resources"]["duration_seconds"] == 3600
+
+
+@pytest.mark.asyncio
 async def test_report_rejects_an_inverted_period(operator_client):
     resp = await operator_client.get(
         "/api/organizations/instance/usage/resources",

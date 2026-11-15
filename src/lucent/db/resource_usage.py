@@ -381,6 +381,15 @@ class ResourceUsageRepository:
         invocations describe the same resources as their own sandbox row, so
         including them here would bill every custom-tool execution twice. Their
         count is reported separately as ``tool_invocations``.
+
+        **Grouping survives offboarding.** ``organization_id`` is
+        ``ON DELETE SET NULL`` so the ledger outlives the tenant, which means
+        every offboarded tenant has a NULL id. Grouping on the id alone would
+        collapse all of them into one NULL row and merge several companies'
+        final periods into a single billable line. The tenant identity the
+        schema deliberately snapshots is ``organization_name``, so a NULL id
+        groups by that name instead: a live tenant still gets one row per id,
+        and each offboarded tenant keeps its own.
         """
         params: list[Any] = []
         period: list[str] = []
@@ -414,7 +423,9 @@ class ResourceUsageRepository:
                    ) AS tool_invocations
             FROM resource_usage_events
             WHERE TRUE{period_sql}
-            GROUP BY organization_id
+            GROUP BY organization_id,
+                     CASE WHEN organization_id IS NULL
+                          THEN organization_name END
             ORDER BY cpu_seconds DESC, duration_seconds DESC
         """
         # Cross-tenant aggregation: spans every tenant by definition, so it
