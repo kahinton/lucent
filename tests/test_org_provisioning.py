@@ -210,11 +210,16 @@ class TestProvisionOrganization:
             operator_user_id=operator_user["id"],
         )
         # Seeding is environment-dependent (the definitions ship in .github/), so
-        # assert the summary shape rather than a particular count.
+        # assert the summary shape rather than a particular count. A subset
+        # check, not equality: a later definition kind may add a key without
+        # this assertion having to change.
         assert isinstance(result.seeded, dict)
-        assert set(result.seeded) == {
+        expected_kinds = {
             "skills", "agents", "hooks", "managed_tools", "sandbox_templates",
+            "mcp_connectors",
         }
+        missing = expected_kinds - set(result.seeded)
+        assert not missing, f"seeding summary is missing kinds: {sorted(missing)}"
 
 
 class TestProvisionWithProvidersAndSettings:
