@@ -676,6 +676,64 @@ async def create_task(
         body.execution_config if resolved_kind == "fusion" else None
     )
 
+    # ── Script tasks ───────────────────────────────────────────────────
+    # A script runs a program directly inside an approved template. Resolve
+    # the template now so a missing/unapproved/host-unreachable template is a
+    # 422 here rather than a dispatch failure later, and reject inline
+    # sandbox_config outright — scripts use approved templates only.
+    if resolved_kind == "script":
+        from lucent.db.sandbox_template import (
+            SandboxTemplateRepository,
+            get_authorized_templates_pool,
+        )
+        from lucent.script_tasks import validate_script_task
+
+        if not body.sandbox_template_id:
+            raise HTTPException(
+                422,
+                "A script task requires sandbox_template_id — scripts run "
+                "only inside an approved sandbox template",
+            )
+        if body.sandbox_config:
+            raise HTTPException(
+                422,
+                "A script task cannot use inline sandbox_config; choose an "
+                "approved sandbox template with sandbox_template_id",
+            )
+        tpl_pool = await get_authorized_templates_pool(
+            pool, {"id": str(user.id), "organization_id": org_id}
+        )
+        tpl_repo = SandboxTemplateRepository(tpl_pool)
+        try:
+            tpl = await tpl_repo.get_usable_template(body.sandbox_template_id)
+        except Exception as exc:  # noqa: BLE001 — surfaced to the caller
+            raise HTTPException(
+                422, f"Invalid sandbox_template_id: {exc}"
+            ) from exc
+        if not tpl:
+            raise HTTPException(
+                422,
+                f"Sandbox template {body.sandbox_template_id} not found or "
+                "not cleared for this user.",
+            )
+        if tpl.get("status") != "approved":
+            raise HTTPException(
+                422,
+                f"Sandbox template '{tpl.get('name')}' has status "
+                f"{tpl.get('status')!r} — only 'approved' templates may be "
+                "referenced by tasks.",
+            )
+        try:
+            validate_script_task(
+                config=effective_config,
+                sandbox_template_id=body.sandbox_template_id,
+                sandbox_config=body.sandbox_config,
+                template_config=tpl_repo.to_sandbox_config(tpl),
+                inline_sandbox_config=bool(body.sandbox_config),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     # ── Remote targeting (Agent Control Protocol) ─────────────────────
     # A remote executes the task in its own environment. Validate the pin
     # here so a bad remote id fails at authoring time rather than silently
@@ -869,7 +927,7 @@ async def create_task(
                 f"Agent definition '{body.agent_definition_id}' not found or not approved. "
                 f"Approve it at /definitions before assigning tasks.",
             )
-    elif body.agent_type:
+    elif resolved_kind != "script" and body.agent_type:
         agents = (
             await def_repo.list_agents_accessible_by(
                 str(user.id),

@@ -5,8 +5,7 @@ A task has two orthogonal axes:
 * ``agent_type`` / ``agent_definition_id`` — *who* does the work (persona,
   skills, tools). Only meaningful for the ``agent`` kind.
 * ``task_kind`` + ``execution_config`` — *how* the work executes (an agent
-  session, a decision-model call, a fusion run, and in future a command or
-  webhook).
+  session, a decision-model call, a fusion run, or a script in a sandbox).
 
 Historically the kind was inferred from the presence of ``decision_config`` /
 ``fusion_config`` and a magic ``agent_type='decision-step'``. That convention is
@@ -27,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from lucent.db.requests import validate_decision_config
+from lucent.script_tasks import SCRIPT_CONFIG_SCHEMA, validate_script_config
 
 
 class UnknownTaskKindError(ValueError):
@@ -347,5 +347,52 @@ register_task_kind(
                 },
             },
         ),
+    )
+)
+
+register_task_kind(
+    TaskKindSpec(
+        kind="script",
+        display_name="Script",
+        description=(
+            "Run a program directly inside an approved sandbox template and "
+            "capture its stdout, stderr, and exit code. No agent session, chat "
+            "model, backend, or engine. Requires sandbox_template_id."
+        ),
+        config_field="execution_config",
+        config_schema=SCRIPT_CONFIG_SCHEMA,
+        config_required=True,
+        requires_agent_definition=False,
+        agent_type_const=None,
+        model_class=None,
+        model_requires_tools=False,
+        model_auto_allowed=False,
+        backend_allowed=False,
+        output_contract_allowed=True,
+        sandbox="required",
+        examples=(
+            {
+                "title": "Compute the report",
+                "task_kind": "script",
+                "sandbox_template_id": "<approved template id>",
+                "execution_config": {
+                    "source": "inline",
+                    "script": (
+                        "#!/usr/bin/env python3\n"
+                        "import json\n"
+                        "print(json.dumps({'total': 42}))\n"
+                    ),
+                },
+                "output_contract": {
+                    "json_schema": {
+                        "type": "object",
+                        "required": ["total"],
+                        "properties": {"total": {"type": "integer"}},
+                    },
+                    "on_failure": "fail",
+                },
+            },
+        ),
+        validate=validate_script_config,
     )
 )

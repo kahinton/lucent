@@ -212,6 +212,11 @@ class WorkflowAction(BaseModel):
     reasoning_effort: str | None = Field(default=None, max_length=64)
     sandbox_template_id: str | None = None
     sandbox_config: dict | None = None
+    # How the action executes. Kept explicit here: an action that names a
+    # non-agent kind (a script, for example) must not have that field dropped
+    # by the authoring model and silently become a chat-agent task on run.
+    task_kind: str | None = None
+    execution_config: dict | None = None
     output_contract: dict | None = None
     output_schema: dict | None = None
     decision_config: dict | None = None
@@ -681,6 +686,7 @@ async def _trigger_schedule_execution(
             )
 
             from lucent.db.definitions import DefinitionRepository
+            from lucent.task_kinds import resolve_task_kind
 
             def_repo = DefinitionRepository(pool)
             agents = (
@@ -696,6 +702,17 @@ async def _trigger_schedule_execution(
             trigger_section = _format_trigger_context(trigger_context)
 
             for idx, action in enumerate(task_actions):
+                # A non-agent kind owns its own execution: a script runs a
+                # program inside its template, so agent-definition and model
+                # selection do not apply and must not fall back to a chat
+                # agent. Resolve the kind once and honor it below.
+                action_kind = resolve_task_kind(
+                    kind=action.get("task_kind"),
+                    agent_type=action.get("agent_type"),
+                    decision_config=action.get("decision_config"),
+                    fusion_config=action.get("fusion_config"),
+                )
+                is_script = action_kind == "script"
                 agent_type = action.get("agent_type") or sched.get("agent_type") or "code"
                 decision_config = action.get("decision_config")
                 if decision_config or agent_type == "decision-step":
@@ -782,7 +799,7 @@ async def _trigger_schedule_execution(
                     # Keep the action's chat model override — it becomes the
                     # first candidate / fallback for count-based configs, so
                     # it must NOT be pinned off like a decision step's is.
-                if agent_type and agent_type not in active_names:
+                if not is_script and agent_type and agent_type not in active_names:
                     raise RuntimeError(
                         f"Workflow action references agent_type '{action.get('agent_type')}', "
                         "but that agent is not approved/accessible for the workflow owner."
@@ -794,7 +811,12 @@ async def _trigger_schedule_execution(
                     if "reasoning_effort" in action
                     else sched.get("reasoning_effort")
                 )
-                if task_model:
+                if is_script:
+                    # Scripts select no model. A schedule-level chat model must
+                    # not leak into one, and there is nothing to validate.
+                    task_model = None
+                    task_reasoning_effort = None
+                elif task_model:
                     from lucent.model_registry import validate_model, validate_reasoning_effort
 
                     model_error = validate_model(task_model, require_tools=True)
@@ -876,6 +898,16 @@ async def _trigger_schedule_execution(
                     output_contract=output_contract,
                     decision_config=action.get("decision_config"),
                     fusion_config=fusion_config,
+                    # A workflow action may carry the kind's own config (a
+                    # script's code, for example). It was stored verbatim in
+                    # the action, so forward it or the repeatability story is
+                    # only half true: the body would never reach dispatch.
+                    task_kind=action.get("task_kind"),
+                    execution_config=(
+                        action.get("execution_config")
+                        if action.get("task_kind")
+                        else None
+                    ),
                 )
                 created_tasks.append(task)
 
@@ -1015,6 +1047,7 @@ async def create_schedule(
 ):
     from lucent.db.schedules import (
         ScheduleRepository,
+        validate_task_action_kinds,
         validate_webhook_secret,
         webhook_secret_hash,
     )
@@ -1070,6 +1103,19 @@ async def create_schedule(
     _validate_workflow_fusion_actions(
         body.actions or [], org_id=str(user.organization_id)
     )
+    # Kind requirements (script → approved template + custom_sandboxes
+    # capability) are refused here, where the author can fix them, instead of
+    # at fire time when the stored action expands.
+    try:
+        await validate_task_action_kinds(
+            body.actions or [],
+            pool=pool,
+            organization_id=str(user.organization_id),
+            user_id=str(user.id),
+            schedule_sandbox_template_id=body.sandbox_template_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     # Usage is clearance-driven and default-deny: every referenced sandbox
     # template must be cleared for the schedule creator.
@@ -1231,7 +1277,7 @@ async def update_schedule(
     user: AuthenticatedUser,
     pool=Depends(get_pool),
 ):
-    from lucent.db.schedules import ScheduleRepository
+    from lucent.db.schedules import ScheduleRepository, validate_task_action_kinds
 
     repo = ScheduleRepository(pool)
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
@@ -1272,6 +1318,18 @@ async def update_schedule(
         _validate_workflow_fusion_actions(
             fields["actions"], org_id=str(user.organization_id)
         )
+        try:
+            await validate_task_action_kinds(
+                fields["actions"],
+                pool=pool,
+                organization_id=str(user.organization_id),
+                user_id=str(user.id),
+                schedule_sandbox_template_id=fields.get(
+                    "sandbox_template_id", sched.get("sandbox_template_id")
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     try:
         result = await repo.update_schedule(
             schedule_id, str(user.organization_id),
@@ -1365,6 +1423,7 @@ async def create_workflow(
     """Create a workflow with a typed trigger and ordered task actions."""
     from lucent.db.schedules import (
         ScheduleRepository,
+        validate_task_action_kinds,
         validate_webhook_secret,
         webhook_secret_hash,
     )
@@ -1431,6 +1490,16 @@ async def create_workflow(
             raise HTTPException(422, "reasoning_effort requires model")
         if action.get("output_contract") and action.get("output_schema"):
             raise HTTPException(422, "Provide either output_contract or output_schema, not both")
+
+    try:
+        await validate_task_action_kinds(
+            actions,
+            pool=pool,
+            organization_id=str(user.organization_id),
+            user_id=str(user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     repo = ScheduleRepository(pool)
     return await repo.create_schedule(

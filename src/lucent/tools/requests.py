@@ -932,7 +932,9 @@ async def _prepare_task_spec(
         return None, "reasoning_effort requires model"
 
     # --- Agent definition ----------------------------------------------
-    if agent_type not in ctx["agent_names"]:
+    # A script task runs a program directly; there is no agent definition to
+    # resolve (its sandbox template is the only execution dependency).
+    if resolved_kind != "script" and agent_type not in ctx["agent_names"]:
         available = sorted(ctx["agent_names"]) if ctx["agent_names"] else "none — approve definitions first"
         return None, (
             f"No approved agent definition for '{agent_type}'. Create and approve "
@@ -941,6 +943,7 @@ async def _prepare_task_spec(
 
     # --- Sandbox template -----------------------------------------------
     sandbox_config: dict | None = None
+    resolved_template: dict | None = None
     if sandbox_template_id:
         tpl_repo = await _authoring_templates(ctx)
         try:
@@ -959,6 +962,7 @@ async def _prepare_task_spec(
                 "referenced by tasks."
             )
         sandbox_config = tpl_repo.to_sandbox_config(tpl)
+        resolved_template = tpl
         allowed_overrides = {
             "repo_url",
             "branch",
@@ -979,6 +983,23 @@ async def _prepare_task_spec(
             sandbox_config["_template_overrides"] = dict(sandbox_overrides)
     elif sandbox_overrides:
         return None, "sandbox_overrides requires sandbox_template_id"
+
+    # --- Script tasks ---------------------------------------------------
+    # A script must name an approved template (enforced here and again in the
+    # repository), and a git source is checked against that template's network
+    # allowlist so the failure names the host at authoring time.
+    if resolved_kind == "script":
+        from lucent.script_tasks import validate_script_task
+
+        try:
+            validate_script_task(
+                config=effective_config,
+                sandbox_template_id=sandbox_template_id,
+                sandbox_config=sandbox_config,
+                template_config=resolved_template,
+            )
+        except ValueError as exc:
+            return None, str(exc)
 
     # --- Backend pin ----------------------------------------------------
     effective_backend = backend_id or request_backend_id
@@ -1402,7 +1423,9 @@ agents are available to the request owner.
 TASK KINDS: Call list_task_kinds() before creating non-standard work.
 ``agent_type`` is *who* does the work; ``task_kind`` + ``execution_config`` is
 *how* it executes. The default kind is ``agent``; ``decision`` and ``fusion``
-currently accept their legacy config fields. For a new kind use its catalog
+currently accept their legacy config fields. The ``script`` kind runs a program
+inside an approved sandbox template and requires ``sandbox_template_id``. For a
+new kind use its catalog
 entry's config schema and pass ``task_kind`` + ``execution_config`` rather than
 inventing a new agent type.
 
@@ -1965,7 +1988,7 @@ if the agent type is not approved or the sandbox template is invalid."""
             )
         )["items"]
         active_names = {a["name"] for a in agents}
-        if agent_type and agent_type not in active_names:
+        if resolved_kind != "script" and agent_type and agent_type not in active_names:
             avail = sorted(active_names) if active_names else "none — approve definitions first"
             return json.dumps(
                 {
@@ -1980,6 +2003,7 @@ if the agent type is not approved or the sandbox template is invalid."""
         # we keep a single dispatch path. Overrides are limited to a small,
         # safe whitelist.
         sandbox_config: dict | None = None
+        resolved_template: dict | None = None
         if sandbox_template_id:
             from lucent.db.sandbox_template import (
                 SandboxTemplateRepository,
@@ -2031,6 +2055,7 @@ if the agent type is not approved or the sandbox template is invalid."""
                     }
                 )
             sandbox_config = tpl_repo.to_sandbox_config(tpl)
+            resolved_template = tpl
 
             allowed_overrides = {
                 "repo_url",
@@ -2066,6 +2091,21 @@ if the agent type is not approved or the sandbox template is invalid."""
                     )
                 }
             )
+
+        # Script tasks: a program, not an agent. The template is mandatory and
+        # a git source is checked against the template's network allowlist.
+        if resolved_kind == "script":
+            from lucent.script_tasks import validate_script_task
+
+            try:
+                validate_script_task(
+                    config=effective_config,
+                    sandbox_template_id=sandbox_template_id,
+                    sandbox_config=sandbox_config,
+                    template_config=resolved_template,
+                )
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
 
         repo = await _get_request_repository()
         parent_request = await repo.get_request(request_id, str(org_id))
@@ -4223,6 +4263,8 @@ config field/schema, examples, model/agent/backend requirements, and
 capabilities (sandbox, output contract). ``agent_type`` is *who* does the work
 and only applies to the ``agent``/``decision``/``fusion`` kinds; ``task_kind`` +
 ``execution_config`` are *how* it executes and are the forward-compatible form.
+The ``script`` kind executes a program in an approved sandbox template and
+requires ``sandbox_template_id``.
 
 Returns JSON with ``kinds`` (schemas + examples + availability) and guidance."""
     )

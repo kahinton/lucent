@@ -14,8 +14,8 @@ from lucent.task_kinds import (
 )
 
 
-def test_registered_kinds_are_agent_decision_fusion():
-    assert task_kind_names() == ["agent", "decision", "fusion"]
+def test_registered_kinds_are_agent_decision_fusion_script():
+    assert task_kind_names() == ["agent", "decision", "fusion", "script"]
     assert task_kind_spec("decision-step").kind == "decision"
 
 
@@ -42,6 +42,15 @@ def test_catalog_exposes_schemas_examples_and_requirements():
     assert decision["requirements"]["output_contract_allowed"] is False
     assert catalog["agent"]["requirements"]["sandbox"] == "optional"
     assert catalog["fusion"]["requirements"]["sandbox"] == "forbidden"
+    script = catalog["script"]
+    assert script["config_field"] == "execution_config"
+    assert script["config_required"] is True
+    assert script["config_schema"]["required"] == ["source"]
+    assert script["config_schema"]["properties"]["source"]["enum"] == ["inline", "git"]
+    assert script["requirements"]["sandbox"] == "required"
+    assert script["requirements"]["agent_definition"] is False
+    assert script["requirements"]["model_class"] is None
+    assert script["examples"]
 
 
 def test_validate_task_kind_payload():

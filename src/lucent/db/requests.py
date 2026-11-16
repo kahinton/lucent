@@ -1174,6 +1174,37 @@ REMOTE_DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                      )"""
 
 
+async def _script_entitlement_error(
+    pool, org_id: str, resolved_kind: str
+) -> str | None:
+    """Authoring-time ``custom_sandboxes`` gate for the ``script`` task kind.
+
+    A script runs a program inside a sandbox, so its owning organization must
+    hold the same capability a sandboxed agent task does. The MCP and API
+    authoring paths already gate a payload that carries a sandbox template;
+    this covers the creation paths that reach the repository directly — most
+    importantly workflow/schedule action expansion, which materializes a
+    stored action without going through either authoring gate.
+
+    The shared gate helper is used deliberately: there is one answer to "is
+    this organization entitled", and this is not a second one. Its missing-row
+    default-deny contract applies unchanged. ``ValueError`` is the
+    repository's validation channel, and every creation caller already maps
+    it to its own error envelope, so the refusal keeps the capability in the
+    message instead of becoming a generic authorization failure.
+    """
+    if resolved_kind != "script":
+        return None
+    from lucent.services.entitlements import (
+        CAPABILITY_SANDBOXES,
+        capability_gate_message,
+    )
+
+    return await capability_gate_message(
+        org_id, CAPABILITY_SANDBOXES, pool=pool
+    )
+
+
 def _normalize_task_payload(
     *,
     agent_type: str | None,
@@ -1183,6 +1214,7 @@ def _normalize_task_payload(
     task_kind: str | None,
     execution_config: dict | None,
     sandbox_config: dict | None,
+    sandbox_template_id: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Validate one task payload and normalize it for insertion.
 
@@ -1218,6 +1250,13 @@ def _normalize_task_payload(
         decision_config = execution_config
     elif resolved_kind == "fusion":
         fusion_config = execution_config
+    elif resolved_kind == "script" and (
+        decision_config is not None or fusion_config is not None
+    ):
+        raise ValueError(
+            "A script task cannot carry decision_config/fusion_config — it runs "
+            "a program directly"
+        )
     elif resolved_kind == "agent" and (
         decision_config is not None or fusion_config is not None
     ):
@@ -1225,6 +1264,17 @@ def _normalize_task_payload(
             "decision_config/fusion_config require their matching task kind"
         )
     validate_task_kind_payload(resolved_kind, execution_config)
+    if resolved_kind == "script":
+        from lucent.script_tasks import validate_script_task
+
+        validate_script_task(
+            config=execution_config,
+            sandbox_template_id=sandbox_template_id,
+            sandbox_config=sandbox_config,
+            inline_sandbox_config=(
+                sandbox_config is not None and sandbox_template_id is None
+            ),
+        )
 
     _validate_output_contract(output_contract)
     validate_decision_config(decision_config)
@@ -3085,7 +3135,13 @@ class RequestRepository:
             task_kind=task_kind,
             execution_config=execution_config,
             sandbox_config=sandbox_config,
+            sandbox_template_id=sandbox_template_id,
         )
+        gate_error = await _script_entitlement_error(
+            self.pool, org_id, resolved_kind
+        )
+        if gate_error:
+            raise ValueError(gate_error)
 
         async with scoped_acquire_on(
             self.pool, organization_id=org_id
@@ -3246,7 +3302,13 @@ class RequestRepository:
                 task_kind=spec.get("task_kind"),
                 execution_config=spec.get("execution_config"),
                 sandbox_config=spec.get("sandbox_config"),
+                sandbox_template_id=spec.get("sandbox_template_id"),
             )
+            gate_error = await _script_entitlement_error(
+                self.pool, org_id, kind
+            )
+            if gate_error:
+                raise ValueError(f"task_specs[{index}]: {gate_error}")
             if not str(spec.get("title") or "").strip():
                 raise ValueError(f"task_specs[{index}].title is required")
             normalized.append((index, kind, resolved, spec))

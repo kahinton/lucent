@@ -269,6 +269,35 @@ class TestCreateWorkflow:
         assert result["invalid_agent_types"] == ["general-purpose"]
 
     @pytest.mark.asyncio
+    async def test_create_workflow_rejects_script_action_without_template(
+        self, mcp, auth_user, capable_organization
+    ):
+        """The MCP authoring surface refuses an unrunnable script action."""
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Script without template",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "task",
+                            "title": "Compute the report",
+                            "task_kind": "script",
+                            "execution_config": {
+                                "source": "inline",
+                                "script": "print('{}')",
+                            },
+                        }
+                    ]
+                ),
+            },
+        )
+
+        assert "sandbox_template_id" in result["error"]
+
+    @pytest.mark.asyncio
     async def test_create_workflow_rejects_server_function_actions(self, mcp, auth_user):
         result = await _call(
             mcp,

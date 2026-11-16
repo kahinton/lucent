@@ -52,6 +52,7 @@ from daemon.dispatch import policy as task_policy
 from daemon.dispatch import decision_step
 from daemon.dispatch import fusion
 from daemon.dispatch import model_auto
+from daemon.dispatch import script_executor
 from daemon.observability.live_output import (
     FLUSH_INTERVAL_SECONDS as LIVE_OUTPUT_FLUSH_SECONDS,
     build_live_output_writer,
@@ -4808,7 +4809,7 @@ class LucentDaemon(
                     if task.get("fusion_config")
                     else "agent"
                 )
-            if task_kind not in {"agent", "decision", "fusion"}:
+            if task_kind not in {"agent", "decision", "fusion", "script"}:
                 reason = (
                     f"Unknown task kind '{task_kind}' — no executor is "
                     "registered for it"
@@ -4896,6 +4897,122 @@ class LucentDaemon(
                     )
                 except Exception as exc:
                     await _fail_owned(task_id, f"Decision step failed: {exc}")
+                continue
+
+            # Script branch: a task of kind 'script' runs a program directly in
+            # an approved sandbox template. It never selects a model, loads an
+            # agent definition, or opens a chat session — the executor owns the
+            # sandbox lifecycle and hands its terminal outcome to the same
+            # complete/fail callbacks as every other dispatched task.
+            if task_kind == "script":
+                if self.draining:
+                    log("Dispatch is draining for source reload; leaving remaining tasks pending")
+                    break
+                script_cfg = task.get("execution_config")
+                if isinstance(script_cfg, str):
+                    try:
+                        script_cfg = json.loads(script_cfg)
+                    except (TypeError, ValueError):
+                        script_cfg = {}
+                script_cfg = script_cfg or {}
+                script_sandbox_cfg = task.get("sandbox_config")
+                if isinstance(script_sandbox_cfg, str):
+                    try:
+                        script_sandbox_cfg = json.loads(script_sandbox_cfg)
+                    except (TypeError, ValueError):
+                        script_sandbox_cfg = None
+                if not script_cfg:
+                    reason = "Script task is missing execution_config"
+                    await _fail_owned(task_id, reason)
+                    await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                    continue
+                # Dispatch-time entitlement re-check, before the task is
+                # claimed or any sandbox work begins. Authoring can be long
+                # before the run (a stored workflow action), so an organization
+                # that was entitled then and is not now must not execute: the
+                # task fails with the capability named and nothing is
+                # provisioned. The org comes from the task row, inside the
+                # probe — never from this branch's locals.
+                entitlement_failure = (
+                    await script_executor.script_entitlement_failure(task)
+                )
+                if entitlement_failure:
+                    reason = (
+                        "Script task refused at dispatch: "
+                        f"{entitlement_failure['detail']}"
+                    )
+                    await RequestAPI.add_event(
+                        task_id,
+                        "dispatch_denied",
+                        reason,
+                        entitlement_failure,
+                    )
+                    await _fail_owned(task_id, reason)
+                    continue
+                if not script_sandbox_cfg and task.get("sandbox_template_id"):
+                    # A task authored with only a template id (a workflow
+                    # action, for example) carries no config snapshot. Resolve
+                    # it the same way the agent branch does, so a script task
+                    # is not failed for the shape of its authoring surface.
+                    script_sandbox_cfg = await self._resolve_sandbox_template(
+                        str(task["sandbox_template_id"]),
+                        org_id=org_id,
+                        requesting_user_id=requesting_user_id,
+                    )
+                if not script_sandbox_cfg:
+                    reason = (
+                        "Script task has no resolved sandbox_config — an "
+                        "approved sandbox_template_id is required"
+                    )
+                    await _fail_owned(task_id, reason)
+                    await RequestAPI.add_event(task_id, "dispatch_denied", reason)
+                    continue
+                self._claim_operations += 1
+                try:
+                    claimed = await RequestAPI.claim_task(task_id, self.instance_id)
+                finally:
+                    self._claim_operations -= 1
+                if not claimed:
+                    continue
+                if not await self._task_matches_bound_org(claimed):
+                    continue
+                try:
+                    started = await _start_owned(task_id)
+                    if not started:
+                        await _release_owned(task_id)
+                        continue
+                    await RequestAPI.add_event(
+                        task_id,
+                        "script_dispatched",
+                        "Script task dispatched to the sandbox executor",
+                        {
+                            "source": script_cfg.get("source"),
+                            "sandbox_template_id": (
+                                str(task.get("sandbox_template_id"))
+                                if task.get("sandbox_template_id")
+                                else None
+                            ),
+                        },
+                    )
+                    if self._tracer:
+                        self._tasks_dispatched_total.add(
+                            1, attributes={"agent_type": "script"}
+                        )
+                    dispatched += 1
+                    await script_executor.run_script_task(
+                        daemon=self,
+                        task=dict(task),
+                        execution_config=script_cfg,
+                        sandbox_config=script_sandbox_cfg,
+                        org_id=org_id,
+                        request_id=request_id,
+                        requesting_user_id=requesting_user_id,
+                        sequence_order=int(task.get("sequence_order") or 0),
+                        on_complete=_complete_owned,
+                        on_fail=_fail_owned,
+                    )
+                except Exception as exc:
+                    await _fail_owned(task_id, f"Script task failed: {exc}")
                 continue
 
             # Auto model selection (flag-gated, default off): the sentinel

@@ -325,6 +325,131 @@ def workflow_actions_for_schedule(sched: dict) -> list[dict]:
     ]
 
 
+async def validate_task_action_kinds(
+    actions: list[dict],
+    *,
+    pool,
+    organization_id: str,
+    user_id: str,
+    schedule_sandbox_template_id: str | None = None,
+) -> None:
+    """Refuse stored workflow task actions whose kind cannot run as authored.
+
+    An action's payload lives verbatim in ``schedules.actions`` (JSONB), and a
+    workflow can fire long after it was saved. So every *requirement* a kind
+    carries — a resolvable approved template, an organization capability — is
+    checked here, at save time, instead of failing a run later.
+
+    Script payload validation is delegated to
+    :func:`lucent.script_tasks.validate_script_task`, the same validator
+    :meth:`lucent.db.requests.RequestRepository.create_task` uses, so the
+    authoring answer and the creation answer cannot drift.
+
+    Raises ``ValueError`` naming what is missing; every authoring caller maps
+    that to its own error envelope (HTTP 4xx, MCP ``{"error": ...}``).
+    """
+    from lucent.task_kinds import resolve_task_kind
+
+    script_actions: list[dict] = []
+    for action in actions or []:
+        if not isinstance(action, dict):
+            continue
+        if action.get("action_type", "task") != "task":
+            continue
+        if (
+            resolve_task_kind(
+                kind=action.get("task_kind"),
+                agent_type=action.get("agent_type"),
+                decision_config=action.get("decision_config"),
+                fusion_config=action.get("fusion_config"),
+            )
+            == "script"
+        ):
+            script_actions.append(action)
+    if not script_actions:
+        return
+
+    from lucent.services.entitlements import (
+        CAPABILITY_SANDBOXES,
+        capability_gate_message,
+    )
+
+    titles = ", ".join(
+        f"'{action.get('title') or 'untitled'}'" for action in script_actions
+    )
+    gate_error = await capability_gate_message(
+        organization_id, CAPABILITY_SANDBOXES, pool=pool
+    )
+    if gate_error:
+        raise ValueError(
+            f"Script workflow action(s) {titles} require the "
+            f"'{CAPABILITY_SANDBOXES}' capability: {gate_error}"
+        )
+
+    from lucent.db.sandbox_template import (
+        SandboxTemplateRepository,
+        get_authorized_templates_pool,
+    )
+    from lucent.script_tasks import validate_script_task
+
+    tpl_pool = await get_authorized_templates_pool(
+        pool, {"id": user_id, "organization_id": organization_id}
+    )
+    tpl_repo = SandboxTemplateRepository(tpl_pool)
+
+    for action in script_actions:
+        title = action.get("title") or "untitled"
+        if action.get("decision_config") or action.get("fusion_config"):
+            raise ValueError(
+                f"Script workflow action '{title}' cannot carry decision_config "
+                "or fusion_config — it runs a program directly"
+            )
+        template_id = (
+            str(
+                action.get("sandbox_template_id")
+                or schedule_sandbox_template_id
+                or ""
+            ).strip()
+            or None
+        )
+        action_sandbox_config = action.get("sandbox_config")
+        if not template_id:
+            raise ValueError(
+                f"Script workflow action '{title}' requires sandbox_template_id — "
+                "a script runs only inside an approved sandbox template"
+            )
+        template = await tpl_repo.get_usable_template(template_id)
+        if not template:
+            raise ValueError(
+                f"Script workflow action '{title}' references sandbox template "
+                f"{template_id}, which was not found or is not cleared for this "
+                "user"
+            )
+        if template.get("status") != "approved":
+            raise ValueError(
+                f"Script workflow action '{title}' references sandbox template "
+                f"'{template.get('name')}' with status "
+                f"{template.get('status')!r} — only 'approved' templates may be "
+                "used by a script action"
+            )
+        try:
+            validate_script_task(
+                config=action.get("execution_config"),
+                sandbox_template_id=template_id,
+                sandbox_config=action_sandbox_config,
+                template_config=tpl_repo.to_sandbox_config(template),
+                inline_sandbox_config=(
+                    action_sandbox_config is not None
+                    and not action.get("sandbox_template_id")
+                ),
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Script workflow action '{title}' has an invalid "
+                f"execution_config: {exc}"
+            ) from exc
+
+
 def _parse_cron(expression: str, after: datetime) -> datetime:
     """Calculate next run time from a cron expression (minute hour dom month dow).
 

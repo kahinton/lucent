@@ -595,11 +595,30 @@ Generate one with: python -c "import secrets; print(secrets.token_urlsafe(24))\"
             if not active_names:
                 active_names = set(FALLBACK_WORKFLOW_AGENT_TYPES)
             if active_names:
+                from lucent.task_kinds import resolve_task_kind
+
+                def _action_is_script(action: dict) -> bool:
+                    # An unknown kind is left for the shared validator below to
+                    # report; it must not turn into an unhandled exception here.
+                    try:
+                        return (
+                            resolve_task_kind(
+                                kind=action.get("task_kind"),
+                                agent_type=action.get("agent_type"),
+                                decision_config=action.get("decision_config"),
+                                fusion_config=action.get("fusion_config"),
+                            )
+                            == "script"
+                        )
+                    except ValueError:
+                        return False
+
                 invalid = sorted(
                     {
                         str(action.get("agent_type") or "code")
                         for action in actions
                         if action.get("action_type", "task") == "task"
+                        and not _action_is_script(action)
                         and str(action.get("agent_type") or "code") not in active_names
                     }
                 )
@@ -655,6 +674,17 @@ Generate one with: python -c "import secrets; print(secrets.token_urlsafe(24))\"
                                 )
                             }
                         )
+        try:
+            from lucent.db.schedules import validate_task_action_kinds
+
+            await validate_task_action_kinds(
+                actions or [],
+                pool=repo.pool,
+                organization_id=str(org_id),
+                user_id=str(user_id),
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
         workflow = await repo.create_schedule(
             title=title,
             org_id=str(org_id),
