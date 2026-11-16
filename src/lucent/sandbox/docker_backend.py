@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import socket
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -44,6 +45,13 @@ _MEMORY_LIMIT_UNITS = {
     "g": 1_000_000_000,
     "t": 1_000_000_000_000,
 }
+# Docker only reports an exec's *host* pid, which is meaningless inside the
+# container, so the exec wrapper records the container-namespace pid here.
+_EXEC_PIDFILE_PREFIX = "/tmp/.lucent-exec-"
+# How long to wait for a killed exec's output stream to finish draining.
+_EXEC_DRAIN_GRACE_SECONDS = 5.0
+# How long to wait for the wrapper to publish its pid before giving up on a kill.
+_EXEC_PIDFILE_WAIT_SECONDS = 1.0
 
 
 def _memory_limit_bytes(value: str) -> int | None:
@@ -75,6 +83,85 @@ def _devcontainer_to_dict(dc: DevcontainerConfig) -> dict:
         "forward_ports": dc.forward_ports or None,
         "remote_user": dc.remote_user,
     }
+
+
+def _wrap_exec_command(command: str | list[str], pidfile: str) -> list[str]:
+    """Wrap a command so it publishes its container-namespace pid.
+
+    ``exec_inspect`` returns the process's pid in the *host* namespace, which
+    cannot be signalled from inside the container. The shell Docker starts for
+    an exec is its own process-group leader, and every descendant inherits that
+    group, so recording ``$$`` is enough to kill the whole tree on timeout.
+
+    The wrapper also removes the pidfile when the command exits normally.
+    """
+    quoted = shlex.quote(pidfile)
+    prefix = f"trap 'rm -f {quoted}' EXIT; echo $$ > {quoted} 2>/dev/null || true; "
+    if isinstance(command, list):
+        # "$@" keeps argv exactly as supplied — no shell splitting.
+        return ["sh", "-c", f'{prefix}"$@"', "sh", *command]
+    return ["sh", "-c", f"{prefix}{command}"]
+
+
+def _timeout_stderr(partial: str, timeout: int) -> str:
+    """Append the timeout notice to whatever stderr was captured first."""
+    notice = f"Command timed out after {timeout}s"
+    if not partial:
+        return notice
+    separator = "" if partial.endswith("\n") else "\n"
+    return f"{partial}{separator}{notice}"
+
+
+class _ExecStream:
+    """Drains a Docker exec's output in a background thread.
+
+    ``exec_start(stream=True)`` blocks until the process exits, so chunks are
+    accumulated into shared buffers. That lets the caller return the output
+    collected before a timeout instead of discarding it — the reason
+    ``asyncio.wait_for`` around a blocking call cannot implement a timeout on
+    its own.
+    """
+
+    def __init__(self, api, exec_id):
+        self._api = api
+        self._exec_id = exec_id
+        self._lock = threading.Lock()
+        self._stdout = bytearray()
+        self._stderr = bytearray()
+        self.exit_code = -1
+        self.error: Exception | None = None
+
+    def run(self) -> None:
+        try:
+            stream = self._api.exec_start(self._exec_id, stream=True, demux=True)
+            for chunk_stdout, chunk_stderr in stream:
+                with self._lock:
+                    if chunk_stdout:
+                        self._stdout += chunk_stdout
+                    if chunk_stderr:
+                        self._stderr += chunk_stderr
+            inspect = self._api.exec_inspect(self._exec_id)
+            exit_code = inspect.get("ExitCode")
+            self.exit_code = -1 if exit_code is None else int(exit_code)
+        except Exception as exc:  # re-raised by the caller on the non-timeout path
+            self.error = exc
+
+    def snapshot(self) -> tuple[str, str]:
+        with self._lock:
+            return (
+                bytes(self._stdout).decode("utf-8", errors="replace"),
+                bytes(self._stderr).decode("utf-8", errors="replace"),
+            )
+
+
+def _abandon_task(task: asyncio.Task) -> None:
+    """Stop waiting on a background reader without leaking its eventual result."""
+    def _consume(done: asyncio.Task) -> None:
+        if not done.cancelled():
+            done.exception()
+
+    task.add_done_callback(_consume)
+    task.cancel()
 
 
 class DockerBackend(SandboxBackend):
@@ -908,44 +995,67 @@ class DockerBackend(SandboxBackend):
         if container is None:
             return ExecResult(exit_code=-1, stdout="", stderr="Sandbox not found", timed_out=False)
 
-        if isinstance(command, list):
-            cmd = command
-        else:
-            cmd = ["sh", "-c", command]
+        api = container.client.api
+        pidfile = f"{_EXEC_PIDFILE_PREFIX}{uuid.uuid4().hex}.pid"
+        wrapped = _wrap_exec_command(command, pidfile)
 
         start = time.monotonic()
+        exec_id = await asyncio.to_thread(
+            self._exec_create, api, container, wrapped, cwd, env, user
+        )
+        stream = _ExecStream(api, exec_id)
+        reader = asyncio.create_task(asyncio.to_thread(stream.run))
+
+        # A deadline the caller can actually rely on: the exec runs in a
+        # worker thread, so timing out the await alone would leave the process
+        # running in the container. On expiry we kill the process group and
+        # drain whatever output was produced. The reader is shielded so it
+        # survives the first timeout and can be awaited again after the kill.
         try:
-            result = await asyncio.to_thread(
-                self._exec_sync, container, cmd, cwd, env, timeout, user
-            )
-            duration_ms = int((time.monotonic() - start) * 1000)
-            return ExecResult(
-                exit_code=result[0],
-                stdout=result[1],
-                stderr=result[2],
-                duration_ms=duration_ms,
-                timed_out=False,
-            )
+            await asyncio.wait_for(asyncio.shield(reader), timeout=timeout)
         except TimeoutError:
-            duration_ms = int((time.monotonic() - start) * 1000)
+            await asyncio.to_thread(
+                self._terminate_exec, api, container, exec_id, pidfile, user
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(reader), timeout=_EXEC_DRAIN_GRACE_SECONDS
+                )
+            except TimeoutError:
+                _abandon_task(reader)
+            except Exception:
+                pass  # The partial output is what the timeout path reports.
+            stdout, stderr = stream.snapshot()
             return ExecResult(
                 exit_code=-1,
-                stdout="",
-                stderr=f"Command timed out after {timeout}s",
-                duration_ms=duration_ms,
+                stdout=stdout,
+                stderr=_timeout_stderr(stderr, timeout),
+                duration_ms=int((time.monotonic() - start) * 1000),
                 timed_out=True,
             )
 
-    def _exec_sync(
-        self,
+        await reader
+        if stream.error is not None:
+            raise stream.error
+        stdout, stderr = stream.snapshot()
+        return ExecResult(
+            exit_code=stream.exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            duration_ms=int((time.monotonic() - start) * 1000),
+            timed_out=False,
+        )
+
+    @staticmethod
+    def _exec_create(
+        api,
         container: docker.models.containers.Container,
         cmd: list[str],
         cwd: str | None,
         env: dict[str, str] | None,
-        timeout: int,
         user: str | None,
-    ) -> tuple[int, str, str]:
-        exec_id = container.client.api.exec_create(
+    ) -> str:
+        created = api.exec_create(
             container.id,
             cmd,
             workdir=cwd,
@@ -954,13 +1064,78 @@ class DockerBackend(SandboxBackend):
             stdout=True,
             stderr=True,
         )
-        output = container.client.api.exec_start(exec_id, demux=True)
-        # output is (stdout_bytes, stderr_bytes) when demux=True
-        stdout = (output[0] or b"").decode("utf-8", errors="replace")
-        stderr = (output[1] or b"").decode("utf-8", errors="replace")
-        inspect = container.client.api.exec_inspect(exec_id)
-        exit_code = inspect.get("ExitCode", -1)
-        return (exit_code, stdout, stderr)
+        return created["Id"]
+
+    def _terminate_exec(
+        self,
+        api,
+        container: docker.models.containers.Container,
+        exec_id: str,
+        pidfile: str,
+        user: str | None,
+    ) -> None:
+        """Kill a timed-out exec's process group inside the container."""
+        try:
+            inspect = api.exec_inspect(exec_id)
+        except Exception:
+            inspect = None
+        if inspect and not inspect.get("Running", True):
+            return  # Exited between the deadline and the kill — nothing to do.
+
+        pid = self._read_exec_pid(api, container, pidfile, user)
+        if pid is None:
+            logger.warning(
+                "Unable to determine pid of timed-out exec %s; process may still run",
+                str(exec_id)[:12],
+            )
+            return
+
+        # The exec process leads its own process group, so a negative pid
+        # signals the shell and every descendant it spawned. SIGKILL skips the
+        # wrapper's EXIT trap, so the pidfile is removed here instead.
+        script = (
+            f"kill -KILL -{pid} 2>/dev/null || true; "
+            f"kill -KILL {pid} 2>/dev/null || true; "
+            f"rm -f {shlex.quote(pidfile)} 2>/dev/null || true"
+        )
+        try:
+            kill_exec = api.exec_create(container.id, ["sh", "-c", script], user=user)
+            api.exec_start(kill_exec["Id"], demux=True)
+            logger.info(
+                "Killed timed-out exec %s (pid %d)", str(exec_id)[:12], pid,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to kill timed-out exec %s", str(exec_id)[:12], exc_info=True,
+            )
+
+    @staticmethod
+    def _read_exec_pid(
+        api,
+        container: docker.models.containers.Container,
+        pidfile: str,
+        user: str | None,
+    ) -> int | None:
+        """Read the container-namespace pid published by the exec wrapper."""
+        deadline = time.monotonic() + _EXEC_PIDFILE_WAIT_SECONDS
+        while True:
+            try:
+                reader = api.exec_create(
+                    container.id,
+                    ["sh", "-c", f"cat {shlex.quote(pidfile)} 2>/dev/null || true"],
+                    user=user,
+                )
+                raw = api.exec_start(reader["Id"])
+            except Exception:
+                logger.debug("Failed to read exec pidfile %s", pidfile, exc_info=True)
+                return None
+            text = (raw or b"").decode("ascii", "ignore").strip()
+            # Pid 1 belongs to the container init, never to an exec.
+            if text.isdigit() and int(text) > 1:
+                return int(text)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
 
     async def read_file(self, sandbox_id: str, path: str) -> bytes:
         container = self._find_container(sandbox_id)

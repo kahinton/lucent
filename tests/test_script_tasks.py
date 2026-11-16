@@ -543,6 +543,111 @@ async def test_sandbox_destroyed_when_provisioning_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_successful_script_emits_sandbox_created_and_destroyed(monkeypatch):
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        task=_task(output_contract=_contract()),
+    )
+
+    assert run.callbacks.failed == []
+    assert len(run.callbacks.completed) == 1
+    event_types = [etype for etype, _d, _m in run.events]
+    assert "sandbox_created" in event_types
+    assert "sandbox_destroyed" in event_types
+    assert event_types.index("sandbox_created") < event_types.index(
+        "sandbox_destroyed"
+    )
+    destroyed = [
+        (etype, detail)
+        for etype, detail, _m in run.events
+        if etype == "sandbox_destroyed"
+    ]
+    assert destroyed == [
+        (
+            "sandbox_destroyed",
+            "Sandbox sb-test-1234 destroyed after task completion",
+        )
+    ]
+    assert run.daemon.destroyed == ["sb-test-1234"]
+
+
+@pytest.mark.asyncio
+async def test_nonzero_exit_failure_still_emits_sandbox_destroyed(monkeypatch):
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=3, stdout="", stderr="boom")],
+    )
+
+    assert len(run.callbacks.failed) == 1
+    event_types = [etype for etype, _d, _m in run.events]
+    assert "script_failed" in event_types
+    assert "sandbox_destroyed" in event_types
+    assert run.daemon.destroyed == ["sb-test-1234"]
+
+
+@pytest.mark.asyncio
+async def test_schema_violation_failure_still_emits_sandbox_destroyed(monkeypatch):
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": "nope"}', stderr="")],
+        task=_task(output_contract=_contract()),
+    )
+
+    assert len(run.callbacks.failed) == 1
+    event_types = [etype for etype, _d, _m in run.events]
+    assert "script_output_invalid" in event_types
+    assert "sandbox_destroyed" in event_types
+    assert run.daemon.destroyed == ["sb-test-1234"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_destroyed_event_failure_keeps_outcome_and_destroy_order(
+    monkeypatch,
+):
+    """A broken event emitter must not change the outcome or skip the destroy."""
+    manager = _FakeManager([ExecResult(exit_code=0, stdout="ok", stderr="")])
+    daemon = _FakeDaemon()
+    callbacks = _Callbacks()
+    recorded: list[str] = []
+
+    async def _add_event(task_id, event_type, detail=None, metadata=None):
+        recorded.append(event_type)
+        if event_type == "sandbox_destroyed":
+            # The container is gone before the event is attempted, and the
+            # emitter itself is broken.
+            assert daemon.destroyed == ["sb-test-1234"]
+            raise RuntimeError("event store unavailable")
+
+    fake_runtime = SimpleNamespace(
+        RequestAPI=SimpleNamespace(add_event=_add_event),
+        log=lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "lucent.sandbox.manager.get_sandbox_manager", lambda: manager
+    )
+    monkeypatch.setattr(script_executor, "runtime", fake_runtime)
+
+    await script_executor.run_script_task(
+        daemon=daemon,
+        task=_task(),
+        execution_config=_inline(),
+        sandbox_config=_sandbox_config(),
+        org_id=ORG_ID,
+        request_id=REQUEST_ID,
+        requesting_user_id=USER_ID,
+        on_complete=callbacks.complete,
+        on_fail=callbacks.fail,
+    )
+
+    assert callbacks.failed == []
+    assert len(callbacks.completed) == 1
+    assert daemon.destroyed == ["sb-test-1234"]
+    assert "sandbox_destroyed" in recorded
+    assert "script_completed" in recorded
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_script_to_executor_without_agent_session(monkeypatch):
     """A script task is handed to the script executor, never an agent session."""
     from daemon.daemon import LucentDaemon

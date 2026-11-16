@@ -1011,14 +1011,17 @@ async def list_tasks(
 
     repo = RequestRepository(pool)
     org_id = str(user.organization_id)
-    tasks = await repo.list_tasks(str(request_id), status=status, org_id=org_id)
+    req = await _get_visible_request(repo, str(request_id), user)
+    if not req:
+        raise HTTPException(404, "Request not found")
+    result = await repo.list_tasks(str(request_id), status=status, org_id=org_id)
     capabilities = {
         "sandboxes_enabled": sandboxes_enabled(organization_id=org_id),
         "custom_tooling_enabled": custom_tooling_enabled(organization_id=org_id),
     }
-    for task in tasks:
+    for task in result["items"]:
         task.update(capabilities)
-    return tasks
+    return result
 
 
 @router.post("/tasks/{task_id}/claim")

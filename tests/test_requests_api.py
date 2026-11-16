@@ -258,3 +258,98 @@ async def test_request_memories_endpoint_handles_uuid_org(db_pool):
             await conn.execute("DELETE FROM memories WHERE id = $1", memory_id)
             await conn.execute("DELETE FROM users WHERE id = $1", user["id"])
             await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])
+
+
+@pytest.mark.asyncio
+async def test_list_request_tasks_returns_pagination_envelope(db_pool):
+    """GET /api/requests/{id}/tasks returns the pagination envelope of tasks.
+
+    Regression: the route iterated the envelope dict returned by
+    ``RequestRepository.list_tasks`` as if it were a list of tasks, raising
+    AttributeError ('str' object has no attribute 'update') and returning 500.
+    The envelope shape and per-task capability flags are pinned here.
+    """
+    prefix = f"test_req_tasks_{str(uuid4())[:8]}_"
+    org = await OrganizationRepository(db_pool).create(name=f"{prefix}org")
+    user = await UserRepository(db_pool).create(
+        external_id=f"{prefix}user",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{prefix}user@test.com",
+        display_name="Member",
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title="Request with tasks",
+        org_id=str(org["id"]),
+        created_by=str(user["id"]),
+    )
+    first = await repo.create_task(
+        request_id=str(request["id"]),
+        title="First task",
+        org_id=str(org["id"]),
+    )
+    second = await repo.create_task(
+        request_id=str(request["id"]),
+        title="Second task",
+        org_id=str(org["id"]),
+    )
+    empty_request = await repo.create_request(
+        title="Request without tasks",
+        org_id=str(org["id"]),
+        created_by=str(user["id"]),
+    )
+
+    try:
+        async with _client_for(user) as client:
+            response = await client.get(f"/api/requests/{request['id']}/tasks")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert set(payload) == {
+                "items",
+                "total_count",
+                "offset",
+                "limit",
+                "has_more",
+            }
+            assert payload["total_count"] == 2
+            assert payload["offset"] == 0
+            assert payload["limit"] == 25
+            assert payload["has_more"] is False
+            assert [task["id"] for task in payload["items"]] == [
+                str(first["id"]),
+                str(second["id"]),
+            ]
+            for task in payload["items"]:
+                assert isinstance(task["sandboxes_enabled"], bool)
+                assert isinstance(task["custom_tooling_enabled"], bool)
+
+            filtered = await client.get(
+                f"/api/requests/{request['id']}/tasks",
+                params={"status": "completed"},
+            )
+            assert filtered.status_code == 200, filtered.text
+            filtered_payload = filtered.json()
+            assert filtered_payload["items"] == []
+            assert filtered_payload["total_count"] == 0
+            assert filtered_payload["has_more"] is False
+
+            empty = await client.get(f"/api/requests/{empty_request['id']}/tasks")
+            assert empty.status_code == 200, empty.text
+            empty_payload = empty.json()
+            assert empty_payload["items"] == []
+            assert empty_payload["total_count"] == 0
+            assert empty_payload["offset"] == 0
+            assert empty_payload["limit"] == 25
+            assert empty_payload["has_more"] is False
+
+            missing = await client.get(f"/api/requests/{uuid4()}/tasks")
+            assert missing.status_code == 404, missing.text
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM requests WHERE id = ANY($1::uuid[])",
+                [request["id"], empty_request["id"]],
+            )
+            await conn.execute("DELETE FROM users WHERE id = $1", user["id"])
+            await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])

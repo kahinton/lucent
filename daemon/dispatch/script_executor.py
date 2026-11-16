@@ -508,6 +508,46 @@ def _retry_budget(output_contract: dict[str, Any] | None) -> int:
     return max(0, min(requested, SCRIPT_MAX_EXTRA_ATTEMPTS))
 
 
+async def _destroy_script_sandbox(
+    *, daemon: Any, task_id: str, sandbox_id: str | None
+) -> None:
+    """Destroy a script task's sandbox and record it in the event trail.
+
+    The destroy runs first and independently of the audit event, exactly as the
+    agent path does (destroy, then ``sandbox_destroyed``): an event-store or
+    logging failure can never leak a container, mask the script outcome, or
+    replace an exception already in flight out of the teardown block.
+
+    A provisioning failure leaves no ``sandbox_id``; there is then no container
+    to destroy and no destruction to record, so the event is skipped
+    explicitly rather than emitted for a sandbox that never existed.
+    """
+    if not sandbox_id:
+        return
+    try:
+        await daemon._destroy_task_sandbox(sandbox_id)
+    except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
+        runtime.log(
+            f"Script sandbox cleanup failed for {sandbox_id[:12]}: {exc}",
+            "WARN",
+        )
+        return
+    try:
+        await _event(
+            task_id,
+            "sandbox_destroyed",
+            f"Sandbox {sandbox_id[:12]} destroyed after task completion",
+        )
+    except Exception as exc:  # noqa: BLE001 — audit must never mask the outcome
+        try:
+            runtime.log(
+                f"Script task {task_id[:8]} sandbox_destroyed event failed: {exc}",
+                "WARN",
+            )
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
+
+
 async def run_script_task(
     *,
     daemon: Any,
@@ -581,6 +621,9 @@ async def run_script_task(
         ),
     )
     if not sandbox_id:
+        # Provisioning failed before a sandbox id existed: there is no teardown
+        # to run and no ``sandbox_destroyed`` event to emit, which is why this
+        # path does not fall through to the finally teardown below.
         detail = (failure_meta or {}).get("detail") or "sandbox manager returned no sandbox_id"
         await _event(
             task_id,
@@ -821,10 +864,6 @@ async def run_script_task(
                     f"Script checkout cleanup failed for {sandbox_id[:12]}: {exc}",
                     "WARN",
                 )
-        try:
-            await daemon._destroy_task_sandbox(sandbox_id)
-        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
-            runtime.log(
-                f"Script sandbox cleanup failed for {sandbox_id[:12]}: {exc}",
-                "WARN",
-            )
+        await _destroy_script_sandbox(
+            daemon=daemon, task_id=task_id, sandbox_id=sandbox_id
+        )
