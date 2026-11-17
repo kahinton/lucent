@@ -370,6 +370,11 @@ If you do not have the tool, credential, sandbox, or permission needed to persis
 --- HANDOFFS TO THE USER ---
 If the task or workflow asks you to send, provide, create, return, share, or publish something "as a handoff" or otherwise hand something off to the user, you MUST call `send_handoff`. Do not just write a section titled "Handoff" in your final task output — that only completes the task transcript and does not create a visible Handoffs item for the user. Use `send_handoff` for updates, recommendations, questions, decisions, or summaries the user should read or answer in Handoffs. Set `requires_response=true` and include a concise `response_prompt` when Lucent should wait for the user's answer before continuing. Use `record_task_output` instead for durable artifacts that belong on the Activity request page, such as PRs, files, documents, deployments, or links.
 
+--- TOOL REPORTING ---
+- Never state that a tool is unavailable, missing, not granted, or not permitted unless an actual invocation returned that error. If a call fails, quote the returned error text verbatim and name the tool.
+- Do not narrate tool access when a call succeeds — call it and report the outcome.
+- If a required tool is listed and you have it, call it. Do not explain in prose why you cannot; attempt the call and report what happened.
+
 --- GUARDRAILS ---
 - {git_commit_instruction}
 - {git_push_instruction}

@@ -1374,6 +1374,12 @@ class TaskFailBody(BaseModel):
     instance_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class TaskNeedsReviewBody(TaskFailBody):
+    """A task parked for review may carry a one-line terminal summary."""
+
+    result_summary: str | None = None
+
+
 @router.post("/tasks/{task_id}/fail")
 async def fail_task(
     task_id: UUID,
@@ -1404,7 +1410,7 @@ async def fail_task(
 async def mark_task_needs_review(
     task_id: UUID,
     user: AuthenticatedUser,
-    body: TaskFailBody = Body(...),
+    body: TaskNeedsReviewBody = Body(...),
     pool=Depends(get_pool),
 ):
     """Stop automatic execution and preserve a task for human review."""
@@ -1418,6 +1424,7 @@ async def mark_task_needs_review(
         org_id=str(user.organization_id),
         instance_id=body.instance_id,
         result=body.result,
+        result_summary=body.result_summary,
     )
     if not task:
         raise HTTPException(
@@ -1540,11 +1547,22 @@ async def requeue_completed_task_for_rework(
 
 
 @router.get("/tasks/{task_id}/events")
-async def task_events(task_id: UUID, user: AuthenticatedUser, pool=Depends(get_pool)):
+async def task_events(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    limit: int = 25,
+    offset: int = 0,
+    pool=Depends(get_pool),
+):
     from lucent.db.requests import RequestRepository
 
     repo = RequestRepository(pool)
-    return await repo.list_task_events(str(task_id), org_id=str(user.organization_id))
+    return await repo.list_task_events(
+        str(task_id),
+        limit=max(1, min(int(limit), 500)),
+        offset=max(0, int(offset)),
+        org_id=str(user.organization_id),
+    )
 
 
 @router.post("/tasks/{task_id}/events")

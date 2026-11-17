@@ -41,6 +41,91 @@ def validate_extra_hosts(extra_hosts: dict[str, str]) -> dict[str, str]:
     return validated
 
 
+# Allowlist enforcement is implemented as iptables OUTPUT rules inside the
+# container, so an image without iptables cannot honour ``network_mode =
+# "allowlist"``. These are official upstream images known not to ship it:
+# matching one at authoring time lets a template proposal name the problem
+# instead of a task failing weeks later at dispatch. The list is deliberately
+# conservative — a custom image is never rejected here, because its contents
+# are unknown and the runtime iptables probe is the authoritative gate.
+_ALLOWLIST_INCAPABLE_IMAGE_PATTERNS = (
+    re.compile(r"^python:.*slim.*$"),
+    re.compile(r"^node:.*slim.*$"),
+    re.compile(r"^ruby:.*slim.*$"),
+    re.compile(r"^debian:.*$"),
+    re.compile(r"^ubuntu:.*$"),
+    re.compile(r"^alpine:.*$"),
+    re.compile(r"^busybox:.*$"),
+)
+
+
+def image_known_to_lack_allowlist_support(image: str) -> bool:
+    """Whether ``image`` is a stock image known not to ship iptables.
+
+    Only exact upstream image names are matched. A custom image — even one
+    whose name mentions a stock base — is not rejected here.
+    """
+    normalized = (image or "").strip().lower()
+    return any(p.match(normalized) for p in _ALLOWLIST_INCAPABLE_IMAGE_PATTERNS)
+
+
+def allowlist_enforcement_error(
+    image: str,
+    network_mode: str,
+    allowed_hosts: list[str] | tuple[str, ...],
+    *,
+    detail: str | None = None,
+) -> str:
+    """Build a self-describing allowlist failure message.
+
+    Every allowlist failure must name the network mode, the image, and the
+    requested hosts, plus a concrete reason. An empty reason is never
+    acceptable — a bare "failed: ." tells the reader nothing.
+    """
+    reason = detail or (
+        "iptables is not installed in the image, so the egress allowlist "
+        "cannot be enforced"
+    )
+    return (
+        f"Network allowlist enforcement unavailable in image {image!r} "
+        f"(network_mode={network_mode!r}, "
+        f"allowed_hosts={list(allowed_hosts)!r}): {reason}. "
+        "Use an image that provides iptables (lucent-sandbox:base does), or "
+        "change network_mode. Sandbox security policy could not be applied."
+    )
+
+
+def check_allowlist_image(
+    image: str,
+    network_mode: str,
+    allowed_hosts: list[str] | tuple[str, ...],
+    *,
+    setup_commands: list[str] | tuple[str, ...] | None = None,
+) -> str | None:
+    """Authoring-time allowlist capability check.
+
+    Returns an error string when ``network_mode == "allowlist"`` names a stock
+    image known to lack iptables; otherwise ``None``. Unknown/custom images
+    pass here and are caught by the runtime probe at dispatch.
+
+    A setup command that mentions iptables is treated as the author supplying
+    the capability themselves (setup runs before the policy is applied), so it
+    is never rejected here — the runtime probe still decides whether it worked.
+    """
+    if str(network_mode or "").strip().lower() != "allowlist":
+        return None
+    if not image_known_to_lack_allowlist_support(image):
+        return None
+    if any("iptables" in str(cmd).lower() for cmd in (setup_commands or [])):
+        return None
+    return allowlist_enforcement_error(
+        image,
+        network_mode,
+        allowed_hosts,
+        detail="the image is a stock upstream image that does not ship iptables",
+    )
+
+
 class SandboxStatus(str, enum.Enum):
     CREATING = "creating"
     READY = "ready"

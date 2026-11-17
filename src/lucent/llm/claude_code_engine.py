@@ -9,8 +9,10 @@ provider (Ollama >= 0.14 serves the Anthropic Messages API) via ``ANTHROPIC_BASE
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 from typing import Any, Callable
 
 from lucent.llm.engine import (
@@ -25,9 +27,40 @@ from lucent.logging import get_logger
 
 logger = get_logger("llm.claude_code")
 
+# The SDK forwards a string system prompt as `--system-prompt <text>`, i.e. one
+# argv element. Linux caps a single argv element at MAX_ARG_STRLEN (128 KiB), so
+# a large system message — a request-review prompt embeds every task output —
+# fails at process start with `[Errno 7] Argument list too long` before the model
+# ever sees it. Above this budget the same text is handed to the CLI as a file
+# (`--system-prompt-file`), which costs one short path in argv. Nothing is
+# truncated: the file carries the prompt verbatim.
+SYSTEM_PROMPT_ARGV_MAX_BYTES = 96 * 1024
+
 _ClaudeAgentOptions: Any = None
 _query: Any = None
 _sdk_available: bool | None = None
+
+
+def _system_prompt_exceeds_argv_budget(system_message: str) -> bool:
+    """True when the system prompt cannot be passed as one argv element."""
+    return len(system_message.encode("utf-8")) > SYSTEM_PROMPT_ARGV_MAX_BYTES
+
+
+def _write_system_prompt_file(system_message: str) -> str:
+    """Write the system prompt verbatim to a temp file and return its path.
+
+    The CLI reads the path while starting, so the file must outlive
+    ``_build_options``; ``_run`` removes it once the session has ended.
+    """
+    fd, path = tempfile.mkstemp(prefix="lucent-system-prompt-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(system_message)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    return path
 
 
 def _ensure_sdk() -> bool:
@@ -203,6 +236,7 @@ class ClaudeCodeEngine(LLMEngine):
         include_partial: bool,
         native_env: dict[str, str] | None = None,
         approval: Any = None,
+        system_prompt_path: str | None = None,
     ) -> Any:
         if not _ensure_sdk():
             raise RuntimeError(
@@ -239,7 +273,11 @@ class ClaudeCodeEngine(LLMEngine):
         if approval is not None and getattr(approval, "enabled", False):
             kwargs["can_use_tool"] = _claude_approval_callback(approval)
         if system_message:
-            kwargs["system_prompt"] = system_message
+            if system_prompt_path:
+                # `--system-prompt-file <path>`: the text never touches argv.
+                kwargs["system_prompt"] = {"type": "file", "path": system_prompt_path}
+            else:
+                kwargs["system_prompt"] = system_message
         mcp_servers = to_claude_mcp_servers(mcp_config)
         if mcp_servers:
             kwargs["mcp_servers"] = mcp_servers
@@ -369,31 +407,50 @@ class ClaudeCodeEngine(LLMEngine):
             audit_context
         )
 
-        options = self._build_options(
-            model=model,
-            system_message=system_message,
-            mcp_config=mcp_config,
-            reasoning_effort=reasoning_effort,
-            approve_permissions=approve_permissions,
-            provider_session_id=provider_session_id,
-            resume=resume,
-            audit_context=audit_context,
-            include_partial=include_partial,
-            native_env=native_env,
-            approval=approval,
-        )
+        # A system prompt too large for one argv element goes to a file the CLI
+        # reads at start-up. It must exist until the session ends, so it is
+        # created here rather than inside `_build_options` and removed below.
+        system_prompt_path: str | None = None
+        if system_message and _system_prompt_exceeds_argv_budget(system_message):
+            system_prompt_path = _write_system_prompt_file(system_message)
+            logger.info(
+                "System prompt is %d bytes (argv budget %d); passing it via "
+                "--system-prompt-file",
+                len(system_message.encode("utf-8")),
+                SYSTEM_PROMPT_ARGV_MAX_BYTES,
+            )
 
         text = _combine_prompt(prompt, attachments)
-        state = {"final": None, "error": None}
+        state: dict[str, Any] = {"final": None, "error": None}
 
         try:
-            async for message in _query(prompt=text, options=options):
-                for event in self._map_message(message, state):
-                    emit(event)
-        except Exception as exc:
-            logger.warning("Claude Code session failed: %s", exc, exc_info=True)
-            emit(SessionEvent(type=SessionEventType.ERROR, content=str(exc)))
-            return None
+            options = self._build_options(
+                model=model,
+                system_message=system_message,
+                mcp_config=mcp_config,
+                reasoning_effort=reasoning_effort,
+                approve_permissions=approve_permissions,
+                provider_session_id=provider_session_id,
+                resume=resume,
+                audit_context=audit_context,
+                include_partial=include_partial,
+                native_env=native_env,
+                approval=approval,
+                system_prompt_path=system_prompt_path,
+            )
+
+            try:
+                async for message in _query(prompt=text, options=options):
+                    for event in self._map_message(message, state):
+                        emit(event)
+            except Exception as exc:
+                logger.warning("Claude Code session failed: %s", exc, exc_info=True)
+                emit(SessionEvent(type=SessionEventType.ERROR, content=str(exc)))
+                return None
+        finally:
+            if system_prompt_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(system_prompt_path)
 
         if state["error"]:
             return None

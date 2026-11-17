@@ -76,6 +76,35 @@ class TestRequiredToolUsage:
         assert "do not repeat its investigation" in prompt
         assert "Prior response" in prompt
 
+    def test_missing_tool_continuation_forbids_false_unavailability_claims(self):
+        # Canary 9c118555: the model held the tools but narrated that they were
+        # unavailable. The corrective prompt must make that claim a fabrication
+        # unless an invocation actually returned it.
+        prompt = _build_missing_tool_continuation_prompt(
+            description="Store a durable report with store_user_file.",
+            prior_result=(
+                "I attempted to call store_user_file, but the tools were "
+                "unavailable in this execution context."
+            ),
+            missing_tools=["store_user_file"],
+            requires_operational_tool=True,
+        )
+
+        assert "This response supersedes a prior attempt" in prompt
+        assert "supersedes that attempt and what was missed" in prompt
+        assert (
+            "Never state that a tool is unavailable, missing, not granted, or not "
+            "permitted unless an actual invocation returned that error."
+            in prompt
+        )
+        assert "quote the returned error text verbatim and name the tool" in prompt
+        assert "Do not narrate tool access when a call succeeds" in prompt
+        assert "If a required tool is listed and you have it, call it" in prompt
+        assert (
+            "Do not explain in prose why you cannot; attempt the call and report "
+            "what happened" in prompt
+        )
+
     def test_memory_agent_requires_mcp_tool_usage_for_mutating_work(self):
         assert _task_requires_mcp_tool_usage("memory", "Soft-delete retired memories") is True
 

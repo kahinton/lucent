@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from lucent.llm import claude_code_engine as cce
@@ -272,3 +274,109 @@ def test_build_options_ignores_native_env_for_local_backend(fake_sdk):
     env = opts.kwargs["env"]
     assert env["ANTHROPIC_BASE_URL"] == "http://h:11434"
     assert env["ANTHROPIC_API_KEY"] == ""
+
+
+# ── system prompt transport (argv vs file) ───────────────────────────────────
+
+_LARGE_TASK_OUTPUT = "TASK OUTPUT: " + ("x" * 200_000)
+
+
+async def test_large_system_prompt_is_not_routed_through_argv(fake_sdk, monkeypatch):
+    """A review prompt carrying every task output must not become an argv element.
+
+    The SDK forwards a string ``system_prompt`` as ``--system-prompt <text>``.
+    Linux caps one argv element at MAX_ARG_STRLEN (128 KiB), which is exactly the
+    failure that stopped the review for request b7f1c593 with
+    ``[Errno 7] Argument list too long`` before the CLI process started.
+    """
+    seen: dict = {}
+
+    async def _query(*, prompt, options=None):
+        # Read the prompt while the session is live: this is when the CLI would
+        # read the file, so it also proves the file outlives `_build_options`.
+        spec = options.kwargs["system_prompt"]
+        seen["spec"] = spec
+        seen["options_kwargs"] = options.kwargs
+        seen["path"] = spec["path"] if isinstance(spec, dict) else None
+        if seen["path"]:
+            seen["content_at_start"] = open(seen["path"], encoding="utf-8").read()
+        yield ResultMessage(result="ok")
+
+    monkeypatch.setattr(cce, "_query", _query)
+    engine = cce.ClaudeCodeEngine()
+    await engine.run_session(
+        model="m", system_message=_LARGE_TASK_OUTPUT, prompt="Execute this task"
+    )
+
+    spec = seen["spec"]
+    assert isinstance(spec, dict) and spec["type"] == "file"
+    # The only thing argv carries is a short path, not the 200k-char prompt.
+    assert len(seen["path"].encode("utf-8")) < 4096
+    # No other option value can become an over-limit argv element either.
+    for value in seen["options_kwargs"].values():
+        if isinstance(value, str):
+            assert len(value.encode("utf-8")) < 128 * 1024
+    assert len(_LARGE_TASK_OUTPUT.encode("utf-8")) > 128 * 1024
+    # No truncation: the file the CLI reads is the prompt, byte for byte.
+    assert seen["content_at_start"] == _LARGE_TASK_OUTPUT
+    assert len(seen["content_at_start"]) == len(_LARGE_TASK_OUTPUT)
+    # Cleaned up once the session ended.
+    assert not os.path.exists(seen["path"])
+
+
+async def test_system_prompt_file_threshold_is_argv_safe(fake_sdk, monkeypatch):
+    """The inline/file boundary stays below the platform per-argument limit."""
+    assert cce.SYSTEM_PROMPT_ARGV_MAX_BYTES < 128 * 1024
+
+    seen: dict = {}
+
+    async def _query(*, prompt, options=None):
+        seen["spec"] = options.kwargs["system_prompt"]
+        yield ResultMessage(result="ok")
+
+    monkeypatch.setattr(cce, "_query", _query)
+    engine = cce.ClaudeCodeEngine()
+
+    at_budget = "y" * cce.SYSTEM_PROMPT_ARGV_MAX_BYTES
+    await engine.run_session(model="m", system_message=at_budget, prompt="hi")
+    assert seen["spec"] == at_budget
+
+    over_budget = "y" * (cce.SYSTEM_PROMPT_ARGV_MAX_BYTES + 1)
+    await engine.run_session(model="m", system_message=over_budget, prompt="hi")
+    assert isinstance(seen["spec"], dict) and seen["spec"]["type"] == "file"
+
+
+async def test_small_system_prompt_stays_inline(fake_sdk, monkeypatch):
+    """Small-prompt regression: the existing argv path is unchanged."""
+    seen: dict = {}
+
+    async def _query(*, prompt, options=None):
+        seen["spec"] = options.kwargs["system_prompt"]
+        yield ResultMessage(result="ok")
+
+    monkeypatch.setattr(cce, "_query", _query)
+    engine = cce.ClaudeCodeEngine()
+    await engine.run_session(model="m", system_message="short system", prompt="hi")
+
+    assert seen["spec"] == "short system"
+
+
+async def test_system_prompt_file_removed_when_session_raises(fake_sdk, monkeypatch):
+    """A failing session must not leak the temp prompt file."""
+    paths: list[str] = []
+
+    async def _query(*, prompt, options=None):
+        spec = options.kwargs["system_prompt"]
+        paths.append(spec["path"])
+        raise RuntimeError("provider died")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(cce, "_query", _query)
+    engine = cce.ClaudeCodeEngine()
+    result = await engine.run_session(
+        model="m", system_message=_LARGE_TASK_OUTPUT, prompt="hi"
+    )
+
+    assert result is None
+    assert paths and not os.path.exists(paths[0])
+

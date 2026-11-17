@@ -53,6 +53,22 @@ async def test_subagent_prompt_includes_request_owner_context():
     assert "Owner-only preference" in prompt
     assert "call `store_user_file` instead of a generic filesystem tool" in prompt
     assert "a path in the agent/container working directory is not a user deliverable" in prompt
+    # Ordinary task guidance carries the same anti-fabrication rules as the
+    # corrective continuation, so the false claim is prevented up front rather
+    # than only repaired after it becomes the record.
+    assert "--- TOOL REPORTING ---" in prompt
+    assert (
+        "Never state that a tool is unavailable, missing, not granted, or not "
+        "permitted unless an actual invocation returned that error."
+        in prompt
+    )
+    assert "quote the returned error text verbatim and name the tool" in prompt
+    assert "Do not narrate tool access when a call succeeds" in prompt
+    assert "If a required tool is listed and you have it, call it" in prompt
+    assert (
+        "Do not explain in prose why you cannot; attempt the call and report "
+        "what happened" in prompt
+    )
 
 
 @pytest.mark.asyncio

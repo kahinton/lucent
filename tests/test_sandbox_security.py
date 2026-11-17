@@ -218,31 +218,144 @@ class TestApplyNetworkAllowlist:
         """A failing iptables rule is a hard failure — partial policies leave
         the sandbox in an undefined security state."""
         config = SandboxConfig(
+            image="custom-builder:1",
             network_mode="allowlist",
             allowed_hosts=["1.2.3.4"],
         )
         backend.exec = self._make_exec_factory(
             rule_failure_substring="iptables -P OUTPUT DROP",
         )
-        with pytest.raises(RuntimeError, match="allowlist policy failed"):
+        with pytest.raises(RuntimeError, match="allowlist policy failed") as excinfo:
             await backend._apply_network_allowlist("sb-test", config)
+        message = str(excinfo.value)
+        assert "custom-builder:1" in message
+        assert "network_mode='allowlist'" in message
+        assert "1.2.3.4" in message
+        assert "simulated rule failure" in message
 
     @pytest.mark.asyncio
     async def test_missing_iptables_fails_closed(self, backend):
-        """A missing iptables binary must fail the sandbox policy setup."""
+        """A missing iptables binary must fail and name the image and mode.
+
+        This is the real-world failure: ``command -v iptables`` exits non-zero
+        and writes nothing to stderr, so the old message was
+        ``Network allowlist policy failed: .`` — an empty reason.
+        """
         config = SandboxConfig(
+            image="python:3.12-slim",
             network_mode="allowlist",
             allowed_hosts=["1.2.3.4"],
         )
 
         async def fake_exec(sandbox_id, cmd, **kwargs):  # noqa: ARG001
             if "command -v iptables" in cmd:
-                return _make_exec_fail()
+                return _make_exec_fail(stderr="")
             return _make_exec_ok()
 
         backend.exec = fake_exec
-        with pytest.raises(RuntimeError, match="allowlist policy failed"):
+        with pytest.raises(RuntimeError) as excinfo:
             await backend._apply_network_allowlist("sb-test", config)
+
+        message = str(excinfo.value)
+        assert message.strip()
+        assert "python:3.12-slim" in message
+        assert "network_mode='allowlist'" in message
+        assert "1.2.3.4" in message
+        assert "iptables" in message
+        # The exact defect from the report: an empty reason after "failed:".
+        assert "failed: ." not in message
+        assert not message.endswith(": .")
+
+    @pytest.mark.asyncio
+    async def test_rule_failure_with_empty_stderr_names_reason(self, backend):
+        """A rule failure with no stderr must still explain itself."""
+        config = SandboxConfig(
+            image="custom-builder:1",
+            network_mode="allowlist",
+            allowed_hosts=["1.2.3.4"],
+        )
+
+        async def fake_exec(sandbox_id, cmd, **kwargs):  # noqa: ARG001
+            if cmd == "command -v iptables":
+                return _make_exec_ok()
+            return _make_exec_fail(stderr="")
+
+        backend.exec = fake_exec
+        with pytest.raises(RuntimeError) as excinfo:
+            await backend._apply_network_allowlist("sb-test", config)
+
+        message = str(excinfo.value)
+        assert message.strip()
+        assert "Network allowlist policy failed" in message
+        assert "custom-builder:1" in message
+        assert "network_mode='allowlist'" in message
+        assert "1.2.3.4" in message
+        assert "wrote no stderr" in message
+        assert "failed: ." not in message
+
+
+class TestAllowlistImageCapability:
+    """Authoring-time checks that an image can enforce an allowlist.
+
+    Allowlist enforcement is iptables inside the container, so a stock image
+    without iptables cannot honour it. These checks reject known-incapable
+    images at proposal/task-creation time; the runtime probe remains the
+    authority for anything not known here.
+    """
+
+    def test_stock_slim_image_is_rejected_for_allowlist(self):
+        from lucent.sandbox.models import check_allowlist_image
+
+        error = check_allowlist_image(
+            "python:3.12-slim", "allowlist", ["api.open-meteo.com"]
+        )
+        assert error is not None
+        assert error.strip()
+        assert "python:3.12-slim" in error
+        assert "network_mode='allowlist'" in error
+        assert "api.open-meteo.com" in error
+        assert "iptables" in error
+
+    def test_base_image_is_not_rejected(self):
+        from lucent.sandbox.models import check_allowlist_image
+
+        assert (
+            check_allowlist_image(
+                "lucent-sandbox:base", "allowlist", ["api.open-meteo.com"]
+            )
+            is None
+        )
+
+    def test_custom_image_is_not_rejected(self):
+        """Unknown images pass — the runtime probe decides, not a guess."""
+        from lucent.sandbox.models import check_allowlist_image
+
+        assert (
+            check_allowlist_image(
+                "myorg/python-with-iptables:1", "allowlist", ["api.open-meteo.com"]
+            )
+            is None
+        )
+
+    def test_non_allowlist_modes_are_not_checked(self):
+        from lucent.sandbox.models import check_allowlist_image
+
+        assert check_allowlist_image("python:3.12-slim", "bridge", []) is None
+        assert check_allowlist_image("python:3.12-slim", "none", []) is None
+
+    def test_setup_command_supplying_iptables_is_not_rejected(self):
+        """A template that installs iptables itself is allowed to pass here."""
+        from lucent.sandbox.models import check_allowlist_image
+
+        assert (
+            check_allowlist_image(
+                "python:3.12-slim",
+                "allowlist",
+                ["api.open-meteo.com"],
+                setup_commands=["apt-get update && apt-get install -y iptables"],
+            )
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------

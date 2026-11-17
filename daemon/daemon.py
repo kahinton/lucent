@@ -53,6 +53,18 @@ from daemon.dispatch import decision_step
 from daemon.dispatch import fusion
 from daemon.dispatch import model_auto
 from daemon.dispatch import script_executor
+from daemon.dispatch.supersession import (
+    REASON_MISSING_OPERATIONAL_TOOL_WORK,
+    REASON_MISSING_REQUIRED_TOOLS,
+    REASON_STRUCTURED_OUTPUT_REPAIR,
+    STRUCTURED_REPAIR_EVENT_TYPE,
+    SupersededAttempt,
+    apply_repair_notice,
+    apply_superseded_header,
+    build_repair_replacement_summary,
+    build_terminal_summary,
+    record_superseded_attempt,
+)
 from daemon.observability.live_output import (
     FLUSH_INTERVAL_SECONDS as LIVE_OUTPUT_FLUSH_SECONDS,
     build_live_output_writer,
@@ -745,12 +757,22 @@ def _build_missing_tool_continuation_prompt(
         requirement = "Complete any remaining required tool work before responding."
 
     return (
+        "This response supersedes a prior attempt at the task below. Open by "
+        "stating plainly that it supersedes that attempt and what was missed.\n\n"
         "Continue the task below. Your prior response is included for context; "
         "do not repeat its investigation unless needed to finish the work.\n\n"
         "The completion check found that required work was not performed. "
         f"{requirement}\n"
         "Do the missing work now using the available tools. Do not merely describe "
         "the intended tool call. Then provide a concise completion note.\n\n"
+        "Tool-reporting rules:\n"
+        "- Never state that a tool is unavailable, missing, not granted, or not "
+        "permitted unless an actual invocation returned that error. If a call "
+        "fails, quote the returned error text verbatim and name the tool.\n"
+        "- Do not narrate tool access when a call succeeds — call it and report "
+        "the outcome.\n"
+        "- If a required tool is listed and you have it, call it. Do not explain "
+        "in prose why you cannot; attempt the call and report what happened.\n\n"
         f"Original task:\n{description}\n\n"
         f"Prior response:\n{prior_result[:10000]}"
     )
@@ -4593,13 +4615,19 @@ class LucentDaemon(
             except TypeError:
                 return await RequestAPI.complete_task(task_id, result, **kwargs)
 
-        async def _needs_review_owned(task_id: str, error: str, result: str | None = None):
+        async def _needs_review_owned(
+            task_id: str,
+            error: str,
+            result: str | None = None,
+            result_summary: str | None = None,
+        ):
             try:
                 return await RequestAPI.mark_task_needs_review(
                     task_id,
                     error,
                     instance_id=self.instance_id,
                     result=result,
+                    result_summary=result_summary,
                 )
             except TypeError:
                 return await RequestAPI.mark_task_needs_review(task_id, error)
@@ -4622,6 +4650,8 @@ class LucentDaemon(
             requesting_user_id: str | None = None,
             provided_result_structured: dict | None = None,
             result_summary_prefix: str | None = None,
+            superseded: SupersededAttempt | None = None,
+            terminal_summary: str | None = None,
         ):
             """Validate → contract-process → complete/fail for a finished session.
 
@@ -4631,16 +4661,26 @@ class LucentDaemon(
             comparison prefix is prepended to the stored summary). Behavior
             is identical to the inline span it replaced.
             """
-            # Validate
+            # Validate. `superseded` tells the failure scan that this pass
+            # replaced an earlier attempt and therefore opens by naming what
+            # that attempt missed — prose about the replaced attempt, not the
+            # final outcome.
             success, reason = self._validate_task_result(
                 result,
                 task=task,
                 tool_counts=validation_tool_counts or {},
+                superseded=superseded is not None,
             )
+            # Validation, structured extraction, and the review pipeline above
+            # all see the final attempt only; the provenance header exists for
+            # readers of `tasks.result` and is added at persistence time (after
+            # any contract repair has replaced `result`).
 
             if success:
                 output_contract = task.get("output_contract")
                 output_result = process_task_output(result, output_contract)
+                repair_displacement: SupersededAttempt | None = None
+                repair_replaced_answer = False
 
                 if output_result["validation_status"] in ("invalid", "extraction_failed"):
                     on_failure = (output_contract or {}).get("on_failure", "fallback")
@@ -4660,7 +4700,76 @@ class LucentDaemon(
                             if repair_result["validation_status"] == "valid":
                                 output_result = repair_result
                                 output_result["validation_status"] = "repair_succeeded"
-                                result = repair_text
+                                repair_replaced_answer = True
+                                # The repair output replaces the model's answer
+                                # wholesale, so the displaced text is preserved
+                                # durably BEFORE the replacement is persisted.
+                                displaced_text = result or ""
+                                if displaced_text.strip():
+                                    displaced_attempt = SupersededAttempt(
+                                        text=displaced_text,
+                                        attempt=(
+                                            superseded.attempt + 1
+                                            if superseded is not None
+                                            else 1
+                                        ),
+                                        total_attempts=(
+                                            superseded.total_attempts
+                                            if superseded is not None
+                                            else 1
+                                        ),
+                                        reason=REASON_STRUCTURED_OUTPUT_REPAIR,
+                                    )
+                                    displaced_event = await record_superseded_attempt(
+                                        displaced_attempt,
+                                        list_events=lambda: RequestAPI.get_task_events(
+                                            task_id
+                                        ),
+                                        add_event=lambda event_type, detail, metadata: (
+                                            RequestAPI.add_event(
+                                                task_id, event_type, detail, metadata
+                                            )
+                                        ),
+                                        match_text=True,
+                                    )
+                                    if displaced_event is not None:
+                                        repair_displacement = displaced_attempt.with_event(
+                                            str(displaced_event.get("id") or "") or None
+                                        )
+                                    else:
+                                        # The durable record could not be written.
+                                        # Dropping the answer here would lose the
+                                        # only copy of text that never reached the
+                                        # database, so keep both and say so.
+                                        log(
+                                            f"Task {task_id[:8]}: could not persist "
+                                            "the answer displaced by structured "
+                                            "repair; keeping both texts in result",
+                                            "ERROR",
+                                        )
+                                        repair_replaced_answer = False
+                                        result = (
+                                            f"{displaced_text.rstrip()}\n\n"
+                                            "--- Structured output repair ---\n\n"
+                                            f"{repair_text}"
+                                        )
+                                if repair_replaced_answer:
+                                    result = repair_text
+                                    await RequestAPI.add_event(
+                                        task_id,
+                                        STRUCTURED_REPAIR_EVENT_TYPE,
+                                        "Output did not match the task's JSON Schema; "
+                                        "a repair session produced the structured "
+                                        "output.",
+                                        {
+                                            "displaced_event_id": (
+                                                repair_displacement.event_id
+                                                if repair_displacement is not None
+                                                else None
+                                            ),
+                                            "displaced_chars": len(displaced_text),
+                                        },
+                                    )
 
                     # If validation still failed after policy actions, either fail or fallback.
                     if output_result["validation_status"] not in ("valid", "repair_succeeded"):
@@ -4681,8 +4790,34 @@ class LucentDaemon(
                 stored_structured = output_result.get("result_structured")
                 if stored_structured is None and provided_result_structured is not None:
                     stored_structured = provided_result_structured
+                # Computed after contract repair so a repaired `result` is what
+                # gets persisted. The repair notice makes the replacement
+                # visible to a reader of `result` alone.
+                stored_result = apply_superseded_header(result, superseded)
+                stored_result = apply_repair_notice(
+                    stored_result,
+                    repair_displacement,
+                    replaced=repair_replaced_answer,
+                )
                 stored_summary = output_result.get("result_summary")
-                if result_summary_prefix:
+                if repair_replaced_answer:
+                    # The terminal state is "repaired", not "the model answered
+                    # this"; say so even when the contract supplied a summary.
+                    summary_parts = [
+                        build_repair_replacement_summary(repair_displacement)
+                    ]
+                    if stored_summary:
+                        summary_parts.append(stored_summary)
+                    if terminal_summary:
+                        summary_parts.append(terminal_summary)
+                    stored_summary = "\n".join(summary_parts)
+                    if result_summary_prefix:
+                        stored_summary = f"{result_summary_prefix}\n{stored_summary}"
+                # A supersession terminal state is only supplied when the
+                # output contract did not already supply its own summary.
+                elif terminal_summary and not stored_summary:
+                    stored_summary = terminal_summary
+                elif result_summary_prefix:
                     stored_summary = (
                         f"{result_summary_prefix}\n{stored_summary}"
                         if stored_summary
@@ -4691,7 +4826,7 @@ class LucentDaemon(
 
                 completed = await _complete_owned(
                     task_id,
-                    result,
+                    stored_result,
                     result_structured=stored_structured,
                     result_summary=stored_summary,
                     validation_status=output_result.get("validation_status", "not_applicable"),
@@ -4737,7 +4872,10 @@ class LucentDaemon(
                             f"Automatic review processing failed: {review_err}",
                         )
 
-                log(f"Tracked task {task_id[:8]} completed ({len(result) if result else 0} chars)")
+                log(
+                    f"Tracked task {task_id[:8]} completed "
+                    f"({len(stored_result) if stored_result else 0} chars)"
+                )
                 if self._tracer:
                     self._tasks_completed_total.add(1, attributes={"status": "success", "agent_type": agent_type})
             else:
@@ -4754,7 +4892,11 @@ class LucentDaemon(
                         reason,
                         {"result_excerpt": (result or "")[:2000]},
                     )
-                    await _fail_owned(task_id, reason, result=result)
+                    await _fail_owned(
+                        task_id,
+                        reason,
+                        result=apply_superseded_header(result, superseded),
+                    )
                     log(f"Tracked task {task_id[:8]} failed: {reason}", "WARN")
                     if self._tracer:
                         self._tasks_completed_total.add(
@@ -5991,10 +6133,17 @@ class LucentDaemon(
             # A model may finish a useful investigation yet omit an explicit final
             # tool action. Give it one scoped continuation before escalating to a
             # human rather than discarding the entire task attempt.
+            superseded_attempt: SupersededAttempt | None = None
             if (
                 (requires_operational_tool and not operational_tool_tracker)
                 or missing_required_tools
             ):
+                repair_missing_tools = list(missing_required_tools)
+                repair_reason = (
+                    REASON_MISSING_REQUIRED_TOOLS
+                    if repair_missing_tools
+                    else REASON_MISSING_OPERATIONAL_TOOL_WORK
+                )
                 continuation_name = f"{agent_type}-{task_id[:8]}-completion"
                 await RequestAPI.add_event(
                     task_id,
@@ -6071,10 +6220,49 @@ class LucentDaemon(
                         },
                     )
                 if continuation_result:
-                    result = (
-                        f"{(result or '').rstrip()}\n\n"
-                        f"--- Completion continuation ---\n\n{continuation_result}"
-                    )
+                    if not (result or "").strip():
+                        # The first attempt produced no text, so there is
+                        # nothing to supersede: never claim a supersession or
+                        # lead the final text with a separator.
+                        result = continuation_result
+                    else:
+                        provisional = SupersededAttempt(
+                            text=result or "",
+                            attempt=1,
+                            total_attempts=2,
+                            reason=repair_reason,
+                            missing_tools=tuple(repair_missing_tools),
+                        )
+                        # Preserve the replaced text durably BEFORE the final
+                        # result is written, so a reader can always retrieve it.
+                        superseded_event = await record_superseded_attempt(
+                            provisional,
+                            list_events=lambda: RequestAPI.get_task_events(task_id),
+                            add_event=lambda event_type, detail, metadata: (
+                                RequestAPI.add_event(task_id, event_type, detail, metadata)
+                            ),
+                        )
+                        if superseded_event is not None:
+                            superseded_attempt = provisional.with_event(
+                                str(superseded_event.get("id") or "") or None
+                            )
+                            # `result` now carries the final attempt only; the
+                            # provenance header is added at persistence time.
+                            result = continuation_result
+                        else:
+                            # The durable event could not be written. Dropping
+                            # the first attempt here would lose the only copy of
+                            # text that never reached the database, so degrade
+                            # to the old concatenation and say so loudly.
+                            log(
+                                f"Task {task_id[:8]}: could not persist superseded "
+                                "attempt text; keeping both attempts in result",
+                                "ERROR",
+                            )
+                            result = (
+                                f"{(result or '').rstrip()}\n\n"
+                                f"--- Completion continuation ---\n\n{continuation_result}"
+                            )
 
                 missing_required_tools = _missing_required_task_tools(
                     required_tools,
@@ -6184,7 +6372,16 @@ class LucentDaemon(
                     reason,
                     {"agent_type": agent_type, "model": selected_model},
                 )
-                await _needs_review_owned(task_id, reason, result=result)
+                await _needs_review_owned(
+                    task_id,
+                    reason,
+                    result=apply_superseded_header(result, superseded_attempt),
+                    result_summary=(
+                        build_terminal_summary(superseded_attempt, succeeded=False)
+                        if superseded_attempt is not None
+                        else None
+                    ),
+                )
                 await RequestAPI.add_event(
                     task_id,
                     "manual_review_required",
@@ -6211,7 +6408,16 @@ class LucentDaemon(
                         "tool_counts": validation_tool_counts,
                     },
                 )
-                await _needs_review_owned(task_id, reason, result=result)
+                await _needs_review_owned(
+                    task_id,
+                    reason,
+                    result=apply_superseded_header(result, superseded_attempt),
+                    result_summary=(
+                        build_terminal_summary(superseded_attempt, succeeded=False)
+                        if superseded_attempt is not None
+                        else None
+                    ),
+                )
                 await RequestAPI.add_event(
                     task_id,
                     "manual_review_required",
@@ -6231,6 +6437,20 @@ class LucentDaemon(
                 selected_model=selected_model,
                 org_id=org_id,
                 requesting_user_id=requesting_user_id,
+                superseded=superseded_attempt,
+                terminal_summary=(
+                    build_terminal_summary(
+                        superseded_attempt,
+                        succeeded=True,
+                        satisfied_tools=sorted(
+                            tool
+                            for tool in required_tools
+                            if validation_tool_counts.get(tool)
+                        ),
+                    )
+                    if superseded_attempt is not None
+                    else None
+                ),
             )
 
     # Maximum time to wait for in-flight sessions during graceful drain (seconds)

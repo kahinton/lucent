@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from daemon.observability.tools import (
     _HANDOFF_TOOL_REQUIRED_PATTERNS,
     _HANDOFF_TOOL_REQUIRED_SIGNALS,
@@ -17,6 +19,7 @@ class TaskValidationMixin:
         *,
         task: dict | None = None,
         tool_counts: dict[str, int] | None = None,
+        superseded: bool = False,
     ) -> tuple[bool, str]:
         from daemon.validation.output import validate_consolidation_execution
 
@@ -64,10 +67,56 @@ class TaskValidationMixin:
             "couldn't complete", "could not complete", "task not completed",
             "error occurred", "exception occurred",
         )
+        failure_text = failure_scan_text(stripped, superseded=superseded)
         for indicator in failures:
-            if indicator in lowered:
+            if indicator in failure_text.lower():
                 return False, f"failure indicator found: '{indicator}'"
         return True, "ok"
+
+
+# A pass that replaced an earlier attempt is required to open by stating that
+# it supersedes that attempt and what was missed (see
+# ``_build_missing_tool_continuation_prompt``). This cue identifies that opening
+# statement structurally; without it no text is exempted.
+_SUPERSEDES_CUE_RE = re.compile(r"\bsupersed(?:e|es|ed|ing)\b", re.IGNORECASE)
+
+
+def _supersedes_opening(text: str) -> str | None:
+    """Return the leading block that states the supersession, if it is one.
+
+    Only the first paragraph can be the mandated opening statement, it must
+    name the supersession, and text must remain after it. Anything else is not
+    treated as an opening statement.
+    """
+    match = re.search(r"\n[ \t]*\n", text)
+    if match is None:
+        return None
+    opening = text[: match.end()]
+    if not _SUPERSEDES_CUE_RE.search(opening):
+        return None
+    if not text[match.end() :].strip():
+        return None
+    return opening
+
+
+def failure_scan_text(text: str, *, superseded: bool) -> str:
+    """Return the text the failure-indicator scan should read.
+
+    With no supersession the input is returned byte-identically, so single-pass
+    validation is unchanged. After a supersession the final pass is required to
+    open with a statement that it supersedes the prior attempt and what that
+    attempt missed. That opening describes the *replaced* attempt, so failure
+    phrasing inside it says nothing about the final outcome and is excluded
+    from the scan — but only that opening block: every later paragraph,
+    including the outcome section, is still scanned, so a final pass that
+    genuinely reports failure still fails.
+    """
+    if not superseded:
+        return text
+    opening = _supersedes_opening(text)
+    if opening is None:
+        return text
+    return text[len(opening) :].lstrip()
 
 
 def resolve_default_model(preferred_model: str | None = None) -> str:

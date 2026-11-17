@@ -33,6 +33,7 @@ from lucent.sandbox.models import (
     SandboxConfig,
     SandboxInfo,
     SandboxStatus,
+    allowlist_enforcement_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -807,14 +808,15 @@ class DockerBackend(SandboxBackend):
         loopback and already-established flows) and drop everything else.
 
         Requires the container to have the NET_ADMIN capability and iptables
-        available in the image. If iptables is missing we attempt to install
-        it via the container's package manager. If installation fails the
-        sandbox is marked failed — silently downgrading allowlist to bridge
-        would defeat the whole point of the security boundary.
+        available in the image. iptables is probed explicitly before the rules
+        run: a stock image without it fails with a message naming the image,
+        the requested mode, and the allowed hosts. Silently downgrading
+        allowlist to bridge would defeat the whole point of the security
+        boundary, so any failure raises.
 
         Raises:
-            RuntimeError: If iptables cannot be installed or any rule fails.
-                The caller must mark the sandbox as failed.
+            RuntimeError: If iptables is unavailable or any rule fails. The
+                caller must mark the sandbox as failed.
         """
         # Resolve allowed hosts before the policy is installed. This avoids one
         # Docker exec per host while keeping address validation in the trusted
@@ -845,6 +847,23 @@ class DockerBackend(SandboxBackend):
             rules.append(f"iptables -A OUTPUT -d {shlex.quote(ip)} -j ACCEPT")
         rules.append("iptables -P OUTPUT DROP")
 
+        # Probe the capability explicitly. Previously this lived only inside
+        # the ``set -eu`` script below: a missing iptables made `command -v`
+        # return non-zero with no stderr, so the caller interpolated an empty
+        # reason ("failed: .") and the real cause — no iptables in the image —
+        # was invisible. The probe makes the cause part of the message.
+        probe = await self.exec(
+            sandbox_id, "command -v iptables", timeout=10, user="root",
+        )
+        if probe.exit_code != 0:
+            raise RuntimeError(
+                allowlist_enforcement_error(
+                    config.image,
+                    config.network_mode,
+                    list(config.allowed_hosts),
+                )
+            )
+
         policy = "\n".join([
             "set -eu",
             "command -v iptables >/dev/null",
@@ -852,8 +871,16 @@ class DockerBackend(SandboxBackend):
         ])
         res = await self.exec(sandbox_id, policy, timeout=10, user="root")
         if res.exit_code != 0:
+            detail = res.stderr.strip()
+            if not detail:
+                detail = (
+                    f"iptables exited {res.exit_code} while applying the policy "
+                    "and wrote no stderr"
+                )
             raise RuntimeError(
-                f"Network allowlist policy failed: {res.stderr[:200]}. "
+                f"Network allowlist policy failed for image {config.image!r} "
+                f"(network_mode={config.network_mode!r}, "
+                f"allowed_hosts={list(config.allowed_hosts)!r}): {detail}. "
                 "Sandbox security policy could not be applied."
             )
 

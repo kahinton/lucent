@@ -350,15 +350,16 @@ Returns: JSON with the schedule details and its run history."""
                 await _authorized_schedule_repository(user_id, str(org_id))
             ).get_usable_schedule(schedule_id)
             if cleared:
-                result = {**cleared, "runs": await repo.list_runs(
-                    schedule_id, org_id=str(org_id)
-                )}
+                runs = await repo.list_runs(schedule_id, org_id=str(org_id))
+                result = {**cleared, "runs": runs["items"]}
             else:
                 result = None
         if not result:
             return json.dumps({"error": "Schedule not found"})
+        # Preserve list/dict/bool structure (runs, actions, enabled); only
+        # UUIDs are coerced, datetimes fall through to default=str.
         return json.dumps(
-            {k: str(v) if hasattr(v, "hex") else str(v) for k, v in result.items()},
+            {k: _jsonable_schedule_value(v) for k, v in result.items()},
             default=str,
         )
 
@@ -756,3 +757,341 @@ Generate one with: python -c "import secrets; print(secrets.token_urlsafe(24))\"
     )
     async def get_workflow_details(workflow_id: str) -> str:
         return await get_schedule_details(workflow_id)
+
+    @mcp.tool(
+        description="""Update a workflow in place; only supplied fields change.
+
+Every argument left as null keeps its current value, and omitting enabled
+preserves the current enabled state (pass enabled=false to disable).
+
+actions_json REPLACES the complete ordered action list — it is not a partial
+merge. To change a single action (e.g. its sandbox_template_id, model,
+description, task_kind, or execution_config), read the workflow with
+get_workflow_details, edit that action in the returned list, and send the full
+list back. Supplied actions are normalized like create_workflow's, and their
+task-kind requirements and sandbox-template clearance are re-validated.
+
+Changing schedule_type, cron_expression, or interval_seconds recomputes
+next_run_at through the same scheduling helper the create path uses.
+
+Returns: JSON with the updated workflow object."""
+    )
+    async def update_workflow(
+        workflow_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        priority: str | None = None,
+        review_instructions: str | None = None,
+        actions_json: str | list | None = None,
+        request_template_json: str | dict | None = None,
+        cron_expression: str | None = None,
+        interval_seconds: int | None = None,
+        schedule_type: str | None = None,
+        enabled: bool | None = None,
+    ) -> str:
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+
+        if priority is not None and priority not in ("low", "medium", "high", "urgent"):
+            return json.dumps(
+                {"error": "priority must be 'low', 'medium', 'high', or 'urgent'"}
+            )
+
+        from lucent.db.schedules import (
+            TIME_BASED_SCHEDULE_TYPES,
+            WORKFLOW_SCHEDULE_TYPES,
+            compute_next_run_at,
+        )
+
+        if schedule_type is not None and schedule_type not in WORKFLOW_SCHEDULE_TYPES:
+            return json.dumps(
+                {
+                    "error": (
+                        "schedule_type must be once, interval, cron, manual, "
+                        "webhook, or integration_event"
+                    )
+                }
+            )
+
+        # Parse JSON args up front so a malformed payload cannot reach the DB.
+        try:
+            actions = (
+                json.loads(actions_json)
+                if isinstance(actions_json, str) and actions_json.strip()
+                else actions_json
+            )
+            request_template = (
+                json.loads(request_template_json)
+                if isinstance(request_template_json, str) and request_template_json.strip()
+                else request_template_json
+            )
+        except json.JSONDecodeError as exc:
+            return json.dumps({"error": f"Invalid JSON: {exc.msg}"})
+        if actions is not None and not isinstance(actions, list):
+            return json.dumps({"error": "actions_json must be a JSON array"})
+        if request_template is not None and not isinstance(request_template, dict):
+            return json.dumps({"error": "request_template_json must be a JSON object"})
+
+        repo = await _get_schedule_repository()
+        # Visibility gate: the same ownership/scope check the get paths use.
+        # A caller who cannot see the workflow must not be able to update it.
+        if _include_daemon_workflows(user_role):
+            current = await repo.get_schedule(
+                workflow_id,
+                str(org_id),
+                created_by=str(user_id),
+                include_daemon_created=True,
+            )
+        else:
+            current = await (
+                await _authorized_schedule_repository(str(user_id), str(org_id), "write")
+            ).get_usable_schedule(workflow_id)
+        if not current:
+            return json.dumps({"error": "Workflow not found"})
+
+        trigger = current.get("trigger_type") or "schedule"
+        if schedule_type is not None:
+            if trigger == "schedule" and schedule_type not in TIME_BASED_SCHEDULE_TYPES:
+                return json.dumps(
+                    {"error": "schedule workflows require once, interval, or cron"}
+                )
+            if trigger != "schedule" and schedule_type in TIME_BASED_SCHEDULE_TYPES:
+                return json.dumps(
+                    {
+                        "error": (
+                            "this workflow's trigger type does not accept a "
+                            "time-based schedule_type"
+                        )
+                    }
+                )
+
+        fields: dict = {}
+        if title is not None:
+            fields["title"] = title
+        if description is not None:
+            fields["description"] = description
+        if priority is not None:
+            fields["priority"] = priority
+        if review_instructions is not None:
+            fields["review_instructions"] = review_instructions
+        if enabled is not None:
+            fields["enabled"] = enabled
+
+        if actions is not None:
+            from lucent.db.schedules import validate_task_action_kinds
+
+            normalized_actions = []
+            for idx, action in enumerate(actions):
+                if not isinstance(action, dict):
+                    return json.dumps({"error": f"actions_json[{idx}] must be an object"})
+                action = dict(action)
+                if "action_type" not in action and "type" in action:
+                    action["action_type"] = action.pop("type")
+                if "description" not in action:
+                    if "instructions" in action:
+                        action["description"] = action.pop("instructions")
+                    elif "prompt" in action:
+                        action["description"] = action.pop("prompt")
+                action.setdefault("action_type", "task")
+                action.setdefault("sequence_order", idx)
+                if action.get("action_type", "task") == "server_function":
+                    return json.dumps(
+                        {"error": "server_function actions are reserved for built-in workflows"}
+                    )
+                normalized_actions.append(action)
+            actions = normalized_actions
+            try:
+                await validate_task_action_kinds(
+                    actions,
+                    pool=repo.pool,
+                    organization_id=str(org_id),
+                    user_id=str(user_id),
+                )
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)})
+
+            # Usage is clearance-driven and default-deny: every referenced
+            # sandbox template must be approved and cleared for the actor.
+            from lucent.db.sandbox_template import (
+                SandboxTemplateRepository,
+                get_authorized_templates_pool,
+            )
+
+            template_ids = sorted(
+                {
+                    str(action["sandbox_template_id"])
+                    for action in actions
+                    if action.get("action_type", "task") == "task"
+                    and action.get("sandbox_template_id")
+                }
+            )
+            if template_ids:
+                tpl_pool = await get_authorized_templates_pool(
+                    repo.pool, {"id": str(user_id), "organization_id": str(org_id)}
+                )
+                tpl_repo = SandboxTemplateRepository(tpl_pool)
+                for template_id in template_ids:
+                    tpl = await tpl_repo.get_usable_template(template_id)
+                    if not tpl:
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"Sandbox template {template_id} not found "
+                                    "or not cleared for this user."
+                                ),
+                                "hint": "Call list_sandbox_templates to discover IDs.",
+                            }
+                        )
+                    if tpl.get("status") != "approved":
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"Sandbox template '{tpl.get('name')}' has "
+                                    f"status {tpl.get('status')!r} — only "
+                                    "'approved' templates may be scheduled."
+                                )
+                            }
+                        )
+            fields["actions"] = actions
+
+        if request_template is not None:
+            fields["request_template"] = request_template
+
+        # Schedule changes: recompute next_run_at through the create path's
+        # helper — never hand-roll cron math in a second place.
+        if (
+            schedule_type is not None
+            or cron_expression is not None
+            or interval_seconds is not None
+        ):
+            eff_schedule_type = (
+                schedule_type if schedule_type is not None else current.get("schedule_type")
+            )
+            eff_cron = (
+                cron_expression
+                if cron_expression is not None
+                else current.get("cron_expression")
+            )
+            eff_interval = (
+                interval_seconds
+                if interval_seconds is not None
+                else current.get("interval_seconds")
+            )
+            if trigger == "schedule":
+                if eff_schedule_type == "cron" and not eff_cron:
+                    return json.dumps(
+                        {"error": "cron_expression is required for cron workflows"}
+                    )
+                if eff_schedule_type == "interval" and (
+                    not eff_interval or eff_interval < 60
+                ):
+                    return json.dumps(
+                        {"error": "interval_seconds must be >= 60 for interval workflows"}
+                    )
+            if schedule_type is not None:
+                fields["schedule_type"] = schedule_type
+            if cron_expression is not None:
+                fields["cron_expression"] = cron_expression
+            if interval_seconds is not None:
+                fields["interval_seconds"] = interval_seconds
+            fields["next_run_at"] = compute_next_run_at(
+                trigger_type=trigger,
+                schedule_type=eff_schedule_type,
+                cron_expression=eff_cron,
+                interval_seconds=eff_interval,
+                timezone_str=current.get("timezone") or "UTC",
+            )
+
+            # Keep the trigger metadata in step with the columns above.
+            trigger_config = dict(current.get("trigger_config") or {})
+            trigger_config["schedule_type"] = eff_schedule_type
+            if eff_cron:
+                trigger_config["cron_expression"] = eff_cron
+            else:
+                trigger_config.pop("cron_expression", None)
+            if eff_interval:
+                trigger_config["interval_seconds"] = eff_interval
+            else:
+                trigger_config.pop("interval_seconds", None)
+            fields["trigger_config"] = trigger_config
+
+        if not fields:
+            return json.dumps(
+                {k: _jsonable_schedule_value(v) for k, v in current.items()},
+                default=str,
+            )
+
+        try:
+            updated = await repo.update_schedule(
+                workflow_id, str(org_id), requester_role=user_role, **fields
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc), "code": 403})
+        if not updated:
+            return json.dumps({"error": "Workflow not found"})
+        return json.dumps(
+            {k: _jsonable_schedule_value(v) for k, v in updated.items()},
+            default=str,
+        )
+
+    @mcp.tool(
+        description="""Permanently delete a workflow and its run history.
+
+This is a hard delete. The workflow row is removed, and every schedule_runs
+row for it is deleted with it (the FK is ON DELETE CASCADE). Past request rows
+created by its runs are not deleted — they keep their lineage, but the link to
+this workflow is gone. Deletion cannot be undone.
+
+Refuses with an error if the workflow does not exist or is outside the
+caller's scope. Returns JSON identifying what was deleted."""
+    )
+    async def delete_workflow(workflow_id: str) -> str:
+        user_id, org_id, user_role, _, _ = await _get_current_user_context()
+        if not org_id:
+            return json.dumps({"error": "No organization context"})
+        if not user_id:
+            return json.dumps({"error": "No user context"})
+
+        repo = await _get_schedule_repository()
+        # Visibility gate: identical to update/get. Out-of-scope reads as
+        # not found and is refused rather than silently no-opped.
+        if _include_daemon_workflows(user_role):
+            current = await repo.get_schedule(
+                workflow_id,
+                str(org_id),
+                created_by=str(user_id),
+                include_daemon_created=True,
+            )
+        else:
+            current = await (
+                await _authorized_schedule_repository(str(user_id), str(org_id), "write")
+            ).get_usable_schedule(workflow_id)
+        if not current:
+            return json.dumps({"error": "Workflow not found"})
+
+        # Run history goes with the schedule row via ON DELETE CASCADE; count
+        # it first so the confirmation says exactly what was lost.
+        run_count = (
+            await repo.list_runs(workflow_id, limit=1, org_id=str(org_id))
+        )["total_count"]
+
+        try:
+            deleted = await repo.delete_schedule(workflow_id, str(org_id))
+        except ValueError as exc:
+            return json.dumps({"error": str(exc), "code": 403})
+        if not deleted:
+            return json.dumps({"error": "Workflow not found"})
+        return json.dumps(
+            {
+                "deleted": True,
+                "id": str(current.get("id") or workflow_id),
+                "title": current.get("title"),
+                "run_history_deleted": run_count,
+                "message": (
+                    "Workflow and its run history were permanently deleted."
+                ),
+            }
+        )

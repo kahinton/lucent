@@ -146,7 +146,7 @@ async def _harness(
     async def _capture_usage(**kwargs):
         calls["usage"].append(kwargs)
 
-    def _validate(_result, task=None, tool_counts=None):
+    def _validate(_result, task=None, tool_counts=None, superseded=False):
         return (True, "")
 
     daemon = LucentDaemon()

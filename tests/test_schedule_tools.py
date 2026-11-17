@@ -5,6 +5,7 @@ Tests auth context enforcement, validation, JSON serialization, and error handli
 """
 
 import json
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -620,3 +621,291 @@ class TestCreateWorkflowDecisionSteps:
         )
         assert "error" in result
         assert "unknown question" in result["error"].lower()
+
+
+# ============================================================================
+# Workflow detail / update / delete
+# ============================================================================
+
+
+@pytest_asyncio.fixture
+async def owner_auth(auth_user):
+    """Owner context: exercises the admin branch of the detail/update paths."""
+    set_current_user(
+        {
+            "id": auth_user["id"],
+            "organization_id": auth_user["organization_id"],
+            "role": "owner",
+            "display_name": "Owner",
+            "email": "owner@test.com",
+        }
+    )
+    yield auth_user
+    set_current_user(None)
+
+
+@pytest_asyncio.fixture
+async def workflow_id(schedule_repo, test_organization, auth_user):
+    wf = await schedule_repo.create_schedule(
+        title="Daily digest",
+        org_id=str(test_organization["id"]),
+        schedule_type="cron",
+        cron_expression="0 9 * * *",
+        description="Original description",
+        priority="high",
+        review_instructions="Check output",
+        created_by=str(auth_user["id"]),
+        actions=[
+            {
+                "action_type": "task",
+                "title": "Summarize",
+                "agent_type": "code",
+                "description": "Summarize the day",
+                "sequence_order": 0,
+            }
+        ],
+        request_template={"title": "Digest", "title_prefix": "[Scheduled]"},
+    )
+    return str(wf["id"])
+
+
+class TestGetWorkflowDetails:
+    @pytest.mark.asyncio
+    async def test_details_returns_fields_and_run_history(
+        self, mcp, owner_auth, workflow_id, schedule_repo, test_organization
+    ):
+        """Regression: the admin branch used to raise TenantScopeError because
+        get_schedule_with_runs called list_runs() without org_id. It must now
+        return real workflow fields plus a structured run list."""
+        org = str(test_organization["id"])
+        await schedule_repo.mark_schedule_run(workflow_id, force=True, org_id=org)
+
+        result = await _call(mcp, "get_workflow_details", {"workflow_id": workflow_id})
+
+        assert "error" not in result, result
+        assert result["title"] == "Daily digest"
+        assert result["priority"] == "high"
+        assert result["schedule_type"] == "cron"
+        assert isinstance(result["actions"], list)
+        assert result["actions"][0]["title"] == "Summarize"
+        assert isinstance(result["runs"], list)
+        assert len(result["runs"]) == 1
+        assert result["runs"][0]["schedule_id"] == workflow_id
+
+    @pytest.mark.asyncio
+    async def test_member_details_returns_structured_runs(
+        self, mcp, auth_user, workflow_id, schedule_repo, test_organization
+    ):
+        org = str(test_organization["id"])
+        await schedule_repo.mark_schedule_run(workflow_id, force=True, org_id=org)
+
+        result = await _call(mcp, "get_schedule_details", {"schedule_id": workflow_id})
+
+        assert "error" not in result, result
+        assert isinstance(result["runs"], list)
+        assert result["runs"][0]["schedule_id"] == workflow_id
+
+
+class TestUpdateWorkflow:
+    @pytest.mark.asyncio
+    async def test_updates_only_supplied_fields(
+        self, mcp, auth_user, workflow_id, schedule_repo, test_organization
+    ):
+        org = str(test_organization["id"])
+        before = await schedule_repo.get_schedule_with_runs(
+            workflow_id, org, created_by=str(auth_user["id"])
+        )
+
+        result = await _call(
+            mcp,
+            "update_workflow",
+            {"workflow_id": workflow_id, "description": "Updated description"},
+        )
+
+        assert "error" not in result, result
+        assert result["description"] == "Updated description"
+        for key in (
+            "title",
+            "priority",
+            "enabled",
+            "review_instructions",
+            "schedule_type",
+            "cron_expression",
+            "interval_seconds",
+            "request_template",
+            "actions",
+            "trigger_config",
+        ):
+            assert result[key] == before[key], key
+        # No schedule field changed, so next_run_at must not be touched.
+        assert str(result["next_run_at"]) == str(before["next_run_at"])
+
+    @pytest.mark.asyncio
+    async def test_omitted_enabled_preserves_state(
+        self, mcp, auth_user, workflow_id, schedule_repo, test_organization
+    ):
+        org = str(test_organization["id"])
+        await schedule_repo.update_schedule(workflow_id, org, enabled=False)
+
+        updated_description = await _call(
+            mcp, "update_workflow", {"workflow_id": workflow_id, "description": "x"}
+        )
+        assert updated_description["enabled"] is False
+
+        disabled = await _call(
+            mcp, "update_workflow", {"workflow_id": workflow_id, "enabled": False}
+        )
+        assert disabled["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_cron_change_recomputes_next_run_at(
+        self, mcp, auth_user, workflow_id
+    ):
+        result = await _call(
+            mcp,
+            "update_workflow",
+            {"workflow_id": workflow_id, "cron_expression": "30 14 * * *"},
+        )
+
+        assert "error" not in result, result
+        assert result["cron_expression"] == "30 14 * * *"
+        next_run = datetime.fromisoformat(result["next_run_at"])
+        assert (next_run.hour, next_run.minute) == (14, 30)
+        # Trigger metadata stays in step with the column.
+        assert result["trigger_config"]["cron_expression"] == "30 14 * * *"
+
+    @pytest.mark.asyncio
+    async def test_actions_json_replaces_full_list(
+        self, mcp, auth_user, db_pool, workflow_id, test_organization
+    ):
+        """A single-action edit is made by re-sending the full, edited list."""
+        from lucent.db.definitions import DefinitionRepository
+
+        await DefinitionRepository(db_pool).create_agent(
+            name="code",
+            description="Code agent",
+            content="# Code",
+            org_id=str(test_organization["id"]),
+            created_by=str(auth_user["id"]),
+            status="active",
+        )
+        result = await _call(
+            mcp,
+            "update_workflow",
+            {
+                "workflow_id": workflow_id,
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "task",
+                            "title": "Summarize",
+                            "agent_type": "code",
+                            "description": "New action description",
+                            "sequence_order": 0,
+                        },
+                        {
+                            "action_type": "task",
+                            "title": "Notify",
+                            "agent_type": "code",
+                            "description": "Send the digest",
+                            "sequence_order": 1,
+                        },
+                    ]
+                ),
+            },
+        )
+
+        assert "error" not in result, result
+        assert [a["title"] for a in result["actions"]] == ["Summarize", "Notify"]
+        assert result["actions"][0]["description"] == "New action description"
+
+    @pytest.mark.asyncio
+    async def test_update_nonexistent_refused(self, mcp, auth_user):
+        result = await _call(
+            mcp,
+            "update_workflow",
+            {
+                "workflow_id": "00000000-0000-0000-0000-000000000000",
+                "title": "nope",
+            },
+        )
+        assert result.get("error") == "Workflow not found"
+
+    @pytest.mark.asyncio
+    async def test_update_foreign_workflow_refused(
+        self, mcp, auth_user, schedule_repo, test_organization
+    ):
+        # created_by NULL has no owner clearance, so a member cannot see it.
+        foreign = await schedule_repo.create_schedule(
+            title="Foreign workflow",
+            org_id=str(test_organization["id"]),
+            schedule_type="once",
+        )
+        foreign_id = str(foreign["id"])
+
+        result = await _call(
+            mcp, "update_workflow", {"workflow_id": foreign_id, "title": "hijacked"}
+        )
+
+        assert result.get("error") == "Workflow not found"
+        still = await schedule_repo.get_schedule(
+            foreign_id, str(test_organization["id"])
+        )
+        assert still["title"] == "Foreign workflow"
+
+
+class TestDeleteWorkflow:
+    @pytest.mark.asyncio
+    async def test_delete_removes_workflow_and_run_history(
+        self, mcp, auth_user, workflow_id, schedule_repo, test_organization, db_pool
+    ):
+        org = str(test_organization["id"])
+        await schedule_repo.mark_schedule_run(workflow_id, force=True, org_id=org)
+        assert (
+            await schedule_repo.list_runs(workflow_id, org_id=org)
+        )["total_count"] == 1
+
+        result = await _call(mcp, "delete_workflow", {"workflow_id": workflow_id})
+
+        assert result.get("deleted") is True, result
+        assert result["title"] == "Daily digest"
+        assert result["run_history_deleted"] == 1
+        assert (
+            await schedule_repo.get_schedule(
+                workflow_id, org, created_by=str(auth_user["id"])
+            )
+            is None
+        )
+        async with db_pool.acquire() as conn:
+            remaining = await conn.fetchval(
+                "SELECT count(*) FROM schedule_runs WHERE schedule_id = $1::uuid",
+                workflow_id,
+            )
+        assert remaining == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_nonexistent_refused(self, mcp, auth_user):
+        result = await _call(
+            mcp,
+            "delete_workflow",
+            {"workflow_id": "00000000-0000-0000-0000-000000000000"},
+        )
+        assert result.get("error") == "Workflow not found"
+
+    @pytest.mark.asyncio
+    async def test_delete_foreign_workflow_refused(
+        self, mcp, auth_user, schedule_repo, test_organization
+    ):
+        foreign = await schedule_repo.create_schedule(
+            title="Foreign workflow",
+            org_id=str(test_organization["id"]),
+            schedule_type="once",
+        )
+        foreign_id = str(foreign["id"])
+
+        result = await _call(mcp, "delete_workflow", {"workflow_id": foreign_id})
+
+        assert result.get("error") == "Workflow not found"
+        assert (
+            await schedule_repo.get_schedule(foreign_id, str(test_organization["id"]))
+        ) is not None

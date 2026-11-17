@@ -963,6 +963,24 @@ async def _prepare_task_spec(
             )
         sandbox_config = tpl_repo.to_sandbox_config(tpl)
         resolved_template = tpl
+
+        # An approved allowlist template can still name an image that cannot
+        # enforce it. Catch that when the task is authored so the error lands
+        # with whoever is scheduling the work, not in a cron dispatch at 5:30am.
+        from lucent.sandbox.models import check_allowlist_image
+
+        allowlist_error = check_allowlist_image(
+            str(sandbox_config.get("image") or ""),
+            str(sandbox_config.get("network_mode") or ""),
+            sandbox_config.get("allowed_hosts") or [],
+            setup_commands=sandbox_config.get("setup_commands") or [],
+        )
+        if allowlist_error:
+            return None, (
+                f"Sandbox template {tpl.get('name')!r} cannot enforce its "
+                f"network allowlist: {allowlist_error}"
+            )
+
         allowed_overrides = {
             "repo_url",
             "branch",
@@ -2481,6 +2499,18 @@ Returns: JSON with the proposed template id and status."""
                     )
                 }
             )
+        # Reject an allowlist proposal on a stock image that cannot enforce it,
+        # so the proposer learns now instead of at first dispatch.
+        from lucent.sandbox.models import check_allowlist_image
+
+        allowlist_error = check_allowlist_image(
+            image,
+            network_mode,
+            allowed_hosts or [],
+            setup_commands=setup_commands or [],
+        )
+        if allowlist_error:
+            return json.dumps({"error": allowlist_error})
 
         from lucent.db import get_pool
         from lucent.db.sandbox_template import SandboxTemplateRepository

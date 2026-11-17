@@ -240,10 +240,13 @@ class TaskAPI:
         error: str,
         instance_id: str | None = None,
         result: str | None = None,
+        result_summary: str | None = None,
     ) -> dict | None:
         body = {"error": error[:10000], "instance_id": instance_id}
         if result is not None:
             body["result"] = result[:200000]
+        if result_summary is not None:
+            body["result_summary"] = result_summary[:2000]
         return await TaskAPI._post_result(
             f"/requests/tasks/{task_id}/needs-review",
             body,
@@ -265,6 +268,32 @@ class TaskAPI:
         return await TaskAPI._post(
             f"/requests/tasks/{task_id}/events", body, "add_event"
         )
+
+    @staticmethod
+    async def get_task_events(task_id: str, limit: int = 200) -> list[dict]:
+        """Return a task's events, newest last, for idempotency checks."""
+        from daemon.runtime.module_proxy import runtime
+
+        try:
+            async with httpx.AsyncClient(timeout=TaskAPI.API_TIMEOUT) as client:
+                response = await client.get(
+                    f"{runtime.API_BASE}/requests/tasks/{task_id}/events",
+                    params={"limit": max(1, int(limit))},
+                    headers=runtime.API_HEADERS,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, dict):
+                        return data.get("items", [])
+                    return data if isinstance(data, list) else []
+                runtime.log(
+                    f"API get_task_events returned {response.status_code}: "
+                    f"{response.text[:200]}",
+                    "WARN",
+                )
+        except Exception as error:
+            runtime.log(f"API get_task_events failed: {error}", "WARN")
+        return []
 
     @staticmethod
     async def link_memory(

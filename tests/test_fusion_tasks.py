@@ -561,7 +561,7 @@ async def _fusion_harness(
     async def _accessible(_user_id, _org_id):
         return [SimpleNamespace(id=m, supports_tools=True) for m in accessible_models]
 
-    def _validate(result, task=None, tool_counts=None):
+    def _validate(result, task=None, tool_counts=None, superseded=False):
         calls["validate_tool_counts"].append({"tool_counts": tool_counts})
         return (True, "")
 

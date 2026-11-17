@@ -1219,11 +1219,11 @@ class TestListRuns:
 class TestGetScheduleWithRuns:
     @pytest.mark.asyncio
     async def test_with_runs(
-        self, repo, test_organization, db_pool, daemon_tenant_scope,
+        self, repo, test_organization, db_pool,
     ):
-        # get_schedule_with_runs loads runs via list_runs() without an
-        # organization kwarg — the ambient ContextVar fallback that real API
-        # request scopes provide. Bind it here so the fail-closed guard passes.
+        # No ambient tenant ContextVar is bound here on purpose: MCP tool
+        # calls have none, so get_schedule_with_runs must pass org_id to
+        # list_runs() itself instead of relying on an ambient scope.
         org = str(test_organization["id"])
         s = await repo.create_schedule(
             title="SWR",

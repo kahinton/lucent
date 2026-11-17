@@ -537,6 +537,34 @@ def _next_cron_utc(expression: str, after_utc: datetime, tz_name: str = "UTC") -
     return next_local.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
 
 
+def compute_next_run_at(
+    *,
+    trigger_type: str,
+    schedule_type: str,
+    cron_expression: str | None = None,
+    interval_seconds: int | None = None,
+    timezone_str: str = "UTC",
+    now: datetime | None = None,
+) -> datetime | None:
+    """Compute a workflow's next run time.
+
+    Single source of truth for ``next_run_at``: creation and schedule-field
+    updates both derive it here so cron/interval math cannot drift between
+    the two paths. Non-time-based triggers (manual/webhook/integration_event)
+    have no next run.
+    """
+    if trigger_type != "schedule":
+        return None
+    now = now or datetime.now(timezone.utc)
+    if schedule_type == "once":
+        return now
+    if schedule_type == "interval" and interval_seconds:
+        return now + timedelta(seconds=interval_seconds)
+    if schedule_type == "cron" and cron_expression:
+        return _next_cron_utc(cron_expression, now, timezone_str)
+    return None
+
+
 class ScheduleRepository:
     """Manages scheduled tasks and their run history."""
 
@@ -845,15 +873,15 @@ class ScheduleRepository:
         if trigger != "schedule" and schedule_type in TIME_BASED_SCHEDULE_TYPES:
             schedule_type = trigger
 
-        # Calculate next_run_at if not provided
-        if next_run_at is None and trigger == "schedule":
-            now = datetime.now(timezone.utc)
-            if schedule_type == "once":
-                next_run_at = now
-            elif schedule_type == "interval" and interval_seconds:
-                next_run_at = now + timedelta(seconds=interval_seconds)
-            elif schedule_type == "cron" and cron_expression:
-                next_run_at = _next_cron_utc(cron_expression, now, timezone_str)
+        # Calculate next_run_at if not provided (shared with the update path).
+        if next_run_at is None:
+            next_run_at = compute_next_run_at(
+                trigger_type=trigger,
+                schedule_type=schedule_type,
+                cron_expression=cron_expression,
+                interval_seconds=interval_seconds,
+                timezone_str=timezone_str,
+            )
 
         trigger_config = _default_trigger_config(
             trigger_type=trigger,
@@ -1733,7 +1761,9 @@ class ScheduleRepository:
         )
         if not sched:
             return None
-        sched["runs"] = (await self.list_runs(schedule_id))["items"]
+        # Pass org_id explicitly: list_runs() fails closed via scoped_acquire,
+        # and MCP tool calls carry no ambient tenant scope to fall back on.
+        sched["runs"] = (await self.list_runs(schedule_id, org_id=org_id))["items"]
         return sched
 
     # ── Summary ───────────────────────────────────────────────────────────

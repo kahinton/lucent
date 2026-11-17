@@ -109,6 +109,87 @@ _OUTPUT_URL_RE = re.compile(r"(?P<url>https?://[^\s<>()\[\]{}\"']+|mailto:[^\s<>
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}>'\""
 
 
+# A task result can lead with provenance for a superseded attempt: the compact
+# header produced by daemon/dispatch/supersession.py, or — on the degraded
+# path — the prior attempt's text followed by the legacy separator. A summary
+# describes the terminal attempt, so neither leading form is allowed to lead
+# it. Keep these literals in sync with that module.
+_SUPERSEDED_HEADER_PREFIX = "[superseded attempt "
+_LEGACY_CONTINUATION_SEPARATOR = "--- Completion continuation ---"
+_REPAIR_NOTICE_PREFIX = "[structured output repaired]"
+_SUPERSEDED_HEADER_RE = re.compile(
+    r"^\[superseded attempt (?P<attempt>\d+) of (?P<total>\d+)\](?P<fields>[^\n]*)"
+)
+
+
+def _terminal_summary_source(result: str | None) -> str | None:
+    """Return the terminal attempt's text, for use as a result summary."""
+    if result is None:
+        return None
+    text = result
+    if text.startswith(_SUPERSEDED_HEADER_PREFIX):
+        _header, separator, remainder = text.partition("\n\n")
+        if separator:
+            text = remainder
+    if text.startswith(_REPAIR_NOTICE_PREFIX):
+        # The repair notice describes provenance, not the terminal answer;
+        # a summary must not open by quoting it.
+        _notice, separator, remainder = text.partition("\n\n")
+        text = remainder if separator else ""
+    index = text.find(_LEGACY_CONTINUATION_SEPARATOR)
+    if index != -1:
+        text = text[index + len(_LEGACY_CONTINUATION_SEPARATOR):]
+    return text.lstrip("\n")
+
+
+def _superseded_terminal_summary(result: str | None) -> str | None:
+    """One-line terminal state for a result led by a supersession header.
+
+    Mirrors ``daemon.dispatch.supersession.build_terminal_summary(...,
+    succeeded=False)`` for the header that module writes; keep the phrasing in
+    sync. Returns ``None`` when the header cannot be read, so callers fall back
+    to the terminal attempt's text.
+    """
+    match = _SUPERSEDED_HEADER_RE.match(result or "")
+    if match is None:
+        return None
+    attempt = int(match.group("attempt"))
+    total = int(match.group("total"))
+    missing: list[str] = []
+    for field in match.group("fields").split(";"):
+        key, _, value = field.strip().partition("=")
+        if key == "missing_tools" and value:
+            missing = [item.strip() for item in value.split(",") if item.strip()]
+    head = (
+        f"Final attempt {attempt + 1} of {total} "
+        "did not satisfy required tool work"
+    )
+    noun = "tool" if len(missing) == 1 else "tools"
+    tail = f"Attempt {attempt} missed required {noun}"
+    if missing:
+        tail += f" ({', '.join(missing)})"
+    tail += " and is superseded."
+    return f"{head}. {tail}"
+
+
+def _terminal_summary_value(
+    result: str | None, supplied: str | None
+) -> str | None:
+    """Summary to persist for a finished attempt.
+
+    A caller-supplied summary wins (the same precedence the completion path
+    uses); otherwise a superseded result yields its one-line terminal state
+    and everything else falls back to the terminal attempt's own text.
+    """
+    if supplied is not None:
+        return supplied
+    if result is not None and result.startswith(_SUPERSEDED_HEADER_PREFIX):
+        terminal = _superseded_terminal_summary(result)
+        if terminal is not None:
+            return terminal
+    return _terminal_summary_source(result)
+
+
 def _normalize_title_for_dedup(title: str | None) -> str:
     """Normalize a request title for duplicate detection.
 
@@ -4824,13 +4905,20 @@ class RequestRepository:
         org_id: str | None = None,
         instance_id: str | None = None,
         result: str | None = None,
+        result_summary: str | None = None,
     ) -> dict | None:
         """Mark task as failed.
 
         Only tasks in 'claimed' or 'running' state can be failed
         (workflow-audit/phase-4: status transition guard).
+
+        ``result_summary`` is the terminal state the caller wants stored. When
+        omitted it is derived from ``result``: a superseded result yields the
+        one-line terminal statement (the same contract the completion path
+        keeps), everything else falls back to the final attempt's text.
         """
         now = datetime.now(timezone.utc)
+        terminal_summary = _terminal_summary_value(result, result_summary)
         if org_id:
             async with scoped_acquire_on(
                 self.pool, organization_id=org_id
@@ -4840,8 +4928,8 @@ class RequestRepository:
                         """UPDATE tasks SET status = 'failed', error = $2,
                            result = COALESCE($6, result),
                            result_summary = CASE
-                               WHEN $6::text IS NULL THEN result_summary
-                               ELSE left($6::text, 500)
+                               WHEN $7::text IS NOT NULL THEN left($7::text, 500)
+                               ELSE result_summary
                            END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
@@ -4854,14 +4942,15 @@ class RequestRepository:
                         UUID(org_id),
                         instance_id,
                         result,
+                        terminal_summary,
                     )
                 else:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
                            result = COALESCE($5, result),
                            result_summary = CASE
-                               WHEN $5::text IS NULL THEN result_summary
-                               ELSE left($5::text, 500)
+                               WHEN $6::text IS NOT NULL THEN left($6::text, 500)
+                               ELSE result_summary
                            END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
@@ -4872,6 +4961,7 @@ class RequestRepository:
                         now,
                         UUID(org_id),
                         result,
+                        terminal_summary,
                     )
         else:
             async with scoped_acquire_on(
@@ -4882,8 +4972,8 @@ class RequestRepository:
                         """UPDATE tasks SET status = 'failed', error = $2,
                            result = COALESCE($5, result),
                            result_summary = CASE
-                               WHEN $5::text IS NULL THEN result_summary
-                               ELSE left($5::text, 500)
+                               WHEN $6::text IS NOT NULL THEN left($6::text, 500)
+                               ELSE result_summary
                            END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
@@ -4894,14 +4984,15 @@ class RequestRepository:
                         now,
                         instance_id,
                         result,
+                        terminal_summary,
                     )
                 else:
                     row = await conn.fetchrow(
                         """UPDATE tasks SET status = 'failed', error = $2,
                            result = COALESCE($4, result),
                            result_summary = CASE
-                               WHEN $4::text IS NULL THEN result_summary
-                               ELSE left($4::text, 500)
+                               WHEN $5::text IS NOT NULL THEN left($5::text, 500)
+                               ELSE result_summary
                            END,
                            completed_at = $3, updated_at = $3
                            WHERE id = $1 AND status IN ('claimed', 'running')
@@ -4910,6 +5001,7 @@ class RequestRepository:
                         error,
                         now,
                         result,
+                        terminal_summary,
                     )
         if row:
             task = dict(row)
@@ -4933,18 +5025,21 @@ class RequestRepository:
         org_id: str | None = None,
         instance_id: str | None = None,
         result: str | None = None,
+        result_summary: str | None = None,
     ) -> dict | None:
         """Stop automatic execution while preserving the result for human review."""
         now = datetime.now(timezone.utc)
+        summary_source = _terminal_summary_source(result)
         query = """UPDATE tasks SET status = 'needs_review', error = $2,
                    result = COALESCE($4, result),
                    result_summary = CASE
+                       WHEN $5::text IS NOT NULL THEN left($5::text, 500)
                        WHEN $4::text IS NULL THEN result_summary
-                       ELSE left($4::text, 500)
+                       ELSE left($6::text, 500)
                    END,
                    completed_at = $3, updated_at = $3
                    WHERE id = $1 AND status IN ('claimed', 'running')"""
-        params: list[Any] = [UUID(task_id), error, now, result]
+        params: list[Any] = [UUID(task_id), error, now, result, result_summary, summary_source]
         if org_id:
             query += f" AND organization_id = ${len(params) + 1}"
             params.append(UUID(org_id))
