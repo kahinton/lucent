@@ -12,6 +12,7 @@ from lucent.api.app import create_app
 from lucent.api.deps import CurrentUser, get_current_user
 from lucent.auth import set_current_user
 from lucent.db.requests import RequestRepository
+from lucent.llm.context import clear_llm_context, set_llm_context
 from lucent.tools.requests import register_request_tools
 
 
@@ -77,6 +78,64 @@ async def _create_request_and_task(repo: RequestRepository, test_user, title: st
         org_id=str(test_user["organization_id"]),
         description="Produce a deliverable",
         requesting_user_id=str(test_user["id"]),
+    )
+    return req, task
+
+
+_FORECAST_URL = (
+    "https://api.open-meteo.com/v1/forecast"
+    "?latitude=52.52&longitude=13.41&hourly=temperature_2m"
+)
+
+# The shape a ``script`` task stores as its result: machine output, including
+# the HTTP request line a script printed to stderr.
+_SCRIPT_MACHINE_RESULT = (
+    "exit_code: 0\n"
+    "stdout:\n"
+    '{"total": 42}\n'
+    "stderr:\n"
+    f"GET {_FORECAST_URL} HTTP/1.1\n"
+)
+
+
+async def _insert_script_template(db_pool, org_id: str) -> str:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO sandbox_templates
+               (organization_id, name, image, scope, status, created_by)
+               VALUES ($1::uuid, 'task-output-script-tpl', 'python:3.12-slim',
+                       'built-in', 'approved', NULL)
+               ON CONFLICT (organization_id, name)
+               DO UPDATE SET image = EXCLUDED.image
+               RETURNING id""",
+            org_id,
+        )
+    return str(row["id"])
+
+
+async def _create_script_task(repo: RequestRepository, db_pool, test_user):
+    org_id = str(test_user["organization_id"])
+    template_id = await _insert_script_template(db_pool, org_id)
+    req = await repo.create_request(
+        title=f"Script output test {uuid4()}",
+        description="Verify script machine output is not auto-extracted",
+        source="user",
+        priority="medium",
+        created_by=str(test_user["id"]),
+        org_id=org_id,
+    )
+    task = await repo.create_task(
+        request_id=str(req["id"]),
+        title="Fetch a forecast",
+        org_id=org_id,
+        description="Run the forecast script",
+        requesting_user_id=str(test_user["id"]),
+        task_kind="script",
+        execution_config={
+            "source": "inline",
+            "script": "print('{\"total\": 42}')",
+        },
+        sandbox_template_id=template_id,
     )
     return req, task
 
@@ -216,6 +275,100 @@ class TestTaskOutputRepository:
         assert len(completed["outputs"]) == 1
         assert completed["outputs"][0]["title"] == "Canonical PR title"
         assert completed["outputs"][0]["is_primary"] is True
+
+
+class TestTaskKindUrlAutoExtraction:
+    """URL auto-extraction from ``result`` is an agent-prose affordance only."""
+
+    @pytest.mark.asyncio
+    async def test_script_task_machine_output_produces_no_outputs(
+        self, db_pool, capable_organization, test_user
+    ):
+        repo = RequestRepository(db_pool)
+        org_id = str(capable_organization["id"])
+        req, task = await _create_script_task(repo, db_pool, test_user)
+        claimed = await repo.claim_task(str(task["id"]), "test-instance", org_id=org_id)
+        assert claimed is not None
+
+        completed = await repo.complete_task(
+            str(task["id"]),
+            _SCRIPT_MACHINE_RESULT,
+            org_id=org_id,
+            instance_id="test-instance",
+            result_structured={"total": 42},
+        )
+
+        assert completed is not None
+        assert completed["outputs"] == []
+        assert await repo.list_request_outputs(str(req["id"]), org_id) == []
+
+    @pytest.mark.asyncio
+    async def test_agent_task_prose_still_extracts_the_same_url(self, db_pool, test_user):
+        repo = RequestRepository(db_pool)
+        req, task = await _create_request_and_task(repo, test_user)
+        org_id = str(test_user["organization_id"])
+        claimed = await repo.claim_task(str(task["id"]), "test-instance", org_id=org_id)
+        assert claimed is not None
+
+        completed = await repo.complete_task(
+            str(task["id"]),
+            f"Fetched the forecast from {_FORECAST_URL}",
+            org_id=org_id,
+            instance_id="test-instance",
+        )
+
+        assert completed is not None
+        persisted = await repo.list_request_outputs(str(req["id"]), org_id)
+        assert len(persisted) == 1
+        assert persisted[0]["url"] == _FORECAST_URL
+
+    @pytest.mark.asyncio
+    async def test_script_task_keeps_explicitly_recorded_output(
+        self, mcp_outputs, db_pool, capable_organization, test_user
+    ):
+        org_id = str(capable_organization["id"])
+        repo = RequestRepository(db_pool)
+        req, task = await _create_script_task(repo, db_pool, test_user)
+
+        set_current_user(
+            {
+                "id": test_user["id"],
+                "organization_id": test_user["organization_id"],
+                "role": "member",
+                "display_name": "Test User",
+                "email": "test@test.com",
+            }
+        )
+        try:
+            recorded = await _call(
+                mcp_outputs,
+                "record_task_output",
+                {
+                    "task_id": str(task["id"]),
+                    "title": "Forecast report",
+                    "url": "https://docs.google.com/document/d/script-report",
+                },
+            )
+        finally:
+            set_current_user(None)
+
+        assert recorded["output_type"] == "document"
+
+        claimed = await repo.claim_task(str(task["id"]), "test-instance", org_id=org_id)
+        assert claimed is not None
+        completed = await repo.complete_task(
+            str(task["id"]),
+            _SCRIPT_MACHINE_RESULT,
+            org_id=org_id,
+            instance_id="test-instance",
+            result_structured={"total": 42},
+        )
+
+        assert completed is not None
+        persisted = await repo.list_request_outputs(str(req["id"]), org_id)
+        assert len(persisted) == 1
+        assert persisted[0]["title"] == "Forecast report"
+        assert persisted[0]["url"] == "https://docs.google.com/document/d/script-report"
 
 
 class TestTaskOutputApi:
@@ -510,3 +663,163 @@ class TestReviewOutputGuidance:
         assert captured["requesting_user_id"] == human_user_id
         assert "user_id=" not in captured["description"]
         assert "SETUP/CONFIGURATION BLOCKER HANDOFFS" in captured["description"]
+
+
+class TestHandoffTaskOutput:
+    """send_handoff records the handoff as the task's primary output artifact."""
+
+    @staticmethod
+    def _use_user(user, *, task_id=None, request_id=None):
+        set_current_user(
+            {
+                "id": user["id"],
+                "organization_id": user["organization_id"],
+                "role": "member",
+                "display_name": user.get("display_name"),
+                "email": user.get("email"),
+            }
+        )
+        set_llm_context(request_id=request_id, task_id=task_id)
+
+    @pytest.mark.asyncio
+    async def test_send_handoff_in_task_records_one_primary_output(
+        self, mcp_outputs, db_pool, test_user
+    ):
+        repo = RequestRepository(db_pool)
+        req, task = await _create_request_and_task(repo, test_user)
+        org_id = str(test_user["organization_id"])
+
+        self._use_user(test_user, task_id=str(task["id"]), request_id=str(req["id"]))
+        try:
+            created = await _call(
+                mcp_outputs,
+                "send_handoff",
+                {
+                    "title": "Delivery complete",
+                    "body": "The report is ready for review.",
+                },
+            )
+        finally:
+            clear_llm_context()
+            set_current_user(None)
+
+        assert "error" not in created
+        outputs = await repo.list_request_outputs(str(req["id"]), org_id)
+        assert len(outputs) == 1
+        output = outputs[0]
+        assert output["output_type"] == "handoff"
+        assert output["is_primary"] is True
+        assert output["title"] == "Delivery complete"
+        assert output["url"] == f"/handoffs/{created['id']}"
+        assert output["external_id"] == created["id"]
+        assert output["metadata"]["source"] == "handoff"
+        assert output["metadata"]["interaction_id"] == created["id"]
+
+    @pytest.mark.asyncio
+    async def test_two_handoff_calls_with_same_interaction_yield_one_output(
+        self, mcp_outputs, db_pool, test_user
+    ):
+        repo = RequestRepository(db_pool)
+        req, task = await _create_request_and_task(repo, test_user)
+        org_id = str(test_user["organization_id"])
+        args = {
+            "title": "Same handoff twice",
+            "body": "Both calls represent one handoff.",
+            "dedupe_key": "handoff-output:idempotency",
+        }
+
+        self._use_user(test_user, task_id=str(task["id"]), request_id=str(req["id"]))
+        try:
+            first = await _call(mcp_outputs, "send_handoff", args)
+            second = await _call(mcp_outputs, "send_handoff", args)
+        finally:
+            clear_llm_context()
+            set_current_user(None)
+
+        # create_interaction collapses the two calls onto one interaction.
+        assert first["id"] == second["id"]
+        outputs = await repo.list_request_outputs(str(req["id"]), org_id)
+        assert len(outputs) == 1
+        assert outputs[0]["url"] == f"/handoffs/{first['id']}"
+
+    @pytest.mark.asyncio
+    async def test_output_store_failure_does_not_fail_the_handoff(
+        self, mcp_outputs, db_pool, test_user, monkeypatch
+    ):
+        repo = RequestRepository(db_pool)
+        req, task = await _create_request_and_task(repo, test_user)
+        org_id = str(test_user["organization_id"])
+
+        class _BrokenRepository:
+            async def create_task_output(self, **kwargs):
+                raise RuntimeError("output store unavailable")
+
+        async def _broken_get_request_repository():
+            return _BrokenRepository()
+
+        monkeypatch.setattr(
+            "lucent.tools.requests._get_request_repository",
+            _broken_get_request_repository,
+        )
+
+        self._use_user(test_user, task_id=str(task["id"]), request_id=str(req["id"]))
+        try:
+            created = await _call(
+                mcp_outputs,
+                "send_handoff",
+                {
+                    "title": "Handoff survives output failure",
+                    "body": "The handoff is the durable artifact.",
+                },
+            )
+        finally:
+            clear_llm_context()
+            set_current_user(None)
+
+        assert "error" not in created
+        assert created["url"] == f"/handoffs/{created['id']}"
+
+        async with db_pool.acquire() as conn:
+            interaction_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM user_interactions WHERE id = $1::uuid",
+                created["id"],
+            )
+        assert interaction_count == 1
+        # The secondary artifact row was the only thing that failed.
+        assert await repo.list_request_outputs(str(req["id"]), org_id) == []
+
+    @pytest.mark.asyncio
+    async def test_explicit_record_for_same_handoff_does_not_duplicate(
+        self, mcp_outputs, db_pool, test_user
+    ):
+        repo = RequestRepository(db_pool)
+        req, task = await _create_request_and_task(repo, test_user)
+        org_id = str(test_user["organization_id"])
+
+        self._use_user(test_user, task_id=str(task["id"]), request_id=str(req["id"]))
+        try:
+            created = await _call(
+                mcp_outputs,
+                "send_handoff",
+                {"title": "One deliverable", "body": "Recorded twice, once."},
+            )
+            recorded = await _call(
+                mcp_outputs,
+                "record_task_output",
+                {
+                    "task_id": str(task["id"]),
+                    "title": "One deliverable",
+                    "url": created["url"],
+                    "external_id": created["id"],
+                    "output_type": "handoff",
+                    "is_primary": True,
+                },
+            )
+        finally:
+            clear_llm_context()
+            set_current_user(None)
+
+        assert recorded["id"]
+        outputs = await repo.list_request_outputs(str(req["id"]), org_id)
+        assert len(outputs) == 1
+        assert outputs[0]["url"] == f"/handoffs/{created['id']}"

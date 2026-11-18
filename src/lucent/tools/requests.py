@@ -340,6 +340,53 @@ async def _enriched_handoff_references(
     return enriched
 
 
+async def _record_handoff_task_output(
+    *,
+    interaction: dict[str, Any],
+    org_id: str,
+    created_by: str,
+) -> None:
+    """Record a created handoff as its producing task's output artifact.
+
+    A handoff is the deliverable of a delivery-shaped task, so it belongs on
+    the request page next to other outputs. Best effort by design: the
+    interaction is already durable, and a failure to record this secondary
+    row must never fail the handoff. ``create_task_output`` dedupes ``handoff``
+    outputs on task + interaction identity, so a repeated ``send_handoff`` for
+    the same interaction and an explicit ``record_task_output`` for it both
+    collapse to one row.
+    """
+    task_id = _valid_uuid(get_llm_context().get("task_id"))
+    if not task_id:
+        return
+    interaction_id = str(interaction["id"])
+    try:
+        repo = await _get_request_repository()
+        await repo.create_task_output(
+            task_id=task_id,
+            org_id=org_id,
+            created_by=created_by,
+            output={
+                "output_type": "handoff",
+                "title": interaction["title"],
+                "url": f"/handoffs/{interaction_id}",
+                "external_id": interaction_id,
+                "metadata": {
+                    "source": "handoff",
+                    "interaction_id": interaction_id,
+                },
+                "is_primary": True,
+            },
+        )
+    except Exception:
+        logger.warning(
+            "Failed to record handoff %s as an output of task %s",
+            interaction_id,
+            task_id,
+            exc_info=True,
+        )
+
+
 async def _create_handoff_interaction_response(
     *,
     title: str,
@@ -411,6 +458,12 @@ async def _create_handoff_interaction_response(
         )
     except ValueError as exc:
         return json.dumps({"error": str(exc)})
+
+    await _record_handoff_task_output(
+        interaction=interaction,
+        org_id=str(org_id),
+        created_by=str(current_user_id),
+    )
 
     return json.dumps(
         {
@@ -2816,7 +2869,7 @@ or generic links from custom tooling. These outputs are shown prominently on
 the request detail page instead of being buried inside raw task text.
 
 Known output_type values: link, github_issue, github_pr, email, document, file,
-memory, deployment, artifact, other. If output_type='link' and the URL is a
+memory, deployment, artifact, handoff, other. If output_type='link' and the URL is a
 GitHub issue/PR or mailto/document URL, Lucent will infer a more specific type.
 
 Args:

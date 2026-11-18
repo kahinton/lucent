@@ -303,7 +303,7 @@ class MemoryLinkCreate(BaseModel):
 class TaskOutputCreate(BaseModel):
     output_type: str = Field(
         default="link",
-        pattern=r"^(link|github_issue|github_pr|email|document|file|memory|deployment|artifact|other)$",
+        pattern=r"^(link|github_issue|github_pr|email|document|file|memory|deployment|artifact|handoff|other)$",
     )
     provider: str | None = Field(default=None, max_length=64)
     title: str = Field(..., min_length=1, max_length=256)

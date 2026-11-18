@@ -102,6 +102,7 @@ VALID_TASK_OUTPUT_TYPES = {
     "memory",
     "deployment",
     "artifact",
+    "handoff",
     "other",
 }
 
@@ -301,6 +302,38 @@ def _extract_outputs_from_structured_result(result_structured: Any) -> list[dict
     if not isinstance(raw, list):
         return []
     return [_normalize_task_output(item) for item in raw]
+
+
+#: Canonical title of the daemon-created post-completion review task. Mirrors
+#: ``REQUEST_REVIEW_TASK_TITLE`` in ``daemon/daemon.py``; kept as a literal here
+#: because ``lucent.db`` must not import the daemon. The review queries below
+#: match the same literal.
+_REVIEW_TASK_TITLE = "Post-completion review"
+
+
+def _allows_result_url_extraction(task: dict[str, Any]) -> bool:
+    """Whether URLs in a task's ``result`` text may become outputs.
+
+    Only ``agent`` tasks narrate a deliverable in prose. Script, decision, and
+    fusion tasks produce machine output (exit_code/stdout/stderr or structured
+    JSON), and review tasks quote the deliverables they are reviewing; a URL in
+    that text is incidental and must never become a request output. Those tasks
+    get outputs from ``record_task_output`` or an explicit ``outputs`` list
+    only.
+    """
+    kind = str(task.get("task_kind") or "").strip().lower()
+    if not kind:
+        # Legacy rows: mirror the daemon's compat inference.
+        kind = (
+            "decision"
+            if task.get("decision_config")
+            else "fusion"
+            if task.get("fusion_config")
+            else "agent"
+        )
+    if kind != "agent":
+        return False
+    return str(task.get("title") or "").strip().lower() != _REVIEW_TASK_TITLE.lower()
 
 
 def _extract_outputs_from_text(result_text: str | None) -> list[dict[str, Any]]:
@@ -3119,6 +3152,30 @@ class RequestRepository:
             if not task:
                 raise ValueError("Task not found")
 
+            if normalized["output_type"] == "handoff":
+                # Handoffs are recorded automatically from send_handoff and may
+                # also be recorded explicitly. One handoff is one deliverable,
+                # so a repeat with the same interaction identity (url and/or
+                # external_id) returns the row already on the request instead
+                # of adding a second one.
+                existing = await conn.fetchrow(
+                    """SELECT * FROM task_outputs
+                       WHERE task_id = $1::uuid
+                         AND organization_id = $2::uuid
+                         AND (
+                               ($3::text IS NOT NULL AND external_id = $3)
+                            OR ($4::text IS NOT NULL AND url = $4)
+                         )
+                       ORDER BY created_at
+                       LIMIT 1""",
+                    task_id,
+                    org_id,
+                    normalized["external_id"],
+                    normalized["url"],
+                )
+                if existing:
+                    return self._row_to_output_dict(existing)
+
             row = await conn.fetchrow(
                 """INSERT INTO task_outputs (
                        task_id, request_id, organization_id, created_by,
@@ -4772,8 +4829,10 @@ class RequestRepository:
         output_candidates: list[dict[str, Any]] = []
         if outputs:
             output_candidates.extend(_normalize_task_output(item) for item in outputs)
-        output_candidates.extend(_extract_outputs_from_structured_result(result_structured))
-        output_candidates.extend(_extract_outputs_from_text(result))
+        existing_task = await self.get_task(task_id, org_id=org_id)
+        if existing_task is None or _allows_result_url_extraction(existing_task):
+            output_candidates.extend(_extract_outputs_from_structured_result(result_structured))
+            output_candidates.extend(_extract_outputs_from_text(result))
         output_candidates = _dedupe_task_outputs(output_candidates)
         now = datetime.now(timezone.utc)
         if org_id:
