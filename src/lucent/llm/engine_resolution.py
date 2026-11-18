@@ -38,6 +38,17 @@ class PinnedBackendUnavailable(RuntimeError):
     """
 
 
+class OrganizationProviderMissing(RuntimeError):
+    """This organization has no provider (engine backend) to serve the model.
+
+    Providers bind per-organization credentials, so there is no correct silent
+    fallback: the deployment default may belong to another tenant, and the
+    generic "no backend" answer leaves the caller to guess. An operator must
+    create a provider for this organization (Admin → Models → Add backend) —
+    or pass the organization id when the caller failed to.
+    """
+
+
 @dataclass(frozen=True)
 class EngineResolution:
     """The engine chosen for a model, plus how it was chosen."""
@@ -110,6 +121,14 @@ async def resolve_engine(
     """Resolve the engine for a model, honoring backends and auto-routing."""
     from lucent.model_registry import get_model
 
+    if not org_id or not str(org_id).strip():
+        raise OrganizationProviderMissing(
+            "Engine resolution requires an organization id: providers (engine "
+            "backends) are owned per organization, so there is no shared provider "
+            "to resolve against. Pass org_id=<organization id>; an operator must "
+            "create a provider for that organization."
+        )
+
     model = get_model(model_id)
     if model and model.model_class == "decision":
         raise ValueError(
@@ -161,6 +180,28 @@ async def resolve_engine(
         if backend:
             return EngineResolution(
                 engine_registry.get_engine(backend["engine"]), backend, "model_backend"
+            )
+        if model.backend_id:
+            raise OrganizationProviderMissing(
+                f"Model '{model.id}' is bound to backend '{model.backend_id}', which "
+                f"organization {org_id} does not own. An operator must attach the "
+                "model to a provider for this organization (Admin → Models), or "
+                "clear the binding; resolution will not borrow another tenant's."
+            )
+        # A model with a pinned engine needs that engine's provider to be owned
+        # by this organization. Falling through to the deployment default here
+        # would run the model on a provider this tenant does not own.
+        if model.engine and not any(
+            b["engine"] == model.engine
+            and b["provider"] == model.provider
+            and str(b.get("organization_id") or "") == str(org_id)
+            for b in candidates
+        ):
+            raise OrganizationProviderMissing(
+                f"Organization {org_id} has no provider for model '{model.id}' "
+                f"(engine={model.engine!r}, provider={model.provider!r}). An operator "
+                f"must create a provider for this organization (Admin → Models → "
+                f"Add backend) before this model can run."
             )
 
     # 4. Auto-route by task type (opt-in).

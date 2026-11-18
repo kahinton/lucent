@@ -8,7 +8,7 @@ from lucent.llm import engine_resolution as er
 from lucent.model_registry import ModelInfo
 
 
-def _backend(bid, engine, provider, org=None, enabled=True):
+def _backend(bid, engine, provider, org="o1", enabled=True):
     return {
         "id": bid,
         "engine": engine,
@@ -193,3 +193,91 @@ async def test_decision_model_refused(patch_model, patch_backends, patch_fallbac
     patch_backends([])
     with pytest.raises(ValueError, match="decision model"):
         await er.resolve_engine("nimble", org_id="o1")
+
+
+async def test_shared_backend_candidate_never_resolves(
+    patch_model, patch_backends, patch_fallback
+):
+    """A shared (org-NULL) row must not serve an org's model; and with no
+    org-owned provider the resolution fails loudly instead of using the default."""
+    patch_model(
+        ModelInfo(
+            id="gpt-5.1",
+            provider="openai",
+            name="GPT-5.1",
+            category="general",
+            engine="langchain",
+            backend_id=None,
+        )
+    )
+    patch_backends([_backend("b-shared", "langchain", "openai", org=None)])
+    with pytest.raises(er.OrganizationProviderMissing, match="create a provider"):
+        await er.resolve_engine("gpt-5.1", org_id="o1")
+
+
+async def test_org_without_provider_raises_named_error(
+    patch_model, patch_backends, patch_fallback
+):
+    patch_model(
+        ModelInfo(
+            id="gpt-5.1",
+            provider="openai",
+            name="GPT-5.1",
+            category="general",
+            engine="langchain",
+            backend_id=None,
+        )
+    )
+    patch_backends([])
+    with pytest.raises(
+        er.OrganizationProviderMissing, match="Organization o1 has no provider"
+    ) as exc:
+        await er.resolve_engine("gpt-5.1", org_id="o1")
+    # The named error must carry operator guidance, not just say "missing".
+    assert "Admin → Models → Add backend" in str(exc.value)
+
+
+async def test_other_org_provider_never_serves_resolution(
+    patch_model, patch_backends, patch_fallback
+):
+    """A's backend is not usable by B even when engine and provider match."""
+    patch_model(
+        ModelInfo(
+            id="gpt-5.1",
+            provider="openai",
+            name="GPT-5.1",
+            category="general",
+            engine="langchain",
+            backend_id=None,
+        )
+    )
+    patch_backends([_backend("b-org-a", "langchain", "openai", org="o-a")])
+    with pytest.raises(er.OrganizationProviderMissing, match="Organization o-b has no provider"):
+        await er.resolve_engine("gpt-5.1", org_id="o-b")
+
+
+async def test_model_backend_id_not_owned_raises(
+    patch_model, patch_backends, patch_fallback
+):
+    patch_model(
+        ModelInfo(
+            id="gpt-5.1",
+            provider="openai",
+            name="GPT-5.1",
+            category="general",
+            engine="langchain",
+            backend_id="b-other-org",
+        )
+    )
+    patch_backends([_backend("b-own", "langchain", "openai")])
+    with pytest.raises(er.OrganizationProviderMissing, match="does not own"):
+        await er.resolve_engine("gpt-5.1", org_id="o1")
+
+
+async def test_missing_org_id_raises_named_error(
+    patch_model, patch_backends, patch_fallback
+):
+    patch_model()
+    patch_backends([])
+    with pytest.raises(er.OrganizationProviderMissing, match="organization id"):
+        await er.resolve_engine("gpt-5.1", org_id=None)

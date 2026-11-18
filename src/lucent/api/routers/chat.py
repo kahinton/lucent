@@ -39,7 +39,7 @@ from lucent.auth_providers import SESSION_COOKIE_NAME, validate_session
 from lucent.db import UserRepository, get_pool
 from lucent.db.llm_sessions import title_from_message
 from lucent.llm.engine_registry import capabilities_for
-from lucent.llm.engine_resolution import resolve_engine
+from lucent.llm.engine_resolution import OrganizationProviderMissing, resolve_engine
 from lucent.llm.token_quota import (
     TokenQuotaExceeded,
     get_token_limit_service,
@@ -2153,6 +2153,15 @@ async def chat_stream_v2(
             resolution.source,
             (resolution.backend or {}).get("name") or "-",
         )
+    except OrganizationProviderMissing as provider_error:
+        # A tenant with no provider for the model is a configuration conflict,
+        # not a transient resolution failure. Falling through to the default
+        # engine would run the turn on a provider this organization does not own.
+        raise HTTPException(
+            status_code=409,
+            detail=str(provider_error),
+            headers={"X-Lucent-Error-Code": "provider_missing"},
+        ) from provider_error
     except Exception:
         engine = get_engine_for_model(selected_model)
 

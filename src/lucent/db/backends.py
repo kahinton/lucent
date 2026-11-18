@@ -6,7 +6,10 @@ engine resolution falls back to the configured default engine.
 
 Models are global (``models.organization_id IS NULL`` = shared) while
 credentials are per-organization, so a backend that binds a credential is
-org-scoped. ``list`` returns an organization's rows plus shared rows.
+org-scoped. Migration 165 makes that ownership total: there are no shared
+backends, and every read here requires an organization id. A lookup without one
+raises :class:`MissingOrganizationScope` rather than widening to another
+tenant's rows.
 """
 
 from __future__ import annotations
@@ -17,6 +20,28 @@ from uuid import UUID
 import asyncpg
 
 from lucent.db.pool import scoped_acquire
+
+
+class MissingOrganizationScope(RuntimeError):
+    """A backend lookup was attempted without an organization id.
+
+    Backends bind per-organization credentials, so there is no shared/global
+    scope to read. Callers must pass the tenant's organization id; reading
+    without one would either serve another tenant's provider or invent a
+    deployment-wide default that no tenant configured.
+    """
+
+
+def _require_org_id(org_id: str | None, caller: str) -> str:
+    """Return ``org_id`` or raise the named scope error for ``caller``."""
+    org = str(org_id).strip() if org_id is not None else ""
+    if not org:
+        raise MissingOrganizationScope(
+            f"{caller} requires an organization id: providers (engine backends) "
+            "are per-organization and there is no shared scope to read. "
+            "Pass org_id=<organization id>."
+        )
+    return org
 
 
 class BackendRepository:
@@ -34,8 +59,9 @@ class BackendRepository:
         config: dict | None = None,
         secret_refs: dict | None = None,
         is_enabled: bool = True,
-        org_id: str | None = None,
+        org_id: str,
     ) -> dict:
+        org_id = _require_org_id(org_id, "BackendRepository.create")
         now = datetime.now(timezone.utc)
         async with scoped_acquire(organization_id=org_id) as conn:
             row = await conn.fetchrow(
@@ -43,7 +69,7 @@ class BackendRepository:
                    config, secret_refs, is_enabled, created_at, updated_at)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
                    RETURNING *""",
-                UUID(org_id) if org_id else None,
+                UUID(org_id),
                 name,
                 engine,
                 provider,
@@ -56,35 +82,39 @@ class BackendRepository:
             )
         return dict(row)
 
-    async def get(self, backend_id: str, *, org_id: str | None = None) -> dict | None:
-        """By-ID lookup; when org_id is given the row must be org-scoped or shared."""
+    async def get(self, backend_id: str, *, org_id: str) -> dict | None:
+        """By-ID lookup, restricted to a backend owned by ``org_id``.
+
+        A backend owned by another organization (or, before migration 165, a
+        shared org-NULL row) is unreachable here — not merely filtered out of a
+        list, since callers bind credentials and route traffic through the row.
+        """
+        org_id = _require_org_id(org_id, "BackendRepository.get")
         async with self.pool.acquire() as conn:
-            query = "SELECT * FROM backends WHERE id = $1"
-            params: list[object] = [UUID(str(backend_id))]
-            if org_id:
-                query += " AND (organization_id IS NULL OR organization_id = $2)"
-                params.append(UUID(org_id))
-            row = await conn.fetchrow(query, *params)
+            row = await conn.fetchrow(
+                "SELECT * FROM backends WHERE id = $1 AND organization_id = $2",
+                UUID(str(backend_id)),
+                UUID(org_id),
+            )
         return dict(row) if row else None
 
     async def list(
         self,
         *,
-        org_id: str | None = None,
+        org_id: str,
         engine: str | None = None,
         provider: str | None = None,
         enabled_only: bool = False,
     ) -> list[dict]:
-        """List backends for an organization plus shared (org-NULL) rows."""
-        query = "SELECT * FROM backends WHERE 1=1"
-        params: list[object] = []
-        idx = 1
-        if org_id:
-            query += f" AND (organization_id IS NULL OR organization_id = ${idx})"
-            params.append(UUID(org_id))
-            idx += 1
-        else:
-            query += " AND organization_id IS NULL"
+        """List the backends owned by ``org_id``.
+
+        ``org_id`` is required: there are no shared (org-NULL) backends to merge
+        in, and a listing without a tenant would be a cross-tenant read.
+        """
+        org_id = _require_org_id(org_id, "BackendRepository.list")
+        query = "SELECT * FROM backends WHERE organization_id = $1"
+        params: list[object] = [UUID(org_id)]
+        idx = 2
         if engine:
             query += f" AND engine = ${idx}"
             params.append(engine)
@@ -95,7 +125,7 @@ class BackendRepository:
             idx += 1
         if enabled_only:
             query += " AND is_enabled = true"
-        query += " ORDER BY organization_id NULLS LAST, engine, provider, name"
+        query += " ORDER BY engine, provider, name"
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
         return [dict(row) for row in rows]
@@ -108,8 +138,9 @@ class BackendRepository:
         config: dict | None = None,
         secret_refs: dict | None = None,
         is_enabled: bool | None = None,
-        org_id: str | None = None,
+        org_id: str,
     ) -> dict | None:
+        org_id = _require_org_id(org_id, "BackendRepository.update")
         sets: list[str] = []
         params: list[object] = []
         idx = 1
@@ -135,9 +166,8 @@ class BackendRepository:
         where = f"WHERE id = ${idx}"
         params.append(UUID(str(backend_id)))
         idx += 1
-        if org_id:
-            where += f" AND organization_id = ${idx}"
-            params.append(UUID(org_id))
+        where += f" AND organization_id = ${idx}"
+        params.append(UUID(org_id))
 
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -146,12 +176,10 @@ class BackendRepository:
             )
         return dict(row) if row else None
 
-    async def delete(self, backend_id: str, *, org_id: str | None = None) -> bool:
-        query = "DELETE FROM backends WHERE id = $1"
-        params: list[object] = [UUID(str(backend_id))]
-        if org_id:
-            query += " AND organization_id = $2"
-            params.append(UUID(org_id))
+    async def delete(self, backend_id: str, *, org_id: str) -> bool:
+        org_id = _require_org_id(org_id, "BackendRepository.delete")
+        query = "DELETE FROM backends WHERE id = $1 AND organization_id = $2"
+        params: list[object] = [UUID(str(backend_id)), UUID(org_id)]
         async with self.pool.acquire() as conn:
             result = await conn.execute(query, *params)
         return result.endswith(" 1")
@@ -160,39 +188,41 @@ class BackendRepository:
 def resolve_backend_for_model(
     model: dict,
     *,
-    org_id: str | None,
+    org_id: str,
     candidates: list[dict],
 ) -> dict | None:
     """Pick the backend a model should run through, or None to use the default.
 
     Precedence:
-      1. The model's explicit ``backend_id``.
+      1. The model's explicit ``backend_id``, if this organization owns it.
       2. An org-scoped backend matching the model's pinned (engine, provider).
-      3. A shared backend matching the model's pinned (engine, provider).
 
-    Models with no pinned engine and no backend_id return None — they resolve
-    through the configured default engine, exactly as before backends existed.
+    Only the organization's own rows are considered. A shared (org-NULL) row is
+    never a candidate — resolution must not reach a provider this tenant does
+    not own. Models with no pinned engine and no backend_id return None — they
+    resolve through the configured default engine, exactly as before backends
+    existed.
     """
-    enabled = [b for b in candidates if b.get("is_enabled", True)]
+    org_id = _require_org_id(org_id, "resolve_backend_for_model")
+    enabled = [
+        b
+        for b in candidates
+        if b.get("is_enabled", True)
+        and str(b.get("organization_id") or "") == org_id
+    ]
     backend_id = model.get("backend_id")
     if backend_id:
-        match = next((b for b in enabled if str(b["id"]) == str(backend_id)), None)
-        if match is not None:
-            return match
+        # An explicit binding is exclusive: falling through to an (engine,
+        # provider) match would silently run the model somewhere its author did
+        # not choose.
+        return next((b for b in enabled if str(b["id"]) == str(backend_id)), None)
 
     engine = model.get("engine")
     provider = model.get("provider")
     if not engine:
         return None
 
-    def _matches(backend: dict) -> bool:
-        return backend["engine"] == engine and backend["provider"] == provider
-
-    def _is_org(backend: dict) -> bool:
-        return str(backend.get("organization_id") or "") == str(org_id or "")
-
-    org_matches = [b for b in enabled if _matches(b) and _is_org(b)]
-    if org_matches:
-        return org_matches[0]
-    shared = [b for b in enabled if _matches(b) and not b.get("organization_id")]
-    return shared[0] if shared else None
+    for backend in enabled:
+        if backend["engine"] == engine and backend["provider"] == provider:
+            return backend
+    return None

@@ -4157,13 +4157,19 @@ class LucentDaemon(
                     "INFO",
                 )
             except Exception as exc:
-                if (audit_context or {}).get("backend_id"):
-                    # An explicit pin is a promise. Falling back would run the
-                    # task on a different engine/provider than the author chose
-                    # (and, for local backends, with the wrong credentials).
+                from lucent.llm.engine_resolution import OrganizationProviderMissing
+
+                if isinstance(exc, OrganizationProviderMissing) or (
+                    audit_context or {}
+                ).get("backend_id"):
+                    # An explicit pin is a promise. So is tenant ownership: an
+                    # organization with no provider must not run on a default
+                    # that belongs to another tenant. Falling back here would
+                    # do exactly that (and, for local backends, with the wrong
+                    # credentials). Fail the task instead.
                     log(
-                        "Pinned backend resolution failed for backend "
-                        f"{(audit_context or {}).get('backend_id')}: {exc}",
+                        "Engine backend resolution failed: "
+                        f"{exc}",
                         "ERROR",
                     )
                     raise
