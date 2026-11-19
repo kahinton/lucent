@@ -50,6 +50,7 @@ from daemon.db_scope import connect_scoped
 from daemon.decomposition.capability import DecompositionHelpersMixin
 from daemon.dispatch import policy as task_policy
 from daemon.dispatch import decision_step
+from daemon.dispatch import flow_gate
 from daemon.dispatch import fusion
 from daemon.dispatch import model_auto
 from daemon.dispatch import script_executor
@@ -5147,6 +5148,42 @@ class LucentDaemon(
                             1, attributes={"agent_type": "script"}
                         )
                     dispatched += 1
+
+                    async def _complete_script(
+                        completed_task_id: str,
+                        result: str,
+                        **complete_kwargs,
+                    ):
+                        """Complete a script task, honoring a flow gate if present.
+
+                        The gate is evaluated from the validated structured
+                        result before the completion is written so the gate
+                        outcome is part of the task's terminal summary. A gate
+                        that stops is a successful decision: the task still
+                        completes, then the remaining flow is short-circuited.
+                        A gate that passes changes nothing.
+                        """
+                        gate = flow_gate.evaluate_gate(
+                            task, complete_kwargs.get("result_structured")
+                        )
+                        if not (gate.configured and gate.stop):
+                            return await _complete_owned(
+                                completed_task_id, result, **complete_kwargs
+                            )
+                        complete_kwargs["result_summary"] = gate.summary(
+                            complete_kwargs.get("result_summary")
+                        )
+                        completed = await _complete_owned(
+                            completed_task_id, result, **complete_kwargs
+                        )
+                        if completed is not None:
+                            await flow_gate.propagate_flow_stop(
+                                task=task,
+                                outcome=gate,
+                                request_id=request_id,
+                            )
+                        return completed
+
                     await script_executor.run_script_task(
                         daemon=self,
                         task=dict(task),
@@ -5156,7 +5193,7 @@ class LucentDaemon(
                         request_id=request_id,
                         requesting_user_id=requesting_user_id,
                         sequence_order=int(task.get("sequence_order") or 0),
-                        on_complete=_complete_owned,
+                        on_complete=_complete_script,
                         on_fail=_fail_owned,
                     )
                 except Exception as exc:

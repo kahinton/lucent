@@ -196,6 +196,21 @@ async def _call(mcp, tool_name: str, args: dict | None = None) -> dict | list:
     return json.loads(result)
 
 
+_GATE_CONTRACT = {
+    "json_schema": {
+        "type": "object",
+        "required": ["should_act"],
+        "properties": {"should_act": {"type": "boolean"}},
+    },
+    "gate": {"path": "should_act", "stop_value": False, "action": "stop_flow"},
+}
+
+
+def _stored_contract(task):
+    stored = task["output_contract"]
+    return json.loads(stored) if isinstance(stored, str) else stored
+
+
 # ============================================================================
 # create_request
 # ============================================================================
@@ -643,6 +658,26 @@ class TestGetRequestDetails:
         assert result["title"] == "Details Test"
 
     @pytest.mark.asyncio
+    async def test_serializes_short_circuited_task_status(
+        self, mcp, repo, auth_user, request_id, db_pool
+    ):
+        """MCP emits the gate-stop status verbatim rather than null/error."""
+        task = await repo.create_task(
+            request_id=request_id,
+            title="Skipped step",
+            org_id=str(auth_user["organization_id"]),
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                task["id"],
+            )
+
+        result = await _call(mcp, "get_request_details", {"request_id": request_id})
+        statuses = {t["id"]: t["status"] for t in result["tasks"]}
+        assert statuses[str(task["id"])] == "short_circuited"
+
+    @pytest.mark.asyncio
     async def test_not_found(self, mcp, auth_user):
         result = await _call(
             mcp,
@@ -948,6 +983,33 @@ class TestListPendingTasks:
         result = await _call(mcp, "list_pending_tasks")
         assert "error" in result
 
+    @pytest.mark.asyncio
+    async def test_omits_gate_stop_tasks(
+        self, mcp, auth_user, repo, test_organization
+    ):
+        """A gate-stop task is settled work, never dispatchable."""
+        org_id = str(test_organization["id"])
+        req = await repo.create_request(
+            title="Gate Stop List Test",
+            org_id=org_id,
+            created_by=str(auth_user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Settled by gate",
+            org_id=org_id,
+            sequence_order=0,
+        )
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                task["id"],
+            )
+
+        result = await _call(mcp, "list_pending_tasks")
+
+        assert "Settled by gate" not in [t["title"] for t in result["items"]]
+
 
 class TestListQueuedTasks:
     @pytest.mark.asyncio
@@ -975,10 +1037,172 @@ class TestListQueuedTasks:
         titles = {task["title"] for task in result["items"]}
         assert {"Ready stage", "Blocked stage"} <= titles
 
+    @pytest.mark.asyncio
+    async def test_omits_gate_stop_tasks(
+        self, mcp, auth_user, repo, test_organization
+    ):
+        """The queued backlog is pending/planned only: a gate stop is not queued."""
+        org_id = str(test_organization["id"])
+        req = await repo.create_request(
+            title="Gate Stop Queue Test",
+            org_id=org_id,
+            created_by=str(auth_user["id"]),
+        )
+        task = await repo.create_task(
+            request_id=str(req["id"]),
+            title="Settled by gate",
+            org_id=org_id,
+            sequence_order=0,
+        )
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                task["id"],
+            )
+
+        result = await _call(mcp, "list_queued_tasks")
+
+        assert "Settled by gate" not in [t["title"] for t in result["items"]]
+
 
 # ============================================================================
 # create_task decision steps
 # ============================================================================
+
+
+class TestCreateTaskFlowGate:
+    """A gate specification must be authorable through every MCP task surface.
+
+    Both the standalone ``create_task`` tool and a bulk ``create_request``
+    task_plan reach the repository, so both must store the spec unchanged and
+    refuse a malformed one with the same message.
+    """
+
+    _UPSERT_AGENT_DEFINITION_SQL = (
+        "INSERT INTO agent_definitions "
+        "(name, organization_id, content, status, owner_user_id) "
+        "VALUES ($1, $2, $3, 'active', $4) "
+        "ON CONFLICT (name, organization_id) DO UPDATE SET "
+        "status = 'active', owner_user_id = EXCLUDED.owner_user_id"
+    )
+
+    async def _ensure_code_agent(self, db_pool, user):
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                self._UPSERT_AGENT_DEFINITION_SQL,
+                "code",
+                user["organization_id"],
+                "test definition",
+                user["id"],
+            )
+
+    @pytest_asyncio.fixture
+    async def gated_request_id(self, mcp, auth_user):
+        result = await _call(mcp, "create_request", {"title": "Gate parent"})
+        return result["id"]
+
+    @pytest.mark.asyncio
+    async def test_create_task_round_trips_gate_spec(
+        self, mcp, auth_user, repo, db_pool, gated_request_id
+    ):
+        await self._ensure_code_agent(db_pool, auth_user)
+
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": gated_request_id,
+                "title": "Gated task",
+                "agent_type": "code",
+                "output_contract": _GATE_CONTRACT,
+            },
+        )
+
+        assert "error" not in result, result
+        task = await repo.get_task(result["id"], str(auth_user["organization_id"]))
+        assert _stored_contract(task) == _GATE_CONTRACT
+
+    @pytest.mark.asyncio
+    async def test_create_task_rejects_malformed_gate(
+        self, mcp, auth_user, db_pool, gated_request_id
+    ):
+        await self._ensure_code_agent(db_pool, auth_user)
+        malformed = {
+            **_GATE_CONTRACT,
+            "gate": {"path": "should_act", "stop_value": "no"},
+        }
+
+        result = await _call(
+            mcp,
+            "create_task",
+            {
+                "request_id": gated_request_id,
+                "title": "Bad gate",
+                "agent_type": "code",
+                "output_contract": malformed,
+            },
+        )
+
+        assert "error" in result
+        assert "output_contract.gate.stop_value must be a boolean" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_request_task_plan_round_trips_gate_spec(
+        self, mcp, auth_user, repo, db_pool
+    ):
+        await self._ensure_code_agent(db_pool, auth_user)
+
+        result = await _call(
+            mcp,
+            "create_request",
+            {
+                "title": "Gated plan",
+                "decomposition_mode": "author",
+                "task_plan": [
+                    {
+                        "title": "Gated plan task",
+                        "agent_type": "code",
+                        "output_contract": _GATE_CONTRACT,
+                    }
+                ],
+            },
+        )
+
+        assert "error" not in result, result
+        tasks = await repo.list_tasks(
+            result["id"], org_id=str(auth_user["organization_id"])
+        )
+        assert len(tasks["items"]) == 1
+        assert _stored_contract(tasks["items"][0]) == _GATE_CONTRACT == _GATE_CONTRACT
+
+    @pytest.mark.asyncio
+    async def test_create_request_task_plan_rejects_malformed_gate(
+        self, mcp, auth_user, db_pool
+    ):
+        await self._ensure_code_agent(db_pool, auth_user)
+        malformed = {
+            **_GATE_CONTRACT,
+            "gate": {"path": "", "stop_value": False},
+        }
+
+        result = await _call(
+            mcp,
+            "create_request",
+            {
+                "title": "Bad gated plan",
+                "decomposition_mode": "author",
+                "task_plan": [
+                    {
+                        "title": "Bad gate",
+                        "agent_type": "code",
+                        "output_contract": malformed,
+                    }
+                ],
+            },
+        )
+
+        assert "error" in result
+        assert "output_contract.gate.path must be a non-empty string" in result["error"]
 
 
 class TestCreateTaskDecision:

@@ -71,6 +71,21 @@ async def _make_task(repo, request_id, org_id, **kwargs):
     return await repo.create_task(**defaults)
 
 
+_GATE_CONTRACT = {
+    "json_schema": {
+        "type": "object",
+        "required": ["should_act"],
+        "properties": {"should_act": {"type": "boolean"}},
+    },
+    "gate": {"path": "should_act", "stop_value": False, "action": "stop_flow"},
+}
+
+
+def _stored_contract(task):
+    stored = task["output_contract"]
+    return json.loads(stored) if isinstance(stored, str) else stored
+
+
 # ── Request CRUD ─────────────────────────────────────────────────────────
 
 
@@ -363,6 +378,84 @@ class TestCreateTask:
         req = await _make_request(repo, org_id)
         with pytest.raises(asyncpg.CheckViolationError):
             await _make_task(repo, str(req["id"]), org_id, sequence_order=-1)
+
+
+class TestCreateTaskGateContract:
+    """Authoring a flow gate on a task (the canonical creation path).
+
+    The same validator guards every other authoring surface, so this class
+    pins the round-trip and the exact refusal messages there.
+    """
+
+    async def test_gate_spec_round_trips_unchanged(self, repo, org_id):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(
+            repo, str(req["id"]), org_id, output_contract=_GATE_CONTRACT
+        )
+
+        assert _stored_contract(task) == _GATE_CONTRACT
+
+    @pytest.mark.parametrize(
+        ("gate", "expected"),
+        [
+            (
+                {"path": "", "stop_value": False},
+                "output_contract.gate.path must be a non-empty string",
+            ),
+            (
+                {"path": "   ", "stop_value": False},
+                "output_contract.gate.path must be a non-empty string",
+            ),
+            (
+                {"path": "should_act", "stop_value": "no"},
+                "output_contract.gate.stop_value must be a boolean",
+            ),
+            (
+                {"path": "should_act", "stop_value": False, "action": "ignore"},
+                "Invalid output_contract.gate.action 'ignore'. "
+                "Must be one of: stop_flow",
+            ),
+        ],
+    )
+    async def test_malformed_gate_rejected(self, repo, org_id, gate, expected):
+        req = await _make_request(repo, org_id)
+        contract = {**_GATE_CONTRACT, "gate": gate}
+
+        with pytest.raises(ValueError) as excinfo:
+            await _make_task(
+                repo, str(req["id"]), org_id, output_contract=contract
+            )
+
+        assert expected in str(excinfo.value)
+
+    async def test_gate_rejected_on_kind_without_structured_result(
+        self, repo, org_id
+    ):
+        """A decision step has its own question schema, so a gate on it can
+        never evaluate. Refuse it at creation instead of storing dead config."""
+        req = await _make_request(repo, org_id)
+
+        with pytest.raises(ValueError) as excinfo:
+            await _make_task(
+                repo,
+                str(req["id"]),
+                org_id,
+                agent_type="decision-step",
+                decision_config={
+                    "questions": [
+                        {
+                            "name": "ready",
+                            "type": "noul",
+                            "instructions": "All checks pass.",
+                        }
+                    ]
+                },
+                output_contract=_GATE_CONTRACT,
+            )
+
+        message = str(excinfo.value)
+        assert "Task kind 'decision' cannot produce a structured result" in message
+        assert "a gate that never evaluates is worse than no gate" in message
 
 
 class TestListTasks:
@@ -1169,6 +1262,75 @@ class TestListPendingTasks:
         titles = [t["title"] for t in pending["items"]]
         assert "Step 1" not in titles
 
+    async def test_strict_gate_stop_advances_but_cancelled_and_failed_still_block(
+        self, repo, org_id
+    ):
+        """Only the gate-stop status satisfies an earlier sequence level.
+
+        Both directions live in one test on purpose: the deadlock guarantee is
+        exactly as strong as the narrowness of that terminal set. A gate stop
+        settles a level *successfully*, so the next level must proceed (a
+        cancelled level would otherwise block a gated plan forever), while
+        cancelled and failed levels must keep blocking exactly as they do
+        today. If anyone widens eligibility to a status beyond
+        ``short_circuited``, the blocking assertions here go red in the same
+        run that unblocks the gate case.
+        """
+        gate_req = await _make_request(repo, org_id, title="Gate-stop plan")
+        gate_rid = str(gate_req["id"])
+        stopped = await _make_task(
+            repo, gate_rid, org_id, title="Gated level", sequence_order=0
+        )
+        await _make_task(
+            repo, gate_rid, org_id, title="After gate stop", sequence_order=1
+        )
+
+        cancelled_req = await _make_request(repo, org_id, title="Cancelled plan")
+        cancelled_rid = str(cancelled_req["id"])
+        cancelled = await _make_task(
+            repo, cancelled_rid, org_id, title="Cancelled level", sequence_order=0
+        )
+        await _make_task(
+            repo,
+            cancelled_rid,
+            org_id,
+            title="After cancelled level",
+            sequence_order=1,
+        )
+
+        failed_req = await _make_request(repo, org_id, title="Failed plan")
+        failed_rid = str(failed_req["id"])
+        failed = await _make_task(
+            repo, failed_rid, org_id, title="Failed level", sequence_order=0
+        )
+        await _make_task(
+            repo, failed_rid, org_id, title="After failed level", sequence_order=1
+        )
+
+        # The same shape three times: the only difference is the terminal
+        # status of the earlier level.
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                stopped["id"],
+            )
+            await conn.execute(
+                "UPDATE tasks SET status = 'cancelled' WHERE id = $1",
+                cancelled["id"],
+            )
+            await conn.execute(
+                "UPDATE tasks SET status = 'failed' WHERE id = $1",
+                failed["id"],
+            )
+
+        pending = await repo.list_pending_tasks(org_id)
+        titles = [t["title"] for t in pending["items"]]
+        # A gate stop is a successful level: the plan proceeds.
+        assert "After gate stop" in titles
+        # Nothing else was widened: a cancelled or failed level still blocks.
+        assert "After cancelled level" not in titles
+        assert "After failed level" not in titles
+
     async def test_strict_is_default(self, repo, org_id):
         """Requests default to strict dependency_policy."""
         req = await _make_request(repo, org_id)
@@ -1357,3 +1519,198 @@ class TestGetRecentEvents:
         # Most recent first
         if len(events) >= 2:
             assert events[0]["created_at"] >= events[1]["created_at"]
+
+
+class TestShortCircuitedStatus:
+    """The gate-stop terminal status: storage, terminal semantics, dispatch pass.
+
+    A short-circuited task is settled without running because an earlier gate
+    stopped the flow. These tests pin that the value survives the repository
+    round-trip, counts as terminal for request completion, and does not make a
+    dispatch pass raise.
+    """
+
+    async def test_round_trips_through_repository(self, repo, org_id, db_pool):
+        req = await _make_request(repo, org_id)
+        task = await _make_task(repo, str(req["id"]), org_id, title="Skipped")
+
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                task["id"],
+            )
+
+        fetched = await repo.get_task(str(task["id"]), org_id=org_id)
+        assert fetched is not None
+        assert fetched["status"] == "short_circuited"
+
+        listed = await repo.list_tasks(
+            str(req["id"]), status="short_circuited", org_id=org_id
+        )
+        assert listed["total_count"] == 1
+        assert [t["status"] for t in listed["items"]] == ["short_circuited"]
+
+    async def test_counts_as_terminal_for_request_completion(self, repo, org_id):
+        req = await _make_request(repo, org_id)
+        await _make_task(repo, str(req["id"]), org_id, title="Skipped")
+        await repo.update_request_status(str(req["id"]), "in_progress", org_id=org_id)
+
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE request_id = $1",
+                req["id"],
+            )
+
+        await repo.reconcile_request_statuses(org_id=org_id)
+        refreshed = await repo.get_request(str(req["id"]), org_id)
+        assert refreshed is not None
+        # Terminal work with no failure advances to review (or straight to
+        # completed when post-completion review is disabled).
+        assert refreshed["status"] in ("review", "completed")
+
+    async def test_dispatch_pass_does_not_raise(self, repo, org_id):
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        await _make_task(repo, rid, org_id, title="Gate", sequence_order=0)
+        await _make_task(repo, rid, org_id, title="Skipped", sequence_order=1)
+
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' "
+                "WHERE request_id = $1 AND title = 'Skipped'",
+                req["id"],
+            )
+
+        # The dispatch predicate and the status reconciler are the two SQL
+        # passes that enumerate task statuses. Neither may raise on the new
+        # value, and the settled level itself is never offered back for
+        # dispatch. (Whether a settled level unblocks a *downstream* level is
+        # covered by TestListPendingTasks::
+        # test_strict_gate_stop_advances_but_cancelled_and_failed_still_block.)
+        pending = await repo.list_pending_tasks(org_id)
+        assert all(t["status"] != "short_circuited" for t in pending["items"])
+        await repo.reconcile_request_statuses(org_id=org_id)
+
+    async def test_gate_stop_task_is_never_claimed_or_offered_for_dispatch(
+        self, repo, org_id
+    ):
+        """Settled gate-stop work is invisible to every dispatch surface.
+
+        A short-circuited task never ran and never will, so it must not be
+        claimable, must not appear in the dispatcher's selection
+        (``list_pending_tasks``), and must not appear in the queued backlog
+        (``list_queued_tasks``) — that backlog is the pending/planned set.
+        """
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        await _make_task(repo, rid, org_id, title="Gate decision", sequence_order=0)
+        stopped = await _make_task(
+            repo, rid, org_id, title="Skipped", sequence_order=1
+        )
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                stopped["id"],
+            )
+
+        claimed = await repo.claim_task(
+            str(stopped["id"]), "inst-test", org_id=org_id
+        )
+        assert claimed is None
+        after = await repo.get_task(str(stopped["id"]), org_id=org_id)
+        assert after["status"] == "short_circuited"
+
+        ready = await repo.list_pending_tasks(org_id)
+        assert "Skipped" not in [t["title"] for t in ready["items"]]
+        queued = await repo.list_queued_tasks(org_id)
+        assert "Skipped" not in [t["title"] for t in queued["items"]]
+
+
+class TestShortCircuitPendingTasks:
+    """Flow-stop propagation settles work without touching the review task."""
+
+    async def test_settles_pending_and_planned_but_spares_review_and_gate(
+        self, repo, org_id
+    ):
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        gating = await _make_task(
+            repo, rid, org_id, title="Gate decision", sequence_order=0
+        )
+        pending = await _make_task(
+            repo, rid, org_id, title="Publish", sequence_order=1
+        )
+        planned = await _make_task(
+            repo, rid, org_id, title="Notify", sequence_order=2
+        )
+        review = await _make_task(
+            repo,
+            rid,
+            org_id,
+            title="Post-completion review",
+            agent_type="request-review",
+            sequence_order=10000000,
+        )
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'completed' WHERE id = $1",
+                gating["id"],
+            )
+            await conn.execute(
+                "UPDATE tasks SET status = 'planned' WHERE id = $1",
+                planned["id"],
+            )
+
+        settled = await repo.short_circuit_pending_tasks(
+            rid, org_id=org_id, reason="gate decision was do-not-act"
+        )
+        settled_ids = {item["id"] for item in settled}
+
+        assert settled_ids == {str(pending["id"]), str(planned["id"])}
+        gating_after = await repo.get_task(str(gating["id"]), org_id=org_id)
+        pending_after = await repo.get_task(str(pending["id"]), org_id=org_id)
+        planned_after = await repo.get_task(str(planned["id"]), org_id=org_id)
+        review_after = await repo.get_task(str(review["id"]), org_id=org_id)
+        assert gating_after["status"] == "completed"
+        assert pending_after["status"] == "short_circuited"
+        assert planned_after["status"] == "short_circuited"
+        # The post-completion review task is exempt: it must still run.
+        assert review_after["status"] == "pending"
+
+        events = await repo.list_task_events(str(pending["id"]), org_id=org_id)
+        assert any(
+            e["event_type"] == "short_circuited" for e in events["items"]
+        )
+
+    async def test_only_remaining_review_task_still_reaches_review(
+        self, repo, org_id
+    ):
+        req = await _make_request(repo, org_id)
+        rid = str(req["id"])
+        gating = await _make_task(
+            repo, rid, org_id, title="Gate decision", sequence_order=0
+        )
+        review = await _make_task(
+            repo,
+            rid,
+            org_id,
+            title="Post-completion review",
+            agent_type="request-review",
+            sequence_order=10000000,
+        )
+        async with repo.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'completed' WHERE id = $1",
+                gating["id"],
+            )
+        await repo.update_request_status(rid, "in_progress", org_id=org_id)
+
+        # Nothing downstream is left to short-circuit...
+        settled = await repo.short_circuit_pending_tasks(rid, org_id=org_id)
+        assert settled == []
+
+        # ...and the review task is still queued for the review lifecycle.
+        refreshed_review = await repo.get_task(str(review["id"]), org_id=org_id)
+        assert refreshed_review["status"] == "pending"
+        refreshed_request = await repo.get_request(rid, org_id)
+        assert refreshed_request["status"] in ("review", "completed")

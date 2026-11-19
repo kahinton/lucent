@@ -162,6 +162,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
     "failed": "Something went wrong",
     "cancelled": "Cancelled",
     "cancelled_by_user": "Cancelled",
+    "short_circuited": "Skipped — the flow stopped before this step",
     "review_approved": "Approved",
     "review_rejected": "Sent back for changes",
 }
@@ -170,7 +171,7 @@ _ACTIVITY_LABELS: dict[str, str] = {
 def _task_activity_line(task: dict) -> str:
     """Return a one-line, non-technical description of what a task is doing."""
     status = task.get("status")
-    if status in ("completed", "failed", "cancelled", "needs_review"):
+    if status in ("completed", "failed", "cancelled", "needs_review", "short_circuited"):
         return _ACTIVITY_LABELS.get(status, "")
 
     for event in reversed(task.get("events") or []):

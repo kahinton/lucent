@@ -34,6 +34,7 @@ from lucent.constants import (
     VALID_REQUEST_STATUSES,
 )
 from lucent.db.pool import scoped_acquire_on
+from lucent.flow_gate import validate_contract_gate
 from lucent.llm.decision import (
     MAX_QUESTIONS,
     MAX_CHOICE_OPTIONS,
@@ -747,6 +748,13 @@ def _recorded_review_feedback(result: str | None) -> str:
 
 
 _VALID_OUTPUT_FAILURE_POLICIES = {"fail", "fallback", "retry_then_fallback"}
+# What a decision step does when a question misses its minimum. ``stop_flow``
+# shares its vocabulary with the flow gate: the step still completes, and the
+# remaining tasks are short-circuited exactly as a script gate would do.
+_VALID_DECISION_ON_FAIL_VALUES = ("fail_task", "needs_review", "stop_flow")
+# Fusion's arbiter threshold policy shares this validator but not the flow-gate
+# mechanism, so stop_flow is not accepted there until its runtime handles it.
+_VALID_FUSION_ON_FAIL_VALUES = ("fail_task", "needs_review")
 _VALID_VALIDATION_STATUSES = {
     "not_applicable",
     "valid",
@@ -798,7 +806,10 @@ def _validate_output_contract(output_contract: dict | None) -> None:
 
 
 def _validate_decision_threshold_policy(
-    threshold_policy: Any, questions: dict[str, str]
+    threshold_policy: Any,
+    questions: dict[str, str],
+    *,
+    on_fail_values: tuple[str, ...] = _VALID_DECISION_ON_FAIL_VALUES,
 ) -> tuple[str, dict[str, dict]]:
     """Validate a decision_config threshold_policy; returns (on_fail, thresholds).
 
@@ -807,14 +818,19 @@ def _validate_decision_threshold_policy(
     positions (documented, not bounded) — choice questions are never
     thresholded because a choice answer is classification output, not a
     degree of confidence in a condition.
+
+    ``on_fail_values`` is the accepted vocabulary for the calling surface: the
+    decision kind implements all three actions, while the fusion arbiter
+    shares this validator but only handles ``fail_task``/``needs_review``.
     """
     if not isinstance(threshold_policy, dict):
         raise ValueError("decision_config.threshold_policy must be an object")
     on_fail = threshold_policy.get("on_fail", "fail_task")
-    if on_fail not in ("fail_task", "needs_review"):
+    if on_fail not in on_fail_values:
+        accepted = ", ".join(repr(value) for value in on_fail_values)
         raise ValueError(
-            "decision_config.threshold_policy.on_fail must be 'fail_task' "
-            f"or 'needs_review'; got {on_fail!r}"
+            "decision_config.threshold_policy.on_fail must be one of "
+            f"{accepted}; got {on_fail!r}"
         )
     raw_thresholds = threshold_policy.get("questions")
     if not isinstance(raw_thresholds, dict) or not raw_thresholds:
@@ -957,7 +973,7 @@ def validate_decision_config(config: dict | None) -> None:
         "state": {"<key>": "<literal>"}                  # optional
         "model": "<decision model id>",                  # optional
         "threshold_policy": {"questions": {name: {"min": f}},
-                             "on_fail": "fail_task|needs_review"},
+                             "on_fail": "fail_task|needs_review|stop_flow"},
       }
 
     Raises ValueError with an author-facing message on any malformed shape.
@@ -1142,7 +1158,9 @@ def validate_fusion_config(
         )
         if "threshold_policy" in arbiter:
             _validate_decision_threshold_policy(
-                arbiter["threshold_policy"], question_types
+                arbiter["threshold_policy"],
+                question_types,
+                on_fail_values=_VALID_FUSION_ON_FAIL_VALUES,
             )
 
     synthesis = config.get("synthesis")
@@ -1213,6 +1231,16 @@ def validate_fusion_config(
 # question the dispatcher asks — counting raw `pending` rows would spawn workers
 # for work that can never be claimed (a cancelled request's leftovers, or a
 # stage-gated task), which then idle out and get respawned forever.
+#
+# Eligibility asymmetry, deliberate and load-bearing:
+#   * 'short_circuited' satisfies an earlier sequence level. A flow gate
+#     settles the remaining work as a successful decision, so the next level
+#     must proceed; without this, every gated plan deadlocks behind its own
+#     gate stop, because that level has no 'completed' row.
+#   * 'cancelled' and 'failed' keep their existing behaviour exactly — a
+#     strict level still blocks on them. Widening this set any further would
+#     silently let a failed or cancelled prerequisite through, so it stays
+#     exactly one status wider than it was.
 DISPATCHABLE_TASKS_FROM = "FROM tasks t JOIN requests r ON t.request_id = r.id"
 
 DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
@@ -1226,7 +1254,8 @@ DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                                              WHERE unfinished.request_id = t.request_id
                                                  AND unfinished.sequence_order < t.sequence_order
                                                  AND unfinished.status NOT IN (
-                                                     'completed', 'failed', 'cancelled'
+                                                     'completed', 'failed', 'cancelled',
+                                                     'short_circuited'
                                                  )
                                          )
                      AND NOT EXISTS (
@@ -1242,8 +1271,13 @@ DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                              AND t2.sequence_order = earlier_seqs.seq
                              AND CASE COALESCE(r.dependency_policy, 'strict')
                                  WHEN 'permissive'
-                                   THEN t2.status IN ('completed', 'failed', 'cancelled')
-                                 ELSE t2.status = 'completed'
+                                   THEN t2.status IN (
+                                       'completed', 'failed', 'cancelled',
+                                       'short_circuited'
+                                   )
+                                 ELSE t2.status IN (
+                                     'completed', 'short_circuited'
+                                 )
                                  END
                        )
                      )"""
@@ -1265,7 +1299,8 @@ REMOTE_DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                          WHERE unfinished.request_id = t.request_id
                              AND unfinished.sequence_order < t.sequence_order
                              AND unfinished.status NOT IN (
-                                 'completed', 'failed', 'cancelled'
+                                 'completed', 'failed', 'cancelled',
+                                 'short_circuited'
                              )
                      )
                      AND NOT EXISTS (
@@ -1281,8 +1316,13 @@ REMOTE_DISPATCHABLE_TASK_PREDICATE = """t.organization_id = $1
                              AND t2.sequence_order = earlier_seqs.seq
                              AND CASE COALESCE(r.dependency_policy, 'strict')
                                  WHEN 'permissive'
-                                   THEN t2.status IN ('completed', 'failed', 'cancelled')
-                                 ELSE t2.status = 'completed'
+                                   THEN t2.status IN (
+                                       'completed', 'failed', 'cancelled',
+                                       'short_circuited'
+                                   )
+                                 ELSE t2.status IN (
+                                     'completed', 'short_circuited'
+                                 )
                                  END
                        )
                      )"""
@@ -1348,6 +1388,11 @@ def _normalize_task_payload(
         decision_config=decision_config,
         fusion_config=fusion_config,
     )
+    # A gate is declared inside output_contract. Reject a malformed gate, or
+    # one on a kind that can never satisfy a structured contract, at authoring
+    # time — before any row is written and before the kind's own payload
+    # checks can mask the real problem.
+    validate_contract_gate(output_contract, kind=resolved_kind)
     if execution_config is not None and (
         decision_config is not None or fusion_config is not None
     ):
@@ -4141,6 +4186,7 @@ class RequestRepository:
                 "failed": 0,
                 "cancelled": 0,
                 "needs_review": 0,
+                "short_circuited": 0,
             }
             for task in tasks:
                 status = str(task.get("status") or "")
@@ -4246,10 +4292,15 @@ class RequestRepository:
         The request's dependency_policy controls what happens when a
         predecessor fails or is cancelled:
           - 'strict' (default): at least one task at each earlier level must
-            be 'completed' — failed/cancelled predecessors block unless a
-            retry completed.
-          - 'permissive': completed, failed, and cancelled all count as
-            acceptable terminal states.
+            be 'completed' or 'short_circuited' — failed/cancelled
+            predecessors block unless a retry completed.
+          - 'permissive': completed, failed, cancelled, and short_circuited
+            all count as acceptable terminal states.
+
+        ``short_circuited`` is the gate-stop terminal status and the only
+        non-'completed' status a strict level accepts: a gate that decides
+        not to act settles its level successfully, so the next level must
+        proceed rather than deadlock behind a level that can never complete.
         """
         base = f"""{DISPATCHABLE_TASKS_FROM}
                    WHERE {DISPATCHABLE_TASK_PREDICATE}"""
@@ -4650,7 +4701,7 @@ class RequestRepository:
     # Statuses where the task is in flight or already finalized successfully.
     # Anything else (pending, planned, failed, cancelled, needs_review, etc.)
     # is safe to edit because the daemon won't be actively executing it.
-    _NON_EDITABLE_TASK_STATUSES = ('claimed', 'running', 'completed')
+    _NON_EDITABLE_TASK_STATUSES = ('claimed', 'running', 'completed', 'short_circuited')
 
     async def update_pending_task(
         self,
@@ -5410,6 +5461,86 @@ class RequestRepository:
             str(task["request_id"]), org_id=str(task["organization_id"])
         )
         return task
+
+    async def short_circuit_pending_tasks(
+        self,
+        request_id: str,
+        org_id: str | None = None,
+        *,
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> list[dict]:
+        """Settle every pending/planned work task of a request as a gate stop.
+
+        A flow gate that decides not to act is a successful outcome, not an
+        error, so the remaining work is ``short_circuited`` — deliberately not
+        ``cancelled``: a cancelled sequence level has no completed row and
+        would block a strict dependency policy forever.
+
+        The post-completion review task is exempt: it must still run so the
+        request can close green. A gating task is already completed when this
+        runs, so the status filter already excludes it.
+
+        The new terminal status satisfies the same completion check as a
+        completed task, so advancing to review happens here after the update.
+        """
+        now = datetime.now(timezone.utc)
+        detail = reason or (
+            "Task short-circuited: an earlier flow gate stopped the request"
+        )
+        async with scoped_acquire_on(
+            self.pool, organization_id=org_id
+        ) as conn:
+            async with conn.transaction():
+                if org_id:
+                    rows = await conn.fetch(
+                        """UPDATE tasks
+                           SET status = 'short_circuited',
+                               completed_at = COALESCE(completed_at, $2),
+                               updated_at = $2
+                           WHERE request_id = $1
+                             AND organization_id = $3
+                             AND status IN ('pending', 'planned')
+                             AND agent_type IS DISTINCT FROM 'request-review'
+                             AND title IS DISTINCT FROM 'Post-completion review'
+                           RETURNING id, title, sequence_order""",
+                        UUID(request_id),
+                        now,
+                        UUID(org_id),
+                    )
+                else:
+                    rows = await conn.fetch(
+                        """UPDATE tasks
+                           SET status = 'short_circuited',
+                               completed_at = COALESCE(completed_at, $2),
+                               updated_at = $2
+                           WHERE request_id = $1
+                             AND status IN ('pending', 'planned')
+                             AND agent_type IS DISTINCT FROM 'request-review'
+                             AND title IS DISTINCT FROM 'Post-completion review'
+                           RETURNING id, title, sequence_order""",
+                        UUID(request_id),
+                        now,
+                    )
+                if rows:
+                    await conn.executemany(
+                        """INSERT INTO task_events
+                               (task_id, event_type, detail, metadata)
+                           VALUES ($1, 'short_circuited', $2, $3)""",
+                        [
+                            (row["id"], detail, metadata or {})
+                            for row in rows
+                        ],
+                    )
+        await self._check_request_completion(request_id, org_id=org_id)
+        return [
+            {
+                "id": str(row["id"]),
+                "title": row["title"],
+                "sequence_order": row["sequence_order"],
+            }
+            for row in rows
+        ]
 
     async def list_requested_cancels(
         self,
@@ -6442,7 +6573,7 @@ AND (
             row = await conn.fetchrow(
                 """SELECT
                      COUNT(*) as total,
-                     COUNT(*) FILTER (WHERE status IN ('completed', 'failed', 'cancelled')) as done
+                     COUNT(*) FILTER (WHERE status IN ('completed', 'failed', 'cancelled', 'short_circuited')) as done
                    FROM tasks
                    WHERE request_id = $1
                      AND agent_type IS DISTINCT FROM 'request-review'
@@ -6517,7 +6648,7 @@ AND (
                    AND NOT EXISTS (
                        SELECT 1 FROM tasks t
                        WHERE t.request_id = r.id
-                       AND t.status NOT IN ('completed', 'failed', 'cancelled')
+                       AND t.status NOT IN ('completed', 'failed', 'cancelled', 'short_circuited')
                    )
                    AND EXISTS (SELECT 1 FROM tasks t WHERE t.request_id = r.id)""",
                 *params,

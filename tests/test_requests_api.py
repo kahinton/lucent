@@ -1,5 +1,6 @@
 """Request API ownership and system visibility tests."""
 
+import json
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -166,6 +167,82 @@ async def test_request_api_scopes_members_and_system_work(db_pool):
             await conn.execute("DELETE FROM requests WHERE organization_id = $1", org["id"])
             await conn.execute("DELETE FROM users WHERE organization_id = $1", org["id"])
             await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])
+
+
+_GATE_CONTRACT = {
+    "json_schema": {
+        "type": "object",
+        "required": ["should_act"],
+        "properties": {"should_act": {"type": "boolean"}},
+    },
+    "gate": {"path": "should_act", "stop_value": False},
+}
+
+
+async def _gate_fixture(db_pool):
+    prefix = f"test_req_gate_{str(uuid4())[:8]}_"
+    org = await OrganizationRepository(db_pool).create(name=f"{prefix}org")
+    user = await UserRepository(db_pool).create(
+        external_id=f"{prefix}user",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{prefix}user@test.com",
+        display_name="Gate Author",
+    )
+    request = await RequestRepository(db_pool).create_request(
+        title="Gate authoring",
+        org_id=str(org["id"]),
+        created_by=str(user["id"]),
+    )
+    return org, user, request
+
+
+async def _gate_cleanup(db_pool, org, user, request):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM requests WHERE id = $1", request["id"])
+        await conn.execute("DELETE FROM users WHERE id = $1", user["id"])
+        await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])
+
+
+@pytest.mark.asyncio
+async def test_rest_create_task_round_trips_gate_spec(db_pool):
+    org, user, request = await _gate_fixture(db_pool)
+    try:
+        async with _client_for(user) as client:
+            response = await client.post(
+                f"/api/requests/{request['id']}/tasks",
+                json={"title": "Gated task", "output_contract": _GATE_CONTRACT},
+            )
+
+        assert response.status_code == 200, response.text
+        stored = response.json()["output_contract"]
+        if isinstance(stored, str):
+            stored = json.loads(stored)
+        assert stored == _GATE_CONTRACT
+    finally:
+        await _gate_cleanup(db_pool, org, user, request)
+
+
+@pytest.mark.asyncio
+async def test_rest_create_task_rejects_malformed_gate(db_pool):
+    org, user, request = await _gate_fixture(db_pool)
+    try:
+        malformed = {
+            **_GATE_CONTRACT,
+            "gate": {"path": "should_act", "stop_value": False, "action": "ignore"},
+        }
+        async with _client_for(user) as client:
+            response = await client.post(
+                f"/api/requests/{request['id']}/tasks",
+                json={"title": "Bad gate", "output_contract": malformed},
+            )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "Invalid output_contract.gate.action 'ignore'" in detail
+        assert "Must be one of: stop_flow" in detail
+    finally:
+        await _gate_cleanup(db_pool, org, user, request)
 
 
 @pytest.mark.asyncio
@@ -350,6 +427,66 @@ async def test_list_request_tasks_returns_pagination_envelope(db_pool):
             await conn.execute(
                 "DELETE FROM requests WHERE id = ANY($1::uuid[])",
                 [request["id"], empty_request["id"]],
+            )
+            await conn.execute("DELETE FROM users WHERE id = $1", user["id"])
+            await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])
+
+
+@pytest.mark.asyncio
+async def test_list_request_tasks_serializes_short_circuited_status(db_pool):
+    """REST emits the gate-stop status verbatim rather than null/error.
+
+    A short-circuited task must survive JSON serialization with its exact
+    status string and be filterable by it, so the UI and API consumers never
+    see a missing value.
+    """
+    prefix = f"test_req_short_{str(uuid4())[:8]}_"
+    org = await OrganizationRepository(db_pool).create(name=f"{prefix}org")
+    user = await UserRepository(db_pool).create(
+        external_id=f"{prefix}user",
+        provider="local",
+        organization_id=org["id"],
+        email=f"{prefix}user@test.com",
+        display_name="Member",
+    )
+    repo = RequestRepository(db_pool)
+    request = await repo.create_request(
+        title="Request with a gated step",
+        org_id=str(org["id"]),
+        created_by=str(user["id"]),
+    )
+    task = await repo.create_task(
+        request_id=str(request["id"]),
+        title="Skipped step",
+        org_id=str(org["id"]),
+    )
+
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                task["id"],
+            )
+
+        async with _client_for(user) as client:
+            response = await client.get(f"/api/requests/{request['id']}/tasks")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            assert payload["total_count"] == 1
+            assert payload["items"][0]["status"] == "short_circuited"
+
+            filtered = await client.get(
+                f"/api/requests/{request['id']}/tasks",
+                params={"status": "short_circuited"},
+            )
+            assert filtered.status_code == 200, filtered.text
+            filtered_payload = filtered.json()
+            assert filtered_payload["total_count"] == 1
+            assert filtered_payload["items"][0]["status"] == "short_circuited"
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM requests WHERE id = $1", request["id"]
             )
             await conn.execute("DELETE FROM users WHERE id = $1", user["id"])
             await conn.execute("DELETE FROM organizations WHERE id = $1", org["id"])

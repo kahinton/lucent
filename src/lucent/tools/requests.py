@@ -1565,7 +1565,8 @@ Args:
     decision_config: Optional decision-step payload — requires agent_type
         'decision-step': {questions: [{name, type: noul|choice|score, instructions,
         criteria?}], state?: {...}, model?: <decision model id>,
-        threshold_policy?: {questions: {name: {min}}, on_fail: fail_task|needs_review}}.
+        threshold_policy?: {questions: {name: {min}}, on_fail:
+        fail_task|needs_review|stop_flow}}.
         Dispatched to a System One decision model without an agent session.
         Choose the model from list_available_models(category='decision')
         ``decision_models``; if omitted here and in ``model``, the daemon

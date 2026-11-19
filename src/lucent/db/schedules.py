@@ -343,11 +343,14 @@ async def validate_task_action_kinds(
     Script payload validation is delegated to
     :func:`lucent.script_tasks.validate_script_task`, the same validator
     :meth:`lucent.db.requests.RequestRepository.create_task` uses, so the
-    authoring answer and the creation answer cannot drift.
+    authoring answer and the creation answer cannot drift. A gate
+    specification in an action's ``output_contract`` is checked by the same
+    helper the repository uses, for the same reason.
 
     Raises ``ValueError`` naming what is missing; every authoring caller maps
     that to its own error envelope (HTTP 4xx, MCP ``{"error": ...}``).
     """
+    from lucent.flow_gate import validate_contract_gate
     from lucent.task_kinds import resolve_task_kind
 
     script_actions: list[dict] = []
@@ -356,15 +359,21 @@ async def validate_task_action_kinds(
             continue
         if action.get("action_type", "task") != "task":
             continue
-        if (
-            resolve_task_kind(
-                kind=action.get("task_kind"),
-                agent_type=action.get("agent_type"),
-                decision_config=action.get("decision_config"),
-                fusion_config=action.get("fusion_config"),
-            )
-            == "script"
-        ):
+        kind = resolve_task_kind(
+            kind=action.get("task_kind"),
+            agent_type=action.get("agent_type"),
+            decision_config=action.get("decision_config"),
+            fusion_config=action.get("fusion_config"),
+        )
+        # A workflow action's payload is stored verbatim and expanded long
+        # after it was saved, so a gate that cannot evaluate is refused here,
+        # where the author can fix it, rather than failing a run later.
+        try:
+            validate_contract_gate(action.get("output_contract"), kind=kind)
+        except ValueError as exc:
+            title = action.get("title") or "untitled"
+            raise ValueError(f"Workflow action '{title}': {exc}") from exc
+        if kind == "script":
             script_actions.append(action)
     if not script_actions:
         return

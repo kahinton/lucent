@@ -123,6 +123,7 @@
                     <option value="" {% if ns.on_fail == '' %}selected{% endif %}>Record answers only (default)</option>
                     <option value="fail_task" {% if ns.on_fail == 'fail_task' %}selected{% endif %}>Fail the step — later stages will not run</option>
                     <option value="needs_review" {% if ns.on_fail == 'needs_review' %}selected{% endif %}>Route the step for review</option>
+                    <option value="stop_flow" {% if ns.on_fail == 'stop_flow' %}selected{% endif %}>Stop the flow — complete the step, skip later stages</option>
                 </select>
                 <p class="mt-1 text-xs text-gray-400">Applies to questions that have a minimum set. Steps without a minimum always record their answers.</p>
             </div>

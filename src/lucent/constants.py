@@ -72,8 +72,13 @@ VALID_DECOMPOSITION_MODES: frozenset[str] = frozenset(
 )
 
 # Task statuses that mean the work is no longer running or queued.
+#
+# 'short_circuited' is a deliberate gate stop, not an error: the task was
+# settled without running because an earlier gate stopped the flow. It is
+# terminal and distinct from 'cancelled' (which blocks a strict dependency
+# level forever).
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset(
-    {"completed", "failed", "cancelled"}
+    {"completed", "failed", "cancelled", "short_circuited"}
 )
 
 # Task statuses that a hard cancel must actively interrupt.

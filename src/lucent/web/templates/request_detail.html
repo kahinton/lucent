@@ -71,6 +71,7 @@
 {%- elif status == 'completed' -%}Done
 {%- elif status == 'failed' -%}Failed
 {%- elif status == 'needs_review' -%}Needs a check
+{%- elif status == 'short_circuited' -%}Skipped (flow stopped)
 {%- elif status == 'cancelled' -%}Cancelled
 {%- else -%}{{ status | replace('_', ' ') | title }}
 {%- endif -%}
@@ -83,6 +84,7 @@
 {%- elif status == 'completed' -%}bg-emerald-100 text-emerald-700
 {%- elif status == 'failed' -%}bg-red-100 text-red-700
 {%- elif status == 'needs_review' -%}bg-purple-100 text-purple-700
+{%- elif status == 'short_circuited' -%}bg-amber-100 text-amber-700
 {%- elif status == 'cancelled' -%}bg-gray-100 text-gray-400
 {%- else -%}bg-gray-100 text-gray-600
 {%- endif -%}
@@ -516,7 +518,7 @@
                             </form>
                         </details>
 
-                        {% if task.status != 'cancelled' %}
+                        {% if task.status not in ('cancelled', 'short_circuited') %}
                         <form id="task-cancel-form-{{ task.id }}" hx-preserve="true" method="POST" action="/requests/tasks/{{ task.id }}/cancel" data-confirm="Stop this step? What it has done so far is kept.">
                             <input type="hidden" name="{{ csrf_field_name }}" value="{{ csrf_token }}">
                             <button type="submit" class="rounded-md border border-red-200 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-50">Stop this step</button>

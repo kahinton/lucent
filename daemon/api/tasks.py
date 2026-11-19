@@ -219,6 +219,30 @@ class TaskAPI:
         )
 
     @staticmethod
+    async def short_circuit_pending_tasks(
+        task_id: str,
+        *,
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> list[dict] | None:
+        """Settle the request's remaining pending/planned tasks as a gate stop.
+
+        ``task_id`` is the gating task. Returns the settled rows, or ``None``
+        when the write could not be made — the caller must not report a flow
+        stop it did not persist.
+        """
+        data = await TaskAPI._post(
+            f"/requests/tasks/{task_id}/short-circuit",
+            {"reason": reason[:2000] if reason else None, "metadata": metadata},
+            "short_circuit_pending_tasks",
+        )
+        if data is None:
+            return None
+        if isinstance(data, dict):
+            return list(data.get("short_circuited") or [])
+        return list(data) if isinstance(data, list) else []
+
+    @staticmethod
     async def fail_task(
         task_id: str,
         error: str,

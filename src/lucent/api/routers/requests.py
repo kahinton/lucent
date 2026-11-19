@@ -1295,6 +1295,42 @@ class TaskCompleteBody(BaseModel):
     outputs: list[TaskOutputCreate] | None = None
 
 
+class FlowStopBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=2000)
+    metadata: dict | None = None
+
+
+@router.post("/tasks/{task_id}/short-circuit")
+async def short_circuit_pending_tasks(
+    task_id: UUID,
+    user: AuthenticatedUser,
+    body: FlowStopBody = Body(default=FlowStopBody()),
+    pool=Depends(get_pool),
+):
+    """Short-circuit the request's remaining work after a flow gate stops.
+
+    ``task_id`` is the gating task, which has already completed successfully.
+    Pending/planned siblings become ``short_circuited``; the post-completion
+    review task is exempt so the request still reaches review.
+    """
+    from lucent.db.requests import RequestRepository
+
+    repo = RequestRepository(pool)
+    task = await _require_task_mutation(
+        repo, str(task_id), str(user.organization_id), user
+    )
+    request_id = str(task.get("request_id") or "")
+    if not request_id:
+        raise HTTPException(422, "Task has no parent request")
+    items = await repo.short_circuit_pending_tasks(
+        request_id,
+        org_id=str(user.organization_id),
+        reason=body.reason,
+        metadata=body.metadata,
+    )
+    return {"short_circuited": items, "count": len(items)}
+
+
 @router.post("/tasks/{task_id}/complete")
 async def complete_task(
     task_id: UUID,

@@ -59,6 +59,7 @@ _TASK_STATUS_LABELS = {
     "failed": "failed",
     "cancelled": "cancelled",
     "needs_review": "needs review",
+    "short_circuited": "skipped — the flow stopped",
 }
 
 

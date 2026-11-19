@@ -475,9 +475,10 @@
                     : st === 'failed' ? 'failed'
                         : st === 'cancelled' ? 'cancelled'
                             : st === 'needs_review' ? 'needs a check'
-                                : st === 'claimed' ? 'starting'
-                                    : st === 'running' ? 'running'
-                                        : 'queued';
+                                : st === 'short_circuited' ? 'skipped'
+                                    : st === 'claimed' ? 'starting'
+                                        : st === 'running' ? 'running'
+                                            : 'queued';
                 return `<li class="delegated-progress-task">
                     <span class="delegated-progress-dot ${dot}"></span>
                     <span class="delegated-progress-task-title">${escapeHtml(task.title || 'Task')}</span>

@@ -660,3 +660,48 @@ async def test_orphaned_claim_is_requeued_when_remote_reports_nothing_active(db_
         )["status"] == "claimed"
     finally:
         await _cleanup(db_pool, org["id"], prefix)
+
+
+@pytest.mark.asyncio
+async def test_remote_claim_never_takes_a_gate_stop_task(db_pool):
+    """A short-circuited task is settled work: no dispatch path re-offers it.
+
+    The remote claim path has its own copy of the dispatch predicate (pinned
+    to this remote instead of excluding pins), so it needs its own proof that
+    the gate-stop status is not claimable there either.
+    """
+    prefix = f"test_remote_gate_stop_{str(uuid4())[:8]}_"
+    org, owner = await _setup(db_pool, prefix)
+    try:
+        remotes = RemoteRepository(db_pool)
+        remote, _token = await remotes.create(
+            org_id=str(org["id"]),
+            name="worker-gate",
+            created_by=str(owner["id"]),
+        )
+        requests = RequestRepository(db_pool)
+        request = await requests.create_request(
+            title="Gate stop on remote",
+            org_id=str(org["id"]),
+            created_by=str(owner["id"]),
+        )
+        task = await requests.create_task(
+            request_id=str(request["id"]),
+            title="Settled by gate",
+            org_id=str(org["id"]),
+            remote_target_id=str(remote["id"]),
+        )
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = 'short_circuited' WHERE id = $1",
+                task["id"],
+            )
+
+        claimed = await requests.claim_remote_task(
+            remote_id=str(remote["id"]), org_id=str(org["id"])
+        )
+        assert claimed is None
+        refreshed = await requests.get_task(str(task["id"]), str(org["id"]))
+        assert refreshed["status"] == "short_circuited"
+    finally:
+        await _cleanup(db_pool, org["id"], prefix)

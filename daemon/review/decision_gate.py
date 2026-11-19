@@ -118,7 +118,7 @@ def _terminal_tasks(daemon, request_data: dict) -> list[dict]:
     """
     tasks = request_data.get("tasks") or []
     non_review = [t for t in tasks if not daemon._is_request_review_task(t)]
-    return [t for t in non_review if t.get("status") in ("completed", "failed", "cancelled")]
+    return [t for t in non_review if t.get("status") in ("completed", "failed", "cancelled", "short_circuited")]
 
 
 def _in_flight_tasks(daemon, request_data: dict) -> list[dict]:

@@ -176,6 +176,32 @@ def test_validates_arbiter_threshold_policy():
                 }
             )
         )
+    # The fusion arbiter shares the decision validator but not the flow gate,
+    # so it keeps exactly fail_task/needs_review and rejects stop_flow.
+    for on_fail in ("fail_task", "needs_review"):
+        validate_fusion_config(
+            _best_of_n(
+                arbiter={
+                    "questions": [_noul()],
+                    "threshold_policy": {
+                        "questions": {"fulfilled": {"min": 0.5}},
+                        "on_fail": on_fail,
+                    },
+                }
+            )
+        )
+    with pytest.raises(ValueError):
+        validate_fusion_config(
+            _best_of_n(
+                arbiter={
+                    "questions": [_noul()],
+                    "threshold_policy": {
+                        "questions": {"fulfilled": {"min": 0.5}},
+                        "on_fail": "stop_flow",
+                    },
+                }
+            )
+        )
 
 
 def test_synthesize_requires_synthesis_object():

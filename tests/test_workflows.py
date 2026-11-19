@@ -220,6 +220,16 @@ async def _insert_decision_agent(db_pool, org_id: str, user_id: str) -> None:
         )
 
 
+_GATE_CONTRACT = {
+    "json_schema": {
+        "type": "object",
+        "required": ["should_act"],
+        "properties": {"should_act": {"type": "boolean"}},
+    },
+    "gate": {"path": "should_act", "stop_value": False, "action": "stop_flow"},
+}
+
+
 _DECISION_CONFIG = {
     "questions": [
         {
@@ -360,6 +370,145 @@ async def test_workflow_decision_step_raises_on_bad_config(
     # (500 with the underlying cause) after advancing the run record.
     assert exc_info.value.status_code == 500
     assert "invalid decision_config" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_workflow_action_authoring_rejects_malformed_gate(
+    db_pool, test_organization, test_user
+):
+    """The schedule authoring surface validates the gate stored on an action.
+
+    A workflow action's payload is stored verbatim and expanded at fire time,
+    so the save-time validator must give the same answer as task creation.
+    """
+    from lucent.db.schedules import validate_task_action_kinds
+
+    malformed = {
+        **_GATE_CONTRACT,
+        "gate": {"path": "should_act", "stop_value": False, "action": "ignore"},
+    }
+    with pytest.raises(ValueError) as excinfo:
+        await validate_task_action_kinds(
+            [
+                {
+                    "action_type": "task",
+                    "title": "Decide",
+                    "agent_type": "code",
+                    "output_contract": malformed,
+                }
+            ],
+            pool=db_pool,
+            organization_id=str(test_organization["id"]),
+            user_id=str(test_user["id"]),
+        )
+
+    message = str(excinfo.value)
+    assert "Workflow action 'Decide'" in message
+    assert "Invalid output_contract.gate.action 'ignore'" in message
+    assert "Must be one of: stop_flow" in message
+
+
+@pytest.mark.asyncio
+async def test_workflow_action_gate_expands_into_task_unchanged(
+    db_pool,
+    test_organization,
+    test_user,
+    workflow_cleanup,
+):
+    """A gate authored on a workflow action survives schedule expansion."""
+    from lucent.api.routers.schedules import _trigger_schedule_execution
+
+    org_id = str(test_organization["id"])
+    user_id = str(test_user["id"])
+    await _insert_code_agent(db_pool, org_id, user_id)
+
+    workflow = await ScheduleRepository(db_pool).create_schedule(
+        title="Gated workflow",
+        org_id=org_id,
+        schedule_type="webhook",
+        trigger_type="webhook",
+        description="A workflow whose step carries a flow gate.",
+        created_by=user_id,
+        webhook_secret_hash=webhook_secret_hash("gsecret"),
+        request_template={"title": "Gated run"},
+        actions=[
+            {
+                "action_type": "task",
+                "title": "Decide whether to act",
+                "description": "Produce the decision payload.",
+                "agent_type": "code",
+                "sequence_order": 0,
+                "output_contract": _GATE_CONTRACT,
+            }
+        ],
+        review_instructions="Check the gate output.",
+    )
+
+    result = await _trigger_schedule_execution(
+        workflow["id"], None, pool=db_pool, force=True
+    )
+
+    assert len(result["tasks"]) == 1
+    stored = result["tasks"][0]["output_contract"]
+    stored = json.loads(stored) if isinstance(stored, str) else stored
+    assert stored == _GATE_CONTRACT
+
+
+@pytest.mark.asyncio
+async def test_workflow_action_malformed_gate_fails_trigger_loud(
+    db_pool,
+    test_organization,
+    test_user,
+    workflow_cleanup,
+):
+    """A malformed gate stored directly (bypassing authoring) fails the run.
+
+    Creation re-validates the action payload, so a gate that slipped past the
+    save-time validator can never be silently stored-and-ignored at fire time.
+    """
+    from fastapi import HTTPException
+
+    from lucent.api.routers.schedules import _trigger_schedule_execution
+
+    org_id = str(test_organization["id"])
+    user_id = str(test_user["id"])
+    await _insert_code_agent(db_pool, org_id, user_id)
+    malformed = {
+        **_GATE_CONTRACT,
+        "gate": {"path": "", "stop_value": False},
+    }
+
+    workflow = await ScheduleRepository(db_pool).create_schedule(
+        title="Bad gate workflow",
+        org_id=org_id,
+        schedule_type="webhook",
+        trigger_type="webhook",
+        description="Should fail at trigger.",
+        created_by=user_id,
+        webhook_secret_hash=webhook_secret_hash("gsecret2"),
+        request_template={"title": "Bad gate run"},
+        actions=[
+            {
+                "action_type": "task",
+                "title": "Bad gate",
+                "description": "Malformed gate stored directly.",
+                "agent_type": "code",
+                "sequence_order": 0,
+                "output_contract": malformed,
+            }
+        ],
+        review_instructions="x",
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await _trigger_schedule_execution(
+            workflow["id"], None, pool=db_pool, force=True
+        )
+
+    assert excinfo.value.status_code == 500
+    assert "output_contract.gate.path must be a non-empty string" in str(
+        excinfo.value.detail
+    )
 
 
 def test_workflow_decision_validator_rejects_on_create(monkeypatch):

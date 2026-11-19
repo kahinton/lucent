@@ -16,6 +16,15 @@ from lucent.db.definitions import DefinitionRepository
 from lucent.db.schedules import ScheduleRepository
 from lucent.tools.schedules import FALLBACK_WORKFLOW_AGENT_TYPES, register_schedule_tools
 
+_GATE_CONTRACT = {
+    "json_schema": {
+        "type": "object",
+        "required": ["should_act"],
+        "properties": {"should_act": {"type": "boolean"}},
+    },
+    "gate": {"path": "should_act", "stop_value": False, "action": "stop_flow"},
+}
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -297,6 +306,75 @@ class TestCreateWorkflow:
         )
 
         assert "sandbox_template_id" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_create_workflow_round_trips_gate_spec(
+        self, mcp, auth_user, db_pool
+    ):
+        """A flow gate authored on a workflow action is stored byte-for-byte."""
+        repo = DefinitionRepository(db_pool)
+        await repo.create_agent(
+            name="code",
+            description="Code agent",
+            content="# Code",
+            org_id=str(auth_user["organization_id"]),
+            created_by=str(auth_user["id"]),
+            status="active",
+        )
+
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Gated workflow",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "task",
+                            "title": "Decide whether to act",
+                            "agent_type": "code",
+                            "output_contract": _GATE_CONTRACT,
+                        }
+                    ]
+                ),
+            },
+        )
+
+        assert "error" not in result, result
+        actions = result["actions"]
+        if isinstance(actions, str):
+            actions = json.loads(actions)
+        assert actions[0]["output_contract"] == _GATE_CONTRACT
+
+    @pytest.mark.asyncio
+    async def test_create_workflow_rejects_malformed_gate(self, mcp, auth_user):
+        malformed = {
+            **_GATE_CONTRACT,
+            "gate": {"path": "should_act", "stop_value": False, "action": "ignore"},
+        }
+
+        result = await _call(
+            mcp,
+            "create_workflow",
+            {
+                "title": "Bad gate workflow",
+                "trigger_type": "manual",
+                "actions_json": json.dumps(
+                    [
+                        {
+                            "action_type": "task",
+                            "title": "Decide",
+                            "agent_type": "code",
+                            "output_contract": malformed,
+                        }
+                    ]
+                ),
+            },
+        )
+
+        assert "Invalid output_contract.gate.action 'ignore'" in result["error"]
+        assert "Must be one of: stop_flow" in result["error"]
 
     @pytest.mark.asyncio
     async def test_create_workflow_rejects_server_function_actions(self, mcp, auth_user):

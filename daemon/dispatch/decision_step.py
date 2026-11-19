@@ -18,9 +18,11 @@ Threshold policy is per-step (author decision): with no
 ``threshold_policy`` the answers are recorded as output, always completing;
 with one, questions scoring below their min either fail the task
 (``on_fail="fail_task"`` — a preventative gate that also blocks downstream
-stages) or route it to review (``on_fail="needs_review"``). Usage is
-recorded on every successful ``decide()`` call regardless of the threshold
-outcome.
+stages), route it to review (``on_fail="needs_review"``), or stop the flow
+(``on_fail="stop_flow"``) — the step completes successfully and the shared
+flow-gate mechanism in :mod:`daemon.dispatch.flow_gate` short-circuits the
+remaining tasks, exactly as a script gate does. Usage is recorded on every
+successful ``decide()`` call regardless of the threshold outcome.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from __future__ import annotations
 import os
 from typing import Any, Callable
 
+from daemon.dispatch import flow_gate
 from daemon.runtime.module_proxy import runtime
 from lucent.llm.decision import (
     DecisionError,
@@ -405,7 +408,39 @@ async def _dispatch_outcome(
     reason = f"Decision threshold policy failed: {detail}"
     policy = decision_config.get("threshold_policy") or {}
     task_id = str(task.get("id") or "")
-    if policy.get("on_fail") == "needs_review":
+    on_fail_policy = policy.get("on_fail", "fail_task")
+    if on_fail_policy == flow_gate.FLOW_STOP_ACTION:
+        # Same gate vocabulary and downstream behaviour as the script kind:
+        # the shared mechanism evaluates the decision result shape (a
+        # non-empty threshold_failed list is the stop value) and propagates
+        # the stop. A gate stop is a successful decision, so the task
+        # completes with the outcome in its summary and is never failed.
+        gate = flow_gate.evaluate_gate(
+            task,
+            structured,
+            spec={
+                "path": "threshold_failed",
+                "stop_value": True,
+                "action": flow_gate.FLOW_STOP_ACTION,
+            },
+        )
+        completed = await on_complete(
+            result_text,
+            result_structured=structured,
+            result_summary=gate.summary(_result_summary(structured)),
+            validation_status="valid",
+        )
+        if completed is not None:
+            try:
+                await flow_gate.propagate_flow_stop(task=task, outcome=gate)
+            except Exception as error:
+                # The step is already completed successfully; a propagation
+                # failure must not turn that completion into a failed task.
+                runtime.log(
+                    f"Decision flow-gate propagation failed: {error}", "WARN"
+                )
+        return
+    if on_fail_policy == "needs_review":
         await on_needs_review(task_id, reason, result=result_text)
     else:
         await on_fail(task_id, reason, result=result_text)

@@ -180,6 +180,37 @@ def test_validate_decision_config_threshold_rules():
     )
 
 
+def test_validate_decision_config_accepts_all_three_on_fail_values():
+    good = {"questions": [_noul()]}
+    for value in ("fail_task", "needs_review", "stop_flow"):
+        validate_decision_config(
+            {
+                **good,
+                "threshold_policy": {
+                    "questions": {"fulfilled": {"min": 0.6}},
+                    "on_fail": value,
+                },
+            }
+        )
+
+
+def test_validate_decision_config_unknown_on_fail_names_all_three():
+    good = {"questions": [_noul()]}
+    with pytest.raises(ValueError) as excinfo:
+        validate_decision_config(
+            {
+                **good,
+                "threshold_policy": {
+                    "questions": {"fulfilled": {"min": 0.6}},
+                    "on_fail": "explode",
+                },
+            }
+        )
+    message = str(excinfo.value)
+    for value in ("fail_task", "needs_review", "stop_flow"):
+        assert value in message
+
+
 def test_validate_decision_config_state_must_be_strings():
     with pytest.raises(ValueError):
         validate_decision_config({"questions": [_noul()], "state": {"k": 5}})
@@ -465,10 +496,6 @@ def _pending_task(decision_config=None, model=None):
     return row
 
 
-async def _noop_async():
-    return None
-
-
 async def _dispatch_harness(
     monkeypatch,
     task,
@@ -489,6 +516,9 @@ async def _dispatch_harness(
         "models": [],
         "usage": [],
         "select_model": [],
+        "short_circuit": [],
+        "review_ensure": [],
+        "order": [],
     }
     decide_requests: list = []
     queue = [task]
@@ -513,6 +543,7 @@ async def _dispatch_harness(
 
     async def _complete(task_id, result, instance_id=None, **kwargs):
         calls["completed"].append((task_id, result, kwargs))
+        calls["order"].append("complete")
         return {"id": task_id}
 
     async def _fail(task_id, error, instance_id=None, result=None):
@@ -523,9 +554,17 @@ async def _dispatch_harness(
         calls["needs_review"].append((task_id, error, result))
         return {"id": task_id}
 
-    async def _event(task_id, event_type, detail=None):
+    async def _event(task_id, event_type, detail=None, metadata=None):
         events.append((event_type, detail))
         return {"id": task_id}
+
+    async def _short_circuit(task_id, *, reason=None, metadata=None):
+        calls["short_circuit"].append((task_id, reason, metadata))
+        calls["order"].append("short_circuit")
+        return [{"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "title": "Downstream"}]
+
+    async def _ensure_review():
+        calls["review_ensure"].append(True)
 
     async def _fetch_request(request_id):
         return {
@@ -567,7 +606,7 @@ async def _dispatch_harness(
         return "chat-model", "selected"
 
     daemon = LucentDaemon()
-    monkeypatch.setattr(daemon, "_ensure_request_review_tasks", _noop_async)
+    monkeypatch.setattr(daemon, "_ensure_request_review_tasks", _ensure_review)
     monkeypatch.setattr("daemon.daemon.RequestAPI.get_pending_tasks", _pending)
     monkeypatch.setattr("daemon.daemon.RequestAPI.claim_task", _claim)
     monkeypatch.setattr("daemon.daemon.RequestAPI.update_task_model_settings", _update_model)
@@ -577,6 +616,9 @@ async def _dispatch_harness(
     monkeypatch.setattr("daemon.daemon.RequestAPI.fail_task", _fail)
     monkeypatch.setattr("daemon.daemon.RequestAPI.mark_task_needs_review", _needs_review)
     monkeypatch.setattr("daemon.daemon.RequestAPI.add_event", _event)
+    monkeypatch.setattr(
+        "daemon.daemon.RequestAPI.short_circuit_pending_tasks", _short_circuit
+    )
     monkeypatch.setattr("daemon.dispatch.decision_step._fetch_request", _fetch_request)
     monkeypatch.setattr("daemon.dispatch.decision_step.decide", _decide)
     monkeypatch.setattr("daemon.dispatch.decision_step.resolve_user_decision_model", _resolve)
@@ -622,6 +664,8 @@ async def test_decision_step_fail_task_on_threshold_miss(monkeypatch):
 
     calls = harness["calls"]
     assert calls["completed"] == []
+    assert calls["needs_review"] == []
+    assert calls["short_circuit"] == []
     task_id, reason, result = calls["failed"][0]
     assert task_id == TASK_ID
     assert "Decision threshold policy failed" in reason
@@ -644,9 +688,73 @@ async def test_decision_step_needs_review_on_threshold_miss(monkeypatch):
     calls = harness["calls"]
     assert calls["failed"] == []
     assert calls["completed"] == []
+    assert calls["short_circuit"] == []
     task_id, reason, result = calls["needs_review"][0]
     assert task_id == TASK_ID
     assert "Decision threshold policy failed" in reason
+
+
+@pytest.mark.asyncio
+async def test_decision_step_stop_flow_completes_and_short_circuits(monkeypatch):
+    """stop_flow is the script gate's vocabulary on a decision threshold miss.
+
+    The step completes successfully with the gate outcome recorded, the rest
+    of the flow is short-circuited, and the review pass still runs.
+    """
+    config = _noul_config(min_value=0.9)
+    config["threshold_policy"]["on_fail"] = "stop_flow"
+    harness = await _dispatch_harness(
+        monkeypatch,
+        _pending_task(decision_config=config),
+        responses=[_response({"fulfilled": NoulAnswer(noul=0.5)})],
+    )
+    await harness["daemon"]._dispatch_tracked_tasks(max_tasks=1)
+
+    calls = harness["calls"]
+    assert calls["failed"] == []  # never marked failed
+    assert calls["needs_review"] == []
+    assert len(calls["completed"]) == 1
+    task_id, result, kwargs = calls["completed"][0]
+    assert task_id == TASK_ID
+    assert kwargs["validation_status"] == "valid"
+    assert kwargs["result_structured"]["on_fail"] == "stop_flow"
+    assert kwargs["result_structured"]["threshold_failed"] == ["fulfilled"]
+    # The gate outcome is recorded in the terminal summary, ahead of the
+    # ordinary decision summary.
+    assert kwargs["result_summary"].startswith("Flow gate stopped the flow")
+    assert "threshold_failed" in kwargs["result_summary"]
+    assert "Decision answers:" in kwargs["result_summary"]
+    # The remaining flow is short-circuited, addressed by the gating task.
+    assert [entry[0] for entry in calls["short_circuit"]] == [TASK_ID]
+    # The gating task is settled before propagation, so it can never be a
+    # short-circuit target itself.
+    assert calls["order"] == ["complete", "short_circuit"]
+    # One event records the value seen, the decision and the settled tasks.
+    gate_events = [e for e in harness["events"] if e[0] == "flow_gate_stopped"]
+    assert len(gate_events) == 1
+    assert "Short-circuited 1 remaining task(s)" in gate_events[0][1]
+    # The review pass still runs for the request.
+    assert calls["review_ensure"] == [True]
+
+
+@pytest.mark.asyncio
+async def test_decision_step_stop_flow_passing_threshold_changes_nothing(monkeypatch):
+    """A met threshold completes normally — no gate event, no propagation."""
+    config = _noul_config(min_value=0.6)
+    config["threshold_policy"]["on_fail"] = "stop_flow"
+    harness = await _dispatch_harness(
+        monkeypatch,
+        _pending_task(decision_config=config),
+        responses=[_response({"fulfilled": NoulAnswer(noul=0.9)})],
+    )
+    await harness["daemon"]._dispatch_tracked_tasks(max_tasks=1)
+
+    calls = harness["calls"]
+    assert len(calls["completed"]) == 1
+    _, _result, kwargs = calls["completed"][0]
+    assert kwargs["result_summary"].startswith("Decision answers:")
+    assert calls["short_circuit"] == []
+    assert [e for e in harness["events"] if e[0] == "flow_gate_stopped"] == []
 
 
 @pytest.mark.asyncio

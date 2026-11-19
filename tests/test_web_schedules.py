@@ -1309,6 +1309,52 @@ class TestWorkflowWizardDecisionSteps:
         }
         assert config["state"] == {"ticket": "AUD-1"}
 
+    async def test_wizard_builder_accepts_stop_flow_on_fail(
+        self, client, db_pool, web_user
+    ):
+        """The builder's third failure action builds a valid threshold_policy."""
+        _user, org, _token = web_user
+        await self._seed_decision_agent(db_pool, org["id"], _user["id"])
+
+        resp = await client.post(
+            "/workflows/new",
+            data=_csrf_data(
+                client,
+                {
+                    "title": "Wizard stop the flow",
+                    "description": "Builder-field stop_flow decision step",
+                    "trigger_type": "manual",
+                    "request_title": "Wizard decision run",
+                    "action_title": "Gate the audit",
+                    "action_prompt": "Check the audit output.",
+                    "action_agent_type": "decision-step",
+                    "action_stage": "1",
+                    "action_decision_q_count": "1",
+                    "decision_q_name": ["fulfilled"],
+                    "decision_q_type": ["noul"],
+                    "decision_q_instructions": ["Was the request fulfilled?"],
+                    "decision_q_criteria": [""],
+                    "decision_q_min": ["0.7"],
+                    "action_decision_on_fail": "stop_flow",
+                    "review_instructions": "Confirm the gate ran.",
+                },
+            ),
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text if resp.status_code != 303 else ""
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT actions FROM schedules
+                   WHERE organization_id = $1 AND title = 'Wizard stop the flow'""",
+                org["id"],
+            )
+        assert row is not None
+        assert row["actions"][0]["decision_config"]["threshold_policy"] == {
+            "questions": {"fulfilled": {"min": 0.7}},
+            "on_fail": "stop_flow",
+        }
+
     async def test_wizard_builder_score_question(self, client, db_pool, web_user):
         """Score criteria lines become an ordered level list; min is the level index."""
         _user, org, _token = web_user

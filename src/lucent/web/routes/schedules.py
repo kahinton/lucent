@@ -496,11 +496,15 @@ def _build_decision_config_from_rows(
             thresholds[name] = {"min": minimum}
 
     on_fail_value = on_fail.strip()
-    if on_fail_value and on_fail_value not in ("fail_task", "needs_review"):
+    if on_fail_value and on_fail_value not in (
+        "fail_task",
+        "needs_review",
+        "stop_flow",
+    ):
         raise HTTPException(
             422,
             f"Step {step_number}: invalid decision failure action — use "
-            "'Fail the step' or 'Route the step for review'",
+            "'Fail the step', 'Route the step for review', or 'Stop the flow'",
         )
     if thresholds:
         threshold_policy: dict[str, Any] = {
