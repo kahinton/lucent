@@ -1835,6 +1835,7 @@ class RequestRepository:
         backend_id: str | None = None,
         requested_model: str | None = None,
         decomposition_mode: str = DECOMPOSITION_MODE_PLANNER,
+        trigger_payload: dict | None = None,
     ) -> dict:
         if source not in VALID_REQUEST_SOURCES:
             valid_sources = ", ".join(sorted(VALID_REQUEST_SOURCES))
@@ -1888,6 +1889,7 @@ class RequestRepository:
                 backend_id=backend_id,
                 requested_model=requested_model,
                 decomposition_mode=decomposition_mode,
+                trigger_payload=trigger_payload,
             )
         return row
 
@@ -1912,6 +1914,7 @@ class RequestRepository:
         backend_id: str | None,
         requested_model: str | None,
         decomposition_mode: str,
+        trigger_payload: dict | None = None,
     ) -> tuple[dict, bool]:
         """Insert one request on an existing connection.
 
@@ -2050,9 +2053,10 @@ class RequestRepository:
                 approval_status, approved_at,
                 target_repo, target_paths,
                 goal_memory_id, goal_milestone_index,
-                backend_id, requested_model, decomposition_mode)
+                backend_id, requested_model, decomposition_mode,
+                trigger_payload)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                       $12, $13, $14, $15, $16)
+                       $12, $13, $14, $15, $16, $17)
                RETURNING *""",
             title,
             description,
@@ -2070,6 +2074,12 @@ class RequestRepository:
             UUID(backend_id) if backend_id else None,
             requested_model,
             decomposition_mode,
+            # The pool registers a jsonb codec whose encoder is json.dumps, so
+            # pass the mapping itself. Pre-serialising it here would be encoded
+            # a second time, storing a JSON string instead of an object — the
+            # daemon's `_fetch_trigger_payload` requires a dict and would then
+            # silently drop every payload.
+            trigger_payload,
         )
 
         # Link memories to the new request

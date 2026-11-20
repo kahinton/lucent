@@ -21,15 +21,21 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport
 
 from lucent.api.app import create_app
+from lucent.api.routers.schedules import (
+    WEBHOOK_PAYLOAD_BEGIN,
+    WEBHOOK_PAYLOAD_END,
+)
 from lucent.db.schedules import (
     MIN_WEBHOOK_SECRET_LENGTH,
     ScheduleRepository,
     validate_webhook_secret,
     webhook_secret_hash,
 )
+from lucent.script_tasks import SCRIPT_PAYLOAD_MAX_BYTES
 
 
 
@@ -496,3 +502,170 @@ async def test_webhook_workflow_cannot_be_a_system_schedule(webhook_env, db_pool
             json={},
         )
     assert resp.status_code == 404, resp.text
+
+
+# ── Durable payload: agent context, persistence, and the cap ─────────────
+
+
+async def test_agent_task_carries_delimited_untrusted_payload_block(
+    webhook_env, db_pool
+):
+    """The full payload reaches an agent task inside its own data fence.
+
+    The pre-existing trigger-context section is lossy (8 000-char cap) and
+    also carries headers, so the complete delivery needs a distinct block.
+    """
+    org_id, user_id, created = webhook_env
+    secret = _secret()
+    wf = await _make_workflow(db_pool, org_id, user_id, secret=secret)
+    created.append(str(wf["id"]))
+    sent = {"marker": "PAYLOAD-BLOCK-abc123", "number": 7}
+
+    async with _client() as client:
+        resp = await client.post(
+            f"/api/workflows/{wf['id']}/webhook",
+            headers={"X-Lucent-Workflow-Token": secret},
+            json=sent,
+        )
+    assert resp.status_code == 200, resp.text
+    request_id = resp.json()["request"]["id"]
+
+    description = await db_pool.fetchval(
+        "SELECT description FROM tasks WHERE request_id = $1::uuid", request_id
+    )
+    assert description is not None
+    assert WEBHOOK_PAYLOAD_BEGIN in description
+    assert WEBHOOK_PAYLOAD_END in description
+
+    block = description.split(WEBHOOK_PAYLOAD_BEGIN, 1)[1].split(
+        WEBHOOK_PAYLOAD_END, 1
+    )[0]
+    assert "PAYLOAD-BLOCK-abc123" in block
+    assert "payload_envelope_json:" in block
+    assert "DATA submitted to this" in block
+
+    # The block is additional to the existing lossy trigger section, and it
+    # is the request-level description that stays unfenced.
+    lowered = description.lower()
+    assert lowered.index("begin untrusted external trigger data") < (
+        description.index(WEBHOOK_PAYLOAD_BEGIN)
+    )
+    request_description = await db_pool.fetchval(
+        "SELECT description FROM requests WHERE id = $1::uuid", request_id
+    )
+    assert WEBHOOK_PAYLOAD_BEGIN not in request_description
+
+
+async def test_agent_task_with_no_payload_has_no_payload_block(
+    webhook_env, db_pool
+):
+    """No payload means no block — the description is exactly today's text.
+
+    A workflow row can be webhook-triggered but carry no persisted payload
+    (older rows, direct triggers). The executor path already degrades to
+    today's behaviour; the agent context must do the same.
+    """
+    from lucent.api.routers.schedules import _trigger_schedule_execution
+
+    org_id, user_id, created = webhook_env
+    secret = _secret()
+    wf = await _make_workflow(db_pool, org_id, user_id, secret=secret)
+    created.append(str(wf["id"]))
+
+    result = await _trigger_schedule_execution(
+        wf["id"],
+        None,
+        pool=db_pool,
+        force=True,
+        advance_schedule=False,
+        trigger_payload=None,
+    )
+    request_id = result["request"]["id"]
+    description = await db_pool.fetchval(
+        "SELECT description FROM tasks WHERE request_id = $1::uuid", request_id
+    )
+    assert description == "Do the thing."
+    assert WEBHOOK_PAYLOAD_BEGIN not in description
+    assert WEBHOOK_PAYLOAD_END not in description
+    stored = await db_pool.fetchval(
+        "SELECT trigger_payload FROM requests WHERE id = $1::uuid", request_id
+    )
+    assert stored is None
+
+
+async def test_webhook_persists_the_payload_on_the_request_row(
+    webhook_env, db_pool
+):
+    """Script dispatch reads this row later, in a different process."""
+    org_id, user_id, created = webhook_env
+    secret = _secret()
+    wf = await _make_workflow(db_pool, org_id, user_id, secret=secret)
+    created.append(str(wf["id"]))
+    sent = {"marker": "PERSIST-me", "n": 3}
+
+    async with _client() as client:
+        resp = await client.post(
+            f"/api/workflows/{wf['id']}/webhook",
+            headers={
+                "X-Lucent-Workflow-Token": secret,
+                "Authorization": f"Bearer {secret}",
+            },
+            json=sent,
+        )
+    assert resp.status_code == 200, resp.text
+    request_id = resp.json()["request"]["id"]
+
+    stored = await db_pool.fetchval(
+        "SELECT trigger_payload FROM requests WHERE id = $1::uuid", request_id
+    )
+    assert stored["kind"] == "json"
+    assert stored["content_type"] == "application/json"
+    assert stored["payload"] == sent
+    assert stored["byte_size"] == len(
+        json.dumps(sent, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+    # The workflow token may travel in that same request's headers and must
+    # not be part of the persisted delivery.
+    assert secret not in json.dumps(stored)
+
+
+async def test_over_cap_payload_fails_before_any_request_is_created(
+    webhook_env, db_pool
+):
+    """Fail closed: no request or task row exists for a rejected payload."""
+    from lucent.api.routers.schedules import _trigger_schedule_execution
+
+    org_id, user_id, created = webhook_env
+    secret = _secret()
+    wf = await _make_workflow(db_pool, org_id, user_id, secret=secret)
+    created.append(str(wf["id"]))
+    oversized = {
+        "kind": "text",
+        "content_type": "text/plain",
+        "byte_size": SCRIPT_PAYLOAD_MAX_BYTES + 10,
+        "payload": "x" * (SCRIPT_PAYLOAD_MAX_BYTES + 10),
+    }
+    before = await db_pool.fetchval(
+        "SELECT count(*) FROM requests WHERE organization_id = $1::uuid", org_id
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        await _trigger_schedule_execution(
+            wf["id"],
+            None,
+            pool=db_pool,
+            force=True,
+            advance_schedule=False,
+            trigger_payload=oversized,
+        )
+
+    after = await db_pool.fetchval(
+        "SELECT count(*) FROM requests WHERE organization_id = $1::uuid", org_id
+    )
+    assert after == before
+    # The trigger wraps failures at its boundary, but the named limit and the
+    # reason travel through to the caller intact.
+    assert raised.value.status_code == 500
+    assert str(SCRIPT_PAYLOAD_MAX_BYTES) in str(raised.value.detail)
+    assert "exceeds the" in str(raised.value.detail)
+

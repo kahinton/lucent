@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -14,7 +15,10 @@ import pytest_asyncio
 from daemon.dispatch import script_executor
 from lucent.sandbox.models import ExecResult
 from lucent.script_tasks import (
+    SCRIPT_PAYLOAD_FILE_ENV,
+    SCRIPT_PAYLOAD_MAX_BYTES,
     derive_interpreter,
+    encode_trigger_payload,
     git_resolution_steps,
     interpreter_from_shebang,
     normalize_repo_path,
@@ -352,9 +356,10 @@ class _Callbacks:
         self.failed.append((task_id, error, result))
 
 
-def _events_recorder(provider=None):
+def _events_recorder(provider=None, request_row=None):
     events: list[tuple] = []
     logs: list[tuple] = []
+    request_fetches: list[str] = []
 
     async def _add_event(task_id, event_type, detail=None, metadata=None):
         events.append((event_type, detail, metadata))
@@ -368,10 +373,15 @@ def _events_recorder(provider=None):
     async def _resolve_secret_env_vars(env_vars, _provider):
         return dict(env_vars)
 
+    async def _get_request(request_id):
+        request_fetches.append(request_id)
+        return request_row
+
     return events, SimpleNamespace(
-        RequestAPI=SimpleNamespace(add_event=_add_event),
+        RequestAPI=SimpleNamespace(add_event=_add_event, get_request=_get_request),
         log=lambda *a, **k: logs.append((a, k)),
         logs=logs,
+        request_fetches=request_fetches,
         get_secret_provider=_get_secret_provider,
         set_current_user=_set_current_user,
         resolve_secret_env_vars=_resolve_secret_env_vars,
@@ -387,9 +397,11 @@ async def _run(
     sandbox_config=None,
     daemon=None,
     provider=None,
+    request_row=None,
+    request_id=REQUEST_ID,
 ):
     manager = _FakeManager(results)
-    events, fake_runtime = _events_recorder(provider)
+    events, fake_runtime = _events_recorder(provider, request_row)
     monkeypatch.setattr(
         "lucent.sandbox.manager.get_sandbox_manager", lambda: manager
     )
@@ -402,7 +414,7 @@ async def _run(
         execution_config=config or _inline(),
         sandbox_config=sandbox_config or _sandbox_config(),
         org_id=ORG_ID,
-        request_id=REQUEST_ID,
+        request_id=request_id,
         requesting_user_id=USER_ID,
         on_complete=callbacks.complete,
         on_fail=callbacks.fail,
@@ -438,6 +450,260 @@ async def test_inline_execution_completes_with_structured_output(monkeypatch):
     assert run.daemon.sessions == []
     event_types = [etype for etype, _d, _m in run.events]
     assert "script_completed" in event_types
+
+
+_ENVELOPE = {
+    "kind": "json",
+    "content_type": "application/json",
+    "byte_size": 18,
+    "payload": {"should_act": True},
+}
+
+
+def test_encode_trigger_payload_text_kind_exposes_raw_text_as_file():
+    envelope = {
+        "kind": "text",
+        "content_type": "text/plain",
+        "byte_size": 5,
+        "payload": "hello",
+    }
+    stdin_bytes, file_bytes = encode_trigger_payload(envelope)
+    assert file_bytes == b"hello"
+    assert json.loads(stdin_bytes)["payload"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_trigger_payload_is_delivered_on_stdin_and_as_file(monkeypatch):
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        request_row={"id": REQUEST_ID, "trigger_payload": _ENVELOPE},
+    )
+
+    assert run.callbacks.failed == []
+    written = dict(run.manager.writes)
+    stdin_path = f"/workspace/.lucent-script-{TASK_ID[:8]}.stdin"
+    file_path = f"/workspace/.lucent-script-{TASK_ID[:8]}.payload"
+    # The envelope arrives as JSON on stdin; the raw payload as a file.
+    assert json.loads(written[stdin_path]) == _ENVELOPE
+    assert json.loads(written[file_path]) == {"should_act": True}
+    # One env var names the file, and the command reads stdin.
+    assert run.manager.execs[0]["env"][SCRIPT_PAYLOAD_FILE_ENV] == file_path
+    assert run.manager.execs[0]["command"].endswith(f"< {stdin_path}")
+    # The audit line carries size and digest only — no payload bytes.
+    detail = next(
+        d for etype, d, _meta in run.events if etype == "script_payload_attached"
+    )
+    assert "should_act" not in detail
+    assert "bytes, sha256 " in detail
+    assert "json.load" not in detail
+
+
+@pytest.mark.asyncio
+async def test_authored_stdin_beats_the_trigger_payload(monkeypatch):
+    """Precedence, pinned against a real delivery.
+
+    The control run proves the payload *would* be delivered on stdin, so the
+    assertion that authored ``stdin`` replaces it is not vacuous. The payload
+    is then not even read: precedence is decided before any request I/O.
+    """
+    stdin_path = f"/workspace/.lucent-script-{TASK_ID[:8]}.stdin"
+
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        request_row={"id": REQUEST_ID, "trigger_payload": _ENVELOPE},
+    )
+    delivered_writes = dict(run.manager.writes)
+    assert stdin_path in delivered_writes
+    assert json.loads(delivered_writes[stdin_path]) == _ENVELOPE
+
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        config=_inline("print('{}')", stdin="authored input"),
+        request_row={"id": REQUEST_ID, "trigger_payload": _ENVELOPE},
+    )
+
+    # The payload was not even fetched: precedence is decided before I/O.
+    assert run.runtime.request_fetches == []
+    written = dict(run.manager.writes)
+    assert written[stdin_path] == b"authored input"
+    assert not any(path.endswith(".payload") for path in written)
+    assert SCRIPT_PAYLOAD_FILE_ENV not in (run.manager.execs[0].get("env") or {})
+    event_types = [etype for etype, _d, _m in run.events]
+    assert "script_payload_attached" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_oversized_trigger_payload_fails_closed_before_sandbox(monkeypatch):
+    oversized = {
+        "kind": "text",
+        "content_type": "text/plain",
+        "byte_size": SCRIPT_PAYLOAD_MAX_BYTES + 10,
+        "payload": "x" * (SCRIPT_PAYLOAD_MAX_BYTES + 10),
+    }
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        request_row={"id": REQUEST_ID, "trigger_payload": oversized},
+    )
+
+    # Nothing was provisioned, written, or executed.
+    assert run.daemon.created == []
+    assert run.manager.writes == []
+    assert run.manager.execs == []
+    assert run.callbacks.completed == []
+    assert len(run.callbacks.failed) == 1
+    error = run.callbacks.failed[0][1]
+    assert str(SCRIPT_PAYLOAD_MAX_BYTES) in error
+    assert "exceeds the" in error
+    assert "x" * 100 not in error  # no payload content in the failure
+    rejected = [
+        meta
+        for etype, _detail, meta in run.events
+        if etype == "script_payload_rejected"
+    ]
+    assert rejected and rejected[0]["limit_bytes"] == SCRIPT_PAYLOAD_MAX_BYTES
+
+
+@pytest.mark.asyncio
+async def test_authored_stdin_beats_even_an_oversized_payload(monkeypatch):
+    """Precedence is decided before the payload is read, let alone sized.
+
+    An authored ``stdin`` is the author's input, so a hostile or huge payload
+    stored on the request must not be able to fail the task or replace it.
+    """
+    oversized = {
+        "kind": "text",
+        "content_type": "text/plain",
+        "byte_size": SCRIPT_PAYLOAD_MAX_BYTES + 10,
+        "payload": "x" * (SCRIPT_PAYLOAD_MAX_BYTES + 10),
+    }
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        config=_inline("print('{}')", stdin="authored input"),
+        request_row={"id": REQUEST_ID, "trigger_payload": oversized},
+    )
+
+    assert run.callbacks.failed == []
+    assert len(run.callbacks.completed) == 1
+    # Not fetched, not encoded, not size-checked: precedence is strict.
+    assert run.runtime.request_fetches == []
+    written = dict(run.manager.writes)
+    stdin_path = f"/workspace/.lucent-script-{TASK_ID[:8]}.stdin"
+    assert written[stdin_path] == b"authored input"
+    assert not any(path.endswith(".payload") for path in written)
+    assert SCRIPT_PAYLOAD_FILE_ENV not in (run.manager.execs[0].get("env") or {})
+
+
+@pytest.mark.asyncio
+async def test_script_task_without_a_payload_matches_the_unchanged_baseline(
+    monkeypatch,
+):
+    """No payload means today's dispatch, byte for byte.
+
+    ``request_id=None`` is the pre-change shape (the row is never consulted).
+    A request that carries no payload must produce exactly the same writes,
+    exec arguments, and event trail.
+    """
+
+    def _result():
+        return ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")
+
+    before = await _run(monkeypatch, results=[_result()], request_id=None)
+    after = await _run(
+        monkeypatch,
+        results=[_result()],
+        request_row={"id": REQUEST_ID},  # no trigger_payload
+    )
+
+    assert after.manager.writes == before.manager.writes
+    assert after.manager.execs == before.manager.execs
+    assert [etype for etype, _d, _m in after.events] == [
+        etype for etype, _d, _m in before.events
+    ]
+    assert after.callbacks.completed == before.callbacks.completed
+
+    # And the unchanged shape concretely: no stdin redirect, no payload env,
+    # no payload file, no payload event.
+    (script_path, _script_bytes), = before.manager.writes
+    command = after.manager.execs[0]["command"]
+    assert isinstance(command, list)
+    assert command[-1] == script_path
+    assert after.manager.execs[0]["env"] is None
+    event_types = [etype for etype, _d, _m in after.events]
+    assert "script_payload_attached" not in event_types
+    assert "script_payload_rejected" not in event_types
+
+
+@pytest.mark.asyncio
+async def test_payload_file_env_is_set_and_the_file_lives_only_in_the_sandbox(
+    monkeypatch,
+):
+    """The env var names a readable sandbox path; no host-side file exists."""
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        request_row={"id": REQUEST_ID, "trigger_payload": _ENVELOPE},
+    )
+
+    payload_path = run.manager.execs[0]["env"][SCRIPT_PAYLOAD_FILE_ENV]
+    assert payload_path == f"/workspace/.lucent-script-{TASK_ID[:8]}.payload"
+    # The file the env var points at was written through the sandbox API and
+    # is readable there — with the raw payload, not the envelope.
+    written = dict(run.manager.writes)
+    assert json.loads(written[payload_path]) == {"should_act": True}
+    # It lives in the sandbox working dir, never on the host.
+    assert payload_path.startswith(str(_sandbox_config()["working_dir"]) + "/")
+    assert not Path(payload_path).exists()
+    # And it goes away with the sandbox.
+    assert run.daemon.destroyed == ["sb-test-1234"]
+
+
+_SENTINEL = "SENTINEL-PAYLOAD-7c1f"
+_SENTINEL_ENVELOPE = {
+    "kind": "json",
+    "content_type": "application/json",
+    "byte_size": 42,
+    "payload": {"marker": _SENTINEL, "should_act": True},
+}
+
+
+@pytest.mark.asyncio
+async def test_payload_never_leaks_into_events_or_result_text(monkeypatch):
+    """Delivery is observable only as size and digest, never payload bytes."""
+    run = await _run(
+        monkeypatch,
+        results=[ExecResult(exit_code=0, stdout='{"total": 1}', stderr="")],
+        request_row={"id": REQUEST_ID, "trigger_payload": _SENTINEL_ENVELOPE},
+    )
+
+    written = dict(run.manager.writes)
+    assert _SENTINEL in written[
+        f"/workspace/.lucent-script-{TASK_ID[:8]}.stdin"
+    ].decode("utf-8")
+    assert _SENTINEL in written[
+        f"/workspace/.lucent-script-{TASK_ID[:8]}.payload"
+    ].decode("utf-8")
+
+    # Nothing in the event trail or the task result carries the payload.
+    assert _SENTINEL not in json.dumps(run.events, default=str)
+    assert _SENTINEL not in json.dumps(run.callbacks.completed, default=str)
+
+    detail, metadata = next(
+        (detail, meta)
+        for etype, detail, meta in run.events
+        if etype == "script_payload_attached"
+    )
+    assert "bytes, sha256 " in detail
+    # Metadata is the size/hash audit line and nothing more.
+    assert set(metadata) == {"source", "byte_size", "sha256", "file_env"}
+    assert metadata["byte_size"] == len(
+        written[f"/workspace/.lucent-script-{TASK_ID[:8]}.stdin"]
+    )
+    assert len(metadata["sha256"]) == 12
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,18 @@ Two code sources share that lifecycle:
   exec environment, and never written to config, the task row, an event, or a
   log line. A ref that is a branch or tag is reported as not pinned to a SHA.
 
+Input:
+
+* An explicitly authored ``execution_config.stdin`` always wins and is the
+  only input written.
+* Otherwise, if the task's request carries a persisted trigger payload (a
+  webhook workflow), the payload envelope is written to stdin as JSON and the
+  raw payload to a file inside the sandbox named by the
+  ``LUCENT_TRIGGER_PAYLOAD_FILE`` environment variable. Delivery is capped at
+  ``SCRIPT_PAYLOAD_MAX_BYTES``; an oversized payload fails the task before
+  provisioning, without running the script, and without echoing its content.
+* Both files live in the sandbox working dir and are destroyed with it.
+
 Failure semantics:
 
 * A nonzero exit fails the task with the raw stdout/stderr and a preview.
@@ -38,6 +50,7 @@ Failure semantics:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import posixpath
 import shlex
@@ -46,10 +59,14 @@ from typing import Any, Callable
 from daemon.runtime.module_proxy import runtime
 from lucent.script_tasks import (
     GIT_ASKPASS_SCRIPT,
+    SCRIPT_PAYLOAD_FILE_ENV,
+    SCRIPT_PAYLOAD_MAX_BYTES,
     SCRIPT_PREVIEW_CHARS,
     SCRIPT_STDERR_CAP,
     SCRIPT_STDOUT_CAP,
+    TriggerPayloadTooLargeError,
     derive_interpreter,
+    encode_trigger_payload,
     git_resolution_steps,
     interpreter_argv,
     interpreter_from_shebang,
@@ -166,6 +183,38 @@ def _script_filename(task_id: str) -> str:
 
 def _stdin_filename(task_id: str) -> str:
     return f".lucent-script-{task_id[:8]}.stdin"
+
+
+def _payload_filename(task_id: str) -> str:
+    return f".lucent-script-{task_id[:8]}.payload"
+
+
+async def _fetch_trigger_payload(
+    request_id: str | None,
+) -> dict[str, Any] | None:
+    """Return the request's persisted trigger payload, or ``None``.
+
+    Consulted only when the author did not author ``execution_config.stdin``
+    — an authored input always wins, and the payload is not even read. A
+    read failure degrades to "no payload" (today's behaviour) rather than
+    failing a script that would otherwise have run; the payload itself is
+    never logged.
+    """
+    if not request_id:
+        return None
+    try:
+        row = await runtime.RequestAPI.get_request(request_id)
+    except Exception as exc:  # noqa: BLE001 — input retrieval is best-effort
+        runtime.log(
+            f"Script trigger payload fetch failed for request "
+            f"{str(request_id)[:8]}: {exc}",
+            "WARN",
+        )
+        return None
+    if not isinstance(row, dict):
+        return None
+    payload = row.get("trigger_payload")
+    return payload if isinstance(payload, dict) else None
 
 
 def _render_result(
@@ -586,11 +635,23 @@ async def run_script_task(
     output_contract = _coerce_dict(task.get("output_contract"))
     max_attempts = 1 + _retry_budget(output_contract)
 
+    # Input precedence is strict: an explicitly authored stdin ALWAYS wins.
+    # The persisted trigger payload is consulted only when no stdin was
+    # authored, and is never allowed to overwrite an author's input.
+    authored_stdin = execution_config.get("stdin")
+    authored_stdin = authored_stdin if isinstance(authored_stdin, str) else None
+
     # Everything that does not need a live sandbox resolves first: a host
     # outside the template's allowlist, a literal credential, or an
-    # unresolvable reference fails before a container is provisioned.
+    # unresolvable reference fails before a container is provisioned. The
+    # trigger payload is encoded (and its cap enforced) here too, so an
+    # oversized payload fails closed without paying for a sandbox.
     run_env: dict[str, str] = {}
     git_spec: dict[str, Any] | None = None
+    payload_stdin_bytes: bytes | None = None
+    payload_file_bytes: bytes | None = None
+    payload_size = 0
+    payload_digest = ""
     try:
         run_env = await _resolve_script_env(
             execution_config, org_id, requesting_user_id
@@ -602,6 +663,28 @@ async def run_script_task(
                 org_id=org_id,
                 requesting_user_id=requesting_user_id,
             )
+        if authored_stdin is None:
+            trigger_payload = await _fetch_trigger_payload(request_id)
+            if trigger_payload is not None:
+                payload_stdin_bytes, payload_file_bytes = encode_trigger_payload(
+                    trigger_payload
+                )
+                payload_size = len(payload_stdin_bytes)
+                payload_digest = hashlib.sha256(
+                    payload_stdin_bytes
+                ).hexdigest()[:12]
+    except TriggerPayloadTooLargeError as exc:
+        await _event(
+            task_id,
+            "script_payload_rejected",
+            str(exc),
+            {
+                "source": "request.trigger_payload",
+                "limit_bytes": SCRIPT_PAYLOAD_MAX_BYTES,
+            },
+        )
+        await on_fail(task_id, str(exc))
+        return
     except ScriptResolutionError as exc:
         await _event(task_id, "script_source_invalid", str(exc))
         await on_fail(task_id, str(exc))
@@ -655,7 +738,6 @@ async def run_script_task(
 
     manager = get_sandbox_manager()
     script_path = posixpath.join(working_dir, _script_filename(task_id))
-    stdin_payload = execution_config.get("stdin")
     stdin_path: str | None = None
     source_lines: list[str] | None = None
     git_work_dir: str | None = None
@@ -709,10 +791,37 @@ async def run_script_task(
                 script_path
             ]
 
-        if isinstance(stdin_payload, str):
+        if authored_stdin is not None:
             stdin_path = posixpath.join(working_dir, _stdin_filename(task_id))
             await manager.write_file(
-                sandbox_id, stdin_path, stdin_payload.encode("utf-8")
+                sandbox_id, stdin_path, authored_stdin.encode("utf-8")
+            )
+        elif payload_stdin_bytes is not None:
+            assert payload_file_bytes is not None  # encoded together above
+            stdin_path = posixpath.join(working_dir, _stdin_filename(task_id))
+            await manager.write_file(sandbox_id, stdin_path, payload_stdin_bytes)
+            # The same payload as a file, for authors who prefer a path over
+            # stdin. It lives in the sandbox working dir and is destroyed with
+            # the container — no host-side temp file exists at any point.
+            payload_path = posixpath.join(
+                working_dir, _payload_filename(task_id)
+            )
+            await manager.write_file(
+                sandbox_id, payload_path, payload_file_bytes
+            )
+            run_env[SCRIPT_PAYLOAD_FILE_ENV] = payload_path
+            # Audit line carries size and a digest only — never payload bytes.
+            await _event(
+                task_id,
+                "script_payload_attached",
+                f"Trigger payload delivered to the script "
+                f"({payload_size} bytes, sha256 {payload_digest})",
+                {
+                    "source": "request.trigger_payload",
+                    "byte_size": payload_size,
+                    "sha256": payload_digest,
+                    "file_env": SCRIPT_PAYLOAD_FILE_ENV,
+                },
             )
 
         if stdin_path:

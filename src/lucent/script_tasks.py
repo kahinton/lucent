@@ -18,6 +18,17 @@ Config shape (``execution_config``)::
       "env": {"NAME": "secret://..."},     # optional process environment
     }
 
+Trigger-payload delivery (implicit input, no config key). When the task's
+request was created by an external trigger, the payload persisted on the
+request row is delivered to the script — but only when the author did not
+author ``stdin``; an authored ``stdin`` always wins. The payload envelope
+(``{kind, content_type, byte_size, payload}``) arrives on stdin as JSON, so a
+script can ``json.load(sys.stdin)``. The raw payload value is also written to
+a file inside the sandbox, whose path is exported as
+``LUCENT_TRIGGER_PAYLOAD_FILE`` (see :data:`SCRIPT_PAYLOAD_FILE_ENV`). Delivery
+is capped at :data:`SCRIPT_PAYLOAD_MAX_BYTES`; an oversized payload fails the
+task before the sandbox is provisioned and before any byte reaches the script.
+
 A git source is resolved at dispatch: the executor shallow-fetches ``ref``
 (commit SHA, branch, or tag) into a task-scoped directory under the sandbox
 working dir and runs ``path`` from the checkout. Only ``https://`` URLs are
@@ -66,8 +77,27 @@ SCRIPT_STDOUT_CAP = 50_000
 SCRIPT_STDERR_CAP = 20_000
 SCRIPT_PREVIEW_CHARS = 2_000
 
+# Implicit trigger-payload input. The env var names the file holding the raw
+# payload inside the sandbox; it is set only when a payload is actually
+# delivered, so a script can test for it to know whether input exists.
+SCRIPT_PAYLOAD_FILE_ENV = "LUCENT_TRIGGER_PAYLOAD_FILE"
+
+# Delivery cap for a persisted trigger payload, measured on the encoded
+# envelope written to stdin. The webhook receiver already caps a raw body at
+# 256 KiB (MAX_WORKFLOW_WEBHOOK_BODY_BYTES); 512 KiB leaves room for the
+# envelope's descriptor fields and re-serialisation while still refusing a
+# payload far larger than any accepted delivery.
+SCRIPT_PAYLOAD_MAX_BYTES = 512 * 1024
+
 SCRIPT_CONFIG_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": (
+        "Script execution config. When the request carries a persisted trigger "
+        "payload and this config authors no 'stdin', the payload envelope is "
+        "delivered on stdin as JSON and the raw payload is written to a file "
+        f"named by the {SCRIPT_PAYLOAD_FILE_ENV} environment variable "
+        f"(at most {SCRIPT_PAYLOAD_MAX_BYTES} bytes; larger fails the task)."
+    ),
     "required": ["source"],
     "additionalProperties": False,
     "properties": {
@@ -464,6 +494,52 @@ def truncate(text: str | None, cap: int) -> tuple[str, bool]:
 def preview(text: str | None, limit: int = SCRIPT_PREVIEW_CHARS) -> str:
     """A bounded, single-purpose preview for failure diagnostics."""
     return truncate(text, limit)[0]
+
+
+class TriggerPayloadTooLargeError(ValueError):
+    """A persisted trigger payload cannot be delivered within the size cap.
+
+    Fail-closed: the payload is not delivered in part, and the task fails
+    before a sandbox is provisioned. The message names the limit and the
+    actual size, never the payload itself.
+    """
+
+
+def encode_trigger_payload(payload: dict[str, Any]) -> tuple[bytes, bytes]:
+    """Encode a persisted trigger payload for delivery into a sandbox.
+
+    Returns ``(stdin_bytes, file_bytes)``:
+
+    * ``stdin_bytes`` — the whole stored envelope (``kind``, ``content_type``,
+      ``byte_size``, ``payload``) as compact UTF-8 JSON. This is uniform for
+      JSON and text deliveries, so a script can branch on ``kind``.
+    * ``file_bytes`` — the raw payload itself: the decoded text for a text
+      delivery, otherwise the re-serialised JSON value.
+
+    The payload is encoded in full before anything is written, so a cap
+    violation is raised here and no partial payload ever reaches the script.
+    """
+    stdin_bytes = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+
+    inner = payload.get("payload")
+    if payload.get("kind") == "text" and isinstance(inner, str):
+        file_bytes = inner.encode("utf-8")
+    else:
+        file_bytes = json.dumps(
+            inner, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+
+    actual = max(len(stdin_bytes), len(file_bytes))
+    if actual > SCRIPT_PAYLOAD_MAX_BYTES:
+        raise TriggerPayloadTooLargeError(
+            f"Trigger payload is {actual} bytes, which exceeds the "
+            f"{SCRIPT_PAYLOAD_MAX_BYTES}-byte trigger payload limit "
+            "(SCRIPT_PAYLOAD_MAX_BYTES); nothing was delivered and the step "
+            "was not run — reduce the payload sent to the workflow"
+        )
+    return stdin_bytes, file_bytes
 
 
 def parse_script_stdout(
