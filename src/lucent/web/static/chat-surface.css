@@ -707,13 +707,23 @@ main > div { max-width: none !important; height: 100%; }
     max-height: 2000px;
 }
 
-/* Fade-in for new messages */
+/* Fade-in for new messages.
+   Applied when a row is first rendered. A row that is later MOVED (progress
+   cards are repositioned to their anchor on every poll) is detached and
+   re-attached by the browser, which replays any animation on the class — so
+   the visible result was a row that flashed back into existence repeatedly.
+   `msg-enter-settled` marks a row whose entrance has already played; it is
+   set once the animation ends, and re-adding the node then leaves it static. */
 @keyframes fade-up {
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
 }
 .msg-enter {
     animation: fade-up 0.25s ease-out;
+}
+.msg-enter-settled,
+.msg-enter-settled.msg-enter {
+    animation: none;
 }
 
 /* Input area glow on focus */

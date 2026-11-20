@@ -63,6 +63,19 @@ templates.env.filters["truncate"] = truncate
 
 
 @functools.lru_cache(maxsize=64)
+def _static_asset_version_cached(relative_path: str, _mtime: float) -> str:
+    """Content hash of a static asset, keyed on its modification time.
+
+    ``_mtime`` participates only in the cache key: it makes a rewritten asset
+    re-hash instead of serving the first version seen by this process.
+    """
+    path = STATIC_DIR / relative_path
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "0"
+
+
 def _static_asset_version(relative_path: str) -> str:
     """Content hash of a static asset, for cache-busting query strings.
 
@@ -72,12 +85,20 @@ def _static_asset_version(relative_path: str) -> str:
     the render API, a stale copy makes newly added UI silently missing rather
     than visibly broken. Hashing the file contents means the URL changes exactly
     when the bytes do.
+
+    The cache key includes the file's mtime so editing an asset is picked up
+    without restarting the server. Caching on the path alone pinned the first
+    hash this process computed: in development, where ``static/`` is a bind
+    mount, a saved CSS/JS change kept being served under the *old* version tag,
+    so the browser legitimately reused its cached copy and the change never
+    appeared.
     """
     path = STATIC_DIR / relative_path
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+        mtime = path.stat().st_mtime
     except OSError:
         return "0"
+    return _static_asset_version_cached(relative_path, mtime)
 
 
 # Deployment label for display only. There is deliberately no `team_mode()`

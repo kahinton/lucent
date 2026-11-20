@@ -387,13 +387,35 @@
      *
      * Kept on the transcript element so it survives re-renders without a
      * module-level global: the card is rebuilt on every status change, and a
-     * collapse the user chose must not spring back open.
+     * collapse the person chose must not spring back open.
      */
     function progressCollapsedIds() {
         const host = document.getElementById('messages');
         if (!host) return new Set();
         if (!host.__delegatedCollapsed) host.__delegatedCollapsed = new Set();
         return host.__delegatedCollapsed;
+    }
+
+    /**
+     * Mark an element's entrance animation as already played.
+     *
+     * `.msg-enter` animates a row in when it is first rendered. Progress cards
+     * are repositioned against their anchor on every poll, and moving a node in
+     * the DOM means detaching and re-attaching it — which makes the browser
+     * replay the animation. The card then visibly reloaded every few seconds.
+     * Adding `msg-enter-settled` pins the row: `animation: none` on that class
+     * means any later move leaves its opacity and position alone.
+     *
+     * Deliberately not waiting on `animationend`: the animation is only 0.25s,
+     * and a card that is moved *during* its entrance should simply finish being
+     * visible rather than restart. A short timer covers the same window without
+     * depending on the animation having actually started (reduced-motion, a
+     * background tab, or an element inserted while the page was hidden would
+     * otherwise never settle).
+     */
+    function settleEntranceAnimation(el) {
+        if (!el || el.classList.contains('msg-enter-settled')) return;
+        window.setTimeout(() => el.classList.add('msg-enter-settled'), 300);
     }
 
     /**
@@ -440,6 +462,9 @@
             } else {
                 container.appendChild(wrapper);
             }
+            // Pin the card once its single entrance has played, so later
+            // repositions cannot replay the animation.
+            settleEntranceAnimation(wrapper);
         }
         const collapsed = progressCollapsedIds();
         // Only rewrite when the visible facts changed — a no-op render would
@@ -550,11 +575,24 @@
      * this pass the card would keep the end-of-thread position it was given then,
      * which is the drift the anchor exists to prevent.
      *
-     * Idempotent: a card already directly after its anchor is left untouched, so
-     * this cannot fight the DOM on every poll.
+     * Several live requests routinely share ONE anchor: they were all created
+     * from the same turn, and `anchorRowFor` resolves the turn to the same last
+     * row for each of them. Placing them one at a time made them fight forever —
+     * `anchor.after(a)` puts a directly behind the anchor, then `anchor.after(b)`
+     * inserts b between the two, so a is no longer "directly after its anchor"
+     * and the next pass moves it again. Every move detaches and re-attaches the
+     * node, and a re-attached node replays its CSS animation, so the boxes
+     * visibly reloaded on every poll.
+     *
+     * Cards are therefore grouped by anchor and the whole group is laid down in
+     * one stable order, which reaches a fixed point instead of oscillating.
+     *
+     * Idempotent: a group already in its final order is left untouched, so this
+     * cannot fight the DOM on every poll.
      */
     function positionDelegatedProgress(container, requests) {
         if (!container) return;
+        const groups = new Map();
         for (const request of requests || []) {
             if (!request || !request.id) continue;
             const wrapper = container.querySelector(
@@ -563,8 +601,36 @@
             if (!wrapper) continue;
             const anchor = anchorRowFor(container, request);
             if (!anchor || anchor.parentNode !== container) continue;
-            if (wrapper.previousElementSibling === anchor) continue;
-            anchor.after(wrapper);
+            const entries = groups.get(anchor) || [];
+            entries.push({
+                wrapper,
+                // Deterministic order so the group's layout is a pure function
+                // of the request set rather than of previous poll order. A card
+                // created earlier reads first.
+                order: `${request.created_at || ''}|${String(request.id)}`,
+            });
+            groups.set(anchor, entries);
+        }
+
+        for (const [anchor, entries] of groups) {
+            entries.sort((left, right) => left.order.localeCompare(right.order));
+            let inPlace = true;
+            let previous = anchor;
+            for (const { wrapper } of entries) {
+                if (previous.nextElementSibling !== wrapper) {
+                    inPlace = false;
+                    break;
+                }
+                previous = wrapper;
+            }
+            if (inPlace) continue;
+            // Lay the group down in order: each card goes directly behind the
+            // previous one, so the sequence ends contiguous and anchored.
+            let cursor = anchor;
+            for (const { wrapper } of entries) {
+                cursor.after(wrapper);
+                cursor = wrapper;
+            }
         }
     }
 

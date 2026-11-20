@@ -2121,9 +2121,21 @@ def test_progress_cards_stay_at_their_creation_anchor():
     assert "function positionDelegatedProgress(container, requests)" in js
     assert "positionDelegatedProgress(cfg.messagesEl, live)" in js
     reposition = js.split("function positionDelegatedProgress(container, requests) {", 1)[1]
-    reposition = reposition.split("\n    }", 1)[0]
-    assert "wrapper.previousElementSibling === anchor" in reposition, (
-        "repositioning must be a no-op when the card is already correctly placed"
+    reposition = reposition.split("\n    function ", 1)[0]
+    # Several live requests routinely share one anchor (they were created from
+    # the same turn). They must be laid down as a GROUP to a fixed order, not
+    # one at a time: `anchor.after(a)` then `anchor.after(b)` inserts b between
+    # the anchor and a, so a stops being "directly after" it and the next poll
+    # moves it again. Moving a node restarts its CSS animation, so the fighting
+    # showed up as progress boxes that visibly reloaded on every poll.
+    assert "groups" in reposition and "anchor" in reposition, (
+        "repositioning must group cards by anchor"
+    )
+    assert "inPlace" in reposition, (
+        "repositioning must be a no-op when the group is already in place"
+    )
+    assert "entries.sort" in reposition, (
+        "the group's order must be deterministic, not dependent on poll order"
     )
 
     # Rows must carry the ids the anchor lookup depends on.
