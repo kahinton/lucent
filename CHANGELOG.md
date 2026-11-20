@@ -31,6 +31,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Live request progress boxes reloaded on every refresh.**
+  Two running requests created from the same turn resolve to the same anchor
+  row, and the repositioning pass moved them one at a time: after
+  `anchor.after(a)`, `anchor.after(b)` inserted b *between* the anchor and a,
+  leaving a no longer adjacent so the next poll moved it back. The cards
+  oscillated indefinitely — measured 15 create/remove cycles in 25 seconds.
+  - Repositioning now groups cards by anchor and lays each group down in one
+    deterministic order, which reaches a fixed point instead of oscillating.
+  - Separately, moving a node in the DOM detaches and re-attaches it, which
+    replays its CSS animation. `.msg-enter` had no finished state, so any
+    legitimate reposition animated a long-settled row back into existence. An
+    entrance now marks itself settled once it has played, and that state
+    disables the animation so later moves leave the row static.
+  - Verified in the running app: 0 animation starts and 0 card moves across
+    55 seconds of polling, where the same window previously produced 44.
+- **Editing a static asset did not change its cache-busting version tag.**
+  The version was cached on the file path alone, so the first hash a process
+  computed stuck for its lifetime. Under the development bind mount a saved
+  CSS/JS change kept being served under the old `?v=`, so the browser
+  correctly reused its cached copy and the change appeared to be missing. The
+  cache key now includes the file's mtime. Production is unaffected (assets
+  ship inside the image).
 - **The usage report merged every offboarded tenant into one billable line.**
   `resource_usage_events.organization_id` is `ON DELETE SET NULL` so the
   ledger outlives the tenant, which means every deleted tenant has a NULL id.
