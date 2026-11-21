@@ -1272,11 +1272,52 @@
      *
      * Returns the rendered rows so a caller can scroll or measure afterwards.
      */
+    /**
+     * Keep the chat shell's empty/transcript mode in step with the transcript.
+     *
+     * `.chat-container.empty-mode .messages-area` sets `overflow: visible` and
+     * centres its content, and `.chat-container` itself is `overflow: hidden`.
+     * So while that class is present the message list cannot scroll at all and
+     * anything taller than the viewport simply runs off the bottom of the page.
+     *
+     * The class used to be toggled by hand at each call site (empty state,
+     * first send, transcript render), so any path that painted a transcript
+     * without clearing it produced a conversation that could not be scrolled —
+     * and the hero stayed on screen above the messages. Deriving it from what
+     * was actually rendered removes that whole class of bug: the state is a
+     * consequence of the transcript, not of remembering to flip a flag.
+     */
+    function syncEmptyMode(container, hasRows) {
+        const shell = container && container.closest
+            ? container.closest('.chat-container')
+            : null;
+        if (!shell) return;
+        shell.classList.toggle('empty-mode', !hasRows);
+        // The hero lives inside the message list, so it must not remain as a
+        // stray block above an existing conversation — and it must come back
+        // when the list is empty again.
+        const emptyState = document.getElementById('empty-state');
+        if (emptyState && container.contains(emptyState)) {
+            emptyState.hidden = !!hasRows;
+            emptyState.style.display = hasRows ? 'none' : '';
+        }
+    }
+
     function renderTranscript(container, messages, events, options) {
         const opts = options || {};
-        container.innerHTML = '';
         const interactions = opts.interactions || {};
         const visible = (messages || []).filter(m => m.role === 'user' || m.role === 'assistant');
+
+        // The empty state is deliberately NOT a transcript, so an empty render
+        // must not clear the container: the caller owns that markup (it holds
+        // the hero, the prompts and the intro summary). All this does is put
+        // the shell back in the mode where the hero is visible and centred.
+        if (!visible.length) {
+            syncEmptyMode(container, false);
+            return [];
+        }
+        syncEmptyMode(container, true);
+        container.innerHTML = '';
         const turnIdByMessageId = new Map(
             visible.filter(m => m.id && m.turn_id).map(m => [m.id, m.turn_id])
         );
@@ -1774,6 +1815,13 @@
                 userMessage.attachments = pendingAttachmentsForRequest();
             }
             state.messages.push(userMessage);
+            // sendTurn appends rows itself instead of going through
+            // renderTranscript, so it must establish the transcript mode too.
+            // Without this the shell could stay in empty mode while a
+            // conversation rendered underneath the hero — and empty mode makes
+            // the message list `overflow: visible`, so nothing could be
+            // scrolled.
+            syncEmptyMode(cfg.messagesEl, true);
             const userRow = appendUserMessage(cfg.messagesEl, text, outgoingAttachments);
             scrollToBottom();
             input.value = '';

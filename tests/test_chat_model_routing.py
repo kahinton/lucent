@@ -1005,3 +1005,39 @@ def test_message_ui_renders_memory_gate_confidence():
     # The hook-chip styling moved with the renderer into the shared stylesheet.
     css = Path("src/lucent/web/static/chat-surface.css").read_text()
     assert ".hook-memory-score" in css
+
+
+def test_chat_shell_empty_mode_is_derived_not_assumed():
+    """A conversation must never render inside the non-scrollable empty shell.
+
+    `.chat-container.empty-mode .messages-area` sets `overflow: visible` while
+    `.chat-container` is `overflow: hidden`, so in empty mode the message list
+    cannot scroll and anything taller than the viewport simply runs off the
+    page. The class used to be toggled by hand at each call site, and any path
+    that painted a transcript without clearing it produced a conversation with
+    no scrollbar and the hero still sitting above it.
+    """
+    template = Path("src/lucent/web/templates/chat.html").read_text()
+    ui = Path("src/lucent/web/static/chat-message-ui.js").read_text()
+
+    # The server knows whether a session is being opened, so it must not render
+    # the empty shell for a session URL.
+    assert '{% if not session_id %} empty-mode{% endif %}' in template, (
+        "the shell must start in transcript mode when a session is being loaded"
+    )
+
+    # The renderer owns the state from then on, so it cannot drift from what is
+    # actually on screen.
+    assert "function syncEmptyMode(container, hasRows)" in ui
+    assert "shell.classList.toggle('empty-mode', !hasRows)" in ui
+
+    # Both paths that can put rows on screen must establish it: a full render
+    # and the live turn, which appends instead of re-rendering.
+    render = ui.split("function renderTranscript(container, messages, events, options) {", 1)[1]
+    render = render.split("\n    function ", 1)[0]
+    assert "syncEmptyMode(container, true)" in render
+    send = ui.split("async function sendTurn(event) {", 1)[1]
+    send = send.split("async function ", 1)[0]
+    assert "syncEmptyMode(cfg.messagesEl, true)" in send, (
+        "the live turn appends rows directly, so it must set the mode too"
+    )

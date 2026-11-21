@@ -10,7 +10,13 @@
 
 {% block content %}
 <div class="chat-shell">
-<div class="chat-container empty-mode" id="chat-root">
+{# A session id means a conversation is about to be loaded, so the shell must
+   start in transcript mode. Rendering `empty-mode` unconditionally left the
+   message list `overflow: visible` underneath a fixed, `overflow: hidden`
+   container whenever a transcript was painted: the conversation ran off the
+   bottom of the page and could not be scrolled. The client keeps this in sync
+   from then on (chat-message-ui.js `syncEmptyMode`). #}
+<div class="chat-container{% if not session_id %} empty-mode{% endif %}" id="chat-root">
     <div class="chat-overview-shell absolute z-30 flex items-center gap-1 text-xs">
         <button type="button" data-overview-trigger="approvals" class="flex items-center gap-1.5 rounded-md px-2 py-1 text-gray-500 hover:bg-gray-100 hover:text-gray-800 transition-colors" title="Show requests awaiting approval" aria-expanded="false">
             <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" aria-hidden="true">
