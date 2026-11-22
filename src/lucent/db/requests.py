@@ -6636,11 +6636,13 @@ AND (
     async def reconcile_request_statuses(self, org_id: str | None = None) -> int:
         """Fix request statuses that got out of sync with their tasks.
 
-        Handles three cases:
+        Handles four cases:
         1. Request is 'in_progress' but all tasks are terminal → complete/fail it
         2. Request is 'pending' but has running/completed tasks → mark in_progress
         3. Request is stuck in 'review' with a completed review task whose
            recorded decision never landed → apply that decision
+        4. Request is stuck in 'review' with *no* review task at all → record
+           the stall for a human (never an approval: there is no verdict)
 
         Returns the number of requests fixed.
         """
@@ -6732,6 +6734,42 @@ AND (
                     row["id"],
                 )
                 if review_task is None:
+                    continue
+                # A review that could not write its mandatory memory updates
+                # produced an unusable verdict: the reviewer was structurally
+                # unable to remedy what it found, and the daemon recorded that
+                # distinctly (review_memory_update_blocked). Re-applying the
+                # verdict here would reopen task work for a defect the task
+                # agent did not cause — the exact budget burn the marker exists
+                # to prevent. A person decides instead; the marker is one-shot.
+                memory_update_blocked = await conn.fetchval(
+                    """SELECT 1 FROM task_events
+                        WHERE task_id = $1
+                          AND event_type = 'request_review_memory_update_blocked'""",
+                    review_task["id"],
+                )
+                if memory_update_blocked:
+                    existing = await conn.fetchval(
+                        """SELECT 1 FROM task_events
+                            WHERE task_id = $1
+                              AND event_type = 'request_review_manual_required'""",
+                        review_task["id"],
+                    )
+                    if not existing:
+                        await self.add_task_event(
+                            str(review_task["id"]),
+                            "request_review_manual_required",
+                            "Request is in review because its review could not "
+                            "update linked memories: the session had no usable "
+                            "memory tool. The task agent is not at fault. A "
+                            "human decision is required.",
+                            {
+                                "reconciled": True,
+                                "reason": "review_memory_update_blocked",
+                            },
+                            org_id=request_org_id,
+                        )
+                        fixed += 1
                     continue
                 decision = _recorded_review_decision(review_task["result"])
                 if decision == "APPROVED":
@@ -6873,6 +6911,90 @@ AND (
                             org_id=request_org_id,
                         )
                         fixed += 1
+
+            # Case 4: a request stuck in 'review' whose review task was never
+            # created at all.
+            #
+            # Case 3 requires a review task to exist (`EXISTS ... request-review`),
+            # so it cannot see this shape. A request reaches `review` through the
+            # ordinary completion path — `_check_request_completion` flips the
+            # status and stamps `reviewed_at` — and has no review task yet: the
+            # daemon's `_ensure_request_review_tasks` pass creates it on a later
+            # dispatch cycle. When that pass does not run, the request is stranded
+            # with nothing to move it and nothing to show for it: no review row,
+            # no review task, no event. Observed live on fb4f29e7 (2026-11-20):
+            # 71 minutes in `review` while the system produced zero task events,
+            # then a review task on the very next pass.
+            #
+            # This is deliberately NOT an approval and NOT a re-review. There is no
+            # verdict to apply, and answering silence with approval would be worse
+            # than the silence. It records the stall once, on the request's most
+            # recent task, using the same `request_review_manual_required` marker
+            # Case 3 emits — so a review that never started is explicit and visible
+            # from Activity instead of looking like work still in progress.
+            #
+            # The grace period keeps this from racing the healthy path: the daemon
+            # normally creates the review task within one dispatch cycle, and only
+            # a request that has sat in `review` well past that is a stall.
+            orphan_rows = await conn.fetch(
+                f"""SELECT r.id, r.organization_id
+                      FROM requests r
+                     WHERE r.status = 'review' {org_filter}
+                       AND r.reviewed_at IS NOT NULL
+                       AND r.reviewed_at < now() - interval '10 minutes'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM tasks t
+                            WHERE t.request_id = r.id
+                              AND (t.agent_type = 'request-review'
+                                   OR t.title = 'Post-completion review')
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM tasks t
+                            WHERE t.request_id = r.id
+                              AND t.status IN ('pending', 'planned', 'claimed', 'running')
+                       )""",
+                *params,
+            )
+            for row in orphan_rows:
+                request_org_id = str(row["organization_id"])
+                # One shot per request, not per task: an anchor task can be
+                # superseded, and re-emitting on each sweep would bury the
+                # signal it exists to raise.
+                existing = await conn.fetchval(
+                    """SELECT 1 FROM task_events e
+                         JOIN tasks t ON t.id = e.task_id
+                        WHERE t.request_id = $1
+                          AND e.event_type = 'request_review_manual_required'""",
+                    row["id"],
+                )
+                if existing:
+                    continue
+                anchor = await conn.fetchrow(
+                    """SELECT id FROM tasks
+                        WHERE request_id = $1
+                        ORDER BY COALESCE(completed_at, updated_at) DESC
+                        LIMIT 1""",
+                    row["id"],
+                )
+                if anchor is None:
+                    continue
+                # `task_events.task_id` is NOT NULL, so a request-level record has
+                # to be anchored to one of the request's own tasks. The marker and
+                # its one-shot guard are scoped to the request above.
+                await self.add_task_event(
+                    str(anchor["id"]),
+                    "request_review_manual_required",
+                    "Request is in review with no review task: the automatic "
+                    "review was never scheduled. Nothing was approved. A human "
+                    "decision is required.",
+                    {
+                        "reconciled": True,
+                        "reason": "review_task_missing",
+                        "request_id": str(row["id"]),
+                    },
+                    org_id=request_org_id,
+                )
+                fixed += 1
 
         return fixed
 

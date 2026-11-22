@@ -118,6 +118,85 @@ def _review_updatable_memories(linked_memories: list[dict]) -> list[dict]:
     ]
 
 
+#: Tools the MANDATORY MEMORY UPDATE STEP cannot be satisfied without.
+_REVIEW_REQUIRED_MEMORY_TOOLS = ("get_memory", "update_memory")
+
+#: Phrases a runtime uses when it refuses a tool the session never allowlisted.
+#: Claude Code's ``... but you haven't granted it yet.`` is emitted by the CLI,
+#: not by Lucent, so there is no in-repo constant to import and compare against.
+_TOOL_REFUSAL_PHRASES = (
+    "haven't granted it yet",
+    "has not been granted",
+    "permission-denied",
+    "permission denied",
+)
+
+#: Engine-qualified names for Lucent's own tools. These only appear when a
+#: runtime is naming the exact call it refused — a reviewer writing prose about
+#: a task's permission problem would say ``update_memory``, not
+#: ``mcp__memory-server__update_memory`` — so matching them keeps a report
+#: *about* someone else's denial from being read as this review's denial.
+_REVIEW_MEMORY_TOOL_HINTS = (
+    "mcp__memory-server__",
+    "memory-server-",
+)
+
+
+def review_memory_tools_granted(mcp_config: dict | None) -> bool:
+    """Whether a composition's MCP config can serve the mandatory memory step.
+
+    ``tools`` is Lucent's own per-server allowlist (see ``lucent.tool_policy``);
+    ``["*"]`` is the wildcard every dispatched task is given. A composition with
+    no memory-server block, or one that excludes the update tools, cannot
+    perform the step no matter what the review prompt demands.
+    """
+    server = (mcp_config or {}).get("memory-server")
+    if not isinstance(server, dict):
+        return False
+    tools = server.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return False
+    if "*" in tools:
+        return True
+    return all(name in tools for name in _REVIEW_REQUIRED_MEMORY_TOOLS)
+
+
+def review_memory_tools_refused(text: str | None) -> bool:
+    """Whether review output shows the runtime refusing a memory tool call."""
+    lowered = (text or "").lower()
+    if not any(phrase in lowered for phrase in _TOOL_REFUSAL_PHRASES):
+        return False
+    return any(hint in lowered for hint in _REVIEW_MEMORY_TOOL_HINTS)
+
+
+def review_memory_step_blocked(
+    *,
+    mcp_config: dict | None,
+    review_output: str | None,
+    updatable_memories: list[dict],
+) -> bool:
+    """Whether the mandatory memory step was impossible for THIS composition.
+
+    This is the distinction the review path has been missing: "linked memories
+    existed and the reviewer updated them" (fine), "linked memories existed and
+    the reviewer skipped them" (the reviewer's own failure — stays visible and
+    is rejected), and "linked memories existed but this composition could never
+    have written them" (nothing the task agent did, and nothing the reviewer
+    could remedy).
+
+    Only the third case returns True. It is detected two ways because the two
+    failure modes differ: the composition may carry no usable memory tool at
+    all, or it may carry one that the engine/runtime never allowlisted — the
+    latter leaves the composition looking healthy and only shows up as refusals
+    in the review's own output.
+    """
+    if not updatable_memories:
+        return False
+    if not review_memory_tools_granted(mcp_config):
+        return True
+    return review_memory_tools_refused(review_output)
+
+
 def _parse_review_decision(daemon, text: str) -> dict:
     """Parse review output into a structured decision.
 
@@ -484,9 +563,43 @@ async def _process_request_review_task(daemon, task: dict, review_result: str) -
         await runtime.RequestAPI.add_event(str(task['id']), 'request_review_parse_error', 'Could not parse review decision; manual review required.', {'recommendation': 'UNPARSEABLE', 'feedback': feedback[:1000]})
         await runtime.RequestAPI.update_request_status(request_id, 'review')
         return
+    linked_memories = await runtime.RequestAPI.get_request_memories(request_id)
+    updatable_memories = _review_updatable_memories(linked_memories)
+    # A review whose composition could not write the mandatory memory updates is
+    # not a usable verdict: the reviewer saw a defect it was structurally unable
+    # to fix, and bouncing that to the task agent charges the wrong agent and
+    # burns its rework budget (observed live: a request spent its whole budget on
+    # exactly this). Park it for a person with a distinct marker instead. The
+    # reviewer's own findings are preserved verbatim in the event, so nothing it
+    # discovered is lost.
+    if review_memory_step_blocked(
+        mcp_config=getattr(runtime, 'MCP_CONFIG', None),
+        review_output=review_result,
+        updatable_memories=updatable_memories,
+    ):
+        await runtime.RequestAPI.add_event(
+            str(task['id']),
+            'request_review_memory_update_blocked',
+            'Review cannot perform its mandatory memory update: this session was '
+            'composed without a usable memory tool. Not sent back to the task '
+            'agent — it had nothing to do with the failure. Manual review required.',
+            {
+                'recommendation': decision,
+                'linked_memory_ids': [str(m['memory_id']) for m in updatable_memories],
+                'memories_updated': parsed.get('memories_updated', []),
+                'task_ids_to_rework': task_ids,
+                'feedback': feedback[:1500],
+            },
+        )
+        await runtime.RequestAPI.update_request_status(request_id, 'review')
+        runtime.log(
+            f'Request {request_id[:8]} review could not update '
+            f'{len(updatable_memories)} linked memory/memories (no memory tool in '
+            'composition); awaiting manual review',
+            'WARN',
+        )
+        return
     if decision == 'APPROVED':
-        linked_memories = await runtime.RequestAPI.get_request_memories(request_id)
-        updatable_memories = _review_updatable_memories(linked_memories)
         if updatable_memories:
             expected_ids = {str(m['memory_id']) for m in updatable_memories}
             attested_ids = {mid.lower() for mid in parsed.get('memories_updated', [])}

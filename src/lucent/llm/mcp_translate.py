@@ -29,6 +29,50 @@ def _server_type(entry: dict[str, Any]) -> str:
     return str(entry.get("type") or ("stdio" if "command" in entry else "http")).lower()
 
 
+def to_claude_allowed_tools(mcp_config: dict[str, Any] | None) -> list[str]:
+    """Translate Lucent's per-server tool policy into Claude Code allow rules.
+
+    ``mcp_servers`` alone only *attaches* a server. Claude Code additionally
+    requires each MCP tool to be allowlisted, either by the session's permission
+    mode or by ``allowed_tools``; a tool that is attached but not allowed is
+    reported to the model as ``... but you haven't granted it yet.`` and the call
+    fails. That is precisely the failure a dispatched daemon task hit: the
+    carrier declared ``tools: ["*"]`` (see ``lucent.tool_policy``) and the
+    policy was dropped here, so every Lucent memory-server call was denied.
+
+    ``"*"`` becomes a server-wide rule (``mcp__<server>``); named tools become
+    ``mcp__<server>__<tool>``. ``exclude_tools`` is not expressed as a rule —
+    the MCP server itself refuses excluded tools, and an allowlist cannot
+    express "everything except".
+
+    Only Lucent's own internal server is allowlisted. An external connector's
+    tools must keep their existing approval semantics: an allow rule is a
+    blanket pre-approval that also bypasses ``can_use_tool``, which would
+    silently remove the chat approval prompt for those servers.
+    """
+    from lucent.llm.tool_approval import is_internal_mcp_server
+
+    allowed: list[str] = []
+    for name, entry in (mcp_config or {}).items():
+        if not isinstance(entry, dict) or not is_internal_mcp_server(name):
+            continue
+        tools = entry.get("tools")
+        if not isinstance(tools, list) or not tools:
+            continue
+        if "*" in tools:
+            # A wildcard already covers every tool on the server; the daemon
+            # also appends managed-tool names to the same list, and emitting
+            # them again as individual rules would only be noise.
+            if f"mcp__{name}" not in allowed:
+                allowed.append(f"mcp__{name}")
+            continue
+        for tool in tools:
+            rule = f"mcp__{name}__{tool}"
+            if rule not in allowed:
+                allowed.append(rule)
+    return allowed
+
+
 def to_claude_mcp_servers(mcp_config: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Translate to Claude Agent SDK ``mcp_servers`` (Mcp*ServerConfig shapes)."""
     servers: dict[str, dict[str, Any]] = {}

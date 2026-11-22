@@ -21,7 +21,7 @@ from lucent.llm.engine import (
     SessionEventType,
 )
 from lucent.llm.engine_injection import backend_local_injection
-from lucent.llm.mcp_translate import to_claude_mcp_servers
+from lucent.llm.mcp_translate import to_claude_allowed_tools, to_claude_mcp_servers
 from lucent.llm.token_usage import normalize_token_usage
 from lucent.logging import get_logger
 
@@ -281,6 +281,16 @@ class ClaudeCodeEngine(LLMEngine):
         mcp_servers = to_claude_mcp_servers(mcp_config)
         if mcp_servers:
             kwargs["mcp_servers"] = mcp_servers
+            # Attaching a server does not authorise its tools. Without an
+            # allowlist (or a can_use_tool callback, which daemon sessions
+            # deliberately do not install) Claude Code reports every MCP call
+            # as "you haven't granted it yet" and the model cannot use a single
+            # tool — the exact shape that made post-completion reviews unable
+            # to perform their mandatory memory updates. The carrier already
+            # states the policy (`tools: ["*"]`); hand it over.
+            allowed_tools = to_claude_allowed_tools(mcp_config)
+            if allowed_tools:
+                kwargs["allowed_tools"] = allowed_tools
         if reasoning_effort:
             kwargs["effort"] = reasoning_effort
         if env:
