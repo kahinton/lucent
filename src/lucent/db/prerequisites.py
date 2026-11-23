@@ -17,6 +17,10 @@ What it ensures:
 
 - ``pg_trgm`` — mandatory (trigram search). A missing/uncreatable ``pg_trgm``
   is a hard error: the schema and search paths depend on it.
+- ``vector`` — mandatory (pgvector, migration 169's embedding columns and HNSW
+  index). Only available when the server image ships pgvector, so the image
+  upgrade must be deployed *before* this module requires it; see the ordering
+  note on ``REQUIRED_EXTENSIONS``.
 - ``uuid-ossp`` — legacy ``uuid_generate_v4()`` default. Best-effort: after
   migration ``138`` no column default needs it, so a deployment that cannot
   allowlist it only needs it for the one-time migration 001 bootstrap.
@@ -54,7 +58,14 @@ DAEMON_ROLE: Final[str] = "lucent_daemon"
 DAEMON_DB_PASSWORD_ENV: Final[str] = "DAEMON_DB_PASSWORD"
 
 #: Extensions the schema genuinely cannot run without.
-REQUIRED_EXTENSIONS: Final[tuple[str, ...]] = ("pg_trgm",)
+#:
+#: ``vector`` (pgvector) backs migration 169's embedding columns and HNSW
+#: index. It is only available when the Postgres server image ships pgvector,
+#: so the image MUST be pgvector/pgvector:pg16 BEFORE this code is deployed:
+#: prerequisites run before migrations on every start, and a missing
+#: ``vector`` is a hard error by design — failing up front beats letting the
+#: migration fail mid-run on a server that cannot provide the extension.
+REQUIRED_EXTENSIONS: Final[tuple[str, ...]] = ("pg_trgm", "vector")
 #: Extensions kept only for the legacy ``uuid_generate_v4()`` default.
 LEGACY_EXTENSIONS: Final[tuple[str, ...]] = ("uuid-ossp",)
 

@@ -64,6 +64,38 @@ RUN EXTRAS="" ; \
         echo "No optional tool extras enabled" ; \
     fi
 
+# Semantic memory embeddings (fastembed / ONNX Runtime). The model weights are
+# fetched here, at build time, into a fixed path so the runtime container can
+# encode with the network disabled — downloading lazily on the first memory
+# write would produce an image that only works online.
+#
+# `--download` constructs the embedder against the cache, which both downloads
+# the model and verifies it encodes a 384-dimension vector. Two env vars point
+# at the same directory on purpose: FASTEMBED_CACHE_PATH is fastembed's own
+# default cache location, while LUCENT_EMBEDDING_CACHE_DIR is what the
+# application resolves its cache through (settings.py:
+# memory.embedding_cache_dir). If they diverged, the runtime would look in the
+# wrong place and miss the baked weights.
+ARG LUCENT_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+ENV FASTEMBED_CACHE_PATH=/opt/models \
+    LUCENT_EMBEDDING_CACHE_DIR=/opt/models \
+    LUCENT_EMBEDDING_MODEL=${LUCENT_EMBEDDING_MODEL} \
+    HF_HUB_DISABLE_TELEMETRY=1
+RUN mkdir -p /opt/models && python -m lucent.memory.embeddings --download
+
+# Build-time assertion, deliberately separate from the fetch. If the download
+# step silently no-ops (wrong path, empty cache, interrupted transfer), this
+# fails the build here instead of the first memory write in production. It
+# checks the actual on-disk artifacts fastembed loads: a non-empty ONNX model
+# plus the tokenizer and config files, all under /opt/models.
+RUN python -c "import pathlib, sys; \
+c = pathlib.Path('/opt/models'); \
+onnx = [p for p in c.rglob('*.onnx') if p.exists() and p.stat().st_size > 0]; \
+names = {p.name for p in c.rglob('*') if p.exists()}; \
+required = ['tokenizer.json', 'config.json', 'tokenizer_config.json']; \
+missing = [n for n in required if n not in names]; \
+sys.exit('ERROR: embedding cache incomplete under /opt/models: onnx=%s missing=%s' % (onnx, missing)) if (not onnx or missing) else print('embedding cache OK: %d onnx file(s), %d bytes' % (len(onnx), sum(p.stat().st_size for p in onnx)))"
+
 # Runtime stage — same pinned digest
 FROM python:3.12-slim@sha256:3d5ed973e45820f5ba5e46bd065bd88b3a504ff0724d85980dcd05eab361fcf4
 
@@ -79,6 +111,18 @@ ARG LUCENT_TOOLS_ENABLE_IMAGES=0
 ENV LUCENT_TOOLS_ENABLE_DOCUMENTS=${LUCENT_TOOLS_ENABLE_DOCUMENTS} \
     LUCENT_TOOLS_ENABLE_IMAGES=${LUCENT_TOOLS_ENABLE_IMAGES}
 
+# Embedding model, re-declared for this stage. The weights were downloaded in
+# the builder; this stage only needs to point runtime at the same cache path.
+# HF_HUB_OFFLINE forces fastembed's Hugging Face cache lookup into offline mode:
+# fastembed already tries `local_files_only=True` first, but without this flag a
+# cache miss would attempt Hub metadata calls, so this makes the "encodes with
+# the network disabled" guarantee explicit and fail-fast.
+ARG LUCENT_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+ENV FASTEMBED_CACHE_PATH=/opt/models \
+    LUCENT_EMBEDDING_CACHE_DIR=/opt/models \
+    LUCENT_EMBEDDING_MODEL=${LUCENT_EMBEDDING_MODEL} \
+    HF_HUB_OFFLINE=1
+
 # Install runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
@@ -91,6 +135,12 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 # silently missing from the image — `lucent` and `lucent-daemon` are the same
 # wheel's scripts, so they all belong together.
 COPY --from=builder /usr/local/bin/lucent* /usr/local/bin/
+
+# Baked embedding model cache. Copied verbatim from the builder so the runtime
+# image needs no network access to encode memory content. --chown takes the
+# numeric runtime uid/gid (1000:1000, created below): a later `chown -R` would
+# rewrite the whole model cache into a second image layer.
+COPY --chown=1000:1000 --from=builder /opt/models /opt/models
 
 # Built-in agent/skill/sandbox-template definitions. The server looks for these
 # at /app/.github (builtin_definitions.py) and the daemon resolves its cognitive

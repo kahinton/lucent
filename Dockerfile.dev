@@ -46,6 +46,36 @@ RUN EXTRAS="dev" ; \
         pip install --no-cache-dir -e ".[${EXTRAS}]" ; \
     fi
 
+# Semantic memory embeddings (fastembed / ONNX Runtime). The model weights are
+# fetched here, at build time, into a fixed path so the running container can
+# encode with the network disabled. This is the image the Compose stack builds
+# (docker-compose.yml: lucent + daemon-1 both use Dockerfile.dev), so without
+# this block the live stack would have the fastembed package but no model.
+#
+# FASTEMBED_CACHE_PATH is fastembed's own default cache env var;
+# LUCENT_EMBEDDING_CACHE_DIR is what the application resolves the cache through
+# (settings.py: memory.embedding_cache_dir). Both must point at /opt/models or
+# runtime would look somewhere the weights are not.
+ARG LUCENT_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+ENV FASTEMBED_CACHE_PATH=/opt/models \
+    LUCENT_EMBEDDING_CACHE_DIR=/opt/models \
+    LUCENT_EMBEDDING_MODEL=${LUCENT_EMBEDDING_MODEL} \
+    HF_HUB_DISABLE_TELEMETRY=1
+RUN mkdir -p /opt/models && python -m lucent.memory.embeddings --download
+
+# Build-time assertion, deliberately separate from the fetch. If the download
+# step silently no-ops (wrong path, empty cache, interrupted transfer), this
+# fails the build here instead of the first memory write at runtime. It checks
+# the actual on-disk artifacts fastembed loads: a non-empty ONNX model plus the
+# tokenizer and config files, all under /opt/models.
+RUN python -c "import pathlib, sys; \
+c = pathlib.Path('/opt/models'); \
+onnx = [p for p in c.rglob('*.onnx') if p.exists() and p.stat().st_size > 0]; \
+names = {p.name for p in c.rglob('*') if p.exists()}; \
+required = ['tokenizer.json', 'config.json', 'tokenizer_config.json']; \
+missing = [n for n in required if n not in names]; \
+sys.exit('ERROR: embedding cache incomplete under /opt/models: onnx=%s missing=%s' % (onnx, missing)) if (not onnx or missing) else print('embedding cache OK: %d onnx file(s), %d bytes' % (len(onnx), sum(p.stat().st_size for p in onnx)))"
+
 EXPOSE 8766
 
 CMD ["lucent"]

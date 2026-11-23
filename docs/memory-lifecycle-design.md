@@ -38,7 +38,7 @@ Lucent's memory system currently has no mechanism for managing memories over tim
 
 ### Specific failure modes
 
-1. **Search noise.** Fuzzy search (`pg_trgm` similarity) ranks results by text similarity, importance, and recency. It has no concept of whether a memory is stale, superseded, or redundant. A debugging session from 6 months ago about a since-refactored module ranks alongside current knowledge about the same module.
+1. **Search noise.** Search ranks by a hybrid relevance score (full-text `ts_rank_cd`, `pg_trgm` `word_similarity` over content and tags, exact-phrase bonuses, and — when enabled — a semantic vector arm), then by importance and recency. It has no concept of whether a memory is stale, superseded, or redundant. A debugging session from 6 months ago about a since-refactored module ranks alongside current knowledge about the same module.
 
 2. **Context pollution.** Agents call `search_memories()` at the start of every task to load relevant context. As memory count grows, these searches return more low-value results, consuming context window tokens and degrading agent reasoning quality.
 
@@ -52,7 +52,7 @@ Lucent's memory system currently has no mechanism for managing memories over tim
 
 The schema already has useful building blocks:
 
-- **`last_accessed_at`** — Updated on every search hit or direct view (migration 006)
+- **`last_accessed_at`** — Updated on direct reads (`get_memory`, `get_memories`, and the memory detail endpoints). Search hits do **not** update it: since migration 137 a search result is deliberately not access-logged.
 - **`memory_access_log`** — Full access history with timestamps, access type, and context (migration 006)
 - **`deleted_at`** — Soft delete mechanism (migration 001)
 - **`version` + audit snapshots** — Full version history with point-in-time restore (migration 012)
@@ -203,9 +203,9 @@ Memories whose vitality has declined enough to warrant review for merging or sum
 
 #### ARCHIVED
 
-Memories that have been consolidated or have decayed to low vitality. They exist for reference but are excluded from default searches.
+Memories that have been consolidated or have decayed to low vitality. They exist for reference; whether they are excluded from ordinary searches depends on `LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED` (see below).
 
-- **Search behavior:** Excluded from default searches. Accessible via explicit `include_archived=true` parameter or direct `get_memory()` by ID.
+- **Search behavior:** Excluded from searches only when `LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED` is on and the caller did not pass `include_archived=true`. With the flag off (the shipped default) archived memories appear in ordinary results; `lifecycle_stage` is present on every result either way. Direct `get_memory()` by ID always works.
 - **Transition out → Forgotten:** Remains archived with no access for the configured grace period (default: 180 days).
 - **Transition out → Active:** Direct access triggers reconsolidation, promoting back to Active.
 
@@ -465,18 +465,17 @@ Lucent's reconsolidation provides two benefits:
 
 ### 7.1 Lifecycle Refresh on Access
 
-When a memory is accessed (via `get_memory`, `get_accessible`, or returned in search results), the system already updates `last_accessed_at`. This naturally increases the recency component of the vitality score on the next lifecycle evaluation.
+When a memory is read directly (via `get_memory`, `get_memories`, or the memory detail endpoints), the system updates `last_accessed_at`. This naturally increases the recency component of the vitality score on the next lifecycle evaluation. Being returned in search results does **not** update it: since migration 137 search is not access-logged, so a search neither refreshes recency nor reactivates a memory.
 
 **Stage promotion rules on access:**
 
 | Current Stage | Access Type | Result |
 |---------------|------------|--------|
-| Active | Any | No stage change. `last_accessed_at` updated. |
-| Consolidating | Search result | No stage change. But vitality score recalculated at next lifecycle run — may promote back to Active. |
-| Consolidating | Direct view (`get_memory`) | Promote to Active immediately. Direct access is a strong intent signal. |
-| Archived | Search result | Not reachable (Archived memories excluded from default search). |
-| Archived | Direct view (`get_memory`) | Promote to Active immediately. Log reconsolidation event. |
-| Forgotten (soft-deleted) | Direct view | Not reachable via normal search. Manual restore via `restore_memory_version` promotes to Active. |
+| Active | Direct read | No stage change. `last_accessed_at` updated. |
+| Consolidating | Direct read (`get_memory`) | Promote to Active immediately. Direct access is a strong intent signal. |
+| Archived | Direct read (`get_memory`) | Promote to Active immediately. Log reconsolidation event. |
+| Forgotten (soft-deleted) | Direct read | Not reachable via normal search. Manual restore via `restore_memory_version` promotes to Active. |
+| Any | Search result | No access row, no `last_accessed_at` update, and no stage change. |
 
 **Implemented (M9 Phase 2, goal 82b41acd).** Reactivation is wired into `AccessRepository.log_access` and `log_batch_access` — both extend their existing `UPDATE memories SET last_accessed_at = NOW()` with a single CASE expression that promotes `consolidating` and `archived` rows to `active` in the same statement. `forgotten` rows are NOT reactivated (they are queued for hard delete). Batched reads (`get_memories`) issue exactly ONE UPDATE covering all qualifying rows, not N. Vitality is intentionally NOT recomputed inline — the vitality computation schedule will catch up.
 
@@ -562,10 +561,13 @@ WHERE metadata ? 'consolidated_from' AND deleted_at IS NULL;
 
 ### 8.2 Search Changes
 
+> **Implementation status.** Only part of this section shipped. `MemoryRepository.search()` and `search_full()` accept `include_archived`, but it is inert unless `LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED` is on; there is no `lifecycle_stages` parameter, and no stage-based score multiplier exists anywhere in the code. The pseudocode and multipliers below are the original design intent, not the current behavior. (The shipped default excludes nothing: with the flag off, archived and forgotten memories are returned like any other row.)
+
 Modify `MemoryRepository.search()` to respect lifecycle stages:
 
 ```python
-# Default behavior: exclude archived and forgotten
+# Design intent — not the shipped behavior. The shipped code excludes
+# archived/forgotten only when LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED is on.
 async def search(
     self,
     ...,
@@ -584,7 +586,7 @@ async def search(
     # AND lifecycle_stage = ANY($stages)
 ```
 
-**Search ranking adjustment:** When both Active and Consolidating memories appear in results, apply a multiplier:
+**Search ranking adjustment (never built).** This multiplier was never implemented: `MemoryRepository.search()` applies no lifecycle-stage penalty. The block below is design intent only — do not read it as current behavior.
 
 ```python
 # Adjust similarity score by lifecycle stage
@@ -602,8 +604,8 @@ elif lifecycle_stage == 'archived':
 
 | Tool | Change |
 |------|--------|
-| `search_memories` | Add optional `include_archived` parameter (default: false). Add `lifecycle_stage` to response objects. |
-| `search_memories_full` | Add optional `include_archived` parameter (default: false). Add `lifecycle_stage` to response objects. |
+| `search_memories` | **Implemented:** optional `include_archived` (default: false), inert unless `LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED` is on. `lifecycle_stage` is in response objects. |
+| `search_memories_full` | **Implemented:** optional `include_archived` (default: false), inert unless `LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED` is on. `lifecycle_stage` is in response objects. |
 | `get_memory` | Return `lifecycle_stage` and `vitality_score` in response. Trigger reconsolidation: if stage is Consolidating/Archived, promote to Active. |
 | `get_memories` | Return `lifecycle_stage` and `vitality_score` in response. Trigger reconsolidation for each memory accessed. |
 | `update_memory` | Set `lifecycle_stage = 'active'` and `vitality_score = max(0.5, current)` on any update. |
@@ -1185,7 +1187,7 @@ This design draws from established neuroscience and AI research on memory consol
 | Day | Event | Memory State |
 |-----|-------|-------------|
 | Day 1 | Daemon creates memory: "Permission denied error in MCP session" | Active, importance 5, vitality ~0.8 |
-| Day 3 | Agent searches for "MCP permission", memory returned in results | Active, last_accessed_at refreshed |
+| Day 3 | Agent searches for "MCP permission", memory returned in results | Active, unchanged — search is not access-logged, so `last_accessed_at` is not refreshed |
 | Day 5 | Daemon creates 4 more debugging memories about same issue | 5 Active memories about MCP permissions |
 | Day 7 | Bug fixed. Agent creates summary memory, updates all 5 with outcome | All 5 Active, importance updated to 6 |
 | Day 45 | No access in 38 days. Vitality computed: 0.32 | All 5 transition to Consolidating |

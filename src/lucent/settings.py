@@ -26,6 +26,12 @@ logger = get_logger(__name__)
 # (single source of truth) rather than a hardcoded tuple.
 _LLM_ENGINE_CHOICES: tuple[str, ...] = tuple(_engine_names(implemented_only=True))
 
+# fastembed model baked into the image. The canonical identifier stored in
+# ``memories.embedding_model`` (``fastembed:<name>``) is defined once in
+# ``lucent.memory.embeddings``, which imports this default so the literal is
+# never duplicated.
+DEFAULT_EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+
 RuntimeSettingType = Literal["boolean", "integer", "float", "string", "json"]
 RuntimeSettingSource = Literal["database", "environment", "default"]
 RuntimeSettingControl = Literal["auto", "toggle", "select", "model", "url", "text"]
@@ -113,6 +119,73 @@ _RUNTIME_SETTING_DEFINITIONS: tuple[RuntimeSettingDefinition, ...] = (
         section="Memory search",
         description="Hide archived and forgotten memories from normal search results by default.",
         help_text="Callers can still explicitly include archived results when supported.",
+    ),
+    RuntimeSettingDefinition(
+        key="memory.search_vector_enabled",
+        env_var="LUCENT_SEARCH_VECTOR_ENABLED",
+        value_type="boolean",
+        default=True,
+        title="Vector embeddings for memory search",
+        section="Memory search",
+        description=(
+            "Embed memory content on write so semantic (vector) search can rank "
+            "memories by meaning instead of words alone."
+        ),
+        help_text=(
+            "Embedding never blocks a memory write: if the encoder is "
+            "unavailable the memory is still saved with a NULL embedding and a "
+            "warning is logged. Disable to stop computing embeddings without "
+            "removing the model from the image."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="memory.embedding_model",
+        env_var="LUCENT_EMBEDDING_MODEL",
+        value_type="string",
+        default=DEFAULT_EMBEDDING_MODEL_NAME,
+        title="Embedding model",
+        section="Memory search",
+        description="fastembed model used to produce memory embeddings.",
+        help_text=(
+            "The stored embedding_model identifier is the compatibility key for "
+            "lookups: vectors produced by different models are not comparable. "
+            "Changing this requires re-embedding existing memories, so it is "
+            "configured in the environment and baked into the image."
+        ),
+        editable=False,
+        requires_restart=True,
+        read_only_reason=(
+            "The model weights are baked into the image at build time, and "
+            "changing the model invalidates existing embeddings."
+        ),
+    ),
+    RuntimeSettingDefinition(
+        key="memory.embedding_cache_dir",
+        env_var="LUCENT_EMBEDDING_CACHE_DIR",
+        value_type="string",
+        default="/opt/models",
+        title="Embedding model cache directory",
+        section="Memory search",
+        description="Directory containing the pre-downloaded fastembed model files.",
+        help_text=(
+            "The image bakes the model into this path so encoding works with "
+            "the network disabled. Only change it for a development checkout "
+            "that downloads the model itself."
+        ),
+        editable=False,
+        requires_restart=True,
+        read_only_reason="The model cache is populated into the image at build time.",
+    ),
+    RuntimeSettingDefinition(
+        key="memory.embedding_batch_size",
+        env_var="LUCENT_EMBEDDING_BATCH_SIZE",
+        value_type="integer",
+        default=32,
+        title="Embedding batch size",
+        section="Memory search",
+        description="Maximum number of texts encoded in one model call during backfill.",
+        min_value=1,
+        max_value=256,
     ),
     RuntimeSettingDefinition(
         key="memory.search_vitality_boost_enabled",
@@ -2389,6 +2462,35 @@ def search_exclude_archived_enabled(*, organization_id: Any | None = None) -> bo
             organization_id=organization_id,
         )
     )
+
+
+def search_vector_enabled(*, organization_id: Any | None = None) -> bool:
+    """Whether memory writes compute and store a semantic embedding.
+
+    Rollout flag: when off, writes leave ``embedding`` NULL (the memory is
+    still saved) and the query path keeps its lexical ranking.
+    """
+    return bool(
+        get_runtime_setting(
+            "memory.search_vector_enabled",
+            organization_id=organization_id,
+        )
+    )
+
+
+def memory_embedding_model(*, organization_id: Any | None = None) -> str:
+    """fastembed model name used to produce memory embeddings."""
+    return _setting_string("memory.embedding_model", organization_id=organization_id)
+
+
+def memory_embedding_cache_dir(*, organization_id: Any | None = None) -> str:
+    """Directory holding the pre-downloaded embedding model files."""
+    return _setting_string("memory.embedding_cache_dir", organization_id=organization_id)
+
+
+def memory_embedding_batch_size(*, organization_id: Any | None = None) -> int:
+    """Maximum number of texts encoded per model call during backfill."""
+    return _setting_int("memory.embedding_batch_size", organization_id=organization_id)
 
 
 def search_vitality_boost_alpha(*, organization_id: Any | None = None) -> float:

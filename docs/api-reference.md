@@ -369,13 +369,13 @@ Fuzzy-matches existing tags against a query string. Useful for autocomplete.
 
 Base path: `/api/search`
 
-### Search Memories (Content Only)
+### Search Memories
 
 ```
 POST /api/search
 ```
 
-Fuzzy search on the content field. All fields are optional — omit `query` to browse/filter.
+Hybrid lexical + semantic relevance search over content and tags. All fields are optional — omit `query` to browse/filter.
 
 ```json
 {
@@ -387,7 +387,8 @@ Fuzzy search on the content field. All fields are optional — omit `query` to b
   "created_after": "2026-01-01T00:00:00Z",
   "created_before": "2026-12-31T23:59:59Z",
   "offset": 0,
-  "limit": 20
+  "limit": 20,
+  "include_archived": false
 }
 ```
 
@@ -423,15 +424,19 @@ GET /api/search?query=database+optimization&type=technical&limit=20
 }
 ```
 
-### Search Full (All Fields)
+`similarity_score` is the engine's relevance score. The lexical component is full-text `ts_rank_cd` plus an all-terms bonus, `pg_trgm` `word_similarity` over content/tags, and an exact-substring bonus, gated by a term-coverage floor and an absolute 0.30 floor. When `LUCENT_SEARCH_VECTOR_ENABLED` is on and the encoder is available, the score is the composite `0.70 × lexical + 0.30 × cosine similarity`; rows with a NULL embedding or a vector from a different model keep their lexical score unchanged, so an un-backfilled corpus degrades to lexical ranking rather than failing. A current-model cosine similarity of 0.55 or more can also admit a paraphrase-only hit.
+
+`include_archived` (default `false`) excludes `lifecycle_stage` values `archived` and `forgotten` **only** when `LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED` is on. With the flag off — the shipped default — the field is accepted but has no effect on the query.
+
+### Search Full
 
 ```
 POST /api/search/full
 ```
 
-Searches across content, tags, and metadata. The `query` field is required.
+The same retrieval engine as `/api/search`, with a required `query` and a smaller filter set: `username`, `type`, `importance_min`/`importance_max`, `offset`, `limit`, and `include_archived`. The shared request model also accepts `tags` and `created_after`/`created_before`, but this endpoint does not apply them. (`memory_ids` is a repository-level filter, not part of the HTTP request model.) It is not a broader field set — `metadata` is not searched by either endpoint.
 
-Same request/response format as content search.
+Same request/response format as `/api/search`.
 
 ---
 

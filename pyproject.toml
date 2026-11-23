@@ -15,6 +15,13 @@ authors = [
 dependencies = [
     "mcp[cli]>=2.3.0,<3.0",
     "asyncpg>=0.32.0",
+    # Text embeddings for semantic memory search. This is a base runtime
+    # dependency, not an optional extra: the memory write path embeds every
+    # memory, so an image without it would silently write NULL embeddings.
+    # fastembed runs the model through ONNX Runtime in-process — no torch and
+    # no separate model server. The model weights themselves are baked into
+    # the image at build time (see Dockerfile).
+    "fastembed>=0.9,<0.10",
     "pydantic>=2.14.3",
     "python-dotenv>=1.2.4",
     "fastapi>=0.163.0,<1.0",
@@ -112,6 +119,10 @@ lucent-bootstrap = "lucent.bootstrap:main"
 # Instance-operator (hyperadmin) account management. Needs direct DB access;
 # it is the only way to grant the cross-tenant operator role.
 lucent-hyperadmin = "lucent.hyperadmin:main"
+# Resumable, idempotent backfill of memories.embedding (safe to re-run; the
+# embedding columns are the progress marker). Also runnable as
+# `python -m lucent.memory.backfill` without the console script.
+lucent-embed-memories = "lucent.memory.backfill:main"
 # Standalone local org-admin console (a client of the hyperadmin API).
 lucent-ops-console = "ops_console.app:main"
 

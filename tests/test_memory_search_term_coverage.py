@@ -2,19 +2,22 @@
 
 Background
 ----------
-Hybrid retrieval requires a candidate memory to match a minimum share of the
-query's distinct terms, originally ``ceil(terms * 0.67)``. That rule scales
-badly with query length. A long natural-language query — the shape a model
-actually types, e.g. ``"spawn subagent tool chat async result return
-standalone request"`` (9 terms) — demanded 7 co-occurring terms in one memory.
-Nothing in the corpus qualified, so the tool returned
-``total_count: 0`` and the caller concluded the fact did not exist. The
-memory that answered the question had 3 of the 9 terms and ranked #1 once it
-was allowed through.
+Hybrid retrieval admits a row only when it contains every term of the query's
+*anchored core* — its first ``TERM_COVERAGE_CORE_TERMS`` content terms in the
+order the caller typed them. This replaced an earlier rule that required
+``ceil(terms * 0.67)`` co-occurring terms and then capped the requirement at 3
+(``TERM_COVERAGE_FLOOR_CAP``). The cap fixed long queries returning nothing,
+but it broke selectivity: past four terms the required count stayed at 3 while
+the term set grew, so appending a word could only ADD candidates. On the live
+corpus the 3-term query "memory search relevance" admitted 7 rows while the
+4-term "memory search relevance scoring" admitted 49 — the reported inversion.
 
-The floor is now capped at ``TERM_COVERAGE_FLOOR_CAP`` so long queries match on
-their strongest few terms, while off-domain queries still match nothing
-(their terms do not occur at all).
+A fraction alone cannot fix that: every fraction below 1 has a flat step
+(``ceil(3*0.67) == ceil(4*0.67) == 3``), and a flat step is exactly where
+widening happens. Requiring the whole anchored core is provably nested instead:
+``admitted(query + extra terms) ⊆ admitted(query)`` for every appended term.
+Long queries still match, on their first four content terms; extra words only
+sharpen ranking. Off-domain queries still match nothing.
 """
 
 from __future__ import annotations
@@ -46,7 +49,9 @@ class _CaptureConn:
                 "filtered_total": 0,
                 "matching_any": 0,
                 "best_overlap": 0,
+                "best_core_overlap": 0,
                 "query_terms": [],
+                "core_terms": [],
             }
         self.count_query = query
         return {"total": self.count_total}
@@ -81,13 +86,15 @@ class _CapturePool:
 
 
 @pytest.mark.parametrize("search_method", ["search", "search_full"])
-async def test_long_query_gate_is_capped(
+async def test_long_query_gate_requires_anchored_core(
     daemon_tenant_scope, monkeypatch, search_method
 ) -> None:
-    """A multi-term query must not require near-unanimous term overlap.
+    """A long query admits on ALL of its first N content terms, not a fraction.
 
-    The emitted gate is ``LEAST(ceil(terms * 0.67), cap)`` — a bare
-    ``ceil(terms * 0.67)`` is what silently zeroed long queries.
+    The anchored core is what makes selectivity monotone: extra words can only
+    grow the core, never shrink the requirement. The old
+    ``LEAST(ceil(terms * 0.67), cap)`` rule is gone from both the page query
+    and the COUNT query (they must agree or ``total_count`` would lie).
     """
     monkeypatch.delenv("LUCENT_SEARCH_VITALITY_BOOST_ENABLED", raising=False)
     monkeypatch.delenv("LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED", raising=False)
@@ -99,12 +106,16 @@ async def test_long_query_gate_is_capped(
         limit=5,
     )
 
-    assert "LEAST(" in conn.search_query
-    assert "cardinality(search_input.query_terms) * 0.67" in conn.search_query
-    # The cap must be present in BOTH the page query and the COUNT query, or
-    # total_count would disagree with the page.
-    assert "LEAST(" in conn.count_query
-    assert str(MemoryRepository.TERM_COVERAGE_FLOOR_CAP) in conn.search_query
+    for query in (conn.search_query, conn.count_query):
+        assert "ts_debug(" in query
+        assert "AS core_terms" in query
+        assert "unnest(search_input.core_terms)" in query
+        assert "cardinality(search_input.core_terms)" in query
+        # The widening rule is gone, cap included.
+        assert "cardinality(search_input.query_terms) * 0.67" not in query
+        assert "TERM_COVERAGE_FLOOR_CAP" not in query
+        # The anchored core is bounded, and it is required in full.
+        assert f"LIMIT {MemoryRepository.TERM_COVERAGE_CORE_TERMS}" in query
 
 
 @pytest.mark.parametrize("search_method", ["search", "search_full"])
@@ -118,14 +129,25 @@ async def test_gate_preserves_short_query_behavior(
 
     await getattr(repo, search_method)(query="delegated work", limit=5)
 
-    # LEAST(ceil(2*0.67), 3) == 2 == ceil(2*0.67): identical to the old rule.
-    assert "LEAST(" in conn.search_query
-    assert "0.67" in conn.search_query
+    # A 2-term query's anchored core is both of its terms: still exactly the
+    # old ceil(2*0.67) == 2 requirement, with no fraction left behind.
+    assert "GREATEST(1, cardinality(search_input.core_terms))" in conn.search_query
+    assert "0.67" not in conn.search_query
 
 
-def test_coverage_cap_is_bounded() -> None:
-    """The cap must stay small — a large cap reintroduces the long-query bug."""
-    assert 2 <= MemoryRepository.TERM_COVERAGE_FLOOR_CAP <= 4
+def test_anchored_core_is_bounded() -> None:
+    """The core must stay small: every query re-requires it in full.
+
+    Too large re-creates the old "long query returns nothing" failure; too
+    small throws away the terms that make a query specific. The vector damping
+    knobs must be a real ceiling (positive step, ceiling above the base floor).
+    """
+    assert 2 <= MemoryRepository.TERM_COVERAGE_CORE_TERMS <= 6
+    assert MemoryRepository.VECTOR_MIN_SIMILARITY_STEP > 0
+    assert (
+        MemoryRepository.VECTOR_MIN_SIMILARITY_MAX
+        > MemoryRepository.VECTOR_MIN_SIMILARITY
+    )
 
 
 @pytest.mark.parametrize("search_method", ["search", "search_full"])
@@ -145,26 +167,24 @@ async def test_stopword_query_cannot_match_everything(
 
     await getattr(repo, search_method)(query="the a of and", limit=5)
 
-    assert "GREATEST(1, LEAST(" in conn.search_query
+    assert "GREATEST(1, cardinality(search_input.core_terms))" in conn.search_query
     # The short-query fuzzy fallback must not fire when zero terms survive
     # stop-word removal.
     assert "cardinality(search_input.query_terms) BETWEEN 1 AND 2" in conn.search_query
 
 
-def test_capped_floor_matches_expectations() -> None:
-    """Document the effective requirement per query length."""
-    from math import ceil
+def test_vector_floor_never_relaxes_with_query_length() -> None:
+    """Damping is monotone non-decreasing in word count: longer never looser."""
+    base = MemoryRepository.VECTOR_MIN_SIMILARITY
+    step = MemoryRepository.VECTOR_MIN_SIMILARITY_STEP
+    ceiling = MemoryRepository.VECTOR_MIN_SIMILARITY_MAX
 
-    cap = MemoryRepository.TERM_COVERAGE_FLOOR_CAP
-    effective = {
-        terms: min(max(1, ceil(terms * 0.67)), cap) for terms in range(1, 13)
-    }
-    assert effective[1] == 1
-    assert effective[2] == 2
-    assert effective[3] == 3
-    # Beyond the cap, the requirement stops growing: the long-query fix.
-    assert effective[9] == cap
-    assert effective[12] == cap
+    floors = [
+        min(ceiling, base + step * max(0, words - 2)) for words in range(1, 21)
+    ]
+    assert floors[0] == base and floors[1] == base
+    assert all(later >= earlier for earlier, later in zip(floors, floors[1:]))
+    assert floors[-1] == ceiling
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +203,9 @@ async def test_empty_search_reports_diagnosis(
         "filtered_total": 100,
         "matching_any": 42,
         "best_overlap": 2,
+        "best_core_overlap": 2,
         "query_terms": ["spawn", "subag", "tool", "chat", "async", "result"],
+        "core_terms": ["spawn", "subag", "tool", "chat"],
     }
     repo = MemoryRepository(_CapturePool(conn))
 
@@ -191,10 +213,10 @@ async def test_empty_search_reports_diagnosis(
 
     assert result["total_count"] == 0
     quality = result["match_quality"]
-    # 42 memories held at least one term but none held 3 of the 6 terms: this
+    # 42 memories held at least one term but none held all 4 core terms: this
     # is a ranking cut, NOT an absence of the fact.
     assert quality["reason"] == "terms_too_scattered"
-    assert quality["terms_required_together"] == 3
+    assert quality["terms_required_together"] == 4
     assert quality["memories_matching_any_term"] == 42
     assert quality["best_term_overlap"] == 2
     assert quality["hint"]
@@ -210,7 +232,9 @@ async def test_empty_search_reports_genuine_no_match(
         "filtered_total": 100,
         "matching_any": 0,
         "best_overlap": 0,
+        "best_core_overlap": 0,
         "query_terms": ["xylophon", "quantum", "banana", "zeppelin"],
+        "core_terms": ["xylophon", "quantum", "banana", "zeppelin"],
     }
     repo = MemoryRepository(_CapturePool(conn))
 
@@ -236,7 +260,9 @@ async def test_empty_search_reports_off_corpus_vocabulary(
         "filtered_total": 373,
         "matching_any": 2,
         "best_overlap": 1,
+        "best_core_overlap": 1,
         "query_terms": ["banana", "quantum", "xylophon", "zeppelin"],
+        "core_terms": ["banana", "quantum", "xylophon", "zeppelin"],
     }
     repo = MemoryRepository(_CapturePool(conn))
 
@@ -257,7 +283,9 @@ async def test_empty_search_reports_filter_elimination(
         "filtered_total": 0,
         "matching_any": 0,
         "best_overlap": 0,
+        "best_core_overlap": 0,
         "query_terms": ["deleg", "work"],
+        "core_terms": ["deleg", "work"],
     }
     repo = MemoryRepository(_CapturePool(conn))
 

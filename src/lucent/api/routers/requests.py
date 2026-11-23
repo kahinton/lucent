@@ -1408,6 +1408,13 @@ class TaskFailBody(BaseModel):
     error: str = ""
     result: str | None = None
     instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # What the session produced before it failed. Optional so existing callers
+    # keep their semantics; a remote engine session always sends it, which is
+    # what makes "produced but rejected" distinguishable from "produced
+    # nothing" in the terminal event.
+    outcome: str | None = Field(default=None, pattern=r"^(accepted|rejected|empty)$")
+    produced_chars: int | None = Field(default=None, ge=0)
+    rejection_reason: str | None = Field(default=None, max_length=2000)
 
 
 class TaskNeedsReviewBody(TaskFailBody):
@@ -1433,6 +1440,9 @@ async def fail_task(
         org_id=str(user.organization_id),
         instance_id=body.instance_id,
         result=body.result,
+        outcome=body.outcome,
+        produced_chars=body.produced_chars,
+        rejection_reason=body.rejection_reason,
     )
     if not task:
         raise HTTPException(

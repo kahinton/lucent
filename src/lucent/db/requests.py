@@ -192,6 +192,35 @@ def _terminal_summary_value(
     return _terminal_summary_source(result)
 
 
+def _failure_event_metadata(
+    result: str | None,
+    outcome: str | None,
+    produced_chars: int | None,
+    rejection_reason: str | None,
+) -> dict[str, Any]:
+    """Metadata for a terminal ``failed`` event.
+
+    The old unconditional ``rejected_output_chars = len(result)`` was a lie on
+    the remote-engine path: ``result`` could be a fabricated placeholder or the
+    session's own honest message, and nothing had been rejected. When the caller
+    supplies an ``outcome`` the event states it (and the produced length)
+    directly. Without one, the legacy key is retained because those callers —
+    the script executor in particular — really did hand over a rejected
+    payload.
+    """
+    if outcome is None:
+        return {"rejected_output_chars": len(result or "")}
+    metadata: dict[str, Any] = {
+        "outcome": outcome,
+        "produced_chars": produced_chars
+        if produced_chars is not None
+        else len(result or ""),
+    }
+    if rejection_reason:
+        metadata["rejection_reason"] = rejection_reason[:2000]
+    return metadata
+
+
 def _normalize_title_for_dedup(title: str | None) -> str:
     """Normalize a request title for duplicate detection.
 
@@ -5026,6 +5055,9 @@ class RequestRepository:
         instance_id: str | None = None,
         result: str | None = None,
         result_summary: str | None = None,
+        outcome: str | None = None,
+        produced_chars: int | None = None,
+        rejection_reason: str | None = None,
     ) -> dict | None:
         """Mark task as failed.
 
@@ -5036,6 +5068,13 @@ class RequestRepository:
         omitted it is derived from ``result``: a superseded result yields the
         one-line terminal statement (the same contract the completion path
         keeps), everything else falls back to the final attempt's text.
+
+        ``outcome`` (``accepted`` / ``rejected`` / ``empty``) is how the caller
+        classified what the session produced. When supplied, the terminal event
+        records that verdict and the produced length, so a task that produced
+        text which was not accepted is distinguishable from one that produced
+        nothing. When omitted, legacy behaviour is kept: a supplied ``result``
+        is recorded as rejected output.
         """
         now = datetime.now(timezone.utc)
         terminal_summary = _terminal_summary_value(result, result_summary)
@@ -5129,7 +5168,9 @@ class RequestRepository:
                 task_id,
                 "failed",
                 f"Failed: {error[:200]}",
-                {"rejected_output_chars": len(result or "")},
+                _failure_event_metadata(
+                    result, outcome, produced_chars, rejection_reason
+                ),
                 org_id=str(task["organization_id"]),
             )
             await self._check_request_completion(

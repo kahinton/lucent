@@ -859,20 +859,21 @@ Records read operations on memories for usage analytics and access auditing.
 
 **Access Types:**
 
-| Type            | Description                                |
-|-----------------|--------------------------------------------|
-| `view`          | Direct memory retrieval                    |
-| `search_result` | Memory appeared in search results          |
+| Type            | Description                                                   |
+|-----------------|---------------------------------------------------------------|
+| `view`          | Direct memory retrieval (`get_memory`, `get_memories`, memory detail endpoints) |
+
+Migration 137 tightened the table constraint to `CHECK (access_type = 'view')`. `search_result` is no longer a valid type, and the code writes no such rows. Search results are deliberately **not** access-logged — a ranked result window is not evidence that the caller used a memory — and that includes the semantic/vector retrieval arm: a vector-ranked hit produces no `memory_access_log` row and does not update `last_accessed_at`. Only direct reads log a `view`.
 
 **Entry Fields:**
 
-| Field             | Description                          |
-|-------------------|--------------------------------------|
-| `memory_id`       | Accessed memory                      |
-| `user_id`         | User who accessed                    |
-| `organization_id` | Organization context                 |
-| `access_type`     | `view` or `search_result`            |
-| `context`         | Search query, filters, referrer      |
+| Field             | Description                                                    |
+|-------------------|----------------------------------------------------------------|
+| `memory_id`       | Accessed memory                                                |
+| `user_id`         | User who accessed                                              |
+| `organization_id` | Organization context                                           |
+| `access_type`     | `view` (the only permitted value after migration 137)          |
+| `context`         | Optional caller-supplied metadata; direct reads currently log an empty object. Search queries and filters are not stored here because search is not logged. |
 
 ### Access Log API Endpoints
 

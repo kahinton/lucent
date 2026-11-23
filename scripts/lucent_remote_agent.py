@@ -374,12 +374,29 @@ class ControllerClient:
             detail = body.get("detail") if isinstance(body, dict) else body
             raise ProtocolError(f"Failed to complete task: HTTP {status} {detail}")
 
-    def fail(self, task_id: str, error: str, result: str | None = None) -> None:
+    def fail(
+        self,
+        task_id: str,
+        error: str,
+        result: str | None = None,
+        outcome: str | None = None,
+        produced_chars: int | None = None,
+        rejection_reason: str | None = None,
+    ) -> None:
         payload = {
             "error": _truncate(error, MAX_EVENT_BYTES),
             "result": _truncate(result, MAX_RESULT_BYTES) if result else None,
             "instance_id": f"remote:{self.config.remote_id}",
         }
+        # The controller records these as the terminal event's state, so a
+        # task that produced text which was not accepted is distinguishable
+        # from one that produced nothing.
+        if outcome is not None:
+            payload["outcome"] = outcome
+        if produced_chars is not None:
+            payload["produced_chars"] = produced_chars
+        if rejection_reason is not None:
+            payload["rejection_reason"] = _truncate(rejection_reason, MAX_EVENT_BYTES)
         status, body = self._request(
             "POST", f"/requests/tasks/{task_id}/fail", payload
         )
@@ -409,6 +426,15 @@ class ExecutionResult:
     output: str
     exit_code: int
     duration_seconds: float
+    # Only the ``engine`` executor classifies a session outcome
+    # (``accepted`` / ``rejected`` / ``empty``). Other executors leave these
+    # unset: their output is the process's own bytes and no session verdict
+    # applies. ``produced_chars`` is the length of the text the session
+    # produced, which is not the same as len(output) once an explanatory
+    # header is prepended to a rejected payload.
+    session_outcome: str | None = None
+    produced_chars: int | None = None
+    rejection_reason: str | None = None
 
 
 def _build_task_text(task: dict) -> str:
@@ -679,6 +705,7 @@ def execute_engine(config: AgentConfig, task: dict, workdir: str) -> ExecutionRe
     try:
         from lucent.llm.remote_session import (
             RemoteSessionError,
+            SessionOutcomeState,
             decode_plan_from_transport,
             run_task_session,
         )
@@ -715,7 +742,7 @@ def execute_engine(config: AgentConfig, task: dict, workdir: str) -> ExecutionRe
         pass
 
     try:
-        output = asyncio.run(run_task_session(plan))
+        outcome = asyncio.run(run_task_session(plan))
     except Exception as exc:  # noqa: BLE001 — executor isolation boundary
         return ExecutionResult(
             ok=False,
@@ -731,15 +758,57 @@ def execute_engine(config: AgentConfig, task: dict, workdir: str) -> ExecutionRe
         else:
             os.environ["TMPDIR"] = previous_tmpdir
 
-    stripped = (output or "").strip()
+    if outcome.state is SessionOutcomeState.ACCEPTED:
+        # There is no length or substance threshold: a short, correct
+        # completion report is a success, not a validation failure.
+        return ExecutionResult(
+            ok=True,
+            output=outcome.text,
+            exit_code=0,
+            duration_seconds=time.monotonic() - started,
+            session_outcome=outcome.state.value,
+            produced_chars=outcome.produced_chars,
+        )
+
+    if outcome.state is SessionOutcomeState.REJECTED:
+        # The session produced bytes that were not accepted. They are carried
+        # in ``output`` so ``fail_task`` persists them instead of the task
+        # reaching a terminal state with unreadable output.
+        reason = outcome.reason or "no reason was reported"
+        return ExecutionResult(
+            ok=False,
+            output=(
+                f"The agent session produced {outcome.produced_chars} "
+                "characters of output, but it was not accepted as a "
+                "completion.\n"
+                f"Rejected because: {reason}.\n"
+                "The produced output is preserved below.\n\n"
+                "--- produced output (not accepted) ---\n"
+                f"{outcome.text}"
+            ),
+            exit_code=1,
+            duration_seconds=time.monotonic() - started,
+            session_outcome=outcome.state.value,
+            produced_chars=outcome.produced_chars,
+            rejection_reason=outcome.reason,
+        )
+
+    # EMPTY: the session produced no text at all. This is the only state in
+    # which it is truthful to say no output was produced.
+    reason_line = (
+        f"\nThe session reported: {outcome.reason}." if outcome.reason else ""
+    )
     return ExecutionResult(
-        ok=bool(stripped),
+        ok=False,
         output=(
-            stripped
-            or "The agent session finished without producing any text output."
+            "The agent session ran but produced no text output (0 characters)."
+            + reason_line
         ),
-        exit_code=0 if stripped else 1,
+        exit_code=1,
         duration_seconds=time.monotonic() - started,
+        session_outcome=outcome.state.value,
+        produced_chars=0,
+        rejection_reason=outcome.reason,
     )
 
 
@@ -919,6 +988,17 @@ class RemoteAgent:
             "exit_code": result.exit_code,
             "duration_seconds": round(result.duration_seconds, 3),
         }
+        # The session verdict belongs on the durable task event as well as on
+        # the terminal row: it is what lets a reader tell an empty session from
+        # one whose output was produced but not accepted.
+        if result.session_outcome is not None:
+            metadata["outcome"] = result.session_outcome
+        if result.produced_chars is not None:
+            metadata["produced_chars"] = result.produced_chars
+        if result.rejection_reason:
+            metadata["rejection_reason"] = _truncate(
+                result.rejection_reason, MAX_EVENT_BYTES
+            )
         if result.ok:
             try:
                 self.client.event(
@@ -950,6 +1030,9 @@ class RemoteAgent:
                     task_id,
                     f"Remote executor exited with code {result.exit_code}",
                     result.output,
+                    outcome=result.session_outcome,
+                    produced_chars=result.produced_chars,
+                    rejection_reason=result.rejection_reason,
                 )
                 log(f"task {task_id} failed (exit {result.exit_code})")
             except AgentError as exc:

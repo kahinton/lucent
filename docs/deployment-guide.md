@@ -115,21 +115,34 @@ Key variables for Docker Compose:
 
 ### Requirements
 
-- PostgreSQL 16+ (earlier versions may work but are untested)
-- Extensions: `uuid-ossp` and `pg_trgm` (for fuzzy search)
+- PostgreSQL 16+ (earlier versions may work but are untested). The Docker Compose stack pins `pgvector/pgvector:pg16`; a plain `postgres:16-alpine` image does **not** ship the `vector` extension.
+- Extensions:
+  - `pg_trgm` — **required** (term similarity in the lexical search engine).
+  - `vector` (pgvector) — **required** since migration 169 (embedding columns and HNSW index). `lucent.db.prerequisites` treats a missing/uncreatable `vector` as a hard error, so the pgvector-capable image must be deployed **before** the migration runs.
+  - `uuid-ossp` — **legacy / best-effort**. Migration 138 moved every uuid primary-key default to `gen_random_uuid()`, so after migration 001 it is only needed for that one-time bootstrap. On a managed server that cannot allowlist it, that is expected to be reported as a warning, not a failure.
 
 ### Using Docker Compose (Recommended)
 
-The included PostgreSQL container auto-installs required extensions and creates the
-restricted daemon role via `docker/postgres-init.sh`:
+The included PostgreSQL container auto-installs the trigram extension and creates the
+restricted daemon role via `docker/postgres-init.sh`; migration 169 creates `vector`
+and `lucent.db.prerequisites` verifies both required extensions before migrations run:
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+CREATE EXTENSION IF NOT EXISTS "vector";      -- migration 169; needs the pgvector image
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";   -- legacy: only the migration 001 bootstrap needs it
 ALTER DATABASE lucent SET pg_trgm.similarity_threshold = 0.3;
 CREATE ROLE lucent_daemon WITH LOGIN;
 ALTER ROLE lucent_daemon WITH PASSWORD '<from DAEMON_DB_PASSWORD>';
 ```
+
+`pg_trgm.similarity_threshold` is still set to 0.3 for historical reasons, but it does **not** tune retrieval. The search SQL calls `word_similarity()` and compares the value against literals (0.6 for the short-query shortcut, 0.55 for the vector admit branch) and uses `ILIKE`; it never uses the `%` operator that reads this GUC. Changing the threshold will not make search faster or change its ranking.
+
+### Embedding Model Cache
+
+The application image bakes the fastembed model (`BAAI/bge-small-en-v1.5`, 384-dim) into `/opt/models` at build time and sets `LUCENT_EMBEDDING_CACHE_DIR=/opt/models`, `FASTEMBED_CACHE_PATH=/opt/models`, and `HF_HUB_OFFLINE=1`. The build runs `python -m lucent.memory.embeddings --download` and then asserts that non-empty ONNX weights plus the tokenizer/config files exist, so a failed download fails the build instead of the first memory write. **No network is needed at runtime for embeddings.** A development checkout that does not use the image may download the model itself; point `LUCENT_EMBEDDING_CACHE_DIR` at a writable directory in that case.
+
+Changing `LUCENT_EMBEDDING_MODEL` invalidates every stored vector: the model identifier is part of the lookup key, so run the embedding backfill after the switch (see the troubleshooting guide).
 
 ### Using an External Database
 
@@ -147,10 +160,13 @@ CREATE DATABASE lucent OWNER lucent;
 
 ```sql
 \c lucent
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "pg_trgm";
-ALTER DATABASE lucent SET pg_trgm.similarity_threshold = 0.3;
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";   -- required
+CREATE EXTENSION IF NOT EXISTS "vector";    -- required; install pgvector on the server first
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; -- legacy/best-effort (migration 001 bootstrap)
+ALTER DATABASE lucent SET pg_trgm.similarity_threshold = 0.3;  -- does not affect search ranking
 ```
+
+`CREATE EXTENSION "vector"` fails unless the pgvector library is installed on that server (or the managed provider offers it). On a managed PostgreSQL that cannot create `vector`, ask the provider to enable pgvector before running migration 169 or starting the application — prerequisites treats it as a hard requirement.
 
 3. Set the connection URL:
 

@@ -37,6 +37,7 @@ trade of running work on someone's machine at all. It is not a sandbox, and
 from __future__ import annotations
 
 import base64
+import enum
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -66,6 +67,47 @@ REMOTE_PERMISSION_MODES = frozenset(
 
 class RemoteSessionError(RuntimeError):
     """The execution plan is missing or malformed."""
+
+
+class SessionOutcomeState(str, enum.Enum):
+    """What a session produced, before the executor decides what to do with it.
+
+    The three states are deliberately distinct. Collapsing them was the defect
+    that made a correct short completion read as "finished without producing
+    any text output":
+
+    * ``ACCEPTED`` — the session produced text and ended normally.
+    * ``REJECTED`` — the session produced text, but it was not a usable
+      completion (the engine reported an error or returned no final answer).
+      The text is still preserved so it can be persisted and read.
+    * ``EMPTY`` — the session produced no text at all.
+
+    There is deliberately no length or substance threshold: a short, correct
+    completion report is an ``ACCEPTED`` outcome.
+    """
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    EMPTY = "empty"
+
+
+@dataclass(frozen=True)
+class SessionOutcome:
+    """The text a session produced plus its verdict, kept separate.
+
+    ``text`` is always the bytes the session produced (empty only for
+    ``EMPTY``). ``reason`` explains a ``REJECTED`` verdict and is ``None``
+    otherwise. ``produced_chars`` is the length of that text, so a failure
+    message can state how much was discarded instead of guessing.
+    """
+
+    state: SessionOutcomeState
+    text: str = ""
+    reason: str | None = None
+
+    @property
+    def produced_chars(self) -> int:
+        return len(self.text)
 
 
 @dataclass(frozen=True)
@@ -154,14 +196,22 @@ def plan_from_payload(payload: Any) -> SessionPlan:
     )
 
 
-async def run_task_session(plan: SessionPlan) -> str:
-    """Run one agent session on this host and return its final text.
+async def run_task_session(plan: SessionPlan) -> SessionOutcome:
+    """Run one agent session on this host and classify what it produced.
+
+    Returns a :class:`SessionOutcome` rather than a bare string so the caller
+    can tell a session that produced nothing (``EMPTY``) from one that produced
+    text which was not accepted as a completion (``REJECTED``). The text is
+    carried in both non-accepted states, so a terminal task record never loses
+    bytes the session actually wrote.
 
     The engine stack is imported lazily so a remote that only runs ``shell``
     tasks never pays for (or needs) the coding-engine dependencies.
     """
+    import inspect
     import os
 
+    from lucent.llm.engine import SessionEventType
     from lucent.llm.engine_registry import get_engine
 
     engine = get_engine(plan.engine)
@@ -186,17 +236,57 @@ async def run_task_session(plan: SessionPlan) -> str:
         # host that has no database to look it up in.
         "engine_backend": plan.backend,
     }
-    result = await engine.run_session(
-        model=plan.model,
-        system_message=plan.system_message,
-        prompt=plan.prompt,
-        mcp_config=plan.mcp_config or None,
-        timeout=plan.timeout,
-        reasoning_effort=plan.reasoning_effort,
-        audit_context=audit_context,
-        approve_permissions=True,
-    )
-    return result or ""
+    # Collect what the session actually emitted. The return value alone cannot
+    # distinguish "produced nothing" from "produced text that the engine did
+    # not accept" — that collapse is exactly what this stream prevents.
+    message_chunks: list[str] = []
+    delta_chunks: list[str] = []
+    error_reasons: list[str] = []
+
+    def _collect(event: Any) -> None:
+        if event.type == SessionEventType.MESSAGE and event.content:
+            message_chunks.append(event.content)
+        elif event.type == SessionEventType.MESSAGE_DELTA and event.content:
+            delta_chunks.append(event.content)
+        elif event.type == SessionEventType.ERROR and event.content:
+            error_reasons.append(event.content)
+
+    run_kwargs: dict[str, Any] = {
+        "model": plan.model,
+        "system_message": plan.system_message,
+        "prompt": plan.prompt,
+        "mcp_config": plan.mcp_config or None,
+        "timeout": plan.timeout,
+        "reasoning_effort": plan.reasoning_effort,
+        "audit_context": audit_context,
+        "approve_permissions": True,
+        "on_event": _collect,
+    }
+    # Match the blocking path's single hard timeout. Engines that also support
+    # an idle cutoff must not abort a long, quiet tool call before the caller's
+    # own timeout; claude_code's streaming signature has no idle_timeout.
+    if "idle_timeout" in inspect.signature(engine.run_session_streaming).parameters:
+        run_kwargs["idle_timeout"] = plan.timeout
+
+    final = await engine.run_session_streaming(**run_kwargs)
+    final_text = (final or "").strip()
+
+    # Full assistant blocks are authoritative; deltas are only a fallback for
+    # engines that stream text without ever emitting a complete block.
+    produced_text = "\n".join(
+        chunk for chunk in (message_chunks or delta_chunks) if chunk.strip()
+    ).strip()
+
+    if final_text:
+        return SessionOutcome(SessionOutcomeState.ACCEPTED, final_text)
+    reason = "; ".join(error_reasons) or None
+    if produced_text:
+        return SessionOutcome(
+            SessionOutcomeState.REJECTED,
+            produced_text,
+            reason or "the session ended without a final answer",
+        )
+    return SessionOutcome(SessionOutcomeState.EMPTY, "", reason)
 
 
 # ── Controller side: build the plan the remote executes ────────────────────
@@ -234,6 +324,8 @@ __all__ = [
     "ENGINE_EXECUTOR",
     "REMOTE_ENGINES",
     "RemoteSessionError",
+    "SessionOutcome",
+    "SessionOutcomeState",
     "SessionPlan",
     "TASK_SESSION_KIND",
     "decode_plan_from_transport",

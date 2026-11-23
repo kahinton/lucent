@@ -46,8 +46,25 @@ class FakeClient:
     def complete(self, task_id, result, summary=None):
         self.completions.append((task_id, result, summary))
 
-    def fail(self, task_id, error, result=None):
-        self.failures.append((task_id, error, result))
+    def fail(
+        self,
+        task_id,
+        error,
+        result=None,
+        outcome=None,
+        produced_chars=None,
+        rejection_reason=None,
+    ):
+        self.failures.append(
+            {
+                "task_id": task_id,
+                "error": error,
+                "result": result,
+                "outcome": outcome,
+                "produced_chars": produced_chars,
+                "rejection_reason": rejection_reason,
+            }
+        )
 
 
 def _config(**overrides):
@@ -268,8 +285,9 @@ def test_process_task_reports_failure(tmp_path):
     remote.process_task({"id": task_id, "title": "will fail"})
 
     assert len(client.failures) == 1
-    assert client.failures[0][0] == task_id
-    assert "exited with code 9" in client.failures[0][1]
+    failure = client.failures[0]
+    assert failure["task_id"] == task_id
+    assert "exited with code 9" in failure["error"]
     assert not client.completions
 
 

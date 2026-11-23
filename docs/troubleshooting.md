@@ -45,7 +45,7 @@ DATABASE_URL=postgresql://lucent:password@postgres:5432/lucent
 
 ### `extension "pg_trgm" is not available`
 
-The `pg_trgm` extension is required for fuzzy search. It's included in the Docker PostgreSQL image by default. For external databases:
+The `pg_trgm` extension is required for the lexical search engine. It's included in the Docker PostgreSQL image by default. For external databases:
 
 ```sql
 -- Requires superuser privileges
@@ -53,6 +53,16 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 ```
 
 On some managed databases (e.g., RDS), you may need to enable this through the provider's dashboard.
+
+### `extension "vector" is not available`
+
+`vector` (pgvector) is equally required since migration 169, which adds the embedding columns and HNSW index. The Compose stack pins `pgvector/pgvector:pg16`; a plain `postgres:16-alpine` image does not ship it. For an external database the server must have pgvector installed, and `lucent.db.prerequisites` must be able to create (or find) the extension:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS "vector";
+```
+
+If this is reported as `unavailable`, the server image/library lacks pgvector. Upgrade to a pgvector-capable server **before** starting Lucent — prerequisites runs before migrations and fails up front rather than letting migration 169 fail mid-run.
 
 ### Migration Errors
 
@@ -251,20 +261,53 @@ LIMIT 20;
 
 Investigate only if the run status is `failed`, the service log contains an exception for the schedule, or a schedule that should have eligible input keeps skipping with `candidate_count: 0`.
 
-### Slow Search Queries
+### Slow or Wrong Search Results
 
-Fuzzy search uses PostgreSQL's `pg_trgm` extension. If searches are slow:
+Search runs a hybrid lexical engine and, when enabled, a local semantic vector arm. **`pg_trgm.similarity_threshold` does not explain slow or wrong results.** The query compares `word_similarity()` values against literals (0.6 for the short-query shortcut, 0.55 for the vector admit branch) and uses `ILIKE`; it never uses the `%` operator that reads that GUC. Leave the threshold alone while diagnosing — changing it will not affect ranking.
 
-1. Check that the extension is enabled and the similarity threshold is set:
+Work through these instead:
 
-```sql
-SHOW pg_trgm.similarity_threshold;
--- Should be 0.3
-```
+1. **Is the vector arm actually running?** If the encoder cannot load, search silently degrades to lexical-only (no error, no vector gate). Look for the structured warnings:
 
-2. Ensure the GIN trigram index exists on the content column (created by migrations).
+   ```bash
+   docker compose logs lucent --since 24h | grep -E 'memory_embedding_(failed|query_failed|query_rejected)'
+   ```
 
-3. For large memory sets, use filters (`type`, `tags`, `importance_min`) to narrow the search scope.
+   A line with `"event": "memory_embedding_failed"` (load/inference), `"event": "memory_embedding_query_failed"` (query encode), or `"event": "memory_embedding_query_rejected"` (the encoder returned a malformed vector) means that request ran without the semantic arm. If `LUCENT_SEARCH_VECTOR_ENABLED` is off, there is no warning at all — check the setting first. An empty result's `match_quality.hint` mentions the semantic arm only when it actually ran, so its absence is another clue.
+
+2. **Is the model cache present?** The image bakes it at build time; the build fails if the cache is incomplete, but a development checkout or an overridden `LUCENT_EMBEDDING_CACHE_DIR` can point elsewhere:
+
+   ```bash
+   docker compose exec lucent ls -l /opt/models
+   ```
+
+   The directory must contain a non-empty `.onnx` file plus the tokenizer/config files. The build verification logs `"event": "memory_embedding_model_cached"`.
+
+3. **How much of the corpus has a current vector?** NULL embeddings and embeddings from a different model are scored lexically (neutral, never excluded). If most rows are in that state, semantic recall is effectively off:
+
+   ```sql
+   SELECT COUNT(*) AS live_rows,
+          COUNT(*) FILTER (WHERE embedding IS NULL) AS never_embedded,
+          COUNT(*) FILTER (
+              WHERE embedding IS NOT NULL
+                AND embedding_model IS DISTINCT FROM 'fastembed:BAAI/bge-small-en-v1.5'
+          ) AS stale_model
+   FROM memories
+   WHERE deleted_at IS NULL;
+   ```
+
+   On a database that has not applied migration 169 this query errors because the columns do not exist yet.
+
+4. **Run the embedding backfill.** It is idempotent and resumable, and only touches `embedding`, `embedding_model`, and `embedded_at`:
+
+   ```bash
+   docker compose exec lucent python -m lucent.memory.backfill --dry-run   # count pending rows
+   docker compose exec lucent python -m lucent.memory.backfill --batch-size 64
+   ```
+
+   Exit codes: `0` completed (possibly with skipped rows), `1` configuration error, `2` another backfill holds the advisory lock, `3` runtime failure or the encoder was unavailable for a whole batch. Re-running after a model change re-embeds the whole corpus.
+
+5. **Slow lexical search.** Confirm the indexes created by migrations exist (`idx_memories_content_trgm`, `idx_memories_search_vector`), and narrow the scope with filters (`type`, `tags`, `importance_min`) or a smaller `limit` for large corpora. The vector arm uses the HNSW index on `embedding`, but it runs only for clearance-scoped searches (the API and MCP tools), never for an unscoped repository call.
 
 ### High Memory Usage
 

@@ -203,6 +203,25 @@ def _as_text(value: Any) -> str | None:
         return str(value)
 
 
+def _result_error_detail(message: Any) -> str | None:
+    """Describe why a ResultMessage reported an error.
+
+    The SDK carries ``errors``, ``api_error_status`` and ``terminal_reason`` on
+    the message; none were previously read, so every failure was recorded as
+    the same content-free sentence. Returns ``None`` when the message carries
+    no diagnostic fields.
+    """
+    bits: list[str] = []
+    errors = _as_text(_attr(message, "errors"))
+    if errors:
+        bits.append(errors)
+    for field in ("api_error_status", "terminal_reason"):
+        value = _attr(message, field)
+        if value not in (None, ""):
+            bits.append(f"{field}={value}")
+    return "; ".join(bits) or None
+
+
 class ClaudeCodeEngine(LLMEngine):
     """LLM engine backed by the Claude Agent SDK (Claude Code)."""
 
@@ -431,7 +450,20 @@ class ClaudeCodeEngine(LLMEngine):
             )
 
         text = _combine_prompt(prompt, attachments)
-        state: dict[str, Any] = {"final": None, "error": None}
+        state: dict[str, Any] = {
+            "final": None,
+            "error": None,
+            # The SDK's ResultMessage declares ``result: str | None``; it can
+            # omit the final text even when the assistant produced a complete
+            # answer in AssistantMessage/TextBlock. Buffer every text block so
+            # that answer is still returned instead of being emitted as an
+            # event and then discarded. Without this, a correct short
+            # completion became "finished without producing any text output".
+            "assistant_text": [],
+            # Streaming-only fallback: engines that deliver text as deltas but
+            # never as a full AssistantMessage block.
+            "stream_text": [],
+        }
 
         try:
             options = self._build_options(
@@ -463,8 +495,24 @@ class ClaudeCodeEngine(LLMEngine):
                     os.unlink(system_prompt_path)
 
         if state["error"]:
-            return None
-        return state["final"]
+            # Log the reason before returning. Callers that only see the return
+            # value cannot tell an error from a genuinely empty session; the
+            # streaming event already carries it, and this line keeps the
+            # blocking path from being silent too.
+            logger.warning("Claude Code session reported an error: %s", state["error"])
+            # An erroring session may still have produced real assistant text
+            # before it failed. Returning None would discard that work and make
+            # it indistinguishable from an empty session. Keep the existing
+            # None contract only when no assistant text was produced.
+            return "".join(state["assistant_text"]).strip() or None
+        if state["final"]:
+            return state["final"]
+        # ResultMessage.result was absent. Prefer full assistant blocks; fall
+        # back to accumulated deltas for engines that only stream.
+        assistant_text = "".join(state["assistant_text"]).strip()
+        if assistant_text:
+            return assistant_text
+        return "".join(state["stream_text"]).strip() or None
 
     # ── message mapping ─────────────────────────────────────────────────────
 
@@ -475,7 +523,11 @@ class ClaudeCodeEngine(LLMEngine):
 
         if cls == "AssistantMessage":
             for block in _attr(message, "content", []) or []:
-                events.extend(self._map_block(block))
+                block_events = self._map_block(block)
+                for event in block_events:
+                    if event.type == SessionEventType.MESSAGE and event.content:
+                        state.setdefault("assistant_text", []).append(event.content)
+                events.extend(block_events)
             usage = normalize_token_usage(_attr(message, "usage"))
             if usage:
                 events.append(SessionEvent(type=SessionEventType.USAGE, usage=usage))
@@ -486,10 +538,13 @@ class ClaudeCodeEngine(LLMEngine):
             if _attr(event, "type") == "content_block_delta":
                 delta = _attr(event, "delta", {}) or {}
                 if _attr(delta, "type") == "text_delta":
+                    delta_text = _attr(delta, "text", "")
+                    if delta_text:
+                        state.setdefault("stream_text", []).append(delta_text)
                     events.append(
                         SessionEvent(
                             type=SessionEventType.MESSAGE_DELTA,
-                            content=_attr(delta, "text", ""),
+                            content=delta_text,
                         )
                     )
             return events
@@ -499,7 +554,14 @@ class ClaudeCodeEngine(LLMEngine):
             if result_text:
                 state["final"] = result_text
             if _attr(message, "is_error"):
-                state["error"] = _as_text(result_text) or "Claude Code reported an error"
+                # Read the diagnostic fields the SDK exposes on ResultMessage.
+                # They used to be ignored, so the persisted reason was always
+                # the uninformative "Claude Code reported an error".
+                state["error"] = (
+                    _result_error_detail(message)
+                    or _as_text(result_text)
+                    or "Claude Code reported an error"
+                )
                 events.append(SessionEvent(type=SessionEventType.ERROR, content=state["error"]))
             else:
                 events.append(SessionEvent(type=SessionEventType.SESSION_IDLE))

@@ -18,7 +18,7 @@ class FakeConn:
         self,
         *,
         installed=(),
-        available=("pg_trgm", "uuid-ossp"),
+        available=("pg_trgm", "uuid-ossp", "vector"),
         roles=(),
         dbname="lucent",
         fail_create_extension=False,
@@ -61,12 +61,16 @@ class FakeConn:
 class TestAllPresent:
     async def test_noop_when_everything_exists(self):
         conn = FakeConn(
-            installed=("pg_trgm", "uuid-ossp"), roles=(DAEMON_ROLE,)
+            installed=("pg_trgm", "uuid-ossp", "vector"), roles=(DAEMON_ROLE,)
         )
         report = await ensure_database_prerequisites(conn, daemon_password=None)
 
         assert report.ok
-        assert report.extensions == {"pg_trgm": "present", "uuid-ossp": "present"}
+        assert report.extensions == {
+            "pg_trgm": "present",
+            "uuid-ossp": "present",
+            "vector": "present",
+        }
         assert report.daemon_role == "present"
         assert report.trigram_threshold.startswith("set")
         # Only the two idempotent GRANTs + the ALTER DATABASE ran.
@@ -96,7 +100,7 @@ class TestExtensionFailures:
         # uuid-ossp exists in available but creation is denied; pg_trgm already
         # installed, so this must not fail the run.
         conn = FakeConn(
-            installed=("pg_trgm",), available=("pg_trgm", "uuid-ossp"),
+            installed=("pg_trgm", "vector"), available=("pg_trgm", "uuid-ossp", "vector"),
             fail_create_extension=True,
         )
         report = await ensure_database_prerequisites(conn, daemon_password=None)

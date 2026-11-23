@@ -8,6 +8,7 @@ from uuid import UUID
 
 import httpx
 from mcp.server import MCPServer as FastMCP
+from mcp.server.mcpserver.exceptions import ToolError
 
 from lucent.constants import (
     DECOMPOSITION_MODE_AUTHOR,
@@ -172,6 +173,35 @@ def _valid_uuid(value: str | UUID | None) -> str | None:
         return str(UUID(str(value)))
     except (TypeError, ValueError):
         return None
+
+
+def _require_uuid_argument(name: str, value: str | UUID | None) -> str:
+    """Return a caller-supplied id as a UUID string, or raise ToolError.
+
+    Passing the raw argument into ``UUID()`` inside the repository raises a
+    bare ``ValueError("badly formed hexadecimal UUID string")``. That is an
+    *unexpected* exception to the MCP SDK, which sanitizes it to
+    ``Error executing tool <name>`` — the caller learns neither which
+    argument was wrong nor what it sent. Raising ``ToolError`` keeps the
+    failure anticipated, so the message survives with the argument name, the
+    offending value, and the rule it broke.
+    """
+    if value in (None, ""):
+        raise ToolError(
+            f"{name} is required and must be a UUID; got {value!r} (empty). "
+            "Pass the id exactly as it was returned by Lucent (36-character "
+            "form), not a display label, slug, or truncated prefix."
+        )
+    try:
+        return str(UUID(str(value)))
+    except (TypeError, ValueError):
+        raise ToolError(
+            f"{name} must be a UUID; got {value!r}, which is not a valid "
+            "UUID. The value is echoed exactly as received, so a truncated "
+            "or invented id is visible here. Ids are 36 characters with "
+            "hyphens, e.g. 6f1c2a9e-... ; re-read the id from the record "
+            "that owns it."
+        ) from None
 
 
 def _reference_key(ref: dict[str, Any]) -> str:
@@ -2651,6 +2681,9 @@ Returns: JSON confirmation."""
         if not org_id:
             return json.dumps({"error": "No organization context"})
 
+        # Validate before the repository turns it into a bare ValueError.
+        task_id = _require_uuid_argument("task_id", task_id)
+
         repo = await _get_request_repository()
         # The task id is caller-supplied: confirm the task is one this caller can
         # see before writing to its timeline.
@@ -2904,6 +2937,9 @@ Returns: JSON with the created output artifact."""
             return json.dumps({"error": "Authentication required"})
         if not org_id:
             return json.dumps({"error": "No organization context"})
+
+        # Validate before the repository turns it into a bare ValueError.
+        task_id = _require_uuid_argument("task_id", task_id)
 
         repo = await _get_request_repository()
         # Caller-supplied task id: only attach outputs to a task this caller sees.
@@ -3775,6 +3811,9 @@ Returns: JSON with request details, task breakdown, events timeline, memory link
             return json.dumps({"error": "No organization context"})
         if not user_id:
             return json.dumps({"error": "No user context"})
+
+        # Validate before the repository turns it into a bare ValueError.
+        request_id = _require_uuid_argument("request_id", request_id)
 
         repo = await _get_request_repository()
         req = await repo.get_request_with_tasks(

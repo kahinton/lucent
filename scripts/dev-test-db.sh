@@ -10,6 +10,9 @@
 #
 # The cluster is prepared to mirror the production Docker setup, which the
 # migrations assume:
+#   - the pgvector-enabled server image (same as docker-compose.yml). Migration
+#     169 adds a vector(384) column and an HNSW index, and prerequisites treat
+#     `vector` as mandatory — plain postgres:16-alpine cannot run the suite.
 #   - docker/postgres-init.sh runs at first-init (via initdb.d) — it creates
 #     the `lucent_daemon` role and the uuid-ossp/pg_trgm extensions, which
 #     migrations 097/098/102 grant to unconditionally.
@@ -34,7 +37,7 @@ PORT=5434
 DB_USER=lucent_test
 DB_PASSWORD=lucent-test-only
 DB_NAME=lucent_test
-IMAGE=postgres:16-alpine
+IMAGE=pgvector/pgvector:pg16
 VOLUME=lucent-test-db-data
 
 case "${1:-}" in

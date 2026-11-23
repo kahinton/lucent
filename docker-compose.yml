@@ -13,7 +13,13 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector-enabled Postgres, pinned to the major version the live data
+    # directory runs (16). Migration 169 adds vector(384) columns and an HNSW
+    # index, which plain postgres:16-alpine does not ship. The major must not
+    # float (e.g. `pgvector/pgvector:latest`): the tag can move the underlying
+    # server major, and PostgreSQL refuses to start on a data directory from a
+    # different major version.
+    image: pgvector/pgvector:pg16
     container_name: lucent-db
     environment:
       POSTGRES_DB: lucent

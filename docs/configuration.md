@@ -437,8 +437,8 @@ final injection filter.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LUCENT_INJECT_MIN_SIMILARITY` | `0.30` | Absolute minimum search similarity score for injection. |
-| `LUCENT_INJECT_MAX_SCORE_DROP` | `0.15` | Maximum score gap from a query window's best hit. Lower values favor precision; higher values favor recall. |
+| `LUCENT_INJECT_MIN_SIMILARITY` | `0.30` | Absolute minimum relevance score for injection. With the vector arm active this filters the **composite** score (0.70 lexical + 0.30 semantic), not a trigram similarity. |
+| `LUCENT_INJECT_MAX_SCORE_DROP` | `0.15` | Maximum composite-score gap from a query window's best hit. Lower values favor precision; higher values favor recall. |
 | `LUCENT_INJECT_MAX_TERMS` | `64` | Maximum meaningful terms retained from each selected message span. |
 | `LUCENT_INJECT_MAX_QUERIES` | `5` | Maximum bounded searches for one message. Each extra search adds memory-server work. |
 | `LUCENT_INJECT_FOLLOWUP_QUERY_TERMS` | `4` | Terms in each follow-up window after the initial eight-term lookup. |
@@ -446,6 +446,8 @@ final injection filter.
 | `LUCENT_INJECT_DECISION_GATE_ENABLED` | `false` | Env fallback for **Settings → Runtime Settings → Message injection decision gate**. Screens surviving injected memories with a decision-class model and keeps only those judged relevant to the conversation. |
 | `LUCENT_INJECT_DECISION_GATE_MODEL` | *(first enabled decision model)* | Decision-class model for the injection screen. Leave blank to use the first enabled decision-class model (ordered by provider, name). |
 | `LUCENT_INJECT_DECISION_GATE_THRESHOLD` | `0.7` | Minimum relevance probability for an injected memory to survive the decision-model screen. |
+
+The two similarity thresholds were calibrated against the **lexical-only** score (the shipped help text cites content-matching queries around 0.52 and noise around 0.11). When `LUCENT_SEARCH_VECTOR_ENABLED` is on, the injection hook's scoped searches return the composite score instead, whose scale and spread differ: a strong paraphrase can rise, and a lexical-only match with weak semantic similarity can fall. The defaults (`0.30`, `0.15`) have **not** been re-measured against the composite and should be recalibrated against live scores before relying on them; treat them as a starting point, not a verified calibration. With the vector arm off they retain their original lexical meaning.
 
 When the decision gate is enabled, the injection hook makes ONE extra
 `/v1/systemone` call per user message after the similarity filters and
@@ -465,6 +467,20 @@ later turn. This adds at most ~15s of bounded pre-model latency (warm
 inference is tens of milliseconds; the budget covers one cold model load)
 for a locally hosted decision model; the independent `LUCENT_DECISION_GATE_*`
 settings above control the request pre-review gate, not this one.
+
+## Memory Search
+
+These control the hybrid lexical + semantic retrieval engine shared by `search_memories`, `search_memories_full`, and `/api/search`. The lexical side needs no configuration; the semantic side is the settings below.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LUCENT_SEARCH_VECTOR_ENABLED` | `true` | Master switch for the semantic (vector) arm. Off keeps the lexical engine and stops computing embeddings on write; existing vectors are left untouched. |
+| `LUCENT_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model used for write-path and query embeddings. Stored on each row as `fastembed:<model>`, which is the compatibility key — vectors from different models are not comparable. Changing it requires re-embedding the corpus. Read-only in the UI because the weights are baked into the image. |
+| `LUCENT_EMBEDDING_CACHE_DIR` | `/opt/models` | Directory holding the pre-downloaded model. The Dockerfile bakes the weights there and sets `LUCENT_EMBEDDING_CACHE_DIR=/opt/models` (and `FASTEMBED_CACHE_PATH=/opt/models`); the code default matches so the installed package resolves the same path without the env var. Read-only; requires a restart. |
+| `LUCENT_EMBEDDING_BATCH_SIZE` | `32` | Maximum number of texts encoded in one model call for multi-text encodes (the backfill). It does not control the backfill's DB batch (that is `python -m lucent.memory.backfill --batch-size`, default 64). |
+| `LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED` | `false` | Rollout flag for lifecycle filtering. When on, searches exclude `archived`/`forgotten` memories unless the caller passes `include_archived=true`. When off (shipped default), `include_archived` is accepted but has no effect. |
+
+With the vector arm on, `similarity_score` is `0.70 × lexical + 0.30 × cosine similarity` for rows embedded with the current model. Rows that are un-embedded or carry a stale `embedding_model` keep their lexical score unchanged. The arm also admits a paraphrase-only hit when cosine similarity is at least 0.55. The arm runs only inside a clearance-scoped search, which is how the API and MCP callers issue it; an unscoped repository call stays lexical.
 
 ## Daemon Configuration
 

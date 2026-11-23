@@ -356,10 +356,10 @@ adds `groq` to every provider→engine answer without a code change, and the
 
 ### Search
 
-- **`search_memories`** — fuzzy search on the content field only. Faster, more focused.
-- **`search_memories_full`** — fuzzy search across content, tags, and metadata. Broader, catches more.
+- **`search_memories`** — hybrid lexical + semantic relevance search over memory content and tags, with the full filter set (tags, date range, specific IDs).
+- **`search_memories_full`** — the *same* retrieval engine with a required query and a smaller filter set (username, type, importance, pagination). It is not a broader field set: `metadata` is not ranked, and neither tool matches on it.
 
-Both use PostgreSQL trigram-based similarity matching for natural language queries.
+The engine combines: full-text `ts_rank_cd` (dominant term, weight 0.50), an all-query-terms-present bonus (0.20), `pg_trgm` `word_similarity` over content and tags (0.20), and a whole-query `ILIKE` bonus (0.10), gated by a term-coverage floor (at least `ceil(terms × 0.67)` of the query's stemmed terms, capped at 3) plus an absolute 0.30 relevance floor, with short-query and exact-substring escape hatches. When `LUCENT_SEARCH_VECTOR_ENABLED` is on and the encoder is available, a local vector arm scores each embedded row as `0.70 × lexical + 0.30 × cosine similarity`; rows with a NULL embedding or one written by a different model fall back to their lexical score unchanged, so un-backfilled rows are neutral rather than penalised. A current-model cosine similarity of 0.55 or more can also admit a paraphrase-only hit that the lexical gate would reject. The model is fastembed `BAAI/bge-small-en-v1.5` (384-dim, L2-normalised).
 
 ### Versioning
 
@@ -376,8 +376,8 @@ Every memory update is versioned. Use `get_memory_versions` to browse history an
 | `get_memories` | Retrieve multiple memories by ID in a single call |
 | `update_memory` | Update an existing memory |
 | `delete_memory` | Soft delete a memory (can be recovered) |
-| `search_memories` | Fuzzy search on content field |
-| `search_memories_full` | Fuzzy search across all fields |
+| `search_memories` | Hybrid lexical + semantic relevance search with tags/date/ID filters |
+| `search_memories_full` | Same engine, required query, fewer filters (username/type/importance) |
 | `get_existing_tags` | List all tags with usage counts |
 | `get_tag_suggestions` | Fuzzy search for similar existing tags |
 | `get_memory_versions` | Browse version history for a memory |
@@ -522,7 +522,7 @@ Only the memory owner can update it. All changes are versioned — use `get_memo
 
 ```
 Arguments:
-- query: Fuzzy search query (optional — omit to browse/filter without text matching)
+- query: Hybrid relevance search query (optional — omit to browse/filter without text matching)
 - username: Filter by username
 - type: Filter by memory type
 - tags: Filter by tags (any match)
@@ -531,18 +531,20 @@ Arguments:
 - memory_ids: List of specific memory UUIDs to retrieve
 - offset: Pagination offset (default: 0)
 - limit: Results per page (default: 5, max: 50)
+- include_archived: When false (default) and LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED is on, exclude archived/forgotten memories; when true, include them. With the flag off (the shipped default) this parameter has no effect.
 ```
 
 #### search_memories_full
 
 ```
 Arguments:
-- query: Fuzzy search query (required — searches content, tags, and metadata)
+- query: Hybrid relevance search query (required — same engine as search_memories, over content and tags)
 - username: Filter by username
 - type: Filter by memory type
 - importance_min/max: Filter by importance range
 - offset: Pagination offset (default: 0)
 - limit: Results per page (default: 5, max: 50)
+- include_archived: When false (default) and LUCENT_SEARCH_EXCLUDE_ARCHIVED_ENABLED is on, exclude archived/forgotten memories; when true, include them. With the flag off (the shipped default) this parameter has no effect.
 ```
 
 ## System Prompts

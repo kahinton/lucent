@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 import pytest
@@ -47,10 +48,23 @@ class StreamEvent:
 
 
 class ResultMessage:
-    def __init__(self, result=None, is_error=False, usage=None):
+    # Mirrors claude_agent_sdk.types.ResultMessage: result is str | None and the
+    # diagnostic fields are optional, so a failing session can carry no result.
+    def __init__(
+        self,
+        result=None,
+        is_error=False,
+        usage=None,
+        errors=None,
+        api_error_status=None,
+        terminal_reason=None,
+    ):
         self.result = result
         self.is_error = is_error
         self.usage = usage
+        self.errors = errors
+        self.api_error_status = api_error_status
+        self.terminal_reason = terminal_reason
 
 
 class SystemMessage:
@@ -221,6 +235,75 @@ async def test_stream_event_delta(fake_sdk, monkeypatch):
 
 async def test_error_result_returns_none(fake_sdk, monkeypatch):
     _install_query(monkeypatch, [ResultMessage(result="bad", is_error=True)])
+    engine = cce.ClaudeCodeEngine()
+    result = await engine.run_session(model="m", system_message="", prompt="hi")
+    assert result is None
+
+
+async def test_result_none_falls_back_to_assistant_text(fake_sdk, monkeypatch):
+    """FAIL-BEFORE: ``state["final"]`` was assigned only from
+    ``ResultMessage.result``. With ``result=None`` it stayed None, so the real
+    78-char assistant answer was emitted as an event and then discarded and the
+    session was reported empty (RCA reproduction B).
+    """
+    answer = "The required tests already exist in the tree and all 13 pass; no changes made."
+    _install_query(
+        monkeypatch,
+        [
+            AssistantMessage([TextBlock(answer)]),
+            ResultMessage(result=None),
+        ],
+    )
+    events = []
+    engine = cce.ClaudeCodeEngine()
+    result = await engine.run_session_streaming(
+        model="m", system_message="", prompt="hi", on_event=events.append
+    )
+    assert result == answer
+    # The answer is still emitted as an event, exactly as before.
+    assert any(e.type == SessionEventType.MESSAGE and e.content == answer for e in events)
+
+
+async def test_error_result_with_assistant_text_returns_text_and_reason(
+    fake_sdk, monkeypatch, caplog
+):
+    """FAIL-BEFORE: ``if state["error"]: return None`` threw away assistant text
+    produced before the failure and propagated no reason at all, so a session
+    that did real work was indistinguishable from an empty one (RCA repro C).
+    """
+    partial = "partial analysis produced before the failure"
+    _install_query(
+        monkeypatch,
+        [
+            AssistantMessage([TextBlock(partial)]),
+            ResultMessage(
+                result=None,
+                is_error=True,
+                errors=["max turns reached"],
+                terminal_reason="error_max_turns",
+            ),
+        ],
+    )
+    events = []
+    engine = cce.ClaudeCodeEngine()
+    with caplog.at_level(logging.WARNING):
+        result = await engine.run_session_streaming(
+            model="m", system_message="", prompt="hi", on_event=events.append
+        )
+    assert result == partial
+    # The reason is surfaced to streaming callers as an ERROR event ...
+    error_events = [e for e in events if e.type == SessionEventType.ERROR]
+    assert error_events and "terminal_reason=error_max_turns" in error_events[0].content
+    assert "max turns reached" in error_events[0].content
+    # ... and to blocking callers, who only see the return value, via the log.
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "terminal_reason=error_max_turns" in logged
+
+
+async def test_genuinely_empty_session_still_returns_none(fake_sdk, monkeypatch):
+    """No assistant text and no result stays empty — the fallback must not
+    invent output."""
+    _install_query(monkeypatch, [ResultMessage(result=None)])
     engine = cce.ClaudeCodeEngine()
     result = await engine.run_session(model="m", system_message="", prompt="hi")
     assert result is None

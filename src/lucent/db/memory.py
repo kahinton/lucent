@@ -3,11 +3,12 @@
 Handles CRUD operations for memories including search functionality.
 """
 
+import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from math import ceil
+from math import ceil, isfinite
 from time import monotonic
 from typing import Any, Final
 from uuid import UUID
@@ -26,6 +27,7 @@ from lucent.metrics import metrics
 from lucent.models.repo_names import normalize_repository_full_name
 from lucent.settings import (
     search_exclude_archived_enabled,
+    search_vector_enabled,
     search_vitality_boost_alpha,
     search_vitality_boost_enabled,
     shadow_forget_enabled,
@@ -269,32 +271,178 @@ class DuplicateTechnicalMemoryError(Exception):
         )
 
 
+def _vector_literal(vector: Sequence[float]) -> str:
+    """Render a Python vector as pgvector's text form (``[v1,v2,...]``).
+
+    asyncpg has no codec for the ``vector`` type, so every vector crosses the
+    wire as a string and is cast in SQL (``$n::vector``). Keeping the format in
+    one place means the write path and the query path cannot disagree about
+    precision or separators.
+    """
+    return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
+
+
+async def _embedding_for_write(
+    content: str,
+) -> tuple[str | None, str | None, datetime | None]:
+    """Compute the embedding columns for a memory write. Never raises.
+
+    Returns ``(vector_literal, embedding_model, embedded_at)``, or three
+    ``None`` values when vector search is disabled or the encoder is
+    unavailable. The vector is passed in pgvector's text form and cast in SQL
+    (``$n::vector``) because asyncpg has no codec for the ``vector`` type.
+
+    Fail-open is the contract: a memory must never fail to save because its
+    embedding could not be computed. The encoder import is lazy so a broken or
+    absent ``fastembed`` install — or an import cycle — degrades to a NULL
+    embedding with a warning instead of breaking the memory repository.
+    """
+    if not search_vector_enabled():
+        return None, None, None
+    try:
+        from lucent.memory.embeddings import (
+            EMBEDDING_DIMENSIONS,
+            embed_text,
+            embedding_model_id,
+        )
+
+        vector = await asyncio.to_thread(embed_text, content)
+        if vector is None:
+            return None, None, None
+        # Validate at the DB boundary, not just in the encoder. A vector of the
+        # wrong width or with a non-finite component would make the INSERT
+        # itself fail (``vector(384)`` column / pgvector rejects ``nan``), i.e.
+        # the memory would NOT save — exactly what fail-open forbids. Treat it
+        # as an encoder failure and write NULL instead.
+        if len(vector) != EMBEDDING_DIMENSIONS or not all(
+            isfinite(value) for value in vector
+        ):
+            logger.warning(
+                "memory_embedding_write_rejected",
+                extra={
+                    "event": "memory_embedding_write_rejected",
+                    "dimensions": len(vector),
+                    "expected_dimensions": EMBEDDING_DIMENSIONS,
+                    "all_finite": all(isfinite(value) for value in vector),
+                },
+            )
+            return None, None, None
+        return _vector_literal(vector), embedding_model_id(), datetime.now(UTC)
+    except Exception as exc:  # pragma: no cover - defensive, encoder already fails open
+        logger.warning(
+            "memory_embedding_write_failed",
+            extra={"event": "memory_embedding_write_failed", "error": str(exc)},
+        )
+        return None, None, None
+
+
+async def _embedding_for_query(query: str) -> tuple[str | None, str | None]:
+    """Compute the query vector for the semantic search arm. Never raises.
+
+    Returns ``(vector_literal, embedding_model_id)``, or ``(None, None)`` when
+    the vector flag is off or the encoder is unavailable for this call. A
+    ``(None, None)`` result is the caller's signal to emit exactly the
+    pre-vector SQL: no vector parameter, no vector predicate, no composite
+    score — so an unavailable encoder degrades to today's lexical behaviour
+    rather than an empty result set.
+
+    The import is lazy for the same reason as the write path: importing this
+    module must stay cheap and must not require the model to be present.
+    """
+    if not search_vector_enabled():
+        return None, None
+    try:
+        from lucent.memory.embeddings import (
+            EMBEDDING_DIMENSIONS,
+            embed_text,
+            embedding_model_id,
+        )
+
+        vector = await asyncio.to_thread(embed_text, query)
+        if vector is None:
+            return None, None
+        # Validate at the wire boundary for the same reason as the write
+        # path: a wrong-width or non-finite vector makes ``$n::vector`` itself
+        # fail against the ``vector(384)`` column, which would turn a soft
+        # encoder problem into a failed search. Treat it as "encoder
+        # unavailable for this call" so the statement degrades to the
+        # pre-vector lexical path instead.
+        if len(vector) != EMBEDDING_DIMENSIONS or not all(
+            isfinite(value) for value in vector
+        ):
+            logger.warning(
+                "memory_embedding_query_rejected",
+                extra={
+                    "event": "memory_embedding_query_rejected",
+                    "dimensions": len(vector),
+                    "expected_dimensions": EMBEDDING_DIMENSIONS,
+                    "all_finite": all(isfinite(value) for value in vector),
+                },
+            )
+            return None, None
+        return _vector_literal(vector), embedding_model_id()
+    except Exception as exc:  # pragma: no cover - defensive, encoder already fails open
+        logger.warning(
+            "memory_embedding_query_failed",
+            extra={"event": "memory_embedding_query_failed", "error": str(exc)},
+        )
+        return None, None
+
+
 class MemoryRepository:
     """Repository for memory CRUD operations."""
 
     TRUNCATE_LENGTH = 1000
 
-    # Hybrid retrieval requires a candidate memory to match a minimum share of
-    # the query's distinct terms. The proportional rule alone
-    # (``ceil(terms * 0.67)``) scales badly for long natural-language queries:
-    # a 9-term question demanded 7 co-occurring terms in a single memory, so
-    # every memory in the corpus was rejected and the caller saw
-    # ``total_count: 0`` — indistinguishable from "no such memory exists".
-    # Capping the floor at 3 keeps short-query behavior byte-identical
-    # (1→1, 2→2, 3→3) while letting long queries match on the strongest few
-    # terms. Calibrated against the live corpus: off-domain queries
-    # ("xylophone quantum banana zeppelin") still match 0 rows because none of
-    # their terms occur at all.
-    TERM_COVERAGE_FLOOR_CAP = 3
+    # Hybrid retrieval admits a row only when the row contains EVERY term of
+    # the query's *anchored core*: its first ``TERM_COVERAGE_CORE_TERMS``
+    # content terms, in the order the caller typed them. Postgres decides which
+    # tokens are content terms; ``ts_debug`` preserves order, whereas
+    # ``tsvector_to_array`` sorts lexemes and would let the core shift when a
+    # newly appended word sorts earlier.
+    #
+    # This is the monotone replacement for the old
+    # ``GREATEST(1, LEAST(CEIL(terms * 0.67), 3))`` rule. That rule stopped
+    # growing at 3, so a query with four or more terms demanded only 3 of them
+    # and adding a word could only ADD candidates: the 3-term query (all 3
+    # required) was strictly narrower than the 4-term query (3 of 4) — 7 vs 49
+    # rows on the live corpus. A bare fraction cannot fix that, because every
+    # fraction below 1 has a flat step somewhere (ceil(3*0.67) ==
+    # ceil(4*0.67) == 3), and a flat step is exactly where widening happens.
+    # Requiring the whole anchored core is the count rule that is provably
+    # nested:
+    #     admitted(query + extra terms) ⊆ admitted(query)
+    # for every appended term, because the core of a longer query is a
+    # superset of the core of every shorter prefix of it.
+    #
+    # Queries of 1-4 content terms therefore keep exact all-term behaviour
+    # (1→1, 2→2, 3→3, 4→4); longer queries admit on their first four content
+    # terms, so extra words can sharpen ranking but never widen the result set.
+    # Off-domain queries ("xylophone quantum banana zeppelin") still match 0
+    # rows because none of their terms occur at all.
+    TERM_COVERAGE_CORE_TERMS = 4
 
-    # Absolute relevance floor for the term-coverage branch. Capping the
-    # coverage requirement at 3 trades precision for recall: a long junk query
-    # whose terms happen to include two common words ("test", "user") can clear
-    # 3 co-occurring terms in an unrelated memory. Measured on the live corpus,
-    # the weighted relevance score separates those cleanly — junk queries top
-    # out around 0.19 while genuine matches start around 0.27 — so a 0.30 floor
-    # removes the false positives and keeps ~98% of real hits. 0.30 is the same
-    # floor the message-lookup hook already uses for injection.
+    # Cosine-similarity floor for the semantic arm. A long, many-concept query
+    # embeds near the corpus centroid, so a fixed floor lets it admit a large
+    # share of the corpus as "paraphrase". Scale the floor with the query's
+    # word count: one- and two-word queries keep the calibrated 0.55, and each
+    # word beyond two adds ``VECTOR_MIN_SIMILARITY_STEP`` up to
+    # ``VECTOR_MIN_SIMILARITY_MAX``. Word count (not stemmed-term count) is
+    # deliberate: an exact identifier — a UUID, a path, an error string — is
+    # one or two words and must keep the base floor even though Postgres splits
+    # it into several lexemes.
+    VECTOR_MIN_SIMILARITY = 0.55
+    VECTOR_MIN_SIMILARITY_STEP = 0.03
+    VECTOR_MIN_SIMILARITY_MAX = 0.75
+
+    # Absolute relevance floor for the term-coverage branch. Requiring the
+    # anchored core removes most false positives, but a query whose core terms
+    # are individually common ("test", "user") can still co-occur in an
+    # unrelated memory. Measured on the live corpus, the weighted relevance
+    # score separates those cleanly — junk queries top out around 0.19 while
+    # genuine matches start around 0.27 — so a 0.30 floor removes them and
+    # keeps ~98% of real hits. 0.30 is the same floor the message-lookup hook
+    # already uses for injection.
     MIN_RELEVANCE_SCORE = 0.30
 
     # Mapping from goal metadata.status → lifecycle_stage.
@@ -558,12 +706,20 @@ class MemoryRepository:
         # Auto-sync lifecycle_stage for goal memories created with an
         # initial metadata.status (e.g. importing a completed goal).
         initial_stage = self._resolve_goal_lifecycle_stage(type, metadata)
+        # Embedding is computed before the row is written and is fail-open:
+        # on any encoder problem all three columns stay NULL (see
+        # _embedding_for_write). It is deliberately not part of
+        # _FULL_COLUMNS/_SEARCH_COLUMNS — the vector is selected only where it
+        # is ranked.
+        embedding_literal, embedding_model, embedded_at = await _embedding_for_write(content)
         if initial_stage and initial_stage != "active":
             query = f"""
                 INSERT INTO memories (username, type, content, tags,
                     importance, related_memory_ids, metadata,
-                    user_id, organization_id, lifecycle_stage)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    user_id, organization_id, lifecycle_stage,
+                    embedding, embedding_model, embedded_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11::vector, $12, $13)
                 RETURNING {self._FULL_COLUMNS}
             """
             logger.info(
@@ -575,8 +731,10 @@ class MemoryRepository:
             query = f"""
                 INSERT INTO memories (username, type, content, tags,
                     importance, related_memory_ids, metadata,
-                    user_id, organization_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    user_id, organization_id,
+                    embedding, embedding_model, embedded_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                        $10::vector, $11, $12)
                 RETURNING {self._FULL_COLUMNS}
             """
 
@@ -603,6 +761,7 @@ class MemoryRepository:
             ]
             if initial_stage and initial_stage != "active":
                 create_params.append(initial_stage)
+            create_params.extend([embedding_literal, embedding_model, embedded_at])
 
             row = await conn.fetchrow(query, *create_params)
             if shared and organization_id is not None:
@@ -1257,6 +1416,23 @@ class MemoryRepository:
             params.append(content)
             param_idx += 1
 
+            # A content change invalidates any stored vector. Re-embed here and
+            # write NULL on failure (fail-open): a stale vector would rank the
+            # memory by text it no longer contains, so NULL — i.e. "not
+            # embedded", which the backfill job picks up — is the honest value.
+            embedding_literal, embedding_model, embedded_at = await _embedding_for_write(
+                content
+            )
+            updates.append(f"embedding = ${param_idx}::vector")
+            params.append(embedding_literal)
+            param_idx += 1
+            updates.append(f"embedding_model = ${param_idx}")
+            params.append(embedding_model)
+            param_idx += 1
+            updates.append(f"embedded_at = ${param_idx}")
+            params.append(embedded_at)
+            param_idx += 1
+
         if tags is not None:
             updates.append(f"tags = ${param_idx}")
             params.append(tags)
@@ -1739,6 +1915,7 @@ class MemoryRepository:
         query: str,
         where_clause: str,
         where_params: list[Any],
+        vector_arm: bool = False,
     ) -> dict[str, Any]:
         """Explain *why* a text search returned nothing.
 
@@ -1755,16 +1932,34 @@ class MemoryRepository:
         # ``term_overlap`` to keep this parseable.
         sql = f"""
             WITH search_input AS (
-                SELECT tsvector_to_array(
-                    to_tsvector('english', ${query_param}::text)
-                ) AS query_terms
+                SELECT
+                    tsvector_to_array(
+                        to_tsvector('english', ${query_param}::text)
+                    ) AS query_terms,
+                    COALESCE((
+                        SELECT array_agg(DISTINCT core_token.lexeme)
+                        FROM (
+                            SELECT (token.lexemes)[1] AS lexeme
+                            FROM ts_debug('english', ${query_param}::text)
+                                 WITH ORDINALITY AS token
+                            WHERE cardinality(token.lexemes) > 0
+                            ORDER BY token.ordinality
+                            LIMIT {int(self.TERM_COVERAGE_CORE_TERMS)}
+                        ) AS core_token
+                    ), ARRAY[]::text[]) AS core_terms
             ), term_overlap AS (
                 SELECT (
                     SELECT COUNT(*)
                     FROM unnest(search_input.query_terms) AS query_term
                     WHERE COALESCE(memories.search_vector, ''::tsvector)
                           @@ plainto_tsquery('english', query_term)
-                ) AS overlap
+                ) AS overlap,
+                (
+                    SELECT COUNT(*)
+                    FROM unnest(search_input.core_terms) AS core_term
+                    WHERE COALESCE(memories.search_vector, ''::tsvector)
+                          @@ plainto_tsquery('english', core_term)
+                ) AS core_overlap
                 FROM memories
                 CROSS JOIN search_input
                 WHERE {where_clause}
@@ -1772,7 +1967,9 @@ class MemoryRepository:
             SELECT COUNT(*) AS filtered_total,
                    COUNT(*) FILTER (WHERE overlap > 0) AS matching_any,
                    COALESCE(MAX(overlap), 0) AS best_overlap,
-                   (SELECT query_terms FROM search_input) AS query_terms
+                   COALESCE(MAX(core_overlap), 0) AS best_core_overlap,
+                   (SELECT query_terms FROM search_input) AS query_terms,
+                   (SELECT core_terms FROM search_input) AS core_terms
             FROM term_overlap
         """
         try:
@@ -1790,19 +1987,20 @@ class MemoryRepository:
             filtered_total = int(row["filtered_total"] or 0)
             matching_any = int(row["matching_any"] or 0)
             best_overlap = int(row["best_overlap"] or 0)
+            best_core_overlap = int(row["best_core_overlap"] or 0)
             # Postgres owns the stemming; never re-derive terms in Python or
             # the count could disagree with what the gate actually compared.
             terms = list(row["query_terms"] or [])
+            core_terms = list(row["core_terms"] or [])
         except (KeyError, IndexError, TypeError, ValueError):
             # A non-conforming connection (test double) — degrade quietly
             # rather than failing a search that succeeded.
             logger.debug("Empty-search diagnostics row malformed", exc_info=True)
             return {}
 
-        required_overlap = min(
-            max(1, ceil(len(terms) * 0.67)),
-            int(self.TERM_COVERAGE_FLOOR_CAP),
-        )
+        # The gate requires every anchored-core term; the full query's term
+        # count is irrelevant beyond that. Postgres computed the core above.
+        required_overlap = max(1, len(core_terms))
 
         if not terms:
             reason = "query_has_no_searchable_terms"
@@ -1837,20 +2035,30 @@ class MemoryRepository:
                 "no-match. Try the vocabulary used when the fact was recorded, "
                 "or browse by tag with get_existing_tags."
             )
-        elif best_overlap < required_overlap:
+        elif best_core_overlap < required_overlap:
             reason = "terms_too_scattered"
             hint = (
                 f"{matching_any} memory(ies) contain at least one query term, "
-                f"but none contain {required_overlap} of the "
-                f"{len(terms)} terms together, so all were cut by the "
-                "term-coverage gate. Relevant memories may exist — retry with "
-                "fewer, more specific keywords."
+                f"but none contain all {required_overlap} core terms together, "
+                "so all were cut by the term-coverage gate. Relevant memories "
+                "may exist — retry with fewer, more specific keywords."
             )
         else:
             reason = "no_rows_after_scoring"
             hint = (
                 "Filtered memories matched the query terms but no row survived "
                 "retrieval. Retry with different keywords."
+            )
+
+        # When the semantic arm ran, say so: otherwise a zero reads as proof
+        # that no paraphrase exists, when in fact the vector pass was also
+        # consulted over the same scoped rows and cleared nothing at 0.55.
+        if vector_arm:
+            hint = (
+                f"{hint} The semantic (vector) arm was also evaluated over the "
+                "same scoped rows and found no paraphrase match at or above its "
+                "length-scaled cosine-similarity floor (0.55 for one- and "
+                "two-word queries)."
             )
 
         return {
@@ -2016,6 +2224,30 @@ class MemoryRepository:
             params.append(query)
             param_idx += 1
 
+            # Semantic arm. It is enabled ONLY when this statement is already
+            # scoped: ``usage`` is an AuthorizedDatabasePool whose query
+            # rewrite turns ``FROM memories`` into the caller's clearance-
+            # scoped subquery. The vector comparison below therefore runs over
+            # exactly the rows the caller may see — never a parallel ranking
+            # that Python filters afterwards. An unscoped ``ORDER BY embedding
+            # <=> $1 LIMIT n`` (or a first unscoped statement) would let other
+            # tenants' rows occupy the candidate window and destroy the
+            # caller's recall, not merely leak rows. With no resolvable scope,
+            # no encoder, or the flag off, ``vector_arm`` stays False and the
+            # emitted SQL is byte-for-byte the pre-vector lexical path.
+            if usage is not None:
+                vector_literal, vector_model = await _embedding_for_query(query)
+            else:
+                vector_literal, vector_model = (None, None)
+            vector_arm = vector_literal is not None and vector_model is not None
+            if vector_arm:
+                vector_param = param_idx
+                params.append(vector_literal)
+                param_idx += 1
+                vector_model_param = param_idx
+                params.append(vector_model)
+                param_idx += 1
+
             search_input = f"""
                 WITH search_input AS (
                     SELECT
@@ -2028,7 +2260,21 @@ class MemoryRepository:
                                 tsvector_to_array(to_tsvector('english', ${query_param})),
                                 ' | '
                             )
-                        ) AS any_query
+                        ) AS any_query,
+                        (
+                            SELECT COALESCE(
+                                array_agg(DISTINCT core_token.lexeme),
+                                ARRAY[]::text[]
+                            )
+                            FROM (
+                                SELECT (token.lexemes)[1] AS lexeme
+                                FROM ts_debug('english', ${query_param})
+                                     WITH ORDINALITY AS token
+                                WHERE cardinality(token.lexemes) > 0
+                                ORDER BY token.ordinality
+                                LIMIT {int(self.TERM_COVERAGE_CORE_TERMS)}
+                            ) AS core_token
+                        ) AS core_terms
                 )
             """
             document = "COALESCE(search_vector, ''::tsvector)"
@@ -2036,15 +2282,15 @@ class MemoryRepository:
                 word_similarity(search_input.query_text, content),
                 word_similarity(search_input.query_text, array_to_string(tags, ' '))
             )"""
-            matched_terms = f"""(
+            # Coverage is measured over the anchored core only: a row must hold
+            # every core term. Extra query terms may lift ranking (they feed
+            # ``any_query``/``all_query``/fuzzy) but never widen admission.
+            core_matched_terms = f"""(
                 SELECT COUNT(*)
-                FROM unnest(search_input.query_terms) AS query_term
-                WHERE {document} @@ plainto_tsquery('english', query_term)
+                FROM unnest(search_input.core_terms) AS core_term
+                WHERE {document} @@ plainto_tsquery('english', core_term)
             )"""
-            term_coverage_floor = f"""GREATEST(1, LEAST(
-                    CEIL(cardinality(search_input.query_terms) * 0.67)::integer,
-                    {int(self.TERM_COVERAGE_FLOOR_CAP)}
-                ))"""
+            core_required = "GREATEST(1, cardinality(search_input.core_terms))"
             relevance_score = f"""(
                 0.50 * ts_rank_cd({document}, search_input.any_query, 32)
                 + 0.20 * CASE
@@ -2059,7 +2305,7 @@ class MemoryRepository:
             )"""
             match_condition = f"""(
                 (
-                    {matched_terms} >= {term_coverage_floor}
+                    {core_matched_terms} >= {core_required}
                     AND {relevance_score} >= {float(self.MIN_RELEVANCE_SCORE)}
                 )
                 OR (
@@ -2071,30 +2317,73 @@ class MemoryRepository:
                 OR array_to_string(tags, ' ') ILIKE '%' || search_input.query_text || '%'
             )"""
 
+            if vector_arm:
+                vector_distance = f"(embedding <=> ${vector_param}::vector)"
+                # COMPOSITE relevance: 0.70 lexical + 0.30 semantic. The
+                # lexical term is the expression above, VERBATIM and
+                # unretuned. A row with a NULL embedding or one written by a
+                # different model falls back to its lexical score unchanged —
+                # un-backfilled rows are neutral rather than penalised, and
+                # exact-identifier ranking is preserved. ``similarity_score``
+                # in the result is this composite, not a trigram similarity.
+                score_expr = f"""(
+                    CASE
+                        WHEN embedding IS NOT NULL
+                         AND embedding_model = ${vector_model_param}
+                        THEN 0.70 * {relevance_score}
+                             + 0.30 * GREATEST(0, 1 - {vector_distance})
+                        ELSE {relevance_score}
+                    END
+                )"""
+                # Exactly one extra gate branch admits paraphrase-only hits: a
+                # current-model embedding whose cosine similarity clears the
+                # length-scaled floor passes even when no query term appears in
+                # the row. Damping long queries is what stops a many-concept
+                # query's near-centroid embedding from out-admitting a
+                # genuinely specific short query. The lexical gate
+                # (MIN_RELEVANCE_SCORE and the anchored-core requirement) is
+                # untouched.
+                vector_admission_floor = f"""LEAST(
+                    {float(self.VECTOR_MIN_SIMILARITY_MAX)},
+                    {float(self.VECTOR_MIN_SIMILARITY)}
+                    + {float(self.VECTOR_MIN_SIMILARITY_STEP)}
+                      * {int(max(0, len(query.split()) - 2))}
+                )"""
+                vector_match = f"""(
+                    embedding IS NOT NULL
+                    AND embedding_model = ${vector_model_param}
+                    AND GREATEST(0, 1 - {vector_distance})
+                        >= {vector_admission_floor}
+                )"""
+                gate = f"({match_condition} OR {vector_match})"
+            else:
+                score_expr = relevance_score
+                gate = match_condition
+
             if boost_enabled:
                 boost_alpha_param = param_idx
                 params.append(boost_alpha)
                 param_idx += 1
                 search_query = search_input + f"""
                     SELECT {self._SEARCH_COLUMNS},
-                           {relevance_score} AS sim_score,
-                           {relevance_score} + (${boost_alpha_param}
+                           {score_expr} AS sim_score,
+                           {score_expr} + (${boost_alpha_param}
                              * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
                     FROM memories
                     CROSS JOIN search_input
                     WHERE {where_clause}
-                      AND {match_condition}
+                      AND {gate}
                     ORDER BY final_rank DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
             else:
                 search_query = search_input + f"""
                     SELECT {self._SEARCH_COLUMNS},
-                           {relevance_score} AS sim_score
+                           {score_expr} AS sim_score
                     FROM memories
                     CROSS JOIN search_input
                     WHERE {where_clause}
-                      AND {match_condition}
+                      AND {gate}
                     ORDER BY sim_score DESC, importance DESC, created_at DESC
                     LIMIT ${param_idx} OFFSET ${param_idx + 1}
                 """
@@ -2104,7 +2393,7 @@ class MemoryRepository:
                 FROM memories
                 CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND {match_condition}
+                  AND {gate}
             """
         else:
             search_query = f"""
@@ -2164,6 +2453,7 @@ class MemoryRepository:
                     query=query,
                     where_clause=where_clause,
                     where_params=filter_params,
+                    vector_arm=vector_arm,
                 )
         elif query and total_count == 0 and offset == 0:
             async with scoped_acquire_on(
@@ -2175,6 +2465,7 @@ class MemoryRepository:
                     query=query,
                     where_clause=where_clause,
                     where_params=filter_params,
+                    vector_arm=vector_arm,
                 )
         return result
 
@@ -2376,6 +2667,23 @@ class MemoryRepository:
         params.append(query)
         param_idx += 1
 
+        # Semantic arm, identical to ``search``: enabled only when this
+        # statement is already clearance-scoped, so the vector comparison runs
+        # over the caller's visible rows in the same statement rather than in
+        # an unscoped pre-ranking. See ``search`` for why that matters.
+        if usage is not None:
+            vector_literal, vector_model = await _embedding_for_query(query)
+        else:
+            vector_literal, vector_model = (None, None)
+        vector_arm = vector_literal is not None and vector_model is not None
+        if vector_arm:
+            vector_param = param_idx
+            params.append(vector_literal)
+            param_idx += 1
+            vector_model_param = param_idx
+            params.append(vector_model)
+            param_idx += 1
+
         search_input = f"""
             WITH search_input AS (
                 SELECT
@@ -2388,7 +2696,21 @@ class MemoryRepository:
                             tsvector_to_array(to_tsvector('english', ${query_param})),
                             ' | '
                         )
-                    ) AS any_query
+                    ) AS any_query,
+                    (
+                        SELECT COALESCE(
+                            array_agg(DISTINCT core_token.lexeme),
+                            ARRAY[]::text[]
+                        )
+                        FROM (
+                            SELECT (token.lexemes)[1] AS lexeme
+                            FROM ts_debug('english', ${query_param})
+                                 WITH ORDINALITY AS token
+                            WHERE cardinality(token.lexemes) > 0
+                            ORDER BY token.ordinality
+                            LIMIT {int(self.TERM_COVERAGE_CORE_TERMS)}
+                        ) AS core_token
+                    ) AS core_terms
             )
         """
         document = "COALESCE(search_vector, ''::tsvector)"
@@ -2396,15 +2718,13 @@ class MemoryRepository:
             word_similarity(search_input.query_text, content),
             word_similarity(search_input.query_text, array_to_string(tags, ' '))
         )"""
-        matched_terms = f"""(
+        # Anchored-core coverage; see ``search`` for the monotonicity rationale.
+        core_matched_terms = f"""(
             SELECT COUNT(*)
-            FROM unnest(search_input.query_terms) AS query_term
-            WHERE {document} @@ plainto_tsquery('english', query_term)
+            FROM unnest(search_input.core_terms) AS core_term
+            WHERE {document} @@ plainto_tsquery('english', core_term)
         )"""
-        term_coverage_floor = f"""GREATEST(1, LEAST(
-                CEIL(cardinality(search_input.query_terms) * 0.67)::integer,
-                {int(self.TERM_COVERAGE_FLOOR_CAP)}
-            ))"""
+        core_required = "GREATEST(1, cardinality(search_input.core_terms))"
         relevance_score = f"""(
             0.50 * ts_rank_cd({document}, search_input.any_query, 32)
             + 0.20 * CASE
@@ -2419,7 +2739,7 @@ class MemoryRepository:
         )"""
         match_condition = f"""(
             (
-                {matched_terms} >= {term_coverage_floor}
+                {core_matched_terms} >= {core_required}
                 AND {relevance_score} >= {float(self.MIN_RELEVANCE_SCORE)}
             )
             OR (
@@ -2431,30 +2751,62 @@ class MemoryRepository:
             OR array_to_string(tags, ' ') ILIKE '%' || search_input.query_text || '%'
         )"""
 
+        if vector_arm:
+            vector_distance = f"(embedding <=> ${vector_param}::vector)"
+            # COMPOSITE relevance (0.70 lexical + 0.30 semantic); see
+            # ``search`` for the fallback contract and index-scope rationale.
+            score_expr = f"""(
+                CASE
+                    WHEN embedding IS NOT NULL
+                     AND embedding_model = ${vector_model_param}
+                    THEN 0.70 * {relevance_score}
+                         + 0.30 * GREATEST(0, 1 - {vector_distance})
+                    ELSE {relevance_score}
+                END
+            )"""
+            # Length-scaled similarity floor; see ``search`` for why long
+            # queries are damped rather than admitted at the base 0.55.
+            vector_admission_floor = f"""LEAST(
+                {float(self.VECTOR_MIN_SIMILARITY_MAX)},
+                {float(self.VECTOR_MIN_SIMILARITY)}
+                + {float(self.VECTOR_MIN_SIMILARITY_STEP)}
+                  * {int(max(0, len(query.split()) - 2))}
+            )"""
+            vector_match = f"""(
+                embedding IS NOT NULL
+                AND embedding_model = ${vector_model_param}
+                AND GREATEST(0, 1 - {vector_distance})
+                    >= {vector_admission_floor}
+            )"""
+            gate = f"({match_condition} OR {vector_match})"
+        else:
+            score_expr = relevance_score
+            gate = match_condition
+
         if boost_enabled:
             boost_alpha_param = param_idx
             params.append(boost_alpha)
             param_idx += 1
             search_query = search_input + f"""
                 SELECT {self._SEARCH_COLUMNS},
-                       {relevance_score} AS sim_score,
-                       {relevance_score} + (${boost_alpha_param}
+                       {score_expr} AS sim_score,
+                       {score_expr} + (${boost_alpha_param}
                          * (COALESCE(vitality_score, 0.5) - 0.5)) AS final_rank
                 FROM memories
                 CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND {match_condition}
+                  AND {gate}
                 ORDER BY final_rank DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
         else:
             search_query = search_input + f"""
                 SELECT {self._SEARCH_COLUMNS},
-                       {relevance_score} AS sim_score
+                       {score_expr} AS sim_score
                 FROM memories
                 CROSS JOIN search_input
                 WHERE {where_clause}
-                  AND {match_condition}
+                  AND {gate}
                 ORDER BY sim_score DESC, importance DESC, created_at DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
@@ -2464,7 +2816,7 @@ class MemoryRepository:
             FROM memories
             CROSS JOIN search_input
             WHERE {where_clause}
-              AND {match_condition}
+              AND {gate}
         """
 
         params.extend([limit, offset])
@@ -2508,6 +2860,7 @@ class MemoryRepository:
                         query=query,
                         where_clause=where_clause,
                         where_params=filter_params,
+                        vector_arm=vector_arm,
                     )
             else:
                 async with scoped_acquire_on(
@@ -2519,6 +2872,7 @@ class MemoryRepository:
                         query=query,
                         where_clause=where_clause,
                         where_params=filter_params,
+                        vector_arm=vector_arm,
                     )
         return result
 
@@ -3783,6 +4137,11 @@ class MemoryRepository:
             "metadata": row["metadata"] if "metadata" in row.keys() else {},
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            # COMPOSITE relevance score — NOT a pg_trgm similarity, despite the
+            # legacy field name. With vector search on this is 0.70 lexical +
+            # 0.30 semantic (falling back to the lexical score for rows with
+            # no current-model embedding); with it off it is the lexical score.
+            # The name is a public contract and must not change.
             "similarity_score": row["sim_score"],
             "user_id": user_id,
             "organization_id": org_id,
